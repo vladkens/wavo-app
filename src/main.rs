@@ -6,8 +6,6 @@ mod audio;
 mod cli;
 #[cfg_attr(not(test), expect(dead_code, reason = "the session (step 6) is its first user"))]
 mod history;
-#[expect(dead_code, reason = "the session (step 6) is its first user")]
-mod paths;
 #[cfg_attr(not(test), expect(dead_code, reason = "the session (step 6) is its first user"))]
 mod settings;
 #[cfg(test)]
@@ -49,6 +47,16 @@ fn main() -> Result<()> {
   match cli.command {
     Command::Devices => cli::devices(),
     Command::Record { seconds, device, out } => cli::record(seconds, device.as_deref(), &out),
+  }
+}
+
+/// The data home, where settings and history live: `$WAVO_HOME`, else the platform's per-user
+/// data directory. Models are in the Hugging Face cache.
+#[expect(dead_code, reason = "the session (step 6) is its first user")]
+fn home() -> PathBuf {
+  match std::env::var_os("WAVO_HOME") {
+    Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+    _ => nimbo::paths::data_dir("me.vladkens.wavo"),
   }
 }
 

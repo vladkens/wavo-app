@@ -15,6 +15,7 @@ crossbeam-channel = "0.5.17"
 earshot = "1.2.2"
 hound = "3.5.1"
 libc = "0.2.191"
+nimbo = { git = "https://github.com/vladkens/nimbo", branch = "main" }
 rtrb = "0.4.0"
 rubato = "5.0.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }

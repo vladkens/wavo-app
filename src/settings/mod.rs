@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Settings: `settings.json` in the data home ([`paths::home`](crate::paths::home)).
+//! Settings: `settings.json` in the data home ([`home`](crate::home)).
 //!
 //! - A missing file, or a missing field, is the default.
 //! - A file that does not parse is copied to `settings.json.bad` and the defaults are used, with a
