@@ -1,0 +1,24 @@
+[package]
+name = "wavo-app"
+version = "0.1.0"
+edition = "2024"
+description = "Local dictation: hold a hotkey, speak, and the text lands where you were typing."
+license = "MIT"
+repository = "https://github.com/vladkens/wavo-app"
+publish = false
+
+[dependencies]
+
+# panic = "unwind" (the default), not "abort": the engine thread catches a panic of wavo or wgpu
+# and the app carries on. `fast` inherits it.
+[profile.release]
+lto = "thin"
+strip = true
+
+# `make run` and `make install`: release speed without LTO, rebuilt incrementally, for trying a
+# change.
+[profile.fast]
+inherits = "release"
+lto = false
+incremental = true
+codegen-units = 256
