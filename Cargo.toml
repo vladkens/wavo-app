@@ -18,6 +18,7 @@ rtrb = "0.4.0"
 rubato = "5.0.1"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+wavo = { git = "https://github.com/vladkens/wavo", rev = "52a7282", version = "0.3.1", default-features = false, features = ["hub"] }
 
 # panic = "unwind" (the default), not "abort": the engine thread catches a panic of wavo or wgpu
 # and the app carries on. `fast` inherits it.

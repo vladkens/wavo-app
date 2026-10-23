@@ -1,17 +1,19 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Command-line tools that run without the GUI: `wavo-app devices` and `record`.
+//! Command-line tools that run without the GUI: `wavo-app devices`, `record` and `models`.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use tracing::{info, warn};
+use wavo::hub::Hub;
 
 use crate::audio::capture::Source;
 use crate::audio::devices::{self, Choice};
 use crate::audio::recorder::Recorder;
 use crate::audio::{SAMPLE_RATE, vad};
+use crate::models;
 
 /// `wavo-app record`: `seconds` of the microphone (or `WAVO_FAKE_MIC`) into `out`, then a summary
 /// on stderr. A device error ends the recording early; what was recorded is kept.
@@ -99,6 +101,34 @@ pub fn devices() -> Result<()> {
   }
 
   Ok(())
+}
+
+/// `wavo-app models`: every speech model found, in the order of wavo's list.
+pub fn models() -> Result<()> {
+  let hub = Hub::new();
+  let models = models::discover(&hub);
+  if models.is_empty() {
+    eprintln!("no speech models in {hub}");
+    return Ok(());
+  }
+
+  let name = models.iter().map(|m| m.name.chars().count()).max().unwrap_or(0);
+  let arch = models.iter().map(|m| m.arch.len()).max().unwrap_or(0).max(4);
+  println!("{:<name$}  {:<arch$}  {:>8}  PATH", "NAME", "ARCH", "SIZE");
+  for m in &models {
+    let size = human_size(m.size);
+    println!("{:<name$}  {:<arch$}  {size:>8}  {}", m.name, m.arch, m.path.display());
+  }
+
+  Ok(())
+}
+
+fn human_size(bytes: u64) -> String {
+  const MB: f64 = 1_000_000.0;
+  match bytes as f64 / MB {
+    mb if mb >= 1_000.0 => format!("{:.1} GB", mb / 1_000.0),
+    mb => format!("{mb:.0} MB"),
+  }
 }
 
 #[cfg(test)]

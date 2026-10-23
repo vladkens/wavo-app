@@ -4,6 +4,7 @@
 
 mod audio;
 mod cli;
+mod models;
 #[cfg(test)]
 mod testing;
 
@@ -35,6 +36,8 @@ enum Command {
     device: Option<String>,
     out: PathBuf,
   },
+  /// List the speech models in the Hugging Face cache
+  Models,
 }
 
 fn main() -> Result<()> {
@@ -43,6 +46,7 @@ fn main() -> Result<()> {
   match cli.command {
     Command::Devices => cli::devices(),
     Command::Record { seconds, device, out } => cli::record(seconds, device.as_deref(), &out),
+    Command::Models => cli::models(),
   }
 }
 
