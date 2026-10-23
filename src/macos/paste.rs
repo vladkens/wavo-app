@@ -28,7 +28,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use nimbo::{Key, Modifiers, Shortcut};
+use nimbo::{Clipboard, Key, Modifiers, Shortcut, SystemClipboard};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
@@ -54,46 +54,19 @@ const RETIRED: usize = 4;
 const TRANSIENT: &str = "org.nspasteboard.TransientType";
 const CONCEALED: &str = "org.nspasteboard.ConcealedType";
 
-/// What macOS lets Wavo read of the general pasteboard without asking (macOS 15.4+:
-/// `NSPasteboard.accessBehavior`, set per app in System Settings → Privacy & Security → Paste from
-/// Other Apps). Reading the property asks nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Access {
-  /// macOS before 15.4: no such setting.
-  Unrestricted,
-  /// Wavo never made macOS ask: the first read of another app's contents shows the system's
-  /// alert («“Wavo” is trying to access the pasteboard.»), and then it is [`Access::Ask`].
-  Default,
-  /// macOS asks before every read: Wavo does not read (an alert per dictation).
-  Ask,
-  AlwaysAllow,
-  AlwaysDeny,
+/// The paste may read the general pasteboard to restore it: always before macOS 15.4, then unless
+/// Paste from Other Apps (System Settings → Privacy & Security, `NSPasteboard.accessBehavior`,
+/// which reading asks nothing) has macOS ask before every read or deny it. Never asked, the first
+/// read makes macOS ask once and list Wavo there, where the person allows it for good.
+pub fn readable() -> bool {
+  may_read(&NSPasteboard::generalPasteboard())
 }
 
-impl Access {
-  pub fn of(pasteboard: &NSPasteboard) -> Self {
-    if !pasteboard.respondsToSelector(sel!(accessBehavior)) {
-      return Access::Unrestricted;
-    }
+fn may_read(pasteboard: &NSPasteboard) -> bool {
+  use NSPasteboardAccessBehavior as Behavior;
 
-    match pasteboard.accessBehavior() {
-      NSPasteboardAccessBehavior::AlwaysAllow => Access::AlwaysAllow,
-      NSPasteboardAccessBehavior::AlwaysDeny => Access::AlwaysDeny,
-      NSPasteboardAccessBehavior::Ask => Access::Ask,
-      _ => Access::Default,
-    }
-  }
-
-  pub fn general() -> Self {
-    Self::of(&NSPasteboard::generalPasteboard())
-  }
-
-  /// The paste takes a snapshot to restore. With [`Access::Default`] that read is what makes macOS
-  /// ask once (and list Wavo in System Settings, where the user allows it for good).
-  pub fn snapshot(self) -> bool {
-    matches!(self, Access::Unrestricted | Access::Default | Access::AlwaysAllow)
-  }
+  !pasteboard.respondsToSelector(sel!(accessBehavior))
+    || !matches!(pasteboard.accessBehavior(), Behavior::Ask | Behavior::AlwaysDeny)
 }
 
 /// Every item of a pasteboard with the data of each of its types.
@@ -277,39 +250,39 @@ pub fn paste(
 ) -> Result<(), NotPasted> {
   let started = Instant::now();
   let pasteboard = NSPasteboard::generalPasteboard();
-  let access = Access::of(&pasteboard);
-  if !access.snapshot() && !keep {
-    warn!("paste: Wavo may not read the clipboard without asking ({access:?}): not restored");
+  let readable = may_read(&pasteboard);
+  if !readable && !keep {
+    warn!("paste: Wavo may not read the clipboard without asking: not restored");
   }
+
   // What comes back afterwards: the user's clipboard, also when the last paste still holds it.
   // Taking it may take long (lazy data of another app, or macOS asking the user): what the user
-  // copies meanwhile wins.
-  let mut snapshot = None;
-  if !keep && access.snapshot() {
-    for attempt in 1.. {
-      let count = pasteboard.changeCount();
+  // copies meanwhile wins; twice, and nothing is pasted.
+  let (mut snapshot, mut count) = (None, None);
+  if !keep && readable {
+    for _ in 0..2 {
+      let now = pasteboard.changeCount();
       let previous = PENDING.with_borrow(|p| {
-        p.as_ref().filter(|tx| tx.change_count == count).map(|tx| tx.snapshot.clone())
+        p.as_ref().filter(|tx| tx.change_count == now).map(|tx| tx.snapshot.clone())
       });
       let taken = previous.unwrap_or_else(|| Snapshot::take(&pasteboard));
-      if pasteboard.changeCount() == count {
-        snapshot = Some((taken, count));
+      if pasteboard.changeCount() == now {
+        (snapshot, count) = (Some(taken), Some(now));
         break;
       }
+    }
 
-      if attempt == 2 {
-        return Err(NotPasted::Failed("the clipboard kept changing: nothing was pasted".into()));
-      }
+    if count.is_none() {
+      return Err(NotPasted::Failed("the clipboard kept changing: nothing was pasted".into()));
     }
   }
+
   // Nothing could be read (the user did not allow it): restoring would empty the clipboard.
-  let unreadable = snapshot.as_ref().is_some_and(|(s, _)| s.unreadable());
-  if unreadable {
-    warn!("paste: the clipboard could not be read ({access:?}): not restored");
+  if snapshot.as_ref().is_some_and(Snapshot::unreadable) {
+    warn!("paste: the clipboard could not be read: not restored");
+    snapshot = None;
   }
 
-  let count = snapshot.as_ref().map(|(_, count)| *count);
-  let snapshot = snapshot.filter(|_| !unreadable);
   if !commit() {
     return Err(NotPasted::Failed("the app was too busy to paste in time".into()));
   }
@@ -328,28 +301,25 @@ pub fn paste(
   // SAFETY: a static of the framework.
   let string = unsafe { NSPasteboardTypeString };
   let markers = [NSString::from_str(TRANSIENT), NSString::from_str(CONCEALED)];
+  let types =
+    NSArray::from_retained_slice(&[string.retain(), markers[0].clone(), markers[1].clone()]);
   let promise = match snapshot {
-    Some((snapshot, _)) => {
+    Some(snapshot) => {
       let owner = Owner::new(mtm, id, text);
-      let types = [string.retain(), markers[0].clone(), markers[1].clone()];
       let owner_object: &AnyObject = &owner;
       // SAFETY: the owner implements `pasteboard:provideDataForType:` for every declared type and
       // stays alive while its promise is on the pasteboard (and some time after).
-      let change_count = unsafe {
-        pasteboard.declareTypes_owner(&NSArray::from_retained_slice(&types), Some(owner_object))
-      };
+      let change_count = unsafe { pasteboard.declareTypes_owner(&types, Some(owner_object)) };
       Some((snapshot, owner, change_count))
     }
     None if keep => {
-      pasteboard.clearContents();
-      pasteboard.setString_forType(&NSString::from_str(text), string);
+      SystemClipboard.write(text);
       None
     }
     // No snapshot to restore (reading is not allowed): the text stays, marked.
     None => {
-      let types = [string.retain(), markers[0].clone(), markers[1].clone()];
       // SAFETY: no owner: the data of every declared type is set right below.
-      unsafe { pasteboard.declareTypes_owner(&NSArray::from_retained_slice(&types), None) };
+      unsafe { pasteboard.declareTypes_owner(&types, None) };
       for marker in &markers {
         pasteboard.setData_forType(Some(&NSData::new()), marker);
       }
@@ -425,9 +395,8 @@ fn settle(id: u64) {
 
 /// Restores the clipboard now if a paste still holds it (the app quits).
 pub fn finish() {
-  let tx = PENDING.with(|p| p.try_borrow_mut().ok().and_then(|mut p| p.take()));
-  if let Some(tx) = tx {
-    tx.finish();
+  if let Some(id) = PENDING.with_borrow(|p| p.as_ref().map(|tx| tx.id)) {
+    settle(id);
   }
 }
 
@@ -475,7 +444,7 @@ mod tests {
     let contents = snapshot.contents();
     assert_eq!(contents.len(), 2, "{contents:?}");
     assert_eq!(snapshot.bytes(), "текст ✓".len() + 8 + png.len());
-    assert!(Access::of(&pasteboard).snapshot(), "a pasteboard of its own may be read");
+    assert!(may_read(&pasteboard), "a pasteboard of its own may be read");
 
     // SAFETY: a static of the framework.
     let string = unsafe { NSPasteboardTypeString };

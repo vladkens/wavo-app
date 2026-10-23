@@ -156,7 +156,7 @@ impl Overlay {
 impl App for Overlay {
   fn event(&mut self, _cx: &mut Cx, ev: &Event) -> bool {
     let Event::Appearance(a) = ev else { return false };
-    self.theme = if a.dark { Theme::PLATES_DARK } else { Theme::PLATES_LIGHT };
+    self.theme = Theme::system(*a);
     true
   }
 

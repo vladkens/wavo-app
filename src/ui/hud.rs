@@ -16,7 +16,6 @@
 use std::time::Duration;
 
 use crate::session::controller::{NoModel, Outcome as Ended, Status};
-use crate::session::machine::Take;
 
 // Geometry, in points.
 pub const WIDTH: f32 = 176.0;
@@ -24,9 +23,9 @@ pub const HEIGHT: f32 = 36.0;
 pub const RADIUS: f32 = HEIGHT / 2.0;
 pub const PAD: f32 = 14.0;
 pub const DOT: f32 = 10.0;
-pub const BARS: usize = 16;
+const BARS: usize = 16;
 pub const BAR_WIDTH: f32 = 3.0;
-pub const BAR_MIN: f32 = 3.0;
+const BAR_MIN: f32 = 3.0;
 const BAR_GAP: f32 = 2.0;
 const BAR_MAX: f32 = 20.0;
 const BARS_X: f32 = PAD + DOT + 10.0;
@@ -69,18 +68,15 @@ pub enum Outcome {
   Error(String),
 }
 
-/// What came of a dictation newer than `shown_take` (the last one the HUD told about), or a new
-/// error (`shown_error`: the one it told about) of a recording that did not start; `None`: no
-/// news (it collapses if it shows something). With `auto_paste`, a refused paste is an error.
-pub fn after(
-  status: &Status,
-  auto_paste: bool,
-  shown_take: Option<Take>,
-  shown_error: Option<&str>,
-) -> Option<Outcome> {
-  let Some(last) = status.last.as_ref().filter(|l| Some(l.take) != shown_take) else {
+/// What came of a dictation that ended since the status `before`, or a new error of a recording
+/// that did not start; `None`: no news (it collapses if it shows something). With `auto_paste`, a
+/// refused paste is an error.
+pub fn after(status: &Status, before: Option<&Status>, auto_paste: bool) -> Option<Outcome> {
+  let take = |s: &Status| s.last.as_ref().map(|l| l.take);
+  let Some(last) = status.last.as_ref().filter(|l| Some(l.take) != before.and_then(take)) else {
     // A recording that did not start leaves no dictation, only the error.
-    let error = status.error.as_deref().filter(|e| shown_error != Some(*e))?;
+    let shown = before.and_then(|s| s.error.as_deref());
+    let error = status.error.as_deref().filter(|e| shown != Some(*e))?;
     return Some(Outcome::Error(short(error)));
   };
 
@@ -118,7 +114,7 @@ fn no_model(load: bool) -> String {
 
 /// An error as the HUD says it: the known causes in a few words, else the first clause,
 /// lowercase.
-pub fn short(error: &str) -> String {
+fn short(error: &str) -> String {
   let lower = error.to_lowercase();
   let known = [
     (&["no speech model", "no model"][..], "no model"),
@@ -277,9 +273,8 @@ pub struct State {
   /// The bars' heights when transcribing began: where they settle from.
   settled_from: [f32; BARS],
   progress: Option<(usize, usize)>,
-  /// An error's reason, or the warning of a recording that shows one.
-  text: String,
-  warned: bool,
+  /// An error's reason, or the warning a recording shows in place of the level.
+  text: Option<String>,
   /// The pill's width: from, to, and since when it goes between them.
   width: (f32, f32, Duration),
 }
@@ -297,8 +292,7 @@ impl Default for State {
       frozen: 0,
       settled_from: [BAR_MIN; BARS],
       progress: None,
-      text: String::new(),
-      warned: false,
+      text: None,
       width: (WIDTH, WIDTH, Duration::ZERO),
     }
   }
@@ -312,10 +306,9 @@ impl State {
   /// The text it shows, for `wavo-app ctl status`: `warning: <reason>`, `n/m`.
   pub fn text(&self) -> Option<String> {
     match self.mode {
-      Mode::Error => Some(format!("warning: {}", self.text)),
-      Mode::Recording if self.warned => Some(format!("warning: {}", self.text)),
+      Mode::Error | Mode::Recording => self.text.as_ref().map(|t| format!("warning: {t}")),
       Mode::Transcribing => pieces(self.progress),
-      _ => None,
+      Mode::Hidden | Mode::Closing => None,
     }
   }
 
@@ -343,33 +336,20 @@ impl State {
 
     self.enter(Mode::Recording, now);
     (self.started, self.levels, self.ticked) = (started, [0.0; BARS], now);
-    self.warned = false;
+    self.text = None;
     self.width = (WIDTH, WIDTH, now);
   }
 
   /// While recording: a warning (`reason`, `text_width` wide as drawn) in place of the level,
   /// the pill widening to it; `None` the level again.
   pub fn warning(&mut self, reason: Option<(&str, f32)>, now: Duration) {
-    let same = match reason {
-      Some((reason, _)) => self.warned && self.text == reason,
-      None => !self.warned,
-    };
-
-    if self.mode != Mode::Recording || same {
+    if self.mode != Mode::Recording || self.text.as_deref() == reason.map(|r| r.0) {
       return;
     }
 
-    let from = self.width_at(now);
-    self.warned = reason.is_some();
-    let to = match reason {
-      Some((reason, text_width)) => {
-        self.text = reason.to_owned();
-        reason_width(text_width)
-      }
-      None => WIDTH,
-    };
-
-    self.width = (from, to, now);
+    let to = reason.map_or(WIDTH, |(_, text_width)| reason_width(text_width));
+    self.width = (self.width_at(now), to, now);
+    self.text = reason.map(|r| r.0.to_owned());
   }
 
   /// Transcribing: the bars settle and become the wave; `n/m` for a recording in pieces. Not of a
@@ -391,7 +371,7 @@ impl State {
     let from =
       if self.mode == Mode::Hidden { reason_width(text_width) } else { self.width_at(now) };
     self.enter(Mode::Error, now);
-    self.text = reason.to_owned();
+    self.text = Some(reason.to_owned());
     self.width = (from, reason_width(text_width), now);
   }
 
@@ -441,12 +421,12 @@ impl State {
 
     let mut shapes = Vec::new();
     let time = |secs: u64| format!("{}:{:02}", secs / 60, secs % 60);
-    let warning = || Shape::Warning { text: self.text.clone(), alpha: a };
+    let warning = || Shape::Warning { text: self.text.clone().unwrap_or_default(), alpha: a };
     // Closing fades out what was shown before it, as it was.
     let shown = if self.mode == Mode::Closing { self.from } else { self.mode };
     match shown {
       Mode::Hidden | Mode::Closing => {}
-      Mode::Recording if self.warned => shapes.push(warning()),
+      Mode::Recording if self.text.is_some() => shapes.push(warning()),
       Mode::Recording => {
         shapes.push(Shape::Dot { alpha: a });
         for (i, level) in self.levels.iter().enumerate() {
@@ -584,7 +564,7 @@ mod tests {
 
   #[test]
   fn a_dictation_that_went_well_just_goes() {
-    let outcome = |l: Last, auto_paste| after(&status(Some(l), None), auto_paste, None, None);
+    let outcome = |l: Last, auto_paste| after(&status(Some(l), None), None, auto_paste);
     assert_eq!(outcome(last(Ended::Done, true, None, None), true), Some(Outcome::Collapse));
     let copied = last(Ended::Done, false, None, Some("auto-paste is off; the text is on it"));
     assert_eq!(outcome(copied, false), Some(Outcome::Collapse), "no extra feedback");
@@ -593,12 +573,12 @@ mod tests {
     let silent = last(Ended::NoSpeech, false, None, None);
     assert_eq!(outcome(silent, true), Some(Outcome::Collapse), "nothing said: it just goes");
     let done = status(Some(last(Ended::Done, true, None, None)), None);
-    assert_eq!(after(&done, true, Some(1), None), None, "told already");
+    assert_eq!(after(&done, Some(&done), true), None, "told already");
   }
 
   #[test]
   fn errors_say_why_in_a_few_lowercase_words() {
-    let outcome = |l: Last, auto_paste| after(&status(Some(l), None), auto_paste, None, None);
+    let outcome = |l: Last, auto_paste| after(&status(Some(l), None), None, auto_paste);
     let error = |s: &str| Some(Outcome::Error(s.into()));
     let refused = |why: NotPasted| last(Ended::Done, false, None, Some(&why.to_string()));
     assert_eq!(outcome(refused(NotPasted::FocusChanged), true), error("not pasted: focus moved"));
@@ -629,11 +609,9 @@ mod tests {
 
     // A recording that did not start: its error, once.
     let mic = "could not start recording: no input device";
-    assert_eq!(
-      after(&status(None, Some(mic)), true, None, None),
-      error("could not start recording")
-    );
-    assert_eq!(after(&status(None, Some(mic)), true, None, Some(mic)), None);
+    let failed = status(None, Some(mic));
+    assert_eq!(after(&failed, None, true), error("could not start recording"));
+    assert_eq!(after(&failed, Some(&failed), true), None);
     assert_eq!(short(&"x".repeat(80)).chars().count(), 40);
     assert_eq!(short(""), "failed");
   }

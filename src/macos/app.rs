@@ -10,13 +10,13 @@
 //! answer from it runs on a thread of its own.
 
 use std::cell::RefCell;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use nimbo::hotkey::{Hotkeys, Listener};
 use nimbo::permissions::{self, Pane};
-use nimbo::tray::Tray;
+use nimbo::tray::{Menu, Tray};
 use nimbo::{AppInfo, Clipboard, Main, Presence, Proxy, SystemClipboard, Window, autostart};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSAlert, NSApplication};
@@ -26,7 +26,7 @@ use tracing::{info, warn};
 
 use super::microphone::{self, Access as Microphone};
 use super::output::MacOutput;
-use super::paste::{self, Access as Pasteboard};
+use super::paste;
 use crate::audio::devices;
 use crate::ctl::{self, Autostart, Claim, Reply, Request, Serving};
 use crate::session::controller::{Handle, Phase, Update};
@@ -34,7 +34,7 @@ use crate::session::{self, Session};
 use crate::settings::HudPosition;
 use crate::ui::hud::{self, Mode};
 use crate::ui::icons::Icon;
-use crate::ui::menu;
+use crate::ui::menu::{self, Warning};
 use crate::ui::overlay::{self, Overlay, Show};
 
 /// The app as the system knows it: its menu bar presence, its login item.
@@ -42,6 +42,8 @@ const INFO: AppInfo =
   AppInfo { id: "me.vladkens.wavo", name: "Wavo", presence: Presence::Accessory };
 /// How often Accessibility access is checked while it is missing (and only then).
 const ACCESS_POLL: Duration = Duration::from_secs(2);
+/// How long `wavo-app ctl status` waits for the main thread for the shell's part.
+const STATUS_WAIT: Duration = Duration::from_secs(1);
 /// Paste from Other Apps (macOS 15.4+), where the app may read the clipboard to restore it.
 const PASTEBOARD_PANE: &str =
   "x-apple.systempreferences:com.apple.preference.security?Privacy_Pasteboard";
@@ -71,20 +73,17 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 struct App {
   tray: Tray,
   icon: Icon,
+  menu: Menu,
   hotkeys: Hotkeys,
   /// The HUD's window and where it shows.
   hud: (Window<Overlay>, HudPosition),
   handle: Handle,
   /// The session's last; none before its first.
   update: Option<Update>,
-  /// The dictation and the error the HUD last told about.
-  told: (Option<u64>, Option<String>),
-  /// What `wavo-app ctl status` shows of the shell, for the control thread.
-  info: Arc<Mutex<Value>>,
   accessibility: bool,
-  /// The Accessibility poll is scheduled.
-  polling: bool,
   microphone: Microphone,
+  /// The paste may read the clipboard to restore it ([paste::readable]).
+  clipboard: bool,
   asked_microphone: bool,
   fake_mic: bool,
   session: Session,
@@ -149,10 +148,9 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     Hotkeys::new(move |edge| handle.input(edge.into()))
   };
 
-  let info = Arc::new(Mutex::new(Value::Null));
   let serving = {
-    let (handle, info) = (handle.clone(), info.clone());
-    server.spawn(move |request| serve(request, &handle, &info))?
+    let handle = handle.clone();
+    server.spawn(move |request| serve(request, &handle))?
   };
 
   let tray = Tray::new(Icon::Idle.tray(), Icon::Idle.description());
@@ -162,15 +160,14 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   let mut app = App {
     tray,
     icon: Icon::Idle,
+    menu: Menu::default(),
     hotkeys,
     hud: (open_hud(main, position), position),
     handle,
     update: None,
-    told: (None, None),
-    info,
     accessibility: false,
-    polling: false,
     microphone: microphone::access(),
+    clipboard: paste::readable(),
     asked_microphone: false,
     fake_mic,
     session,
@@ -189,12 +186,13 @@ fn open_hud(main: &mut Main, position: HudPosition) -> Window<Overlay> {
 }
 
 /// A control request, on the control thread.
-fn serve(request: Request, handle: &Handle, info: &Mutex<Value>) -> Reply {
+fn serve(request: Request, handle: &Handle) -> Reply {
   match request {
     Request::Status => {
       let mut reply = handle.request(Request::Status);
       if let Value::Object(map) = &mut reply.result {
-        map.insert("shell".into(), info.lock().unwrap().clone());
+        let shell = proxy().call(|_| with_app(|app| app.status()), STATUS_WAIT).flatten();
+        map.insert("shell".into(), shell.unwrap_or_default());
       }
 
       reply
@@ -269,6 +267,7 @@ impl App {
     let _ = self.hotkeys.set(&update.settings.hotkey);
     self.hotkeys.escape(status.state == Phase::Recording);
     let position = update.settings.hud_position;
+    let shown = self.hud.0.with(|o| o.mode()).unwrap_or(Mode::Hidden);
     match status.state {
       Phase::Recording => {
         let recording = self.update.as_ref().is_some_and(|u| u.status.state == Phase::Recording);
@@ -283,33 +282,36 @@ impl App {
           seconds: r.map_or(0.0, |r| r.seconds),
           no_model: hud::during(status),
         };
-        self.show(main, show, position);
+        self.show(main, shown, show, position);
       }
       Phase::Transcribing | Phase::Pasting => {
-        self.show(main, Show::Transcribing(status.engine.progress), position)
+        self.show(main, shown, Show::Transcribing(status.engine.progress), position)
       }
       Phase::Idle => {
-        let (take, error) = (self.told.0, self.told.1.as_deref());
-        match hud::after(status, update.settings.auto_paste, take, error) {
-          Some(hud::Outcome::Error(reason)) => self.show(main, Show::Error(reason), position),
-          Some(hud::Outcome::Collapse) => self.show(main, Show::Collapse, position),
-          None if self.hud.0.with(|o| o.mode()) != Some(Mode::Error) => {
-            self.show(main, Show::Collapse, position)
-          }
-          None => {}
-        }
+        let before = self.update.as_ref().map(|u| &u.status);
+        let show = match hud::after(status, before, update.settings.auto_paste) {
+          Some(hud::Outcome::Error(reason)) => Show::Error(reason),
+          None if shown == Mode::Error => return self.keep(update),
+          _ => Show::Collapse,
+        };
+
+        self.show(main, shown, show, position);
       }
     }
 
-    self.told = (status.last.as_ref().map(|l| l.take).or(self.told.0), status.error.clone());
+    self.keep(update);
+  }
+
+  /// Keeps `update` as the last and shows it in the icon and the menu.
+  fn keep(&mut self, update: Update) {
     self.update = Some(update);
     self.refresh();
   }
 
-  /// Shows `show` in the HUD; from hidden only a recording or an error, at `position` on the
-  /// screen with the pointer.
-  fn show(&mut self, main: &mut Main, show: Show, position: HudPosition) {
-    let hidden = self.hud.0.with(|o| o.mode()) == Some(Mode::Hidden);
+  /// Shows `show` in the HUD, which shows `shown`; from hidden only a recording or an error, at
+  /// `position` on the screen with the pointer.
+  fn show(&mut self, main: &mut Main, shown: Mode, show: Show, position: HudPosition) {
+    let hidden = shown == Mode::Hidden;
     if hidden && !matches!(show, Show::Recording { .. } | Show::Error(_)) {
       return;
     }
@@ -366,15 +368,12 @@ impl App {
       warn!("the event tap: {e}");
     }
 
-    let needed = !self.accessibility || self.hotkeys.status().listener != Listener::Active;
-    if needed && !self.polling {
-      self.polling = true;
+    if !self.accessibility || self.hotkeys.status().listener != Listener::Active {
       proxy().after(ACCESS_POLL, |_| _ = with_app(App::poll_access));
     }
   }
 
   fn poll_access(&mut self) {
-    self.polling = false;
     let (had, tap) = (self.accessibility, self.hotkeys.status().listener);
     self.check_access();
     if self.accessibility != had {
@@ -398,25 +397,31 @@ impl App {
   /// The menu opens: what the system does not tell the app is looked at again.
   fn menu_opening(&mut self) {
     self.microphone = microphone::access();
+    self.clipboard = paste::readable();
     self.refresh();
   }
 
-  /// The warnings, the icon, the menu and what `wavo-app ctl status` shows of the shell.
-  fn refresh(&mut self) {
-    let Some(update) = &self.update else { return };
+  /// What needs the person's attention, as the session and the system have it now.
+  fn warnings(&self, update: &Update) -> Vec<Warning> {
     let hotkeys = self.hotkeys.status();
     let settings = &update.settings;
     let restores = settings.auto_paste && !settings.keep_in_clipboard;
     let system = menu::System {
       accessibility: self.accessibility,
       tap_failed: hotkeys.listener == Listener::Failed,
-      hotkey_error: hotkeys.error.clone(),
-      fallback_error: hotkeys.fallback_error.clone(),
+      hotkey_error: hotkeys.error,
+      fallback_error: hotkeys.fallback_error,
       microphone_denied: matches!(self.microphone, Microphone::Denied | Microphone::Restricted),
-      clipboard_unread: restores && !Pasteboard::general().snapshot(),
+      clipboard_unread: restores && !self.clipboard,
       secure_input: hotkeys.secure_input,
     };
-    let warnings = menu::warnings(&system, &settings.hotkey, &update.status);
+    menu::warnings(&system, &settings.hotkey, &update.status)
+  }
+
+  /// The icon and the menu.
+  fn refresh(&mut self) {
+    let Some(update) = &self.update else { return };
+    let warnings = self.warnings(update);
     let icon = menu::icon(&update.status, &warnings);
     if icon != self.icon {
       self.icon = icon;
@@ -424,17 +429,26 @@ impl App {
       self.tray.set_tooltip(icon.description());
     }
 
-    let hotkey = hotkeys.hotkey.map(|h| h.label());
-    self.tray.set_menu(&menu::menu(hotkey.as_deref(), &update.status, &warnings));
-    let hud = self.hud.0.with(|o| json!({ "mode": o.mode(), "text": o.text() }));
-    *self.info.lock().unwrap() = json!({
-      "icon": icon.name(),
-      "hotkey": hotkey,
+    let hotkey = self.hotkeys.status().hotkey.map(|h| h.label());
+    let menu = menu::menu(hotkey.as_deref(), &update.status, &warnings);
+    if menu != self.menu {
+      self.tray.set_menu(&menu);
+      self.menu = menu;
+    }
+  }
+
+  /// What `wavo-app ctl status` shows of the shell.
+  fn status(&self) -> Value {
+    let hotkeys = self.hotkeys.status();
+    let warnings = self.update.as_ref().map(|u| self.warnings(u)).unwrap_or_default();
+    json!({
+      "icon": self.icon,
+      "hotkey": hotkeys.hotkey.map(|h| h.label()),
       "tap": format!("{:?}", hotkeys.listener).to_lowercase(),
       "accessibility": self.accessibility,
       "microphone": self.microphone,
-      "hud": hud,
+      "hud": self.hud.0.with(|o| json!({ "mode": o.mode(), "text": o.text() })),
       "warnings": warnings.iter().map(|w| &w.text).collect::<Vec<_>>(),
-    });
+    })
   }
 }

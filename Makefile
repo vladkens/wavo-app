@@ -28,28 +28,27 @@ update:
 clean:
 	cargo clean
 
-.PHONY: bundle bundle-fast run install fixtures test-models unload-memory
+.PHONY: bundle run install fixtures test-models unload-memory
 
 ICON := target/Wavo.icns
 APP := target/Wavo.app
+PROFILE := release
 
 $(ICON): assets/icon.png scripts/icns.sh
 	scripts/icns.sh assets/icon.png $@
 
 # target/Wavo.app (scripts/bundle.sh), signed with the identity $$WAVO_SIGN_IDENTITY when the
 # keychain has it, ad hoc otherwise. Built, never opened.
-bundle: $(ICON) # target/Wavo.app from the release profile
-	cargo build --release
-	scripts/bundle.sh target/release/wavo-app $(ICON) $(APP)
+bundle: $(ICON) # target/Wavo.app from the release profile, or PROFILE
+	cargo build --profile $(PROFILE)
+	scripts/bundle.sh target/$(PROFILE)/wavo-app $(ICON) $(APP)
 
-bundle-fast: $(ICON) # target/Wavo.app from the quick fast profile, for run and install
-	cargo build --profile fast
-	scripts/bundle.sh target/fast/wavo-app $(ICON) $(APP)
-
-run: bundle-fast # quit the running Wavo, start target/Wavo.app
+run: # quit the running Wavo, start target/Wavo.app built with the quick fast profile
+	$(MAKE) bundle PROFILE=fast
 	scripts/run.sh $(APP)
 
-install: bundle-fast # quit the running Wavo, install it into /Applications and start it
+install: # the same, installed into /Applications
+	$(MAKE) bundle PROFILE=fast
 	scripts/run.sh $(APP) /Applications/Wavo.app
 
 # WAV fixtures and reference transcripts in target/fixtures/ (scripts/gen-fixtures.sh, macOS

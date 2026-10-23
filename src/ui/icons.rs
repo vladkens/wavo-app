@@ -6,7 +6,9 @@
 
 use nimbo::tray::TrayIcon;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// As `wavo-app ctl status` calls it: `idle`, `recording`…
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Icon {
   Idle,
   Recording,
@@ -21,16 +23,6 @@ impl Icon {
       Icon::Recording => include_str!("../../assets/status-icon/recording.svg"),
       Icon::Transcribing => include_str!("../../assets/status-icon/transcribing.svg"),
       Icon::Warning => include_str!("../../assets/status-icon/warning.svg"),
-    }
-  }
-
-  /// What `wavo-app ctl status` calls it.
-  pub fn name(self) -> &'static str {
-    match self {
-      Icon::Idle => "idle",
-      Icon::Recording => "recording",
-      Icon::Transcribing => "transcribing",
-      Icon::Warning => "warning",
     }
   }
 
@@ -58,7 +50,7 @@ mod tests {
     for icon in [Icon::Idle, Icon::Recording, Icon::Transcribing, Icon::Warning] {
       let TrayIcon::Path { size, d, even_odd } = icon.tray() else { unreachable!() };
       assert!(size == 18.0 && even_odd && !d.is_empty(), "{icon:?}");
-      assert!(!icon.name().is_empty() && icon.description().starts_with("Wavo"));
+      assert!(icon.description().starts_with("Wavo"), "{icon:?}");
     }
   }
 }

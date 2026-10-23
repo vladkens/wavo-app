@@ -29,8 +29,8 @@ unsafe impl Send for Element {}
 /// The app the person typed in when the recording started.
 #[derive(Debug, Clone)]
 pub struct Focus {
-  pub pid: i32,
-  pub app: String,
+  pid: i32,
+  app: String,
   window: Window,
 }
 
@@ -39,7 +39,7 @@ enum Window {
   /// The focused window (none: the app has no window in focus).
   Known(Option<Element>),
   /// The app did not say (no AX support, busy): only the pid is compared.
-  Unknown(AXError),
+  Unknown,
 }
 
 impl Focus {
@@ -50,7 +50,7 @@ impl Focus {
       Ok(window) => Window::Known(window.and_then(element)),
       Err(e) => {
         debug!("{app} ({pid}): no AXFocusedWindow (AXError {})", e.0);
-        Window::Unknown(e)
+        Window::Unknown
       }
     };
 
@@ -81,10 +81,7 @@ impl Focus {
 
         true
       }
-      Window::Unknown(e) => {
-        debug!("{app} ({pid}): the window at the start is unknown (AXError {}); pid only", e.0);
-        false
-      }
+      Window::Unknown => false,
     };
 
     match secure_field(&ax) {
