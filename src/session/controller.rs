@@ -721,7 +721,10 @@ impl<O: TextOutput> Controller<O> {
         notify: Some(self.engine_tx.clone()),
       };
 
-      self.engine = Some(Loaded { name, path, engine: Engine::start(config) });
+      // Without its thread the model cannot load: the recording waits, as for a load that fails.
+      let engine = Engine::start(config)
+        .map_err(|e| NoModel::LoadFailed { model: label(&name), error: e.to_string() })?;
+      self.engine = Some(Loaded { name, path, engine });
     }
 
     Ok(self.engine.as_ref().unwrap())

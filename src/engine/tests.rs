@@ -45,7 +45,7 @@ fn model_name(path: &Path) -> String {
 /// Transcribes each fixture after a warm-up run and checks its WER; prints WER and timings.
 fn check_wer(model: PathBuf, cases: &[(&str, Option<&str>)]) {
   let name = model_name(&model);
-  let engine = Engine::start(EngineConfig::new(model));
+  let engine = Engine::start(EngineConfig::new(model)).unwrap();
   let (warm, lang) = (fixture(cases[0].0), cases[0].1);
   let cold = run(&engine, &warm, lang).unwrap();
   let load = engine.status().last_load.unwrap();
@@ -100,7 +100,8 @@ fn whisper_ru_en_wer() {
 fn a_panic_in_a_run_fails_it_and_a_fresh_model_takes_the_next_job() {
   let faults = Faults::new();
   let engine =
-    Engine::start(EngineConfig { loader: faults.wrap(Wavo), ..EngineConfig::new(model_ru()) });
+    Engine::start(EngineConfig { loader: faults.wrap(Wavo), ..EngineConfig::new(model_ru()) })
+      .unwrap();
   let short = fixture("ru-short");
   assert_wer(&short, &run(&engine, &short, None).unwrap());
   let first = engine.status().thread;
@@ -127,11 +128,11 @@ fn a_panic_in_a_run_fails_it_and_a_fresh_model_takes_the_next_job() {
 fn warm_start_to_loaded_is_fast() {
   let short = fixture("ru-short");
   // Warms the OS shader cache and the page cache with a full cycle.
-  run(&Engine::start(EngineConfig::new(model_ru())), &short, None).unwrap();
+  run(&Engine::start(EngineConfig::new(model_ru())).unwrap(), &short, None).unwrap();
 
   let mut times: Vec<Duration> = (0..5)
     .map(|_| {
-      let engine = Engine::start(EngineConfig::new(model_ru()));
+      let engine = Engine::start(EngineConfig::new(model_ru())).unwrap();
       run(&engine, &short, None).unwrap();
       engine.status().last_load.unwrap()
     })
@@ -156,7 +157,7 @@ fn check_long(model: PathBuf, window: Duration) {
   );
   assert!(input.seconds() < recorded.seconds() - 1.5, "the 2.5 s pause is shortened");
 
-  let engine = Engine::start(EngineConfig::new(model));
+  let engine = Engine::start(EngineConfig::new(model)).unwrap();
   run(&engine, &fixture("ru-short"), None).unwrap(); // warm-up
   let out = engine.transcribe(input.pcm, None).wait().unwrap();
   let pieces: Vec<f64> = out.pieces.iter().map(|p| p.len() as f64 / SAMPLE_RATE as f64).collect();
@@ -188,7 +189,7 @@ fn whisper_long_recording() {
 #[test]
 #[ignore = "needs models: make test-models"]
 fn gigaam_warm_latency() {
-  let engine = Engine::start(EngineConfig::new(model_ru()));
+  let engine = Engine::start(EngineConfig::new(model_ru())).unwrap();
   run(&engine, &fixture("ru-short"), None).unwrap();
   for (name, limit) in [("ru-short", WARM_SHORT_LIMIT), ("ru-typical", WARM_TYPICAL_LIMIT)] {
     let f = fixture(name);

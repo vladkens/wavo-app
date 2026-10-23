@@ -50,7 +50,7 @@ pub fn transcribe(wav: &Path, model: Option<&str>, language: Option<&str>) -> Re
     return Ok(());
   };
 
-  let engine = Engine::start(EngineConfig::new(model));
+  let engine = Engine::start(EngineConfig::new(model))?;
   let seconds = input.seconds();
   let result = engine.transcribe(input.pcm, language).wait()?;
   let status = engine.status();
