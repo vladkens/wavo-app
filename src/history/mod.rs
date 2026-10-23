@@ -19,7 +19,7 @@ pub mod recordings;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,11 @@ pub const DB_FILE: &str = "history.db";
 /// The error of an entry [`History::recover`] made for a recording without one.
 pub const STOPPED_RECORDING: &str =
   "Wavo stopped during the recording; the audio up to then is kept";
+
+/// Now as the history keeps time: Unix ms.
+pub fn now_ms() -> i64 {
+  SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
 
 /// How long history is kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
