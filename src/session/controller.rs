@@ -16,8 +16,8 @@
 //! - Whether a model can transcribe is looked at without loading one ([`NoModel`] in the status):
 //!   at the start, when an engine starts, when a setting changes the model and when a load fails. A
 //!   loaded model whose file is gone goes with its engine at the next recording. A chosen model
-//!   whose file is gone gives way to the first one found: the choice is cleared and saved; with
-//!   none left it stays (downloading it again brings it back).
+//!   that is not on disk gives way to the first one found while it is not, a warning in the status
+//!   saying so; the choice stays (downloading it again brings it back).
 //! - The result goes to the history first, then it is pasted (`pasted` says whether it was). Speech
 //!   of which the engine made no text (a model that does not know the language) is no success: the
 //!   entry and its recording stay as `no_text`, to transcribe again with another model.
@@ -304,6 +304,7 @@ impl Session {
       engine_tx,
       engine_rx,
       model_error: None,
+      model_fallback: None,
       observer,
       published: None,
     };
@@ -412,6 +413,8 @@ struct Controller<O: TextOutput> {
   /// Why no model on disk can transcribe, as last looked ([`Controller::check_model`]); a load
   /// that fails is the engine's ([`Status::no_model`]).
   model_error: Option<NoModel>,
+  /// The warning of a chosen model not on disk while another one transcribes, as last looked.
+  model_fallback: Option<String>,
   observer: Option<Observer>,
   /// The status last sent to the observer (without the recording's time and level), the settings
   /// and the history's changes then.
@@ -661,12 +664,13 @@ impl<O: TextOutput> Controller<O> {
   }
 
   /// Whether a model can transcribe now, without loading one: the files on disk against the
-  /// choice. A chosen model that is gone gives way to the first one found, the choice cleared and
-  /// saved; with none found the choice stays (downloading it again brings it back) and is the
-  /// reason. The model's path, or why there is none (kept for the status).
+  /// choice. A chosen model that is not on disk gives way to the first one found, with a warning
+  /// (kept for the status); the choice stays. With none found the choice is the reason. The
+  /// model's path, or why there is none (kept for the status).
   fn check_model(&mut self) -> Result<PathBuf, NoModel> {
     let hub = &self.config.hub;
     let query = self.settings.model.clone();
+    let fallback_before = self.model_fallback.take();
     let error = match (model::find(query.as_deref(), hub), query) {
       (Ok(path), _) => {
         self.model_error = None;
@@ -674,8 +678,13 @@ impl<O: TextOutput> Controller<O> {
       }
       (Err(_), Some(query)) => match model::find(None, hub) {
         Ok(path) => {
-          warn!("model {} is not on disk: {} takes its place", label(&query), file_stem(&path));
-          self.apply_settings(Settings { model: None, ..self.settings.clone() });
+          let fallback = label(&path.to_string_lossy());
+          let note = format!("{} is not on disk: {fallback} transcribes instead", label(&query));
+          if fallback_before.as_ref() != Some(&note) {
+            warn!("model {note}");
+          }
+
+          self.model_fallback = Some(note);
           self.model_error = None;
           return Ok(path);
         }
@@ -702,12 +711,21 @@ impl<O: TextOutput> Controller<O> {
   }
 
   /// The engine for the model in the settings, started on first use; or why there is none. One
-  /// whose file is gone goes, once it is not busy.
+  /// whose file is gone goes, once it is not busy, as does one standing in for the chosen model
+  /// once that is back.
   fn engine(&mut self) -> Result<&Loaded, NoModel> {
     if let Some(loaded) = &self.engine
       && !loaded.path.is_file()
     {
       warn!("model {}: its file is gone", loaded.name);
+      self.engine_stale = true;
+    }
+
+    if self.model_fallback.is_some()
+      && let Some(path) = self.engine.as_ref().map(|l| l.path.clone())
+      && self.check_model().is_ok_and(|p| p != path)
+    {
+      info!("model {}: the chosen model is back", file_stem(&path));
       self.engine_stale = true;
     }
 
@@ -1240,6 +1258,7 @@ impl<O: TextOutput> Controller<O> {
     let d = self.dictation.as_ref();
     let engine = self.engine.as_ref().map(|l| (l, l.engine.status()));
     let mut warnings = self.warnings.clone();
+    warnings.extend(self.model_fallback.clone());
     if let Some(d) = d {
       warnings.extend(d.warnings.iter().map(|w| format!("dictation {}: {w}", d.last.take)));
     }

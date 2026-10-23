@@ -478,8 +478,8 @@ fn without_any_model_the_recording_waits_for_one() {
 }
 
 /// The chosen model's file deleted behind the app's back while its engine has it loaded: the next
-/// dictation finds it gone, that engine goes and the first model left takes its place (the choice
-/// cleared and saved), and transcribes it.
+/// dictation finds it gone, that engine goes and the first model left transcribes in its place, the
+/// status saying so; the choice stays, and once the model is back it transcribes again.
 #[test]
 fn a_chosen_model_gone_behind_the_apps_back_gives_way_to_the_next() {
   let settings = Settings { model: Some("parakeet-tdt-0.6b-v3".into()), ..Settings::default() };
@@ -498,9 +498,15 @@ fn a_chosen_model_gone_behind_the_apps_back_gives_way_to_the_next() {
   assert_eq!(second.engine.model.as_deref(), Some("whisper-tiny-Q8_0"));
   assert_ne!(second.engine.thread, Some(thread), "the gone model's engine went");
   assert_eq!(second.no_model, None);
+  let note = "parakeet-tdt-0.6b-v3 is not on disk: whisper-tiny transcribes instead";
+  assert!(second.warnings.iter().any(|w| w == note), "{:?}", second.warnings);
   let (saved, _) = Settings::load(&s.home.path().join(settings::FILE));
-  assert_eq!(saved.model, None, "back to the first found, saved");
-  s.update_where("the settings", |u| u.settings.model.is_none());
+  assert_eq!(saved.model.as_deref(), Some("parakeet-tdt-0.6b-v3"), "the choice stays");
+
+  download(&s.hub, "parakeet-v3");
+  let third = dictate(&s, 3);
+  assert_eq!(kept(&s, &third).model.as_deref(), Some("parakeet-tdt-0.6b-v3-Q8_0"), "back");
+  assert!(!third.warnings.iter().any(|w| w == note), "{:?}", third.warnings);
 }
 
 /// The chosen model gone with none left: the choice stays, the status says it is not on disk, the
