@@ -179,6 +179,13 @@ impl Db {
     Ok(Self { db })
   }
 
+  /// Moves on every row this connection writes, and on every commit of another one (the
+  /// background cleanup): a history window reloads when it does.
+  pub fn changes(&self) -> u64 {
+    let others: i64 = self.db.query_row("PRAGMA data_version", [], |r| r.get(0)).unwrap_or(0);
+    self.db.total_changes() + others as u64
+  }
+
   // MARK: Getters
 
   pub fn get_entry(&self, id: i64) -> Result<Option<Entry>> {
@@ -330,6 +337,19 @@ mod tests {
     // Reopening keeps the data and runs no migration again.
     let db = open(&dir);
     assert_eq!(db.get_entry(id).unwrap().map(|e| e.status), Some(Status::Done));
+  }
+
+  #[test]
+  fn changes_move_with_every_write() {
+    let dir = TempDir::new("db-changes");
+    let db = open(&dir);
+    let start = db.changes();
+    let id = insert(&db, Status::Transcribing);
+    db.update_outcome(id, Status::Done, Some("text"), None).unwrap();
+    db.get_entry(id).unwrap();
+    assert_eq!(db.changes(), start + 2, "reads change nothing");
+    insert(&open(&dir), Status::Done);
+    assert_ne!(db.changes(), start + 2, "another connection's write");
   }
 
   #[test]

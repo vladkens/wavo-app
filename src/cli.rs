@@ -1,26 +1,49 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Command-line tools that run without the GUI: `wavo-app transcribe`, `devices` and `record`.
+//! Command-line tools that run without the GUI: `wavo-app transcribe`, `devices`, `record`, the
+//! headless `daemon` and its `ctl` client.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use crossbeam_channel::bounded;
 use tracing::{info, warn};
 use wavo::hub::Hub;
 
-use crate::audio::capture::Source;
+use crate::audio::capture::{self, Source};
 use crate::audio::devices::{self, Choice};
 use crate::audio::recorder::Recorder;
 use crate::audio::vad::Clip;
 use crate::audio::{SAMPLE_RATE, vad, wav};
+use crate::ctl::{self, Claim, Reply, Request};
 use crate::engine::{Engine, EngineConfig, model};
+use crate::session::output::Stdout;
+use crate::session::{self, Session};
+use crate::settings::{self, Settings};
 
 /// `wavo-app transcribe`: the dictation pipeline on a file, without capture and paste. The text
 /// goes to stdout, timings and warnings to stderr. Without speech nothing is printed and the engine
-/// is not started.
+/// is not started. Model and language default to the settings; `--language auto` leaves it to the
+/// model.
 pub fn transcribe(wav: &Path, model: Option<&str>, language: Option<&str>) -> Result<()> {
-  let model = model::find(model, &Hub::new())?;
+  let (settings, warning) = Settings::load(&crate::home().join(settings::FILE));
+  if let Some(w) = warning {
+    warn!("{w}");
+  }
+
+  // As the app does, the settings' model gone from the disk gives way to the first one found.
+  let hub = Hub::new();
+  let model = match (model, settings.model.as_deref()) {
+    (None, Some(chosen)) => model::find(Some(chosen), &hub).or_else(|e| {
+      warn!("the settings' model: {e:#}");
+      model::find(None, &hub)
+    })?,
+    (model, _) => model::find(model, &hub)?,
+  };
+
+  let language = language.map_or_else(|| settings.engine_language(), settings::engine_language);
+
   let clip = Clip::analyze(wav::read(wav)?);
   let Some(input) = clip.engine_input() else {
     warn!("no speech in {} ({:.1} s): the engine is not called", wav.display(), clip.seconds());
@@ -29,7 +52,7 @@ pub fn transcribe(wav: &Path, model: Option<&str>, language: Option<&str>) -> Re
 
   let engine = Engine::start(EngineConfig::new(model));
   let seconds = input.seconds();
-  let result = engine.transcribe(input.pcm, language.map(str::to_owned)).wait()?;
+  let result = engine.transcribe(input.pcm, language).wait()?;
   let status = engine.status();
   info!(
     "{:.1} s of audio ({seconds:.1} s to the engine in {} piece(s)) in {:.2?} on {} (engine thread \
@@ -48,7 +71,7 @@ pub fn transcribe(wav: &Path, model: Option<&str>, language: Option<&str>) -> Re
 /// `wavo-app record`: `seconds` of the microphone (or `WAVO_FAKE_MIC`) into `out`, then a summary
 /// on stderr. A device error ends the recording early; what was recorded is kept.
 pub fn record(length: Duration, device: Option<&str>, out: &Path) -> Result<()> {
-  let source = Source::from_env(device.map(Choice::id_or_name));
+  let source = Source::new(capture::fake_mic(), device.map(Choice::id_or_name));
   let recorder = Recorder::start(&source, out)?;
   let fallback = recorder.warning().map(str::to_owned);
   if let Some(w) = &fallback {
@@ -109,6 +132,66 @@ pub fn seconds(s: &str) -> Result<Duration, String> {
 
 fn dbfs(level: f32) -> f32 {
   20.0 * level.max(1e-10).log10()
+}
+
+/// `wavo-app daemon`: dictation without a GUI, controlled by `wavo-app ctl`; each text is a line on
+/// stdout. A second one for the same home leaves the first alone and exits.
+pub fn daemon() -> Result<()> {
+  let config = session::Config::from_env();
+  let home = config.home.clone();
+  std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
+  let socket = ctl::socket_path(&home)?;
+  let server = match ctl::claim(&home).with_context(|| format!("claim {}", socket.display()))? {
+    Claim::Server(server) => server,
+    Claim::Running => {
+      eprintln!("wavo-app is already running for {}", home.display());
+      return Ok(());
+    }
+  };
+
+  let session = Session::start(config, Stdout)?;
+  let handle = session.handle();
+  let (quit, quitting) = bounded(1);
+  let serving = server.spawn(move |request| match request {
+    Request::Quit => {
+      let _ = quit.try_send(());
+      Reply::ok(serde_json::json!({ "state": "quitting" }))
+    }
+    request => handle.request(request),
+  })?;
+
+  info!("wavo-app daemon for {}: control socket {}", home.display(), socket.display());
+  let _ = quitting.recv();
+  // The session first: the lock goes with the socket, and the next instance's recovery must not
+  // find this one's recording or transcription unfinished.
+  drop(session);
+  drop(serving);
+  info!("wavo-app daemon: quit");
+  Ok(())
+}
+
+/// `wavo-app ctl`: one request to the running app. Commands print the state they leave, `status`
+/// the whole status as JSON.
+pub fn ctl(request: Request) -> Result<()> {
+  let home = crate::home();
+  let Ok(socket) = ctl::socket_path(&home) else {
+    bail!("wavo-app is not running (no {})", home.display())
+  };
+
+  let reply = ctl::request(&socket, &request)?;
+
+  if let Some(error) = reply.error {
+    bail!("{error}");
+  }
+
+  match (&request, reply.result.get("state").and_then(|s| s.as_str())) {
+    (Request::Status, _) | (_, None) => {
+      println!("{}", serde_json::to_string_pretty(&reply.result)?)
+    }
+    (_, Some(state)) => println!("{state}"),
+  }
+
+  Ok(())
 }
 
 /// `wavo-app devices`: input devices, the system default marked with `*`.

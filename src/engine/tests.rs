@@ -13,7 +13,8 @@ use super::supervisor::{Engine, EngineConfig, EngineError, Phase, Transcription}
 use crate::audio::SAMPLE_RATE;
 use crate::audio::vad::Clip;
 use crate::testing::{
-  Fault, Faults, Fixture, app_exe, fixture, fixture_wav, model_en, model_ru, paragraph_recall, wer,
+  Fault, Faults, Fixture, TempDir, app_exe, fixture, fixture_wav, model_en, model_ru,
+  paragraph_recall, wer,
 };
 
 const MAX_WER: f64 = 0.15;
@@ -212,11 +213,13 @@ fn gigaam_warm_latency() {
 #[test]
 #[ignore = "needs the fixtures and the release binary: make test-models"]
 fn no_speech_never_reaches_the_engine() {
+  let home = TempDir::new("transcribe-no-speech");
   for name in ["silence", "noise"] {
     // The WAV itself as the "model": loading it would fail, so success means no engine.
     let wav = fixture_wav(name);
-    let out = Command::new(app_exe()).arg("transcribe").arg(&wav).arg("--model").arg(&wav).output();
-    let out = out.unwrap();
+    let mut transcribe = Command::new(app_exe());
+    transcribe.arg("transcribe").arg(&wav).arg("--model").arg(&wav).env("WAVO_HOME", home.path());
+    let out = transcribe.output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{name}: {stderr}");
     assert!(out.stdout.is_empty(), "{name}: {:?}", String::from_utf8_lossy(&out.stdout));

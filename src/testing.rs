@@ -1,19 +1,24 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Test helpers: temp dirs, speech fixtures, real models, a fake engine and faults to inject, the
-//! app binary and WER.
+//! Test helpers: temp dirs, polling, audio and history files, speech fixtures, real models and
+//! fake ones in a cache, a fake engine and faults to inject, the app binary and WER.
 
 use std::collections::VecDeque;
+use std::f32::consts::TAU;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::{env, fs};
+use std::time::{Duration, Instant};
+use std::{env, fs, thread};
 
 use crossbeam_channel::{Receiver, Sender, bounded};
+use rusqlite::Connection;
 
 use crate::audio::vad::Clip;
+use crate::audio::wav::WavSink;
 use crate::audio::{SAMPLE_RATE, wav};
 use crate::engine::model::{Loader, SpeechModel};
+use crate::history::DB_FILE;
 
 /// A fresh directory under the system temp dir, removed on drop.
 pub struct TempDir(PathBuf);
@@ -37,6 +42,50 @@ impl Drop for TempDir {
   fn drop(&mut self) {
     let _ = fs::remove_dir_all(&self.0);
   }
+}
+
+/// What `f` returns once it returns something; it is asked every few ms, for up to `timeout`.
+pub fn poll<T>(what: &str, timeout: Duration, mut f: impl FnMut() -> Option<T>) -> T {
+  let deadline = Instant::now() + timeout;
+  loop {
+    if let Some(v) = f() {
+      return v;
+    }
+
+    assert!(Instant::now() < deadline, "no {what} within {timeout:?}");
+    thread::sleep(Duration::from_millis(5));
+  }
+}
+
+/// `seconds` of a 440 Hz sine of amplitude `a`, 16 kHz.
+pub fn tone(seconds: f64, a: f32) -> Vec<f32> {
+  let n = (seconds * f64::from(SAMPLE_RATE)) as usize;
+  (0..n).map(|i| a * (TAU * 440.0 * i as f32 / SAMPLE_RATE as f32).sin()).collect()
+}
+
+/// `pcm` (16 kHz mono) into a new WAV file at `path`, as recordings are written.
+pub fn write_wav(path: &Path, pcm: &[f32]) {
+  let mut sink = WavSink::create(path).unwrap();
+  sink.write(pcm).unwrap();
+  sink.finalize().unwrap();
+}
+
+/// `.wav` files in `dir`, at any depth.
+pub fn wav_count(dir: &Path) -> usize {
+  let files = fs::read_dir(dir).unwrap().flatten();
+  files
+    .map(|e| match e.path() {
+      path if path.is_dir() => wav_count(&path),
+      path => usize::from(path.extension().is_some_and(|x| x == "wav")),
+    })
+    .sum()
+}
+
+/// Every entry's id in the history in `home`, in order.
+pub fn entry_ids(home: &Path) -> Vec<i64> {
+  let db = Connection::open(home.join(DB_FILE)).unwrap();
+  let mut stmt = db.prepare("SELECT id FROM entries ORDER BY id").unwrap();
+  stmt.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect()
 }
 
 /// A `target/fixtures/<name>.wav` from `make fixtures`, with its reference transcript.
@@ -93,6 +142,19 @@ fn test_model(var: &str, name: &str) -> PathBuf {
 
   let found = wavo::hub::Hub::new().find(name);
   found.unwrap_or_else(|| panic!("{name} is not in the Hugging Face cache; set {var}"))
+}
+
+/// wavo's model `name` in the Hugging Face cache at `hub`, as `hf` lays it out, a file the fake
+/// engine loads; its path.
+pub fn download(hub: &wavo::hub::Hub, name: &str) -> PathBuf {
+  let m = wavo::hub::lookup(name).unwrap();
+  let repo = hub.root().join(format!("models--{}", m.repo().replace('/', "--")));
+  fs::create_dir_all(repo.join("refs")).unwrap();
+  fs::write(repo.join("refs/main"), "c1").unwrap();
+  let file = repo.join("snapshots/c1").join(m.file());
+  fs::create_dir_all(file.parent().unwrap()).unwrap();
+  fs::write(&file, b"GGUF").unwrap();
+  file
 }
 
 /// The `wavo-app` binary next to this test binary (`target/<profile>/deps/..`). Unit tests cannot

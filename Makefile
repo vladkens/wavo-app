@@ -22,7 +22,7 @@ update:
 clean:
 	cargo clean
 
-.PHONY: fixtures test-models
+.PHONY: fixtures test-models unload-memory
 
 # WAV fixtures and reference transcripts in target/fixtures/ (scripts/gen-fixtures.sh, macOS
 # voices and ffmpeg); regenerated when the script or a text changes.
@@ -34,8 +34,18 @@ $(FIXTURES): scripts/gen-fixtures.sh $(wildcard scripts/fixtures/*.txt)
 	scripts/gen-fixtures.sh target/fixtures
 	touch $@
 
-# Tests that need real models from the Hugging Face cache (#[ignore]); WAVO_TEST_MODEL_RU and
-# WAVO_TEST_MODEL_EN pick them by path. One test runs target/release/wavo-app.
+# The ignored tests that need real models from the Hugging Face cache or the fixtures, by module
+# (not those that need a microphone); WAVO_TEST_MODEL_RU and WAVO_TEST_MODEL_EN pick the models by
+# path. The daemon's tests run target/release/wavo-app.
+MODEL_TESTS := engine::tests:: session::tests:: audio::vad::tests::fixtures
+
 test-models: fixtures # the ignored tests on real models
 	cargo build --release
-	cargo test --release -- --ignored --test-threads=1 --nocapture
+	cargo test --release -- --ignored --test-threads=1 --nocapture $(MODEL_TESTS)
+
+# The headless app's footprint over 10 load and unload cycles of the first model found, with the
+# malloc setting the bundle will have; fails when it grows by more than a few MB (macOS: uv and
+# footprint).
+unload-memory: fixtures # the footprint after unloading a real model, 10 times
+	cargo build --release
+	MallocSpaceEfficient=1 uv run scripts/unload-memory.py target/release/wavo-app target/fixtures/en-short.wav

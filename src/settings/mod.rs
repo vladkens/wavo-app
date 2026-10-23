@@ -13,6 +13,7 @@ use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -164,6 +165,21 @@ impl Settings {
 
     Ok(())
   }
+
+  /// `language` for the engine: see [`engine_language`].
+  pub fn engine_language(&self) -> Option<String> {
+    engine_language(&self.language)
+  }
+
+  pub fn unload_after(&self) -> Option<Duration> {
+    self.unload_after_minutes.map(|m| Duration::from_secs(u64::from(m) * 60))
+  }
+}
+
+/// A language code for the engine; empty or `auto` is `None`, which leaves it to the model.
+pub fn engine_language(code: &str) -> Option<String> {
+  let code = code.trim();
+  (!code.is_empty() && !code.eq_ignore_ascii_case("auto")).then(|| code.to_owned())
 }
 
 #[cfg(test)]
@@ -178,8 +194,17 @@ mod tests {
     assert_eq!(s.activation, Activation::HoldOrToggle);
     assert_eq!((&s.microphone, &s.model), (&None, &None));
     assert_eq!((s.language.as_str(), s.unload_after_minutes), ("auto", Some(5)));
+    assert_eq!((s.engine_language(), s.unload_after()), (None, Some(Duration::from_secs(300))));
     assert_eq!(s.history_retention, Retention::Unlimited);
     assert!(s.auto_paste && !s.keep_in_clipboard && !s.autostart && !s.start_in_tray);
+  }
+
+  #[test]
+  fn the_engine_gets_a_language_but_auto() {
+    let language =
+      |l: &str| Settings { language: l.into(), ..Settings::default() }.engine_language();
+    assert_eq!(language(" ru "), Some("ru".into()));
+    assert_eq!((language("AUTO"), language("")), (None, None));
   }
 
   #[test]
