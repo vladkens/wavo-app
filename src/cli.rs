@@ -112,12 +112,10 @@ pub fn models() -> Result<()> {
     return Ok(());
   }
 
-  let name = models.iter().map(|m| m.name.chars().count()).max().unwrap_or(0);
-  let arch = models.iter().map(|m| m.arch.len()).max().unwrap_or(0).max(4);
-  println!("{:<name$}  {:<arch$}  {:>8}  PATH", "NAME", "ARCH", "SIZE");
+  let name = models.iter().map(|m| m.info.name.len()).max().unwrap_or(0).max(4);
+  println!("{:<name$}  {:>8}  PATH", "NAME", "SIZE");
   for m in &models {
-    let size = human_size(m.size);
-    println!("{:<name$}  {:<arch$}  {size:>8}  {}", m.name, m.arch, m.path.display());
+    println!("{:<name$}  {:>8}  {}", m.info.name, human_size(m.size), m.path.display());
   }
 
   Ok(())

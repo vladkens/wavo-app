@@ -4,43 +4,30 @@
 //! wavo's hub.
 
 pub mod download;
-mod gguf;
 
 use std::fs;
 use std::path::PathBuf;
 
-use wavo::hub::{self, Hub};
+use wavo::hub::{self, Hub, ModelInfo};
 
+/// One of wavo's models, downloaded.
 #[derive(Debug)]
 pub struct ModelFile {
-  /// File name without extension, e.g. `gigaam-v3-e2e-rnnt-Q8_0`.
-  pub name: String,
+  pub info: &'static ModelInfo,
   pub path: PathBuf,
-  /// `general.architecture`, e.g. `whisper`.
-  pub arch: String,
   pub size: u64,
 }
 
-/// Every speech model: wavo's models in the cache `hub` ([`Hub::find`], which never uses the
-/// network), in the order of [`hub::MODELS`]. Files that are not speech models (an LLM GGUF, an
-/// architecture wavo does not run) are skipped.
+/// wavo's models in the cache `hub` ([`Hub::find`], which never uses the network), in the order
+/// of [`hub::MODELS`].
 pub fn discover(hub: &Hub) -> Vec<ModelFile> {
-  (hub::MODELS.iter()).filter_map(|m| probe(hub.find(m.name)?)).collect()
-}
-
-fn probe(path: PathBuf) -> Option<ModelFile> {
-  // `metadata` follows symlinks: HF snapshots link into `blobs/`.
-  let meta = fs::metadata(&path).ok().filter(|m| m.is_file())?;
-  let arch = match gguf::speech_arch(&path) {
-    Ok(arch) => arch?,
-    Err(e) => {
-      tracing::debug!("skip {}: {e}", path.display());
-      return None;
-    }
-  };
-
-  let name = path.file_stem()?.to_string_lossy().into_owned();
-  Some(ModelFile { name, path, arch, size: meta.len() })
+  let found = hub::MODELS.iter().filter_map(|info| {
+    let path = hub.find(info.name)?;
+    // `metadata` follows symlinks: HF snapshots link into `blobs/`.
+    let meta = fs::metadata(&path).ok().filter(|m| m.is_file())?;
+    Some(ModelFile { info, path, size: meta.len() })
+  });
+  found.collect()
 }
 
 // The cache is made with symbolic links.
@@ -48,7 +35,6 @@ fn probe(path: PathBuf) -> Option<ModelFile> {
 mod tests {
   use std::path::Path;
 
-  use super::gguf::speech_header;
   use super::*;
   use crate::testing::TempDir;
 
@@ -74,18 +60,16 @@ mod tests {
   fn discovers_wavos_models_in_the_cache() {
     let dir = TempDir::new("models-discover");
     let hub = Hub::at(dir.path().join("hub"));
-    let tiny = cache(&hub, "whisper-tiny", &speech_header("whisper"));
-    let gigaam = cache(&hub, "gigaam-v3", &speech_header("gigaam"));
-    cache(&hub, "moonshine-tiny", b"not a model");
-    cache(&hub, "whisper-base", &speech_header("llama"));
+    let tiny = cache(&hub, "whisper-tiny", b"tiny");
+    let gigaam = cache(&hub, "gigaam-v3", b"gigaam");
     // Another file of a known repo, and a repo wavo does not know.
-    write(&gigaam.with_file_name("gigaam-v3-e2e-rnnt-Q4_0.gguf"), &speech_header("gigaam"));
-    write(&hub.root().join("models--x--y-gguf/snapshots/c1/y.gguf"), &speech_header("whisper"));
+    write(&gigaam.with_file_name("gigaam-v3-e2e-rnnt-Q4_0.gguf"), b"q4");
+    write(&hub.root().join("models--x--y-gguf/snapshots/c1/y.gguf"), b"y");
 
     let found = discover(&hub);
-    let summary: Vec<_> = found.iter().map(|m| (m.name.as_str(), m.arch.as_str())).collect();
-    assert_eq!(summary, [("gigaam-v3-e2e-rnnt-Q8_0", "gigaam"), ("whisper-tiny-Q8_0", "whisper")]);
-    assert_eq!((&found[1].path, found[1].size), (&tiny, speech_header("whisper").len() as u64));
+    let names: Vec<_> = found.iter().map(|m| m.info.name).collect();
+    assert_eq!(names, ["gigaam-v3", "whisper-tiny"]);
+    assert_eq!((&found[1].path, found[1].size), (&tiny, 4));
     assert!(discover(&Hub::at(dir.path().join("missing"))).is_empty());
   }
 }
