@@ -4,6 +4,7 @@
 
 mod audio;
 mod cli;
+mod engine;
 #[cfg_attr(not(test), expect(dead_code, reason = "the session (step 6) is its first user"))]
 mod history;
 #[cfg_attr(not(test), expect(dead_code, reason = "the session (step 6) is its first user"))]
@@ -28,6 +29,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+  /// Transcribe a WAV file without capture or paste
+  Transcribe {
+    wav: PathBuf,
+    /// Model: one of wavo's (`wavo list`: gigaam-v3, whisper-turbo…) in the Hugging Face cache, or
+    /// a path to its GGUF file; by default the first of wavo's models downloaded
+    #[arg(long)]
+    model: Option<String>,
+    /// Language code (`en`, `ru`…); by default the model detects it or has one
+    #[arg(long)]
+    language: Option<String>,
+  },
   /// List audio input devices
   Devices,
   /// Record from the microphone (or the WAV file `WAVO_FAKE_MIC` names) into a 16 kHz mono WAV
@@ -45,6 +57,9 @@ fn main() -> Result<()> {
   let cli = Cli::parse();
   init_tracing();
   match cli.command {
+    Command::Transcribe { wav, model, language } => {
+      cli::transcribe(&wav, model.as_deref(), language.as_deref())
+    }
     Command::Devices => cli::devices(),
     Command::Record { seconds, device, out } => cli::record(seconds, device.as_deref(), &out),
   }

@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! WAV files: reading any PCM WAV as it is stored, and [`WavSink`], the streaming writer of
-//! recordings (16 kHz mono 16-bit).
+//! WAV files: reading any PCM WAV as it is stored or in the engine's format (16 kHz mono `f32` in
+//! `[-1, 1]`), and [`WavSink`], the streaming writer of recordings (16 kHz mono 16-bit).
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, ErrorKind};
@@ -11,12 +11,30 @@ use anyhow::{Context, Result, bail};
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 
 use super::SAMPLE_RATE;
+use super::resample::To16k;
 
 /// Interleaved samples of a WAV file as they are stored, scaled to `[-1, 1]`.
 pub struct Interleaved {
   pub samples: Vec<f32>,
   pub rate: u32,
   pub channels: u16,
+}
+
+/// Any PCM WAV, as [`read_interleaved`] takes, downmixed to mono and resampled to 16 kHz.
+pub fn read(path: &Path) -> Result<Vec<f32>> {
+  let Interleaved { samples, rate, channels } = read_interleaved(path)?;
+  let channels = channels as usize;
+  let mono: Vec<f32> = samples
+    .chunks_exact(channels)
+    .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+    .map(|s| if s.is_finite() { s } else { 0.0 }) // a NaN would panic the resampler's FFT
+    .collect();
+
+  let mut pcm = Vec::new();
+  let mut resampler = To16k::new(rate)?;
+  resampler.push(&mono, &mut pcm)?;
+  resampler.finish(&mut pcm)?;
+  Ok(pcm)
 }
 
 /// Any PCM WAV (8/16/24/32-bit integer or 32-bit float, any channel count and rate), without
@@ -156,6 +174,25 @@ mod tests {
     let wav = read_interleaved(&path).unwrap();
     assert_eq!((wav.rate, wav.channels), (48_000, 2));
     assert_eq!(wav.samples, [16_383.0 / 32_768.0, 0.0, -1.0, -1.0 / 32_768.0]);
+  }
+
+  #[test]
+  fn reads_stereo_int_downmixed_at_16k() {
+    let dir = TempDir::new("wav-read-16k");
+    let path = dir.path().join("stereo.wav");
+    let spec = WavSpec {
+      channels: 2,
+      sample_rate: 48_000,
+      bits_per_sample: 16,
+      sample_format: SampleFormat::Int,
+    };
+    let frame = [i16::MAX / 2, 0]; // left +0.5, right silent
+    write(&path, spec, &frame.repeat(48_000));
+
+    let pcm = read(&path).unwrap();
+    assert!(pcm.len().abs_diff(16_000) <= 1, "{} samples", pcm.len());
+    let mid = pcm[8_000];
+    assert!((mid - 0.25).abs() < 0.01, "downmixed DC {mid}");
   }
 
   #[test]
