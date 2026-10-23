@@ -78,22 +78,8 @@ pub fn find(name: Option<&str>, hub: &Hub) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-  use std::fs;
-
   use super::*;
-  use crate::testing::TempDir;
-
-  /// wavo's model `name` in the cache at `hub`, as `hf` lays it out; its path.
-  fn download(hub: &Hub, name: &str) -> PathBuf {
-    let m = hub::lookup(name).unwrap();
-    let repo = hub.root().join(format!("models--{}", m.repo().replace('/', "--")));
-    fs::create_dir_all(repo.join("refs")).unwrap();
-    fs::write(repo.join("refs/main"), "c1").unwrap();
-    let file = repo.join("snapshots/c1").join(m.file());
-    fs::create_dir_all(file.parent().unwrap()).unwrap();
-    fs::write(&file, b"GGUF").unwrap();
-    file
-  }
+  use crate::testing::{TempDir, download};
 
   #[test]
   fn finds_a_model_by_name_or_path_else_the_first_downloaded() {

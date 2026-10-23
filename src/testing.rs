@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Test helpers: temp dirs, speech fixtures, real models, a fake engine and faults to inject, the
-//! app binary and WER.
+//! Test helpers: temp dirs, speech fixtures, real models and fake ones in a cache, a fake engine
+//! and faults to inject, the app binary and WER.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -93,6 +93,19 @@ fn test_model(var: &str, name: &str) -> PathBuf {
 
   let found = wavo::hub::Hub::new().find(name);
   found.unwrap_or_else(|| panic!("{name} is not in the Hugging Face cache; set {var}"))
+}
+
+/// wavo's model `name` in the Hugging Face cache at `hub`, as `hf` lays it out, a file the fake
+/// engine loads; its path.
+pub fn download(hub: &wavo::hub::Hub, name: &str) -> PathBuf {
+  let m = wavo::hub::lookup(name).unwrap();
+  let repo = hub.root().join(format!("models--{}", m.repo().replace('/', "--")));
+  fs::create_dir_all(repo.join("refs")).unwrap();
+  fs::write(repo.join("refs/main"), "c1").unwrap();
+  let file = repo.join("snapshots/c1").join(m.file());
+  fs::create_dir_all(file.parent().unwrap()).unwrap();
+  fs::write(&file, b"GGUF").unwrap();
+  file
 }
 
 /// The `wavo-app` binary next to this test binary (`target/<profile>/deps/..`). Unit tests cannot

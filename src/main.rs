@@ -1,13 +1,13 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! wavo-app: local dictation. For now its command-line tools.
+//! wavo-app: local dictation. For now headless: the dictation daemon and its command-line tools.
 
 mod audio;
 mod cli;
+mod ctl;
 mod engine;
-#[cfg_attr(not(test), expect(dead_code, reason = "the session (step 6) is its first user"))]
 mod history;
-#[cfg_attr(not(test), expect(dead_code, reason = "the session (step 6) is its first user"))]
+mod session;
 mod settings;
 #[cfg(test)]
 mod testing;
@@ -19,6 +19,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::prelude::*;
+
+use crate::ctl::Request;
 
 #[derive(Parser)]
 #[command(version, about = "Local dictation")]
@@ -33,12 +35,21 @@ enum Command {
   Transcribe {
     wav: PathBuf,
     /// Model: one of wavo's (`wavo list`: gigaam-v3, whisper-turbo…) in the Hugging Face cache, or
-    /// a path to its GGUF file; by default the first of wavo's models downloaded
+    /// a path to its GGUF file; by default the settings', else the first of wavo's models
+    /// downloaded
     #[arg(long)]
     model: Option<String>,
-    /// Language code (`en`, `ru`…); by default the model detects it or has one
+    /// Language code (`en`, `ru`…), or `auto` for the model to detect it; by default the
+    /// settings'
     #[arg(long)]
     language: Option<String>,
+  },
+  /// Run dictation without a GUI, controlled by `wavo-app ctl`; texts go to stdout
+  Daemon,
+  /// Control the running app
+  Ctl {
+    #[command(subcommand)]
+    action: CtlAction,
   },
   /// List audio input devices
   Devices,
@@ -53,6 +64,44 @@ enum Command {
   },
 }
 
+#[derive(Subcommand)]
+enum CtlAction {
+  /// Start or stop dictation
+  Toggle,
+  /// Start dictation
+  Start,
+  /// Stop dictation and transcribe
+  Stop,
+  /// Cancel recording or transcription
+  Cancel,
+  /// Print the app's state as JSON
+  Status,
+  /// Transcribe a history entry's recording again
+  Retranscribe { id: i64 },
+  /// Delete a history entry and its recording
+  Delete { id: i64 },
+  /// Free the model's memory now; the next dictation loads it again
+  Unload,
+  /// Quit the running app
+  Quit,
+}
+
+impl From<CtlAction> for Request {
+  fn from(action: CtlAction) -> Self {
+    match action {
+      CtlAction::Toggle => Request::Toggle,
+      CtlAction::Start => Request::Start,
+      CtlAction::Stop => Request::Stop,
+      CtlAction::Cancel => Request::Cancel,
+      CtlAction::Status => Request::Status,
+      CtlAction::Retranscribe { id } => Request::Retranscribe { id },
+      CtlAction::Delete { id } => Request::Delete { id },
+      CtlAction::Unload => Request::Unload,
+      CtlAction::Quit => Request::Quit,
+    }
+  }
+}
+
 fn main() -> Result<()> {
   let cli = Cli::parse();
   init_tracing();
@@ -60,6 +109,8 @@ fn main() -> Result<()> {
     Command::Transcribe { wav, model, language } => {
       cli::transcribe(&wav, model.as_deref(), language.as_deref())
     }
+    Command::Daemon => cli::daemon(),
+    Command::Ctl { action } => cli::ctl(action.into()),
     Command::Devices => cli::devices(),
     Command::Record { seconds, device, out } => cli::record(seconds, device.as_deref(), &out),
   }
@@ -67,7 +118,6 @@ fn main() -> Result<()> {
 
 /// The data home, where settings and history live: `$WAVO_HOME`, else the platform's per-user
 /// data directory. Models are in the Hugging Face cache.
-#[expect(dead_code, reason = "the session (step 6) is its first user")]
 fn home() -> PathBuf {
   match std::env::var_os("WAVO_HOME") {
     Some(dir) if !dir.is_empty() => PathBuf::from(dir),
