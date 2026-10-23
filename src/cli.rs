@@ -1,19 +1,19 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Command-line tools that run without the GUI: `wavo-app devices`, `record` and `models`.
+//! Command-line tools that run without the GUI: `wavo-app devices`, `record`, `models` and `pull`.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
-use wavo::hub::Hub;
+use wavo::hub::{self, Hub};
 
 use crate::audio::capture::Source;
 use crate::audio::devices::{self, Choice};
 use crate::audio::recorder::Recorder;
 use crate::audio::{SAMPLE_RATE, vad};
-use crate::models;
+use crate::models::{self, download};
 
 /// `wavo-app record`: `seconds` of the microphone (or `WAVO_FAKE_MIC`) into `out`, then a summary
 /// on stderr. A device error ends the recording early; what was recorded is kept.
@@ -108,7 +108,7 @@ pub fn models() -> Result<()> {
   let hub = Hub::new();
   let models = models::discover(&hub);
   if models.is_empty() {
-    eprintln!("no speech models in {hub}");
+    eprintln!("no speech models in {hub}: download one with `wavo-app pull <name>`");
     return Ok(());
   }
 
@@ -120,6 +120,24 @@ pub fn models() -> Result<()> {
     println!("{:<name$}  {:<arch$}  {size:>8}  {}", m.name, m.arch, m.path.display());
   }
 
+  Ok(())
+}
+
+/// `wavo-app pull`: one of wavo's models into the Hugging Face cache, its progress on stderr and
+/// then its path on stdout; an interrupted download resumes.
+pub fn pull(name: &str) -> Result<()> {
+  let model = hub::lookup(name)?;
+  let mut shown = None;
+  let path = download::pull(&Hub::new(), model, |p| {
+    let percent = p.received * 100 / p.total.max(1);
+    if shown != Some(percent) {
+      eprintln!("{}: {percent}% of {}", p.file, human_size(p.total));
+      shown = Some(percent);
+    }
+  });
+
+  let path = path.with_context(|| format!("download {}", model.file()))?;
+  println!("{}", path.display());
   Ok(())
 }
 

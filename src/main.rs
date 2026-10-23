@@ -38,6 +38,8 @@ enum Command {
   },
   /// List the speech models in the Hugging Face cache
   Models,
+  /// Download one of wavo's models (e.g. whisper-base) into the Hugging Face cache
+  Pull { name: String },
 }
 
 fn main() -> Result<()> {
@@ -47,6 +49,7 @@ fn main() -> Result<()> {
     Command::Devices => cli::devices(),
     Command::Record { seconds, device, out } => cli::record(seconds, device.as_deref(), &out),
     Command::Models => cli::models(),
+    Command::Pull { name } => cli::pull(&name),
   }
 }
 

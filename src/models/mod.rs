@@ -1,7 +1,9 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Speech models: wavo's models found in the Hugging Face cache.
+//! Speech models: wavo's models found in the Hugging Face cache, and their [`download`]s through
+//! wavo's hub.
 
+pub mod download;
 mod gguf;
 
 use std::fs;
