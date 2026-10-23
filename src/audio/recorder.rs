@@ -287,6 +287,13 @@ impl Processor {
       self.carry.extend_from_slice(&interleaved[whole..]);
     }
 
+    // A NaN or infinity (a broken driver, a float WAV) would panic the resampler's FFT.
+    for s in &mut self.mono {
+      if !s.is_finite() {
+        *s = 0.0;
+      }
+    }
+
     self.out.clear();
     self.resampler.push(&self.mono, &mut self.out)?;
     self.emit();
@@ -375,6 +382,21 @@ mod tests {
     assert_eq!(processed.clip.scores.len(), pcm.len().div_ceil(FRAME));
     let wav = WavReader::open(&processed.wav).unwrap();
     assert_eq!(wav.len() as usize, pcm.len());
+  }
+
+  #[test]
+  fn non_finite_samples_are_silence() {
+    let dir = TempDir::new("proc-nan");
+    let sink = WavSink::create(&dir.path().join("n.wav")).unwrap();
+    let mut p = Processor::new(2, 48_000, sink).unwrap();
+    let mut input = sine(48_000, 2, 0.5);
+    input[1_000] = f32::NAN;
+    input[2_001] = f32::INFINITY;
+    input[3_000] = f32::NEG_INFINITY;
+    p.push(&input).unwrap();
+    let processed = p.finish().unwrap();
+    assert!(processed.clip.pcm.len().abs_diff(8_000) <= 1, "{}", processed.clip.pcm.len());
+    assert!(processed.clip.pcm.iter().all(|s| s.is_finite()));
   }
 
   #[test]
