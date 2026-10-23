@@ -27,7 +27,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 #[serde(default)]
 pub struct Settings {
   pub schema_version: u32,
-  /// A chord such as `ctrl+option+space`, or a modifier key alone such as `left_option` or `fn`
+  /// A chord such as `option+space`, or a modifier key alone such as `left_option` or `fn`
   /// (macOS), in nimbo's hotkey grammar.
   pub hotkey: String,
   pub activation: Activation,
@@ -80,7 +80,7 @@ impl Default for Settings {
   fn default() -> Self {
     Self {
       schema_version: SCHEMA_VERSION,
-      hotkey: "ctrl+option+space".into(),
+      hotkey: "option+space".into(),
       activation: Activation::HoldOrToggle,
       microphone: None,
       language: "auto".into(),
@@ -174,7 +174,7 @@ mod tests {
   #[test]
   fn defaults() {
     let s = Settings::default();
-    assert_eq!(s.hotkey, "ctrl+option+space");
+    assert_eq!(s.hotkey, "option+space");
     assert_eq!(s.activation, Activation::HoldOrToggle);
     assert_eq!((&s.microphone, &s.model), (&None, &None));
     assert_eq!((s.language.as_str(), s.unload_after_minutes), ("auto", Some(5)));
