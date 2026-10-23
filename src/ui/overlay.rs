@@ -55,6 +55,8 @@ pub struct Overlay {
   meter: Option<Meter>,
   device: String,
   no_model: Option<String>,
+  /// The meter's silence, as the warning was last made from it.
+  silent: bool,
   theme: Theme,
   hidden: Box<dyn FnMut()>,
 }
@@ -68,6 +70,7 @@ impl Overlay {
       meter: None,
       device: String::new(),
       no_model: None,
+      silent: false,
       theme: Theme::PLATES_LIGHT,
       hidden: Box::new(hidden),
     }
@@ -78,13 +81,16 @@ impl Overlay {
     self.shows.push(show);
   }
 
-  /// What it shows, or will at its next frame.
+  /// What it shows, or will at its next frame: the shows not applied yet move it as [State]'s
+  /// transitions do.
   pub fn mode(&self) -> Mode {
-    match self.shows.last() {
-      Some(Show::Recording { .. }) => Mode::Recording,
-      Some(Show::Error(_)) => Mode::Error,
-      _ => self.state.mode(),
-    }
+    self.shows.iter().fold(self.state.mode(), |mode, show| match (show, mode) {
+      (Show::Recording { .. }, _) => Mode::Recording,
+      (Show::Error(_), _) => Mode::Error,
+      (Show::Transcribing(_), Mode::Recording) => Mode::Transcribing,
+      (Show::Collapse, Mode::Recording | Mode::Transcribing | Mode::Error) => Mode::Closing,
+      (Show::Transcribing(_) | Show::Collapse, mode) => mode,
+    })
   }
 
   /// See [State::text].
@@ -162,18 +168,24 @@ impl App for Overlay {
 
   fn paint(&mut self, f: &mut Frame) {
     let shown = self.state.mode() != Mode::Hidden;
-    for show in std::mem::take(&mut self.shows) {
-      self.apply(show, f);
+    let shows = std::mem::take(&mut self.shows);
+    let silent = self.meter.as_ref().is_some_and(Meter::silent);
+    if !shows.is_empty() || silent != self.silent {
+      for show in shows {
+        self.apply(show, f);
+      }
+
+      // No sound from the microphone first: it is the recording's own; then no model.
+      self.silent = silent;
+      let warning = match silent {
+        true => Some(format!("no sound from {}", self.device)),
+        false => self.no_model.clone(),
+      };
+
+      let warning = warning.map(|w| (f.measure(&w, FONT), w));
+      self.state.warning(warning.as_ref().map(|(width, w)| (w.as_str(), *width)), f.now);
     }
 
-    // No sound from the microphone first: it is the recording's own; then no model.
-    let warning = match &self.meter {
-      Some(m) if m.silent() => Some(format!("no sound from {}", self.device)),
-      _ => self.no_model.clone(),
-    };
-
-    let warning = warning.map(|w| (f.measure(&w, FONT), w));
-    self.state.warning(warning.as_ref().map(|(width, w)| (w.as_str(), *width)), f.now);
     self.state.tick(self.meter.as_ref().map_or(0.0, Meter::level), f.now);
     if self.state.mode() == Mode::Hidden {
       if shown {
@@ -264,6 +276,21 @@ mod tests {
     h.wait(Duration::from_secs(5));
     assert_eq!((h.app().mode(), hidden.get()), (Mode::Hidden, 1), "held, collapsed, hidden");
     assert!(!h.rt.needs_frame(), "no frames once hidden");
+  }
+
+  /// Shows asked for before a frame: what they will show, as the shell decides by it.
+  #[test]
+  fn shows_not_drawn_yet_count() {
+    let mut o = Overlay::new(|| {});
+    o.show(recording(0.0));
+    o.show(Show::Transcribing(None));
+    assert_eq!(o.mode(), Mode::Transcribing);
+    o.show(Show::Collapse);
+    assert_eq!(o.mode(), Mode::Closing);
+    let mut hidden = Overlay::new(|| {});
+    hidden.show(Show::Transcribing(None));
+    hidden.show(Show::Collapse);
+    assert_eq!(hidden.mode(), Mode::Hidden, "nothing to transcribe or collapse");
   }
 
   #[test]

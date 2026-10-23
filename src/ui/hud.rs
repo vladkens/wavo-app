@@ -119,9 +119,8 @@ fn short(error: &str) -> String {
   let known = [
     (&["no speech model", "no model"][..], "no model"),
     (&["microphone access", "not authorized", "permission"][..], "no microphone access"),
-    // Before "focus": "the focused field is a password field" names both.
     (&["password", "secure"][..], "password field"),
-    (&["focus"][..], "focus moved"),
+    (&["focus moved"][..], "focus moved"),
     (&["crash", "died", "panicked"][..], "engine crashed"),
     (&["timed out", "took longer"][..], "engine timed out"),
     (&["engine is stuck"][..], "engine stuck"),
@@ -319,6 +318,7 @@ impl State {
       Mode::Closing => None,
       _ => self.appearing,
     };
+
     self.mode = mode;
     self.since = now;
   }
@@ -582,6 +582,8 @@ mod tests {
     let error = |s: &str| Some(Outcome::Error(s.into()));
     let refused = |why: NotPasted| last(Ended::Done, false, None, Some(&why.to_string()));
     assert_eq!(outcome(refused(NotPasted::FocusChanged), true), error("not pasted: focus moved"));
+    let unknown = refused(NotPasted::Failed("the app in focus is unknown".into()));
+    assert_eq!(outcome(unknown, true), error("not pasted: the app in focus is unknown"));
     let field = refused(NotPasted::SecureField);
     assert_eq!(outcome(field, true), error("not pasted: password field"));
     let copy = last(Ended::Done, false, None, Some("auto-paste is off, and copying failed: x"));

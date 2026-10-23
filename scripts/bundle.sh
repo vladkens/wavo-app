@@ -74,9 +74,11 @@ with_timeout() {
       wait "$pid" 2>/dev/null || true
       return 124
     fi
+
     sleep 0.1
     ticks=$((ticks + 1))
   done
+
   wait "$pid"
 }
 
@@ -92,9 +94,11 @@ elif security find-identity -v -p codesigning | grep -qF "\"$identity\""; then
 else
   echo "bundle: no code signing identity \"$identity\": signing ad hoc" >&2
 fi
+
 if [ -z "$signed" ]; then
   codesign --force --sign - --timestamp=none "$app"
   signed="ad hoc (permissions are asked for again after each rebuild)"
 fi
+
 codesign --verify --strict "$app"
 echo "$app: Wavo $version, signed: $signed"

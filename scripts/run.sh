@@ -18,7 +18,10 @@ if pgrep -f "$running" >/dev/null; then
     pgrep -f "$running" >/dev/null || break
     sleep 0.2
   done
-  pkill -f "$running" 2>/dev/null || true
+
+  # Still there: killed, and gone before the new one starts (LaunchServices would only activate it).
+  pkill -KILL -f "$running" 2>/dev/null || true
+  while pgrep -f "$running" >/dev/null; do sleep 0.1; done
 fi
 
 if [ -n "$dest" ]; then

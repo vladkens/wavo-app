@@ -522,7 +522,14 @@ impl<O: TextOutput> Controller<O> {
 
   fn on_msg(&mut self, msg: Msg) {
     match msg {
-      Msg::Input(input) => self.feed(input),
+      Msg::Input(input) => {
+        // A press is a new attempt: the last one's error goes, to come back if it fails again.
+        if matches!(input, Input::KeyDown { repeat: false, .. }) && self.error.take().is_some() {
+          self.publish();
+        }
+
+        self.feed(input)
+      }
       Msg::Request(request, reply) => {
         let _ = reply.send(self.on_request(request).into());
       }
