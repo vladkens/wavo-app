@@ -156,9 +156,9 @@ fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<Entry> {
 }
 
 /// An entry's id and its recording.
-pub type Victim = (i64, Option<String>);
+pub type EntryAudio = (i64, Option<String>);
 
-fn victim_from_row(row: &Row<'_>) -> rusqlite::Result<Victim> {
+fn entry_audio_from_row(row: &Row<'_>) -> rusqlite::Result<EntryAudio> {
   Ok((row.get("id")?, row.get("audio_path")?))
 }
 
@@ -204,25 +204,25 @@ impl Db {
 
   /// The entries after the newest `keep`; entries still being transcribed are neither returned
   /// nor counted.
-  pub fn get_beyond_newest(&self, keep: u32) -> Result<Vec<Victim>> {
+  pub fn get_beyond_newest(&self, keep: u32) -> Result<Vec<EntryAudio>> {
     let qs = "
     SELECT id, audio_path FROM entries WHERE status != 'transcribing'
     ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?1;
     ";
 
     let mut stmt = self.db.prepare_cached(qs)?;
-    let items = stmt.query_map([keep], victim_from_row)?.collect::<rusqlite::Result<_>>()?;
+    let items = stmt.query_map([keep], entry_audio_from_row)?.collect::<rusqlite::Result<_>>()?;
     Ok(items)
   }
 
   /// The entries recorded before `at` (Unix ms), but those still being transcribed.
-  pub fn get_created_before(&self, at: i64) -> Result<Vec<Victim>> {
+  pub fn get_created_before(&self, at: i64) -> Result<Vec<EntryAudio>> {
     let qs = "
     SELECT id, audio_path FROM entries WHERE status != 'transcribing' AND created_at < ?1;
     ";
 
     let mut stmt = self.db.prepare_cached(qs)?;
-    let items = stmt.query_map([at], victim_from_row)?.collect::<rusqlite::Result<_>>()?;
+    let items = stmt.query_map([at], entry_audio_from_row)?.collect::<rusqlite::Result<_>>()?;
     Ok(items)
   }
 
@@ -248,7 +248,7 @@ impl Db {
     Ok(self.db.last_insert_rowid())
   }
 
-  // MARK: Updaters
+  // MARK: Updater
 
   /// Sets the outcome; `text` `None` keeps the text the entry has.
   pub fn update_outcome(
@@ -297,8 +297,6 @@ impl Db {
     let qs = "UPDATE entries SET status = 'failed', error = ?1 WHERE status = 'transcribing';";
     Ok(self.db.execute(qs, [STOPPED_TRANSCRIBING])?)
   }
-
-  // MARK: Deleters
 
   pub fn delete_entry(&self, id: i64) -> Result<()> {
     let qs = "DELETE FROM entries WHERE id = ?1;";

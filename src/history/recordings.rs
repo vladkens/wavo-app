@@ -84,7 +84,20 @@ impl Recordings {
     }
   }
 
-  /// Every recording, named as an entry names it; a day folder without one goes.
+  /// Removes every day folder without a recording (left by a crash).
+  pub fn prune_all(&self) -> Result<()> {
+    let dirs = fs::read_dir(&self.dir).with_context(|| format!("read {}", self.dir.display()))?;
+    for e in dirs.flatten() {
+      let day = e.file_name().to_str().is_some_and(is_day);
+      if day && e.file_type().is_ok_and(|t| t.is_dir()) {
+        prune_day(&e.path());
+      }
+    }
+
+    Ok(())
+  }
+
+  /// Every recording, named as an entry names it.
   pub fn list(&self) -> Result<Vec<String>> {
     let wavs = |dir: &Path| -> Result<Vec<String>> {
       Ok(
@@ -106,12 +119,7 @@ impl Recordings {
       if kind.is_file() && name.ends_with(".wav") {
         found.push(name);
       } else if kind.is_dir() && is_day(&name) {
-        let files = wavs(&e.path())?;
-        if files.is_empty() {
-          prune_day(&e.path());
-        }
-
-        found.extend(files.into_iter().map(|file| format!("{name}/{file}")));
+        found.extend(wavs(&e.path())?.into_iter().map(|file| format!("{name}/{file}")));
       }
     }
 
@@ -264,12 +272,15 @@ mod tests {
     assert!(r.discard("../history.db").is_err());
 
     // A recording that was never made does not keep the folder made for it either; an empty one
-    // left behind goes when the recordings are listed.
+    // left behind stays through a listing and goes with the explicit prune.
     let (name, path) = r.new_file(NOW);
     r.prune(&r.path(&name).unwrap());
     assert!(!path.parent().unwrap().exists());
     r.new_file(NOW);
     assert!(r.list().unwrap().is_empty());
-    assert_eq!(fs::read_dir(&r.dir).unwrap().count(), 0);
+    assert!(path.parent().unwrap().exists(), "a listing deletes nothing");
+    fs::create_dir(r.dir.join("notes")).unwrap();
+    r.prune_all().unwrap();
+    assert_eq!(fs::read_dir(&r.dir).unwrap().count(), 1, "only the day folder goes");
   }
 }
