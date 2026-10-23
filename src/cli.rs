@@ -156,8 +156,10 @@ pub fn daemon() -> Result<()> {
 
   info!("wavo-app daemon for {}: control socket {}", home.display(), socket.display());
   let _ = quitting.recv();
-  drop(serving);
+  // The session first: the lock goes with the socket, and the next instance's recovery must not
+  // find this one's recording or transcription unfinished.
   drop(session);
+  drop(serving);
   info!("wavo-app daemon: quit");
   Ok(())
 }
