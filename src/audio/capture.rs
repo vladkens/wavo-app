@@ -43,6 +43,8 @@ pub struct Signals {
   dropped: AtomicU64,
   /// Buffer overruns the backend reported.
   xruns: AtomicU64,
+  /// Frames pushed into the ring.
+  delivered: AtomicU64,
   failed: AtomicBool,
   failure: Mutex<Option<String>>,
 }
@@ -59,6 +61,11 @@ impl Signals {
 
   pub fn xruns(&self) -> u64 {
     self.xruns.load(Ordering::Relaxed)
+  }
+
+  /// Frames the source has delivered so far.
+  pub fn delivered(&self) -> u64 {
+    self.delivered.load(Ordering::Relaxed)
   }
 
   /// A fatal stream error: capture has stopped, the audio so far is kept.
@@ -94,6 +101,7 @@ impl Signals {
     let fits = ring.slots().min(samples.len()) / channels * channels;
     if let Ok(chunk) = ring.write_chunk_uninit(fits) {
       chunk.fill_from_iter(samples.iter().map(|s| s.to_sample::<f32>()));
+      self.delivered.fetch_add((fits / channels) as u64, Ordering::Relaxed);
     }
 
     if fits < samples.len() {
@@ -134,8 +142,7 @@ pub enum Source {
 impl Source {
   /// The fake microphone if [`FAKE_MIC_ENV`] is set, else the microphone `choice`.
   pub fn from_env(choice: Option<Choice>) -> Self {
-    let fake = std::env::var_os(FAKE_MIC_ENV).filter(|p| !p.is_empty()).map(PathBuf::from);
-    match fake {
+    match fake_mic() {
       Some(path) => {
         if let Some(choice) = choice {
           info!("{FAKE_MIC_ENV} is set: recording from the file instead of {:?}", choice.name);
@@ -146,6 +153,11 @@ impl Source {
       None => Self::Mic(choice),
     }
   }
+}
+
+/// The file [`FAKE_MIC_ENV`] names, if it is set.
+pub fn fake_mic() -> Option<PathBuf> {
+  std::env::var_os(FAKE_MIC_ENV).filter(|p| !p.is_empty()).map(PathBuf::from)
 }
 
 /// Starts capturing from `source`.
@@ -339,10 +351,10 @@ mod tests {
 
     // Of one and a half stereo frames only the whole one is kept.
     assert_eq!(consumer.slots(), 2);
-    assert_eq!(signals.dropped(), 1);
+    assert_eq!((signals.dropped(), signals.delivered()), (1, 1));
     signals.push(&mut producer, &[0.5f32; 4], 2);
     assert_eq!(consumer.slots(), 4);
-    assert_eq!(signals.dropped(), 3);
+    assert_eq!((signals.dropped(), signals.delivered()), (3, 2));
 
     let chunk = consumer.read_chunk(4).unwrap();
     let (a, b) = chunk.as_slices();

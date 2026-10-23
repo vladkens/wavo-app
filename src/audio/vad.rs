@@ -64,6 +64,16 @@ impl Vad {
 
   /// All scores; a trailing partial frame is scored padded with silence, so frame `i` always
   /// covers samples `i * FRAME ..` of the audio.
+  /// Frames scored so far.
+  pub fn scored(&self) -> usize {
+    self.scores.len()
+  }
+
+  /// Frames at the end of the audio scored so far that are not speech, at most `max`.
+  pub fn trailing_quiet(&self, max: usize) -> usize {
+    self.scores.iter().rev().take(max).take_while(|&&s| s < VOICED).count()
+  }
+
   pub fn finish(mut self) -> Vec<f32> {
     if !self.pending.is_empty() {
       self.pending.resize(FRAME, 0.0);

@@ -1,9 +1,9 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! A recording: a capture source, and a processing thread that drains its ring every [`POLL`]
-//! (woken at once on stop): downmix to mono, resampling to 16 kHz, the signal level, VAD scores
-//! and the WAV file. The microphone is open only between [`Recorder::start`] and
-//! [`Recorder::stop`].
+//! (woken at once on stop): downmix to mono, resampling to 16 kHz, the signal level and whether
+//! there is sound at all, VAD scores and the WAV file. The microphone is open only between
+//! [`Recorder::start`] and [`Recorder::stop`].
 //!
 //! A device error mid-recording (unplugged, sample rate changed) ends capture but not the
 //! recording: everything up to the error is kept and the error becomes a warning.
@@ -11,7 +11,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -23,7 +23,7 @@ use tracing::{debug, warn};
 use super::SAMPLE_RATE;
 use super::capture::{self, Capture, Signals, Source};
 use super::resample::To16k;
-use super::vad::{Clip, Vad};
+use super::vad::{self, Clip, Vad};
 use super::wav::WavSink;
 
 /// How often the processing thread drains the ring (only while recording).
@@ -32,6 +32,15 @@ const POLL: Duration = Duration::from_millis(10);
 const LEVEL_WINDOW: usize = SAMPLE_RATE as usize / 30;
 /// Exact zeros this long mean no signal at all, not a quiet room.
 const DEAD_SILENCE: usize = SAMPLE_RATE as usize / 2;
+/// While recording, exact zeros this long: digital silence, said at once.
+const LIVE_DEAD: usize = SAMPLE_RATE as usize;
+/// While recording, a level under [`FAINT`] this long: the softer case (a muted or far
+/// microphone).
+const LIVE_FAINT: usize = SAMPLE_RATE as usize * 4;
+/// RMS (linear) under which a window is no sound to speak of: −80 dBFS.
+const FAINT: f32 = 1e-4;
+/// [`Recorder::quiet`] counts no further back than this.
+const QUIET_MAX: usize = vad::frames(1000);
 
 /// A recording in progress. Dropping it without [`stop`](Recorder::stop) still closes the
 /// microphone and finalizes the WAV file.
@@ -42,9 +51,67 @@ pub struct Recorder {
   started: Instant,
   signals: Arc<Signals>,
   level: Arc<AtomicU32>,
+  silent: Arc<AtomicBool>,
+  quiet: Arc<AtomicU32>,
+  scored: Arc<AtomicU64>,
+  /// Of the device.
+  rate: u32,
   stop: Arc<AtomicBool>,
   failures: Receiver<String>,
   thread: Option<JoinHandle<Result<Processed>>>,
+}
+
+/// [`Recorder::level`] and whether the microphone sends any sound, readable from any thread.
+#[derive(Debug, Clone)]
+pub struct Meter {
+  level: Arc<AtomicU32>,
+  silent: Arc<AtomicBool>,
+}
+
+#[cfg_attr(not(test), expect(dead_code, reason = "the HUD (step 7) is its first user"))]
+impl Meter {
+  /// RMS of the last ~33 ms, linear, 0 to 1.
+  pub fn level(&self) -> f32 {
+    f32::from_bits(self.level.load(Ordering::Relaxed))
+  }
+
+  /// The microphone has sent no sound for a while (see [`SilenceWatch`]): it may be off, muted or
+  /// the wrong one. Back to `false` as soon as sound comes.
+  pub fn silent(&self) -> bool {
+    self.silent.load(Ordering::Relaxed)
+  }
+}
+
+/// Whether a microphone sends sound, from its 16 kHz samples as they come: exact zeros for
+/// [`LIVE_DEAD`] (digital silence), or a level under [`FAINT`] for [`LIVE_FAINT`], is silent; a
+/// window with sound ends it.
+#[derive(Debug, Default)]
+struct SilenceWatch {
+  /// Exact zeros in a row.
+  zeros: usize,
+  /// Samples in a row in windows under [`FAINT`].
+  faint: usize,
+  sum: f64,
+  n: usize,
+}
+
+impl SilenceWatch {
+  fn push(&mut self, samples: &[f32]) {
+    for &s in samples {
+      self.zeros = if s == 0.0 { self.zeros + 1 } else { 0 };
+      self.sum += f64::from(s * s);
+      self.n += 1;
+      if self.n == LEVEL_WINDOW {
+        let rms = (self.sum / LEVEL_WINDOW as f64).sqrt() as f32;
+        self.faint = if rms < FAINT { self.faint + LEVEL_WINDOW } else { 0 };
+        (self.sum, self.n) = (0.0, 0);
+      }
+    }
+  }
+
+  fn silent(&self) -> bool {
+    self.zeros >= LIVE_DEAD || self.faint >= LIVE_FAINT
+  }
 }
 
 #[derive(Debug)]
@@ -82,7 +149,9 @@ impl Recorder {
   fn run(capture: Capture, ring: Consumer<f32>, sink: WavSink, started: Instant) -> Result<Self> {
     let signals = capture.signals.clone();
     let processor = Processor::new(capture.format.channels as usize, capture.format.rate, sink)?;
-    let level = processor.level.clone();
+    let (level, silent) = (processor.level.clone(), processor.silent.clone());
+    let (quiet, scored) = (processor.quiet.clone(), processor.scored.clone());
+    let rate = capture.format.rate;
     let stop = Arc::new(AtomicBool::new(false));
     let (failures_tx, failures) = bounded(1);
     let (thread_stop, thread_signals) = (stop.clone(), signals.clone());
@@ -98,6 +167,10 @@ impl Recorder {
       started,
       signals,
       level,
+      silent,
+      quiet,
+      scored,
+      rate,
       stop,
       failures,
       thread: Some(thread),
@@ -123,6 +196,35 @@ impl Recorder {
   /// [`stop`](Recorder::stop) returns what was recorded.
   pub fn failures(&self) -> &Receiver<String> {
     &self.failures
+  }
+
+  /// How long the audio recorded so far ends without speech (at most a second).
+  pub fn quiet(&self) -> Duration {
+    let frames = self.quiet.load(Ordering::Relaxed);
+    Duration::from_secs_f64(f64::from(frames) * vad::FRAME as f64 / f64::from(SAMPLE_RATE))
+  }
+
+  /// The audio the device has delivered so far.
+  pub fn delivered(&self) -> Duration {
+    Duration::from_secs_f64(self.signals.delivered() as f64 / f64::from(self.rate))
+  }
+
+  /// The audio the VAD has scored so far, behind [`delivered`](Self::delivered) by the
+  /// resampler's block and a VAD frame (up to ~50 ms). [`quiet`](Self::quiet) read after it is at
+  /// least as recent.
+  pub fn scored(&self) -> Duration {
+    let frames = self.scored.load(Ordering::Acquire);
+    Duration::from_secs_f64(frames as f64 * vad::FRAME as f64 / f64::from(SAMPLE_RATE))
+  }
+
+  /// The device failed: capture has ended.
+  pub fn failed(&self) -> bool {
+    self.signals.failed()
+  }
+
+  /// The level for another thread; it stops changing once the recording ends.
+  pub fn meter(&self) -> Meter {
+    Meter { level: self.level.clone(), silent: self.silent.clone() }
   }
 
   fn open_latency(&self) -> Option<Duration> {
@@ -239,6 +341,12 @@ struct Processor {
   level: Arc<AtomicU32>,
   level_sum: f64,
   level_n: usize,
+  silence: SilenceWatch,
+  silent: Arc<AtomicBool>,
+  /// [`Vad::trailing_quiet`] in frames.
+  quiet: Arc<AtomicU32>,
+  /// VAD frames scored.
+  scored: Arc<AtomicU64>,
   warnings: Vec<String>,
 }
 
@@ -257,6 +365,10 @@ impl Processor {
       level: Arc::new(AtomicU32::new(0)),
       level_sum: 0.0,
       level_n: 0,
+      silence: SilenceWatch::default(),
+      silent: Arc::new(AtomicBool::new(false)),
+      quiet: Arc::new(AtomicU32::new(0)),
+      scored: Arc::new(AtomicU64::new(0)),
       warnings: Vec::new(),
     })
   }
@@ -320,7 +432,12 @@ impl Processor {
       }
     }
 
+    self.silence.push(&self.out);
+    self.silent.store(self.silence.silent(), Ordering::Relaxed);
     self.vad.push(&self.out);
+    // `scored` releases `quiet`: whoever sees the count sees the quiet that goes with it.
+    self.quiet.store(self.vad.trailing_quiet(QUIET_MAX) as u32, Ordering::Relaxed);
+    self.scored.store(self.vad.scored() as u64, Ordering::Release);
     self.pcm.extend_from_slice(&self.out);
   }
 
@@ -405,7 +522,42 @@ mod tests {
     let sink = WavSink::create(&dir.path().join("z.wav")).unwrap();
     let mut p = Processor::new(1, 48_000, sink).unwrap();
     p.push(&[0.0; 96_000]).unwrap();
+    assert_eq!(p.quiet.load(Ordering::Relaxed) as usize, QUIET_MAX, "counted up to a second");
+    assert!(p.silent.load(Ordering::Relaxed), "said while recording");
     assert!(p.finish().unwrap().dead);
+  }
+
+  /// `seconds` of a sine at amplitude `a`, 16 kHz.
+  fn tone(seconds: f64, a: f32) -> Vec<f32> {
+    let n = (seconds * f64::from(SAMPLE_RATE)) as usize;
+    (0..n).map(|i| a * (TAU * 440.0 * i as f32 / SAMPLE_RATE as f32).sin()).collect()
+  }
+
+  #[test]
+  fn digital_silence_is_seen_within_a_second_and_sound_ends_it() {
+    let mut w = SilenceWatch::default();
+    w.push(&tone(2.0, 0.1));
+    assert!(!w.silent());
+    w.push(&vec![0.0; SAMPLE_RATE as usize * 9 / 10]);
+    assert!(!w.silent(), "0.9 s of zeros: not yet");
+    w.push(&vec![0.0; SAMPLE_RATE as usize / 10]);
+    assert!(w.silent(), "a second of zeros");
+    w.push(&tone(0.1, 0.1));
+    assert!(!w.silent(), "sound came back");
+  }
+
+  #[test]
+  fn a_faint_signal_is_silent_only_after_seconds() {
+    let mut w = SilenceWatch::default();
+    // Dither under −80 dBFS: not exact zeros, no sound either.
+    w.push(&tone(3.5, 5e-5));
+    assert!(!w.silent(), "3.5 s: a pause, not yet");
+    w.push(&tone(0.6, 5e-5));
+    assert!(w.silent(), "over 4 s");
+    // A quiet room (−60 dBFS) is sound.
+    let mut room = SilenceWatch::default();
+    room.push(&tone(10.0, 1.4e-3));
+    assert!(!room.silent());
   }
 
   #[test]
