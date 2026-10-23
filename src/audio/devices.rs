@@ -6,12 +6,13 @@
 
 use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait};
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 /// A chosen microphone. The ID (CoreAudio's device UID, ALSA's PCM name) is matched first: it
 /// survives a rename and tells two devices of the same name apart. The name is shown, and matches
 /// when the ID does not (no ID known, or the backend changed it).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choice {
   pub id: Option<String>,
   pub name: String,
