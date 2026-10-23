@@ -110,6 +110,8 @@ pub struct Capture {
   pub device: String,
   /// Why it is not the device asked for, if it is not.
   pub warning: Option<String>,
+  /// This source's alone: a device that failed to open before it had its own.
+  pub signals: Arc<Signals>,
   _feed: Feed,
 }
 
@@ -147,32 +149,34 @@ impl Source {
 }
 
 /// Starts capturing from `source`.
-pub fn start(source: &Source, signals: &Arc<Signals>) -> Result<(Capture, Consumer<f32>)> {
+pub fn start(source: &Source) -> Result<(Capture, Consumer<f32>)> {
   let choice = match source {
-    Source::File(path) => return start_file(path, signals),
+    Source::File(path) => return start_file(path),
     Source::Mic(choice) => choice.as_ref(),
   };
 
   let opened = devices::open(&Cpal::new(), choice, |name, device| {
     let started = Instant::now();
-    let opened = open_stream(device, signals);
+    let opened = open_stream(device);
     debug!("opened {name:?} in {:.1?}", started.elapsed());
     opened
   })?;
-  let (stream, ring, format) = opened.value;
+  let (stream, ring, format, signals) = opened.value;
   let capture = Capture {
     format,
     device: opened.name,
     warning: opened.warning,
+    signals,
     _feed: Feed::Mic { _stream: stream },
   };
   Ok((capture, ring))
 }
 
+/// A stream with signals of its own: a failed attempt's error callback may still fire.
 fn open_stream(
   device: &cpal::Device,
-  signals: &Arc<Signals>,
-) -> Result<(cpal::Stream, Consumer<f32>, Format)> {
+) -> Result<(cpal::Stream, Consumer<f32>, Format, Arc<Signals>)> {
+  let signals = Arc::new(Signals::default());
   let supported = device.default_input_config().context("input format")?;
   let config = supported.config();
   let format = Format { rate: config.sample_rate, channels: config.channels };
@@ -180,7 +184,7 @@ fn open_stream(
   macro_rules! build {
     ($($variant:ident => $t:ty),*) => {
       match supported.sample_format() {
-        $(SampleFormat::$variant => build::<$t>(device, config, producer, signals),)*
+        $(SampleFormat::$variant => build::<$t>(device, config, producer, &signals),)*
         other => bail!("unsupported sample format {other}"),
       }
     };
@@ -191,7 +195,7 @@ fn open_stream(
     U8 => u8, U16 => u16, U24 => cpal::U24, U32 => u32, U64 => u64
   )?;
   stream.play().context("start the input stream")?;
-  Ok((stream, ring, format))
+  Ok((stream, ring, format, signals))
 }
 
 fn build<T>(
@@ -240,19 +244,20 @@ impl Drop for FileSource {
   }
 }
 
-fn start_file(path: &Path, signals: &Arc<Signals>) -> Result<(Capture, Consumer<f32>)> {
+fn start_file(path: &Path) -> Result<(Capture, Consumer<f32>)> {
   let wav::Interleaved { samples, rate, channels } =
     wav::read_interleaved(path).with_context(|| FAKE_MIC_ENV.to_string())?;
   let format = Format { rate, channels };
   let (mut producer, ring) = ring(format);
   let stop = Arc::new(AtomicBool::new(false));
-  let (stop_flag, signals) = (stop.clone(), signals.clone());
+  let signals = Arc::new(Signals::default());
+  let (stop_flag, feed_signals) = (stop.clone(), signals.clone());
   let channels = channels as usize;
   let mut feed = FileFeed::new(samples, rate, channels);
   let thread = thread::Builder::new().name("fake-mic".into()).spawn(move || {
     let started = Instant::now();
     while !stop_flag.load(Ordering::Acquire) {
-      feed.play(started.elapsed(), |block| signals.push(&mut producer, block, channels));
+      feed.play(started.elapsed(), |block| feed_signals.push(&mut producer, block, channels));
       thread::sleep(FAKE_MIC_BLOCK);
     }
   })?;
@@ -263,6 +268,7 @@ fn start_file(path: &Path, signals: &Arc<Signals>) -> Result<(Capture, Consumer<
     format,
     device: format!("fake mic ({name})"),
     warning: None,
+    signals,
     _feed: Feed::File { _feeder: FileSource { stop, thread: Some(thread) } },
   };
   Ok((capture, ring))
@@ -309,6 +315,7 @@ pub fn manual(format: Format) -> (Capture, Producer<f32>, Consumer<f32>) {
     format,
     device: "manual".into(),
     warning: None,
+    signals: Arc::default(),
     _feed: Feed::File { _feeder: feeder },
   };
   (capture, producer, ring)
@@ -393,8 +400,7 @@ mod tests {
 
     w.finalize().unwrap();
 
-    let signals = Arc::new(Signals::default());
-    let (capture, mut ring) = start(&Source::File(path), &signals).unwrap();
+    let (capture, mut ring) = start(&Source::File(path)).unwrap();
     assert_eq!(capture.format, Format { rate: 44_100, channels: 2 });
     assert!(capture.device.contains("in.wav"), "{}", capture.device);
 
@@ -404,7 +410,7 @@ mod tests {
       thread::sleep(Duration::from_millis(5));
     }
 
-    assert!(signals.first_data().is_some());
+    assert!(capture.signals.first_data().is_some());
     let chunk = ring.read_chunk(2_000).unwrap();
     let (a, b) = chunk.as_slices();
     let got: Vec<f32> = a.iter().chain(b).copied().collect();

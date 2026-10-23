@@ -70,9 +70,8 @@ impl Recorder {
 
     // The file first: a bad path never opens the microphone.
     let sink = WavSink::create(wav)?;
-    let signals = Arc::new(Signals::default());
-    let recorder = capture::start(source, &signals)
-      .and_then(|(capture, ring)| Self::run(capture, ring, sink, signals, started));
+    let recorder =
+      capture::start(source).and_then(|(capture, ring)| Self::run(capture, ring, sink, started));
     if recorder.is_err() {
       let _ = fs::remove_file(wav);
     }
@@ -80,13 +79,8 @@ impl Recorder {
     recorder
   }
 
-  fn run(
-    capture: Capture,
-    ring: Consumer<f32>,
-    sink: WavSink,
-    signals: Arc<Signals>,
-    started: Instant,
-  ) -> Result<Self> {
+  fn run(capture: Capture, ring: Consumer<f32>, sink: WavSink, started: Instant) -> Result<Self> {
+    let signals = capture.signals.clone();
     let processor = Processor::new(capture.format.channels as usize, capture.format.rate, sink)?;
     let level = processor.level.clone();
     let stop = Arc::new(AtomicBool::new(false));
@@ -409,10 +403,10 @@ mod tests {
 
   /// A recording into `out.wav` from a source the test feeds through the returned [`Feeder`].
   fn record_manual(dir: &TempDir) -> (Recorder, Feeder) {
-    let signals = Arc::new(Signals::default());
     let (capture, producer, ring) = capture::manual(FORMAT);
+    let signals = capture.signals.clone();
     let sink = WavSink::create(&dir.path().join("out.wav")).unwrap();
-    let recorder = Recorder::run(capture, ring, sink, signals.clone(), Instant::now()).unwrap();
+    let recorder = Recorder::run(capture, ring, sink, Instant::now()).unwrap();
     (recorder, Feeder { producer, signals })
   }
 

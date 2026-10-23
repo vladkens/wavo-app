@@ -36,20 +36,11 @@ impl<D> Found<D> {
   fn is_id(&self, wanted: &Choice) -> bool {
     wanted.id.is_some() && self.id == wanted.id
   }
-
-  /// The same device: by ID when both have one (two microphones of a model share a name), else by
-  /// name.
-  fn is(&self, other: &Found<D>) -> bool {
-    match (&self.id, &other.id) {
-      (Some(a), Some(b)) => a == b,
-      _ => self.name == other.name,
-    }
-  }
 }
 
 /// The devices a recorder may open: cpal's in the app, fakes in tests.
 pub trait Inputs {
-  type Device: Clone;
+  type Device: Clone + PartialEq;
 
   /// Input devices in system order.
   fn inputs(&self) -> Vec<Found<Self::Device>>;
@@ -106,7 +97,7 @@ pub fn open<I: Inputs, T>(
     Some(w) => anyhow!("{w}, and there is no default microphone"),
     None => anyhow!("no microphone found"),
   })?;
-  if tried.is_some_and(|tried| tried.is(&default)) {
+  if tried.is_some_and(|tried: Found<I::Device>| tried.device == default.device) {
     // The default is the device that just failed to open: no second attempt.
     return Err(anyhow!(warning.unwrap_or_default()));
   }
@@ -200,11 +191,13 @@ mod tests {
 
   use super::*;
 
-  /// Devices as `(id, name)`; `broken` IDs fail to open.
+  /// Devices as `(id, name)`; `broken` IDs fail to open. `no_ids`: the backend tells no IDs.
+  #[derive(Default)]
   struct Fake {
     devices: Vec<(&'static str, &'static str)>,
     default: Option<(&'static str, &'static str)>,
     broken: Vec<&'static str>,
+    no_ids: bool,
   }
 
   type Device = (&'static str, &'static str);
@@ -217,15 +210,20 @@ mod tests {
     type Device = Device;
 
     fn inputs(&self) -> Vec<Found<Device>> {
-      self.devices.iter().copied().map(found).collect()
+      self.devices.iter().map(|&d| self.found(d)).collect()
     }
 
     fn default_input(&self) -> Option<Found<Device>> {
-      self.default.map(found)
+      self.default.map(|d| self.found(d))
     }
   }
 
   impl Fake {
+    fn found(&self, device: Device) -> Found<Device> {
+      let found = found(device);
+      Found { id: found.id.filter(|_| !self.no_ids), ..found }
+    }
+
     fn open(&self, wanted: Option<&Choice>) -> Result<Opened<Device>> {
       open(self, wanted, |name, &device| {
         assert_eq!(name, device.1);
@@ -252,7 +250,7 @@ mod tests {
   }
 
   fn laptop() -> Fake {
-    Fake { devices: vec![BUILT_IN], default: Some(BUILT_IN), broken: vec![] }
+    Fake { devices: vec![BUILT_IN], default: Some(BUILT_IN), ..Fake::default() }
   }
 
   #[test]
@@ -266,7 +264,7 @@ mod tests {
 
   #[test]
   fn the_id_wins_over_the_name() {
-    let fake = Fake { devices: vec![BUILT_IN, RODE, RODE_2], default: Some(RODE), broken: vec![] };
+    let fake = Fake { devices: vec![BUILT_IN, RODE, RODE_2], default: Some(RODE), ..laptop() };
     assert_eq!(fake.open(Some(&choice(RODE_2))).unwrap().value, RODE_2);
     assert_eq!(fake.open(Some(&choice(RODE))).unwrap().value, RODE);
 
@@ -307,7 +305,19 @@ mod tests {
     assert!(warning.contains("device busy") && warning.contains(BUILT_IN.1), "{warning}");
 
     // The default is the twin of the broken one: same name, another device.
-    let twins = Fake { devices: vec![RODE, RODE_2], default: Some(RODE), broken: vec![RODE_2.0] };
+    let twins =
+      Fake { devices: vec![RODE, RODE_2], default: Some(RODE), broken: vec![RODE_2.0], ..laptop() };
+    let opened = twins.open(Some(&choice(RODE_2))).unwrap();
+    assert_eq!(opened.value, RODE);
+    assert!(opened.warning.unwrap().contains("device busy"));
+
+    // Without IDs from the backend the twins are still two devices.
+    let twins = Fake {
+      devices: vec![RODE_2, RODE],
+      default: Some(RODE),
+      broken: vec![RODE_2.0],
+      no_ids: true,
+    };
     let opened = twins.open(Some(&choice(RODE_2))).unwrap();
     assert_eq!(opened.value, RODE);
     assert!(opened.warning.unwrap().contains("device busy"));
@@ -315,7 +325,7 @@ mod tests {
 
   #[test]
   fn failures_without_a_working_default_are_errors() {
-    let none = Fake { devices: vec![], default: None, broken: vec![] };
+    let none = Fake::default();
     assert!(none.open(None).unwrap_err().to_string().contains("no microphone"));
     let err = none.open(Some(&choice(RODE))).unwrap_err().to_string();
     assert!(err.contains("not connected") && err.contains("no default"), "{err}");
