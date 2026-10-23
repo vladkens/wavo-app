@@ -1,17 +1,49 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Command-line tools that run without the GUI: `wavo-app devices` and `record`.
+//! Command-line tools that run without the GUI: `wavo-app transcribe`, `devices` and `record`.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use tracing::{info, warn};
+use wavo::hub::Hub;
 
 use crate::audio::capture::Source;
 use crate::audio::devices::{self, Choice};
 use crate::audio::recorder::Recorder;
-use crate::audio::{SAMPLE_RATE, vad};
+use crate::audio::vad::Clip;
+use crate::audio::{SAMPLE_RATE, vad, wav};
+use crate::engine::{Engine, EngineConfig, model};
+
+/// `wavo-app transcribe`: the dictation pipeline on a file, without capture and paste. The text
+/// goes to stdout, timings and warnings to stderr. Without speech nothing is printed and the engine
+/// is not started.
+pub fn transcribe(wav: &Path, model: Option<&str>, language: Option<&str>) -> Result<()> {
+  let model = model::find(model, &Hub::new())?;
+  let clip = Clip::analyze(wav::read(wav)?);
+  let Some(input) = clip.engine_input() else {
+    warn!("no speech in {} ({:.1} s): the engine is not called", wav.display(), clip.seconds());
+    return Ok(());
+  };
+
+  let engine = Engine::start(EngineConfig::new(model));
+  let seconds = input.seconds();
+  let result = engine.transcribe(input.pcm, language.map(str::to_owned)).wait()?;
+  let status = engine.status();
+  info!(
+    "{:.1} s of audio ({seconds:.1} s to the engine in {} piece(s)) in {:.2?} on {} (engine thread \
+     {}, start to loaded {:.2?})",
+    clip.seconds(),
+    result.pieces.len(),
+    result.elapsed,
+    result.device,
+    status.thread.map_or("-".into(), |n| n.to_string()),
+    status.last_load.unwrap_or_default(),
+  );
+  println!("{}", result.text);
+  Ok(())
+}
 
 /// `wavo-app record`: `seconds` of the microphone (or `WAVO_FAKE_MIC`) into `out`, then a summary
 /// on stderr. A device error ends the recording early; what was recorded is kept.
