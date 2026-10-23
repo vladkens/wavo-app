@@ -277,7 +277,7 @@ impl Db {
 
   /// Puts back `entry`'s status, model, language and error, as they were before
   /// [`mark_retranscribing`](Self::mark_retranscribing): the text it kept is the one they go with.
-  pub fn update_entry(&self, entry: &Entry) -> Result<()> {
+  pub fn update_as_before(&self, entry: &Entry) -> Result<()> {
     let qs = "UPDATE entries SET status = ?2, model = ?3, language = ?4, error = ?5 WHERE id = ?1;";
     let status = entry.status.as_str();
     let args = params![entry.id, status, entry.model, entry.language, entry.error];
@@ -437,7 +437,7 @@ mod tests {
     db.update_outcome(id, Status::Done, None, None).unwrap();
     let before = db.get_entry(id).unwrap().unwrap();
     db.mark_retranscribing(id, "parakeet", None).unwrap();
-    db.update_entry(&before).unwrap();
+    db.update_as_before(&before).unwrap();
     assert_eq!(db.get_entry(id).unwrap().unwrap(), before);
   }
 

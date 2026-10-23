@@ -241,7 +241,7 @@ impl Recorder {
     let processed = self.finish()?;
     let mut warnings: Vec<String> = self.warning.take().into_iter().collect();
     if let Some(failure) = self.signals.failure() {
-      warnings.push(format!("the microphone stopped: {failure}"));
+      warnings.push(format!("the recording stopped: {failure}"));
     }
 
     let dropped = self.signals.dropped();
@@ -679,7 +679,11 @@ mod tests {
     let rec = recorder.stop().unwrap();
     let pcm = &rec.clip.pcm;
     assert!(pcm.len().abs_diff(4_800) <= 1, "{} samples kept", pcm.len());
-    assert!(rec.warnings.iter().any(|w| w.contains("microphone stopped")), "{:?}", rec.warnings);
+    assert!(
+      rec.warnings.iter().any(|w| w.contains("recording stopped: The requested")),
+      "{:?}",
+      rec.warnings
+    );
     let wav = WavReader::open(&rec.wav).unwrap();
     assert_eq!(wav.len() as usize, pcm.len());
   }

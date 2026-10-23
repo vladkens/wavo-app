@@ -509,6 +509,25 @@ fn a_chosen_model_gone_behind_the_apps_back_gives_way_to_the_next() {
   assert!(!third.warnings.iter().any(|w| w == note), "{:?}", third.warnings);
 }
 
+/// The chosen model's file deleted while it loads for a recording: that engine cannot serve the
+/// recording, so the first model left transcribes it instead.
+#[test]
+fn a_model_gone_while_it_loads_for_a_recording_gives_way_at_once() {
+  let settings = Settings { model: Some("parakeet-v3".into()), ..Settings::default() };
+  let models = Models("hello there", &["parakeet-v3", "whisper-tiny"]);
+  let s = InProcess::start("session-model-gone-loading", &settings, Some(&tone(10.0)), models);
+  s.faults.load(Fault::Hang);
+  s.send(Request::Start);
+  poll("a held load", Duration::from_secs(10), || (s.faults.hanging() == 1).then_some(()));
+  fs::remove_file(s.hub.find("parakeet-v3").unwrap()).unwrap();
+  wait_for_level(&s, 0.3);
+  s.send(Request::Stop);
+  let status = s.finished(1);
+  assert_eq!(status.last.as_ref().unwrap().text, "hello there");
+  assert_eq!(kept(&s, &status).model.as_deref(), Some("whisper-tiny-Q8_0"));
+  s.faults.release();
+}
+
 /// The chosen model gone with none left: the choice stays, the status says it is not on disk, the
 /// recording is kept; downloaded again, it is the choice again and transcribes the recording.
 #[test]

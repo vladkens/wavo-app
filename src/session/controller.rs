@@ -648,7 +648,8 @@ impl<O: TextOutput> Controller<O> {
   /// settings. The old one shuts down on its own thread: its engine thread gets up to a few seconds
   /// to drop the model.
   fn retire_stale_engine(&mut self) {
-    let dictation = self.dictation.as_ref().is_some_and(|d| d.prewarmed || d.job.is_some());
+    let prewarmed = self.dictation.as_ref().is_some_and(|d| d.prewarmed) && self.engine_can_serve();
+    let dictation = prewarmed || self.dictation.as_ref().is_some_and(|d| d.job.is_some());
     let busy = dictation || !self.retranscribing.is_empty();
     if !self.engine_stale || busy {
       return;
@@ -711,6 +712,18 @@ impl<O: TextOutput> Controller<O> {
     }
   }
 
+  /// Whether the engine has its model, or can still load it: not after a load that failed, nor
+  /// while it loads a file that is gone.
+  fn engine_can_serve(&self) -> bool {
+    let Some(loaded) = &self.engine else { return false };
+    let status = loaded.engine.status();
+    match status.phase {
+      EnginePhase::Idle | EnginePhase::Running => true,
+      EnginePhase::Stopped if status.load_error.is_some() => false,
+      EnginePhase::Stopped | EnginePhase::Loading => loaded.path.is_file(),
+    }
+  }
+
   /// The engine for the model in the settings, started on first use; or why there is none. One
   /// whose file is gone goes, once it is not busy, as does one standing in for the chosen model
   /// once that is back.
@@ -722,10 +735,9 @@ impl<O: TextOutput> Controller<O> {
       self.engine_stale = true;
     }
 
-    let chosen = self.settings.model.as_deref();
-    if let Some(loaded) = &self.engine
-      && self.model_fallback.is_some()
-      && model::find(chosen, &self.config.hub).is_ok()
+    // A stand-in for the chosen model, which is back (a few file lookups, of that model alone).
+    if let (Some(loaded), Some(chosen)) = (&self.engine, &self.settings.model)
+      && model::find(Some(chosen), &self.config.hub).is_ok_and(|p| p != loaded.path)
     {
       info!("model {}: the chosen model is back", loaded.name);
       self.engine_stale = true;
@@ -830,7 +842,7 @@ impl<O: TextOutput> Controller<O> {
 
   fn on_mic_failure(&mut self, failure: String) {
     let Some(d) = &self.dictation else { return };
-    warn!("dictation {}: the microphone stopped: {failure}", d.last.take);
+    warn!("dictation {}: the recording stopped: {failure}", d.last.take);
     let take = d.last.take;
     // In the post-roll the machine is past the recording: the recording ends here. Either way the
     // recorder goes, and with it the failures channel, which stays ready once it is closed.
@@ -1247,7 +1259,7 @@ impl<O: TextOutput> Controller<O> {
         self.error = Some(error);
       }
 
-      log_history(self.history.db.update_entry(&before));
+      log_history(self.history.db.update_as_before(&before));
     } else {
       let status = outcome.entry_status().unwrap_or(EntryStatus::Failed);
       let text = Some(text.trim()).filter(|t| !t.is_empty());

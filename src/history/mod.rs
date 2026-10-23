@@ -155,7 +155,9 @@ impl History {
   /// time is unknown.
   pub fn recover(&self, now: i64) -> Result<Recovered> {
     let failed = self.db.mark_interrupted()?;
-    self.recordings.prune_all()?;
+    if let Err(e) = self.recordings.prune_all() {
+      warn!("{e:#}");
+    }
 
     let known = self.db.get_audio_paths()?;
     let mut orphans: Vec<String> =
