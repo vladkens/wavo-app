@@ -7,7 +7,8 @@
 //!   over a channel, sends its events back over another and drops the model when its channel
 //!   closes. The model is never touched elsewhere.
 //! - Panics: the load and every run are inside `catch_unwind`. A load that panics is a failed load
-//!   ([`EngineError::Load`]); a run that panics fails its job ([`EngineError::Crashed`]). Either
+//!   ([`EngineError::Load`]); a run that panics fails its job ([`EngineError::Crashed`]), as does
+//!   one that fails on the GPU (a lost device: [`gpu_failed`]) with [`EngineError::Failed`]. Either
 //!   way the thread drops the model and ends, and the next job loads a fresh one on a new thread. A
 //!   native crash (a segfault or an abort in a driver) is not a panic: it ends the app.
 //! - Deadlines: model load [`LOAD_DEADLINE`], each run max([`REQUEST_MIN_DEADLINE`],
@@ -317,8 +318,8 @@ enum Event {
     id: u64,
     result: Result<String, String>,
   },
-  /// The run panicked; the thread dropped its model and ended.
-  Panicked(String),
+  /// The run panicked or failed on the GPU; the thread dropped its model and ended.
+  Ended(EngineError),
 }
 
 struct Supervisor {
@@ -517,18 +518,17 @@ impl Supervisor {
         }
       }
 
-      Event::Panicked(message) => {
+      Event::Ended(error) => {
         let state = worker.state;
         self.worker = None; // the thread has dropped its model and ended
         if let WorkerState::Running { cancelled: true, .. } = state {
-          warn!("engine thread {generation} panicked in a cancelled run: {message}");
+          warn!("engine thread {generation} ended in a cancelled run: {error}");
           return;
         }
 
-        warn!("engine thread {generation} panicked during transcription: {message}");
+        warn!("engine thread {generation} ended: {error}");
         if self.job.is_some() {
-          let error = format!("during transcription (panicked: {message})");
-          self.finish(Err(EngineError::Crashed(error)));
+          self.finish(Err(error));
         }
       }
     }
@@ -698,18 +698,31 @@ fn serve(
 
   for Piece { id, language, pcm } in pieces {
     let run = panic::catch_unwind(AssertUnwindSafe(|| model.transcribe(&pcm, language.as_deref())));
-    match run {
-      Ok(result) => send(Event::Result { id, result: result.map_err(|e| format!("{e:#}")) }),
+    let ended = match run {
+      Ok(Err(e)) if gpu_failed(&e) => EngineError::Failed(format!("{e:#}")),
+      Ok(result) => {
+        send(Event::Result { id, result: result.map_err(|e| format!("{e:#}")) });
+        continue;
+      }
       Err(panic) => {
         let message = panic_message(&*panic);
-        // Whatever state the run left the model in, it goes before the next one loads.
-        drop_model(model);
-        return send(Event::Panicked(message));
+        EngineError::Crashed(format!("during transcription (panicked: {message})"))
       }
-    }
+    };
+
+    // Whatever state the run left the model in, it goes before the next one loads.
+    drop_model(model);
+    return send(Event::Ended(ended));
   }
 
   drop_model(model);
+}
+
+/// Whether a run failed on the GPU (a lost device, work the driver dropped): its model is not used
+/// again.
+fn gpu_failed(error: &anyhow::Error) -> bool {
+  use wavo::Error::{Gpu, Map, Poll, Readback};
+  error.downcast_ref().is_some_and(|e| matches!(e, Gpu(_) | Poll(_) | Readback(_) | Map(_)))
 }
 
 /// Drops a model, catching a panic of its destructor (one left half-way by a panicking run).
@@ -878,6 +891,27 @@ mod tests {
     assert_eq!(f.run().unwrap().text, "text");
     assert_ne!(f.engine.status().thread, first, "a new thread");
     assert_eq!((f.models.loads(), f.models.live()), (2, 1));
+  }
+
+  /// A run that fails on the GPU fails its job and ends its thread, as a panic does; another error
+  /// keeps the model.
+  #[test]
+  fn a_gpu_failure_retires_the_model() {
+    let f = Fake::start("engine-gpu", FakeModels::new("text"), |_| {});
+    f.faults.run(Fault::Fail("no such language"));
+    let err = f.run().unwrap_err();
+    assert_eq!(err, EngineError::Failed("no such language".into()));
+    let first = f.engine.status().thread;
+    assert_eq!((f.engine.status().phase, f.models.live()), (Phase::Idle, 1), "kept");
+
+    f.faults.run(Fault::GpuLost);
+    let Err(EngineError::Failed(err)) = f.run() else { panic!("no failure") };
+    assert!(err.starts_with("GPU: "), "{err}");
+    assert_eq!((f.engine.status().phase, f.models.live()), (Phase::Stopped, 0), "dropped");
+
+    assert_eq!(f.run().unwrap().text, "text");
+    assert_ne!(f.engine.status().thread, first, "a new thread");
+    assert_eq!(f.models.loads(), 2);
   }
 
   /// A run past its deadline fails its job; the thread is left holding its model until the run

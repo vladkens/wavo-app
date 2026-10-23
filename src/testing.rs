@@ -194,6 +194,10 @@ impl Drop for FakeModel {
 pub enum Fault {
   /// Panics, as a bug in wavo or wgpu would.
   Panic,
+  /// Fails with this message, as a bad request does.
+  Fail(&'static str),
+  /// Fails as wavo does when the GPU device is lost.
+  GpuLost,
   /// Blocks until [`Faults::release`], then does its work: a wedged GPU, or a run held while the
   /// test looks.
   Hang,
@@ -247,10 +251,12 @@ impl Faults {
     Arc::new(Faulty { inner: Box::new(loader), faults: self.clone() })
   }
 
-  fn take(&self, queue: &Mutex<VecDeque<Fault>>, what: &str) {
+  fn take(&self, queue: &Mutex<VecDeque<Fault>>, what: &str) -> anyhow::Result<()> {
     let fault = queue.lock().unwrap_or_else(PoisonError::into_inner).pop_front();
     match fault {
       Some(Fault::Panic) => panic!("injected panic in {what}"),
+      Some(Fault::Fail(message)) => anyhow::bail!(message),
+      Some(Fault::GpuLost) => return Err(wavo::Error::Gpu("device lost".into()).into()),
       Some(Fault::Hang) => {
         let gate = self.0.gate.lock().unwrap().1.clone();
         self.0.hanging.fetch_add(1, Ordering::SeqCst);
@@ -259,6 +265,8 @@ impl Faults {
       }
       None => {}
     }
+
+    Ok(())
   }
 }
 
@@ -269,7 +277,7 @@ struct Faulty {
 
 impl Loader for Faulty {
   fn load(&self, path: &Path) -> anyhow::Result<Box<dyn SpeechModel>> {
-    self.faults.take(&self.faults.0.loads, "the load");
+    self.faults.take(&self.faults.0.loads, "the load")?;
     let inner = self.inner.load(path)?;
     Ok(Box::new(FaultyModel { inner, faults: self.faults.clone() }))
   }
@@ -290,7 +298,7 @@ impl SpeechModel for FaultyModel {
   }
 
   fn transcribe(&self, pcm: &[f32], language: Option<&str>) -> anyhow::Result<String> {
-    self.faults.take(&self.faults.0.runs, "a run");
+    self.faults.take(&self.faults.0.runs, "a run")?;
     self.inner.transcribe(pcm, language)
   }
 }
