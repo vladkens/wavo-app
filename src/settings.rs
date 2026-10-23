@@ -152,17 +152,13 @@ impl Settings {
   /// The settings of a file's keys, each one on its own: a value that does not parse is left out
   /// (its field is the default) and named in the second half.
   fn parse(file: Map<String, Value>) -> (Self, Vec<String>) {
-    let mut good = Map::new();
-    let mut invalid = Vec::new();
-    for (key, value) in file {
-      good.insert(key.clone(), value);
-      if serde_json::from_value::<Self>(Value::Object(good.clone())).is_err() {
-        good.remove(&key);
-        invalid.push(key);
-      }
-    }
-
-    (serde_json::from_value(Value::Object(good)).unwrap_or_default(), invalid)
+    let parses = |key: &String, value: &Value| {
+      let one = Map::from_iter([(key.clone(), value.clone())]);
+      serde_json::from_value::<Self>(Value::Object(one)).is_ok()
+    };
+    let (good, invalid): (Map<_, _>, Map<_, _>) = file.into_iter().partition(|(k, v)| parses(k, v));
+    let settings = serde_json::from_value(Value::Object(good)).unwrap_or_default();
+    (settings, invalid.into_iter().map(|(key, _)| key).collect())
   }
 
   /// Writes the settings to `path` atomically, creating its directory.

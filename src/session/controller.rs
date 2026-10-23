@@ -671,22 +671,20 @@ impl<O: TextOutput> Controller<O> {
   fn check_model(&mut self) -> Result<PathBuf, NoModel> {
     let hub = &self.config.hub;
     let query = self.settings.model.clone();
-    let fallback_before = self.model_fallback.take();
     let error = match (model::find(query.as_deref(), hub), query) {
       (Ok(path), _) => {
-        self.model_error = None;
+        (self.model_error, self.model_fallback) = (None, None);
         return Ok(path);
       }
       (Err(_), Some(query)) => match model::find(None, hub) {
         Ok(path) => {
           let fallback = label(&path.to_string_lossy());
           let note = format!("{} is not on disk: {fallback} transcribes instead", label(&query));
-          if fallback_before.as_ref() != Some(&note) {
+          if self.model_fallback.as_ref() != Some(&note) {
             warn!("model {note}");
           }
 
-          self.model_fallback = Some(note);
-          self.model_error = None;
+          (self.model_error, self.model_fallback) = (None, Some(note));
           return Ok(path);
         }
         Err(_) => NoModel::Gone { model: label(&query) },
@@ -697,6 +695,8 @@ impl<O: TextOutput> Controller<O> {
     if self.model_error.as_ref() != Some(&error) {
       warn!("no model: {}", error.to_string());
     }
+
+    self.model_fallback = None;
 
     self.model_error = Some(error.clone());
     Err(error)
@@ -722,11 +722,12 @@ impl<O: TextOutput> Controller<O> {
       self.engine_stale = true;
     }
 
-    if self.model_fallback.is_some()
-      && let Some(path) = self.engine.as_ref().map(|l| l.path.clone())
-      && self.check_model().is_ok_and(|p| p != path)
+    let chosen = self.settings.model.as_deref();
+    if let Some(loaded) = &self.engine
+      && self.model_fallback.is_some()
+      && model::find(chosen, &self.config.hub).is_ok()
     {
-      info!("model {}: the chosen model is back", file_stem(&path));
+      info!("model {}: the chosen model is back", loaded.name);
       self.engine_stale = true;
     }
 
@@ -1144,7 +1145,7 @@ impl<O: TextOutput> Controller<O> {
       return;
     };
 
-    if let (true, Some(loaded)) = (prewarmed, &self.engine) {
+    if prewarmed && let Some(loaded) = &self.engine {
       loaded.engine.release();
     }
 

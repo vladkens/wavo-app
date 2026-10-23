@@ -480,7 +480,7 @@ mod tests {
   use super::*;
   use crate::audio::capture::Format;
   use crate::audio::vad::FRAME;
-  use crate::testing::{TempDir, tone};
+  use crate::testing::{TempDir, poll, tone};
 
   fn sine(rate: u32, channels: u16, seconds: f32) -> Vec<f32> {
     let frames = (rate as f32 * seconds) as usize;
@@ -698,11 +698,9 @@ mod tests {
     signals.push(&mut producer, &[0.5; 1_000], 1);
     thread::scope(|s| {
       let processing = s.spawn(|| process(ring, p, &stop, &signals, &failures_tx));
-      let deadline = Instant::now() + Duration::from_secs(10);
-      while producer.slots() < SAMPLE_RATE as usize {
-        assert!(Instant::now() < deadline, "the first audio not processed");
-        thread::sleep(Duration::from_millis(2));
-      }
+      poll("the first audio processed", Duration::from_secs(10), || {
+        (producer.slots() == SAMPLE_RATE as usize).then_some(())
+      });
 
       signals.push(&mut producer, &[0.5; 1_000], 1);
       let message = failures.recv_timeout(Duration::from_secs(10)).unwrap();
