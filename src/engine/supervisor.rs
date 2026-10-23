@@ -11,14 +11,15 @@
 //!   one that fails on the GPU (a lost device: [`gpu_failed`]) with [`EngineError::Failed`]. Either
 //!   way the thread drops the model and ends, and the next job loads a fresh one on a new thread. A
 //!   native crash (a segfault or an abort in a driver) is not a panic: it ends the app.
-//! - Deadlines: model load [`LOAD_DEADLINE`], each run max([`REQUEST_MIN_DEADLINE`],
-//!   [`REQUEST_DEADLINE_FACTOR`] × audio). A thread cannot be stopped from outside: one past its
-//!   deadline is left to end on its own, its job fails with [`EngineError::TimedOut`] and the next
-//!   job starts a fresh thread. **The stuck thread keeps its model (memory, GPU buffers) until its
-//!   run returns**, then drops it and ends; what it answers is dropped. While [`MAX_STUCK`] of them
-//!   are still stuck, jobs fail with [`EngineError::Stuck`] instead of loading yet another model.
+//! - Deadlines ([`Deadlines`]): the model load, each run max(a minimum, a factor × audio). A thread
+//!   cannot be stopped from outside: one past its deadline is left to end on its own, its job fails
+//!   with [`EngineError::TimedOut`] and the next job starts a fresh thread. **The stuck thread
+//!   keeps its model (memory, GPU buffers) until its run returns**, then drops it and ends; what it
+//!   answers is dropped. While [`MAX_STUCK`] of them are still stuck, jobs fail with
+//!   [`EngineError::Stuck`] instead of loading yet another model.
 //! - An idle engine thread is stopped after [`EngineConfig::unload_after`]: it drops the model and
-//!   ends. A prewarmed one waits for the job it was started for up to [`PREWARM_HOLD`].
+//!   ends. A prewarmed one waits for the job it was started for up to [`PREWARM_HOLD`], unless
+//!   [`Engine::release`] says none comes.
 //!
 //! A job is cut by [`wavo::split`] into pieces of up to the model's
 //! [`max_audio_ms`](SpeechModel::max_audio_ms), one run per piece; [`Status::progress`] counts the
@@ -46,10 +47,6 @@ use tracing::{debug, info, warn};
 use super::model::{Loader, SpeechModel, Wavo};
 use crate::audio::SAMPLE_RATE;
 
-/// wavo loads a model in ~0.1–0.4 s warm; a cold page cache for a 1.7 GB file takes seconds.
-pub const LOAD_DEADLINE: Duration = Duration::from_secs(60);
-pub const REQUEST_MIN_DEADLINE: Duration = Duration::from_secs(60);
-pub const REQUEST_DEADLINE_FACTOR: f64 = 3.0;
 /// Engine threads past their deadline that may still hold their models before jobs fail with
 /// [`EngineError::Stuck`]: each holds a model, and a wedged GPU would wedge every new one too.
 pub const MAX_STUCK: usize = 2;
@@ -98,11 +95,12 @@ pub struct Deadlines {
 }
 
 impl Default for Deadlines {
+  /// wavo loads a model in ~0.1–0.4 s warm; a cold page cache for a 1.7 GB file takes seconds.
   fn default() -> Self {
     Self {
-      load: LOAD_DEADLINE,
-      request_min: REQUEST_MIN_DEADLINE,
-      request_factor: REQUEST_DEADLINE_FACTOR,
+      load: Duration::from_secs(60),
+      request_min: Duration::from_secs(60),
+      request_factor: 3.0,
     }
   }
 }
@@ -206,13 +204,15 @@ impl Pending {
 
 enum Request {
   Prewarm,
+  Release,
   Transcribe(Job),
   Cancel(JobId),
   Quit,
 }
 
 impl Engine {
-  pub fn start(config: EngineConfig) -> Self {
+  /// Starts the supervisor thread; the engine thread starts with the first job or prewarm.
+  pub fn start(config: EngineConfig) -> Result<Self, EngineError> {
     let (requests, requests_rx) = unbounded();
     let (msgs_tx, msgs) = unbounded();
     let status = Arc::new(Mutex::new(Status::default()));
@@ -220,14 +220,20 @@ impl Engine {
     let thread = thread::Builder::new()
       .name("engine-supervisor".into())
       .spawn(move || supervisor.run(requests_rx, msgs))
-      .expect("spawn the engine supervisor thread");
+      .map_err(|e| EngineError::Spawn(e.to_string()))?;
 
-    Self { requests, next_job: AtomicU64::new(1), status, thread: Some(thread) }
+    Ok(Self { requests, next_job: AtomicU64::new(1), status, thread: Some(thread) })
   }
 
   /// Starts the engine thread and loads the model ahead of the first job (as a recording starts).
   pub fn prewarm(&self) {
     let _ = self.requests.send(Request::Prewarm);
+  }
+
+  /// The recording a [`prewarm`](Self::prewarm) was for ended without a job (cancelled, no
+  /// speech): the idle unload counts as usual again.
+  pub fn release(&self) {
+    let _ = self.requests.send(Request::Release);
   }
 
   /// Queues a transcription of 16 kHz mono audio, the engine's input (see
@@ -301,20 +307,20 @@ struct Job {
 
 /// The live engine thread, as the supervisor sees it.
 struct Worker {
-  /// Its number: tells its messages from those of threads left behind.
-  generation: u64,
+  /// Its number ([`Status::thread`]): tells its messages from those of threads left behind.
+  thread: u64,
   pieces: Sender<Piece>,
   /// Disconnected once the thread has ended, its model dropped.
   ended: Receiver<()>,
   spawned: Instant,
   /// The loaded model's, once loaded.
-  model: Option<Loaded>,
+  model: Option<ModelInfo>,
   state: WorkerState,
 }
 
 /// What the supervisor knows of a loaded model.
 #[derive(Debug, Clone)]
-struct Loaded {
+struct ModelInfo {
   device: String,
   max_audio_ms: Option<u32>,
 }
@@ -327,37 +333,34 @@ enum WorkerState {
   Idle,
   /// `cancelled`: the run's job was cancelled, its result is dropped.
   Running {
-    id: u64,
     deadline: Instant,
     timeout: Duration,
     cancelled: bool,
   },
 }
 
-/// Supervisor → engine thread: one piece of audio to transcribe.
+/// Supervisor → engine thread: one piece of audio to transcribe; one at a time, the next one once
+/// its result is in.
 struct Piece {
-  id: u64,
   language: Option<String>,
   pcm: Vec<f32>,
 }
 
 /// Engine thread → supervisor.
 struct WorkerMsg {
-  generation: u64,
+  thread: u64,
   event: Event,
 }
 
 enum Event {
   Loaded {
-    model: Loaded,
+    model: ModelInfo,
     load_ms: u64,
   },
   /// The load failed or panicked; the thread has ended.
   LoadFailed(String),
-  Result {
-    id: u64,
-    result: Result<String, String>,
-  },
+  /// Of the piece it was sent last.
+  Result(Result<String, String>),
   /// The run panicked or failed on the GPU; the thread dropped its model and ended.
   Ended(EngineError),
 }
@@ -367,7 +370,6 @@ struct Supervisor {
   /// Handed to each engine thread.
   msgs_tx: Sender<WorkerMsg>,
   worker: Option<Worker>,
-  next_id: u64,
   job: Option<Job>,
   queue: VecDeque<Job>,
   last_load: Option<Duration>,
@@ -390,7 +392,6 @@ impl Supervisor {
       config,
       msgs_tx,
       worker: None,
-      next_id: 0,
       job: None,
       queue: VecDeque::new(),
       last_load: None,
@@ -439,6 +440,7 @@ impl Supervisor {
           warn!("prewarm: {e}");
         }
       }
+      Request::Release => self.hold_until = None,
       Request::Transcribe(job) if job.background => self.queue.push_back(job),
       Request::Transcribe(job) => {
         // The recording a prewarm was for has arrived; after it the usual unload timer applies.
@@ -468,7 +470,7 @@ impl Supervisor {
     if let Some(worker) = &mut self.worker
       && let WorkerState::Running { cancelled, .. } = &mut worker.state
     {
-      info!("engine thread {}: transcription cancelled; its run ends unread", worker.generation);
+      info!("engine thread {}: transcription cancelled; its run ends unread", worker.thread);
       *cancelled = true;
     }
 
@@ -533,13 +535,11 @@ impl Supervisor {
         continue;
       };
 
-      self.next_id += 1;
-      let id = self.next_id;
       let samples = range.len();
-      let piece = Piece { id, language: job.language.clone(), pcm: job.pcm[range].to_vec() };
+      let piece = Piece { language: job.language.clone(), pcm: job.pcm[range].to_vec() };
       if worker.pieces.send(piece).is_err() {
         // The thread ends only after saying why (or when told to): this is a bug.
-        warn!("engine thread {} is gone without a word", worker.generation);
+        warn!("engine thread {} is gone without a word", worker.thread);
         self.worker = None;
         self.finish(Err(EngineError::Crashed("without a word".into())));
         continue;
@@ -547,24 +547,23 @@ impl Supervisor {
 
       let timeout = self.config.deadlines.request(samples);
       let deadline = Instant::now() + timeout;
-      worker.state = WorkerState::Running { id, deadline, timeout, cancelled: false };
-      debug!(id, samples, ?timeout, "piece sent");
+      worker.state = WorkerState::Running { deadline, timeout, cancelled: false };
+      debug!(samples, ?timeout, "piece sent");
       return;
     }
   }
 
   fn on_worker(&mut self, msg: WorkerMsg) {
-    if self.worker.as_ref().map(|w| w.generation) != Some(msg.generation) {
+    let Some(worker) = self.worker.as_mut().filter(|w| w.thread == msg.thread) else {
       return; // from a thread left behind
-    }
+    };
 
-    let worker = self.worker.as_mut().unwrap();
-    let generation = worker.generation;
+    let thread = worker.thread;
     match msg.event {
       Event::Loaded { model, load_ms } => {
         let total = worker.spawned.elapsed();
         info!(
-          "engine thread {generation} loaded {} on {} in {total:.2?} (model {load_ms} ms)",
+          "engine thread {thread} loaded {} on {} in {total:.2?} (model {load_ms} ms)",
           self.config.model.display(),
           model.device,
         );
@@ -585,21 +584,12 @@ impl Supervisor {
         }
       }
 
-      Event::Result { id, result } => {
-        let WorkerState::Running { id: expected, cancelled, .. } = worker.state else {
-          warn!("engine thread {generation} sent a result for {id} while not running");
-          return;
-        };
-
-        if id != expected {
-          warn!("engine thread {generation} sent a result for {id}, expected {expected}");
-          return;
-        }
-
+      Event::Result(result) => {
+        let cancelled = matches!(worker.state, WorkerState::Running { cancelled: true, .. });
         worker.state = WorkerState::Idle;
         self.idle_since = Instant::now();
         if cancelled {
-          debug!(id, "the result of a cancelled job dropped");
+          debug!("the result of a cancelled job dropped");
           return;
         }
 
@@ -620,11 +610,11 @@ impl Supervisor {
         let state = worker.state;
         self.worker = None; // the thread has dropped its model and ended
         if let WorkerState::Running { cancelled: true, .. } = state {
-          warn!("engine thread {generation} ended in a cancelled run: {error}");
+          warn!("engine thread {thread} ended in a cancelled run: {error}");
           return;
         }
 
-        warn!("engine thread {generation} ended: {error}");
+        warn!("engine thread {thread} ended: {error}");
         if self.job.is_some() {
           self.finish(Err(error));
         }
@@ -638,17 +628,17 @@ impl Supervisor {
     }
 
     let Some(worker) = &self.worker else { return };
-    let generation = worker.generation;
+    let thread = worker.thread;
     let (what, timeout) = match worker.state {
       WorkerState::Idle => {
-        info!("engine thread {generation} idle, unloading");
+        info!("engine thread {thread} idle, unloading");
         self.stop_worker();
         return;
       }
       WorkerState::Loading { .. } => ("model load", self.config.deadlines.load),
       WorkerState::Running { timeout, cancelled: true, .. } => {
         warn!(
-          "engine thread {generation}: a cancelled run took longer than {timeout:?}; it is left \
+          "engine thread {thread}: a cancelled run took longer than {timeout:?}; it is left \
            to end on its own, holding its model until then"
         );
         self.leave_stuck();
@@ -658,7 +648,7 @@ impl Supervisor {
     };
 
     warn!(
-      "engine thread {generation}: {what} took longer than {timeout:?}; it is left to end on its \
+      "engine thread {thread}: {what} took longer than {timeout:?}; it is left to end on its \
        own, holding its model until then, and a fresh thread takes the next job"
     );
     self.leave_stuck();
@@ -687,7 +677,7 @@ impl Supervisor {
       return Err(EngineError::Stuck(self.stuck.len()));
     }
 
-    let generation = THREADS.fetch_add(1, Ordering::Relaxed) + 1;
+    let thread = THREADS.fetch_add(1, Ordering::Relaxed) + 1;
     let (pieces, pieces_rx) = unbounded();
     let (ended_tx, ended) = bounded::<()>(0);
     let loader = self.config.loader.clone();
@@ -695,36 +685,36 @@ impl Supervisor {
     let msgs = self.msgs_tx.clone();
     let spawned = Instant::now();
     thread::Builder::new()
-      .name(format!("engine-{generation}"))
+      .name(format!("engine-{thread}"))
       .spawn(move || {
         // Dropped as the thread ends, after the model.
         let _ended = ended_tx;
-        serve(generation, &*loader, &path, &pieces_rx, &msgs);
+        serve(thread, &*loader, &path, &pieces_rx, &msgs);
       })
       .map_err(|e| EngineError::Spawn(e.to_string()))?;
 
-    debug!(generation, "engine thread started");
+    debug!(thread, "engine thread started");
     let state = WorkerState::Loading { deadline: spawned + self.config.deadlines.load };
-    self.worker = Some(Worker { generation, pieces, ended, spawned, model: None, state });
+    self.worker = Some(Worker { thread, pieces, ended, spawned, model: None, state });
     Ok(())
   }
 
   /// Ends the engine thread: an idle one drops its model before this returns (up to
   /// [`SHUTDOWN_GRACE`]); a busy one when its load or run returns.
   fn stop_worker(&mut self) {
-    let Some(Worker { generation, pieces, ended, state, .. }) = self.worker.take() else { return };
+    let Some(Worker { thread, pieces, ended, state, .. }) = self.worker.take() else { return };
     drop(pieces); // the end of its input
     if !matches!(state, WorkerState::Idle) {
-      debug!(generation, ?state, "engine thread left to end after its load or run");
+      debug!(thread, ?state, "engine thread left to end after its load or run");
       return;
     }
 
     let started = Instant::now();
     match ended.recv_timeout(SHUTDOWN_GRACE) {
       Err(RecvTimeoutError::Disconnected) => {
-        debug!(generation, "engine thread ended, its model dropped in {:.2?}", started.elapsed());
+        debug!(thread, "engine thread ended, its model dropped in {:.2?}", started.elapsed());
       }
-      _ => warn!("engine thread {generation} still drops its model after {SHUTDOWN_GRACE:?}"),
+      _ => warn!("engine thread {thread} still drops its model after {SHUTDOWN_GRACE:?}"),
     }
   }
 
@@ -768,7 +758,7 @@ impl Supervisor {
         Some(WorkerState::Idle) => Phase::Idle,
         Some(WorkerState::Running { .. }) => Phase::Running,
       },
-      thread: worker.map(|w| w.generation),
+      thread: worker.map(|w| w.thread),
       last_load: self.last_load,
       device: self.device.clone(),
       progress: (self.job.as_ref())
@@ -790,20 +780,20 @@ impl Supervisor {
 /// The engine thread: loads the model, runs the pieces until its input ends, drops the model. A
 /// panic in the load or a run ends it (the model dropped first) after saying so.
 fn serve(
-  generation: u64,
+  thread: u64,
   loader: &dyn Loader,
   path: &Path,
   pieces: &Receiver<Piece>,
   msgs: &Sender<WorkerMsg>,
 ) {
   let send = |event| {
-    let _ = msgs.send(WorkerMsg { generation, event });
+    let _ = msgs.send(WorkerMsg { thread, event });
   };
 
   let started = Instant::now();
   let load = || {
     let model = loader.load(path)?;
-    let loaded = Loaded { device: model.device(), max_audio_ms: model.max_audio_ms() };
+    let loaded = ModelInfo { device: model.device(), max_audio_ms: model.max_audio_ms() };
     anyhow::Ok((model, loaded))
   };
   let model = match panic::catch_unwind(AssertUnwindSafe(load)) {
@@ -815,12 +805,12 @@ fn serve(
     Err(panic) => return send(Event::LoadFailed(format!("panicked: {}", panic_message(&*panic)))),
   };
 
-  for Piece { id, language, pcm } in pieces {
+  for Piece { language, pcm } in pieces {
     let run = panic::catch_unwind(AssertUnwindSafe(|| model.transcribe(&pcm, language.as_deref())));
     let ended = match run {
       Ok(Err(e)) if gpu_failed(&e) => EngineError::Failed(format!("{e:#}")),
       Ok(result) => {
-        send(Event::Result { id, result: result.map_err(|e| format!("{e:#}")) });
+        send(Event::Result(result.map_err(|e| format!("{e:#}"))));
         continue;
       }
       Err(panic) => {
@@ -889,7 +879,7 @@ mod tests {
       let mut config =
         EngineConfig { loader: faults.wrap(models.clone()), ..EngineConfig::new(model) };
       edit(&mut config);
-      Self { dir, faults, models, engine: Engine::start(config) }
+      Self { dir, faults, models, engine: Engine::start(config).unwrap() }
     }
 
     fn model(&self) -> PathBuf {
@@ -1193,6 +1183,21 @@ mod tests {
     assert_eq!(f.models.live(), 0, "dropped by the time the status says so");
     assert_eq!(f.run().unwrap().text, "text");
     assert_eq!(f.models.loads(), 2, "loaded again");
+  }
+
+  /// A prewarm released without a job (its recording was cancelled) holds the model no longer
+  /// than the idle unload.
+  #[test]
+  fn a_released_prewarm_unloads_as_any_idle_engine() {
+    let unload = |c: &mut EngineConfig| c.unload_after = Some(Duration::ZERO);
+    let f = Fake::start("engine-release", FakeModels::new("text"), unload);
+    f.engine.prewarm();
+    f.wait("the load", |s| s.phase == Phase::Idle);
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(f.engine.status().phase, Phase::Idle, "held for its recording");
+    f.engine.release();
+    f.wait("the unload", |s| s.phase == Phase::Stopped);
+    assert_eq!(f.models.live(), 0);
   }
 
   /// A job's progress shows while its pieces run.

@@ -3,8 +3,11 @@
 //! Settings: `settings.json` in the data home ([`home`](crate::home)).
 //!
 //! - A missing file, or a missing field, is the default.
-//! - A file that does not parse is copied to `settings.json.bad` and the defaults are used, with a
-//!   warning: the next save would otherwise overwrite what the person wrote.
+//! - Each field is read on its own: one this version does not understand (a value of a newer
+//!   Wavo's, a typo) is the default, with a warning. A file that is not a JSON object is all
+//!   defaults. Either way the file is copied to `settings.json.bad` first: the next save would
+//!   otherwise overwrite what the person wrote.
+//! - Keys this version does not know are kept through a save ([`Settings::unknown`]).
 //! - Writes are atomic: a temporary file next to it, `fsync`, then `rename`.
 //! - `schema_version` says which layout a file has. Migrations go into [`Settings::load`]; a file
 //!   from a newer version loads what this version knows, with a warning.
@@ -17,6 +20,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::audio::devices::Choice;
 use crate::history::Retention;
@@ -52,6 +56,9 @@ pub struct Settings {
   pub hud_position: HudPosition,
   /// Start without the settings window: only the icon in the menu bar (the tray).
   pub start_in_tray: bool,
+  /// Keys this version does not know (a newer Wavo's), written back as they were.
+  #[serde(flatten)]
+  pub unknown: Map<String, Value>,
 }
 
 /// How the hotkey starts and stops a dictation.
@@ -93,6 +100,7 @@ impl Default for Settings {
       autostart: false,
       hud_position: HudPosition::Bottom,
       start_in_tray: false,
+      unknown: Map::new(),
     }
   }
 }
@@ -111,28 +119,46 @@ impl Settings {
       }
     };
 
-    match serde_json::from_slice::<Self>(&bytes) {
-      Ok(settings) if settings.schema_version > SCHEMA_VERSION => {
-        let warning = format!(
-          "{} is from a newer Wavo (schema {}): settings this version does not know are ignored",
-          path.display(),
-          settings.schema_version
-        );
-        (Self { schema_version: SCHEMA_VERSION, ..settings }, Some(warning))
-      }
-      Ok(settings) => (Self { schema_version: SCHEMA_VERSION, ..settings }, None),
+    let file = match serde_json::from_slice::<Map<String, Value>>(&bytes) {
+      Ok(file) => file,
       Err(e) => {
-        let bad = path.with_extension("json.bad");
-        let kept = match fs::write(&bad, &bytes) {
-          Ok(()) => format!("kept as {}", bad.display()),
-          Err(e) => format!("could not keep a copy: {e}"),
-        };
-        (
-          Self::default(),
-          Some(format!("{} is invalid ({e}); using defaults, {kept}", path.display())),
-        )
+        let kept = keep_aside(path, &bytes);
+        let warning = format!("{} is invalid ({e}); using defaults, {kept}", path.display());
+        return (Self::default(), Some(warning));
       }
+    };
+
+    let (settings, invalid) = Self::parse(file);
+    let mut warnings = Vec::new();
+    if settings.schema_version > SCHEMA_VERSION {
+      warnings.push(format!(
+        "{} is from a newer Wavo (schema {}): settings this version does not know are kept, not \
+         used",
+        path.display(),
+        settings.schema_version
+      ));
     }
+
+    if !invalid.is_empty() {
+      let kept = keep_aside(path, &bytes);
+      let keys = invalid.join(", ");
+      warnings.push(format!("{}: {keys} not understood, using defaults; {kept}", path.display()));
+    }
+
+    let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+    (Self { schema_version: SCHEMA_VERSION, ..settings }, warning)
+  }
+
+  /// The settings of a file's keys, each one on its own: a value that does not parse is left out
+  /// (its field is the default) and named in the second half.
+  fn parse(file: Map<String, Value>) -> (Self, Vec<String>) {
+    let parses = |key: &String, value: &Value| {
+      let one = Map::from_iter([(key.clone(), value.clone())]);
+      serde_json::from_value::<Self>(Value::Object(one)).is_ok()
+    };
+    let (good, invalid): (Map<_, _>, Map<_, _>) = file.into_iter().partition(|(k, v)| parses(k, v));
+    let settings = serde_json::from_value(Value::Object(good)).unwrap_or_default();
+    (settings, invalid.into_iter().map(|(key, _)| key).collect())
   }
 
   /// Writes the settings to `path` atomically, creating its directory.
@@ -173,6 +199,15 @@ impl Settings {
 
   pub fn unload_after(&self) -> Option<Duration> {
     self.unload_after_minutes.map(|m| Duration::from_secs(u64::from(m) * 60))
+  }
+}
+
+/// Copies the file that could not all be used to `settings.json.bad`; what the warning says of it.
+fn keep_aside(path: &Path, bytes: &[u8]) -> String {
+  let bad = path.with_extension("json.bad");
+  match fs::write(&bad, bytes) {
+    Ok(()) => format!("kept as {}", bad.display()),
+    Err(e) => format!("could not keep a copy: {e}"),
   }
 }
 
@@ -246,28 +281,58 @@ mod tests {
   }
 
   #[test]
-  fn missing_fields_take_defaults_and_unknown_ones_are_ignored() {
+  fn missing_fields_take_defaults_and_unknown_ones_are_kept_through_a_save() {
     let dir = TempDir::new("settings-partial");
     let path = dir.path().join(FILE);
-    fs::write(&path, r#"{"hotkey": "ctrl+option+cmd+F12", "later_feature": 1}"#).unwrap();
+    fs::write(&path, r#"{"hotkey": "ctrl+option+cmd+F12", "later_feature": {"on": true}}"#)
+      .unwrap();
     let (settings, warning) = Settings::load(&path);
     assert_eq!(warning, None);
-    assert_eq!(settings, Settings { hotkey: "ctrl+option+cmd+F12".into(), ..Settings::default() });
+    assert_eq!(settings.hotkey, "ctrl+option+cmd+F12");
+    assert_eq!(settings.unknown.get("later_feature"), Some(&serde_json::json!({"on": true})));
+    assert_eq!(
+      Settings { unknown: Map::new(), ..settings.clone() },
+      Settings { hotkey: "ctrl+option+cmd+F12".into(), ..Settings::default() }
+    );
+
+    Settings { language: "ru".into(), ..settings }.save(&path).unwrap();
+    let (saved, _) = Settings::load(&path);
+    assert_eq!(saved.language, "ru");
+    assert_eq!(saved.unknown.get("later_feature"), Some(&serde_json::json!({"on": true})));
   }
 
+  /// A value this version does not understand (a newer Wavo's) costs only its own field.
   #[test]
-  fn invalid_file_is_kept_aside_and_defaults_are_used() {
-    let dir = TempDir::new("settings-bad");
+  fn a_value_not_understood_is_the_default_and_the_rest_stays() {
+    let dir = TempDir::new("settings-bad-value");
     let path = dir.path().join(FILE);
-    let text = r#"{"activation": "sometimes"}"#;
+    let text =
+      r#"{"activation": "sometimes", "language": "ru", "hud_position": 3, "autostart": true}"#;
     fs::write(&path, text).unwrap();
 
     let (settings, warning) = Settings::load(&path);
-    assert_eq!(settings, Settings::default());
+    let expected = Settings { language: "ru".into(), autostart: true, ..Settings::default() };
+    assert_eq!(settings, expected);
 
     let warning = warning.unwrap();
-    assert!(warning.contains("invalid") && warning.contains("settings.json.bad"), "{warning}");
+    assert!(warning.contains("activation, hud_position not understood"), "{warning}");
+    assert!(warning.contains("settings.json.bad"), "{warning}");
     assert_eq!(fs::read_to_string(dir.path().join("settings.json.bad")).unwrap(), text);
+  }
+
+  #[test]
+  fn a_file_that_is_no_json_object_is_kept_aside_and_defaults_are_used() {
+    let dir = TempDir::new("settings-bad");
+    let path = dir.path().join(FILE);
+    for text in [r#"{"activation": "#, r#"["toggle"]"#] {
+      fs::write(&path, text).unwrap();
+      let (settings, warning) = Settings::load(&path);
+      assert_eq!(settings, Settings::default());
+
+      let warning = warning.unwrap();
+      assert!(warning.contains("invalid") && warning.contains("settings.json.bad"), "{warning}");
+      assert_eq!(fs::read_to_string(dir.path().join("settings.json.bad")).unwrap(), text);
+    }
   }
 
   #[test]
@@ -307,10 +372,12 @@ mod tests {
   fn newer_schema_loads_what_it_knows_with_a_warning() {
     let dir = TempDir::new("settings-newer");
     let path = dir.path().join(FILE);
-    fs::write(&path, r#"{"schema_version": 7, "language": "en"}"#).unwrap();
+    fs::write(&path, r#"{"schema_version": 7, "language": "en", "activation": "double_tap"}"#)
+      .unwrap();
     let (settings, warning) = Settings::load(&path);
     assert_eq!(settings.language, "en");
     assert_eq!(settings.schema_version, SCHEMA_VERSION);
-    assert!(warning.unwrap().contains("newer"));
+    let warning = warning.unwrap();
+    assert!(warning.contains("newer") && warning.contains("activation"), "{warning}");
   }
 }

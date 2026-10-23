@@ -16,8 +16,8 @@
 //! - Whether a model can transcribe is looked at without loading one ([`NoModel`] in the status):
 //!   at the start, when an engine starts, when a setting changes the model and when a load fails. A
 //!   loaded model whose file is gone goes with its engine at the next recording. A chosen model
-//!   whose file is gone gives way to the first one found: the choice is cleared and saved; with
-//!   none left it stays (downloading it again brings it back).
+//!   that is not on disk gives way to the first one found while it is not, a warning in the status
+//!   saying so; the choice stays (downloading it again brings it back).
 //! - The result goes to the history first, then it is pasted (`pasted` says whether it was). Speech
 //!   of which the engine made no text (a model that does not know the language) is no success: the
 //!   entry and its recording stay as `no_text`, to transcribe again with another model.
@@ -52,7 +52,7 @@ use crate::engine::supervisor::{
   Deadlines, EngineError, JobId, Phase as EnginePhase, Transcription,
 };
 use crate::engine::{Engine, EngineConfig};
-use crate::history::db::{NewEntry, Status as EntryStatus};
+use crate::history::db::{Entry, NewEntry, Status as EntryStatus};
 use crate::history::{History, Retention, now_ms};
 use crate::settings::{self, Activation, Settings};
 
@@ -304,6 +304,7 @@ impl Session {
       engine_tx,
       engine_rx,
       model_error: None,
+      model_fallback: None,
       observer,
       published: None,
     };
@@ -382,6 +383,8 @@ struct Dictation<T> {
   post_roll_mark: Option<Duration>,
   recorder: Option<Recorder>,
   device: String,
+  /// The engine started loading the model for it: that engine stays until the dictation ends.
+  prewarmed: bool,
   job: Option<JobId>,
   duration_ms: i64,
   warnings: Vec<String>,
@@ -398,7 +401,8 @@ struct Controller<O: TextOutput> {
   tx: Sender<Msg>,
   dictation: Option<Dictation<O::Target>>,
   last: Option<Last>,
-  retranscribing: Vec<(i64, JobId)>,
+  /// The entries being transcribed again, as they were before.
+  retranscribing: Vec<Entry>,
   error: Option<String>,
   warnings: Vec<String>,
   /// The engine no longer fits (the settings changed, its file is gone, an unload): replace it
@@ -410,6 +414,8 @@ struct Controller<O: TextOutput> {
   /// Why no model on disk can transcribe, as last looked ([`Controller::check_model`]); a load
   /// that fails is the engine's ([`Status::no_model`]).
   model_error: Option<NoModel>,
+  /// The warning of a chosen model not on disk while another one transcribes, as last looked.
+  model_fallback: Option<String>,
   observer: Option<Observer>,
   /// The status last sent to the observer (without the recording's time and level), the settings
   /// and the history's changes then.
@@ -637,12 +643,14 @@ impl<O: TextOutput> Controller<O> {
     self.retire_stale_engine();
   }
 
-  /// Stops an engine that no longer fits, unless it is working for a dictation or an entry; the
-  /// next use starts one with the current settings. The old one shuts down on its own thread: its
-  /// engine thread gets up to a few seconds to drop the model.
+  /// Stops an engine that no longer fits, unless it is working for a dictation (from its prewarm
+  /// on: it would load the model twice) or an entry; the next use starts one with the current
+  /// settings. The old one shuts down on its own thread: its engine thread gets up to a few seconds
+  /// to drop the model.
   fn retire_stale_engine(&mut self) {
-    let busy =
-      self.dictation.as_ref().is_some_and(|d| d.job.is_some()) || !self.retranscribing.is_empty();
+    let prewarmed = self.dictation.as_ref().is_some_and(|d| d.prewarmed) && self.engine_can_serve();
+    let dictation = prewarmed || self.dictation.as_ref().is_some_and(|d| d.job.is_some());
+    let busy = dictation || !self.retranscribing.is_empty();
     if !self.engine_stale || busy {
       return;
     }
@@ -658,22 +666,26 @@ impl<O: TextOutput> Controller<O> {
   }
 
   /// Whether a model can transcribe now, without loading one: the files on disk against the
-  /// choice. A chosen model that is gone gives way to the first one found, the choice cleared and
-  /// saved; with none found the choice stays (downloading it again brings it back) and is the
-  /// reason. The model's path, or why there is none (kept for the status).
+  /// choice. A chosen model that is not on disk gives way to the first one found, with a warning
+  /// (kept for the status); the choice stays. With none found the choice is the reason. The
+  /// model's path, or why there is none (kept for the status).
   fn check_model(&mut self) -> Result<PathBuf, NoModel> {
     let hub = &self.config.hub;
     let query = self.settings.model.clone();
     let error = match (model::find(query.as_deref(), hub), query) {
       (Ok(path), _) => {
-        self.model_error = None;
+        (self.model_error, self.model_fallback) = (None, None);
         return Ok(path);
       }
       (Err(_), Some(query)) => match model::find(None, hub) {
         Ok(path) => {
-          warn!("model {} is not on disk: {} takes its place", label(&query), file_stem(&path));
-          self.apply_settings(Settings { model: None, ..self.settings.clone() });
-          self.model_error = None;
+          let fallback = label(&path.to_string_lossy());
+          let note = format!("{} is not on disk: {fallback} transcribes instead", label(&query));
+          if self.model_fallback.as_ref() != Some(&note) {
+            warn!("model {note}");
+          }
+
+          (self.model_error, self.model_fallback) = (None, Some(note));
           return Ok(path);
         }
         Err(_) => NoModel::Gone { model: label(&query) },
@@ -684,6 +696,8 @@ impl<O: TextOutput> Controller<O> {
     if self.model_error.as_ref() != Some(&error) {
       warn!("no model: {}", error.to_string());
     }
+
+    self.model_fallback = None;
 
     self.model_error = Some(error.clone());
     Err(error)
@@ -698,13 +712,34 @@ impl<O: TextOutput> Controller<O> {
     }
   }
 
+  /// Whether the engine has its model, or can still load it: not after a load that failed, nor
+  /// while it loads a file that is gone.
+  fn engine_can_serve(&self) -> bool {
+    let Some(loaded) = &self.engine else { return false };
+    let status = loaded.engine.status();
+    match status.phase {
+      EnginePhase::Idle | EnginePhase::Running => true,
+      EnginePhase::Stopped if status.load_error.is_some() => false,
+      EnginePhase::Stopped | EnginePhase::Loading => loaded.path.is_file(),
+    }
+  }
+
   /// The engine for the model in the settings, started on first use; or why there is none. One
-  /// whose file is gone goes, once it is not busy.
+  /// whose file is gone goes, once it is not busy, as does one standing in for the chosen model
+  /// once that is back.
   fn engine(&mut self) -> Result<&Loaded, NoModel> {
     if let Some(loaded) = &self.engine
       && !loaded.path.is_file()
     {
       warn!("model {}: its file is gone", loaded.name);
+      self.engine_stale = true;
+    }
+
+    // A stand-in for the chosen model, which is back (a few file lookups, of that model alone).
+    if let (Some(loaded), Some(chosen)) = (&self.engine, &self.settings.model)
+      && model::find(Some(chosen), &self.config.hub).is_ok_and(|p| p != loaded.path)
+    {
+      info!("model {}: the chosen model is back", loaded.name);
       self.engine_stale = true;
     }
 
@@ -721,7 +756,10 @@ impl<O: TextOutput> Controller<O> {
         notify: Some(self.engine_tx.clone()),
       };
 
-      self.engine = Some(Loaded { name, path, engine: Engine::start(config) });
+      // Without its thread the model cannot load: the recording waits, as for a load that fails.
+      let engine = Engine::start(config)
+        .map_err(|e| NoModel::LoadFailed { model: label(&name), error: e.to_string() })?;
+      self.engine = Some(Loaded { name, path, engine });
     }
 
     Ok(self.engine.as_ref().unwrap())
@@ -773,6 +811,7 @@ impl<O: TextOutput> Controller<O> {
       post_roll_mark: None,
       device: recorder.device().to_owned(),
       recorder: Some(recorder),
+      prewarmed: false,
       job: None,
       duration_ms: 0,
       warnings,
@@ -793,13 +832,17 @@ impl<O: TextOutput> Controller<O> {
     // the status saying why from the start.
     match self.engine() {
       Ok(loaded) => loaded.engine.prewarm(),
-      Err(e) => info!("dictation {take}: recording without a model: {}", e.to_string()),
+      Err(e) => return info!("dictation {take}: recording without a model: {}", e.to_string()),
+    }
+
+    if let Some(d) = self.dictation.as_mut().filter(|d| d.last.take == take) {
+      d.prewarmed = true;
     }
   }
 
   fn on_mic_failure(&mut self, failure: String) {
     let Some(d) = &self.dictation else { return };
-    warn!("dictation {}: the microphone stopped: {failure}", d.last.take);
+    warn!("dictation {}: the recording stopped: {failure}", d.last.take);
     let take = d.last.take;
     // In the post-roll the machine is past the recording: the recording ends here. Either way the
     // recorder goes, and with it the failures channel, which stays ready once it is closed.
@@ -1105,13 +1148,18 @@ impl<O: TextOutput> Controller<O> {
     self.complete();
   }
 
-  /// The dictation is over: it becomes the last one, and the retention runs.
+  /// The dictation is over: it becomes the last one, and the retention runs. An engine prewarmed
+  /// for it unloads as usual, also when no job came (cancelled, no speech).
   fn complete(&mut self) {
-    let Some(Dictation { mut last, duration_ms, stopped, device, warnings, .. }) =
+    let Some(Dictation { mut last, duration_ms, stopped, device, prewarmed, warnings, .. }) =
       self.dictation.take()
     else {
       return;
     };
+
+    if prewarmed && let Some(loaded) = &self.engine {
+      loaded.engine.release();
+    }
 
     last.seconds = duration_ms as f64 / 1000.0;
     let after_stop = stopped.map(|s| format!(", {:.0?} after the stop", s.elapsed()));
@@ -1161,7 +1209,7 @@ impl<O: TextOutput> Controller<O> {
     let loaded = self.engine.as_ref().expect("started above");
     let pending = loaded.engine.transcribe_background(input.pcm, language);
     info!("entry {id}: transcribing {:.1} s again with {model}", clip.seconds());
-    self.retranscribing.push((id, pending.id()));
+    self.retranscribing.push(entry);
     let tx = self.tx.clone();
     spawn_waiter(move || {
       let _ = tx.send(Msg::Retranscribed { entry: id, result: pending.wait() });
@@ -1174,7 +1222,7 @@ impl<O: TextOutput> Controller<O> {
   /// text goes with it: what the person deleted is not kept anywhere.
   fn delete(&mut self, id: i64) -> Result<()> {
     let current = self.dictation.as_ref().is_some_and(|d| d.last.entry == Some(id));
-    if current || self.retranscribing.iter().any(|(e, _)| *e == id) {
+    if current || self.retranscribing.iter().any(|e| e.id == id) {
       bail!("entry {id} is being transcribed");
     }
 
@@ -1190,30 +1238,38 @@ impl<O: TextOutput> Controller<O> {
     Ok(())
   }
 
-  fn on_retranscribed(&mut self, entry: i64, result: Result<Transcription, EngineError>) {
-    self.retranscribing.retain(|(e, _)| *e != entry);
+  /// Entry `id`'s new outcome. One that had text keeps it, with its status and model, unless new
+  /// text replaces it; a failure then is the session's error.
+  fn on_retranscribed(&mut self, id: i64, result: Result<Transcription, EngineError>) {
+    let Some(at) = self.retranscribing.iter().position(|e| e.id == id) else { return };
+    let before = self.retranscribing.remove(at);
     let (outcome, text, error) = match self.outcome(result) {
       // Nothing cancels it today; if something did, the recording would stay to try again.
       (Outcome::Cancelled, ..) => {
         (Outcome::Failed, String::new(), Some("the transcription was cancelled".into()))
       }
-      // No text now, but text from before: it stays.
-      (Outcome::NoText, ..) if self.had_text(entry) => (Outcome::Done, String::new(), None),
       outcome => outcome,
     };
 
-    info!("entry {entry}: transcribed again: {outcome:?}");
-    let status = outcome.entry_status().unwrap_or(EntryStatus::Failed);
-    let text = Some(text.trim()).filter(|t| !t.is_empty());
-    log_history(self.history.db.update_outcome(entry, status, text, error.as_deref()));
+    info!("entry {id}: transcribed again: {outcome:?}");
+    if outcome != Outcome::Done && !before.text.is_empty() {
+      if let Some(e) = &error {
+        let error = format!("entry {id} could not be transcribed again: {e}; its text stays");
+        warn!("{error}");
+        self.error = Some(error);
+      }
+
+      log_history(self.history.db.update_as_before(&before));
+    } else {
+      let status = outcome.entry_status().unwrap_or(EntryStatus::Failed);
+      let text = Some(text.trim()).filter(|t| !t.is_empty());
+      log_history(self.history.db.update_outcome(id, status, text, error.as_deref()));
+    }
+
     self.retire_stale_engine();
     if outcome == Outcome::NoModel {
       let _ = self.check_model();
     }
-  }
-
-  fn had_text(&self, entry: i64) -> bool {
-    self.history.db.get_entry(entry).ok().flatten().is_some_and(|e| !e.text.is_empty())
   }
 
   fn cleanup(&mut self) {
@@ -1224,6 +1280,7 @@ impl<O: TextOutput> Controller<O> {
     let d = self.dictation.as_ref();
     let engine = self.engine.as_ref().map(|l| (l, l.engine.status()));
     let mut warnings = self.warnings.clone();
+    warnings.extend(self.model_fallback.clone());
     if let Some(d) = d {
       warnings.extend(d.warnings.iter().map(|w| format!("dictation {}: {w}", d.last.take)));
     }
@@ -1253,7 +1310,7 @@ impl<O: TextOutput> Controller<O> {
         device: s.device,
       }),
       last: self.last.clone(),
-      retranscribing: self.retranscribing.iter().map(|(e, _)| *e).collect(),
+      retranscribing: self.retranscribing.iter().map(|e| e.id).collect(),
       error: self.error.clone(),
       warnings,
       no_model: self.model_error.clone().or(load_failed),

@@ -11,8 +11,8 @@
 //!   file first, so a crash in between leaves a row whose file is already gone, never a file
 //!   nothing points to. Entries still being transcribed are never removed.
 //! - [`History::recover`] runs on start: entries left `transcribing` by a crash become `failed`,
-//!   and recordings without an entry (the app died while recording) get a `failed` entry, so their
-//!   audio can be transcribed again and the retention covers them.
+//!   recordings without an entry (the app died while recording) get a `failed` entry, so their
+//!   audio can be transcribed again and the retention covers them, and empty day folders go.
 
 pub mod db;
 pub mod recordings;
@@ -25,7 +25,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use self::db::{Db, Entry, NewEntry, Status, Victim};
+use self::db::{Db, Entry, EntryAudio, NewEntry, Status};
 use self::recordings::Recordings;
 
 pub const DB_FILE: &str = "history.db";
@@ -115,16 +115,16 @@ impl History {
   /// whose file cannot be deleted stays, to be tried again next time. Returns how many entries
   /// were removed.
   pub fn cleanup(&self, retention: Retention, now: i64) -> Result<usize> {
-    let victims: Vec<Victim> = match (retention, retention.max_age()) {
+    let doomed: Vec<EntryAudio> = match (retention, retention.max_age()) {
       (Retention::Unlimited, _) => return Ok(0),
       (Retention::Count(n), _) => self.db.get_beyond_newest(n.max(1))?,
       (_, Some(age)) => self.db.get_created_before(now - age.as_millis() as i64)?,
       (_, None) => unreachable!("every other retention has an age"),
     };
 
-    let mut removed = Vec::with_capacity(victims.len());
+    let mut removed = Vec::with_capacity(doomed.len());
     let mut emptied = HashSet::new();
-    for (id, audio) in victims {
+    for (id, audio) in doomed {
       match audio.as_deref().and_then(|name| self.recordings.remove(name)) {
         Some(Err(e)) => {
           warn!("could not {e:#}; its history entry stays");
@@ -155,6 +155,9 @@ impl History {
   /// time is unknown.
   pub fn recover(&self, now: i64) -> Result<Recovered> {
     let failed = self.db.mark_interrupted()?;
+    if let Err(e) = self.recordings.prune_all() {
+      warn!("{e:#}");
+    }
 
     let known = self.db.get_audio_paths()?;
     let mut orphans: Vec<String> =

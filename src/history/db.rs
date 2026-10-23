@@ -156,9 +156,9 @@ fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<Entry> {
 }
 
 /// An entry's id and its recording.
-pub type Victim = (i64, Option<String>);
+pub type EntryAudio = (i64, Option<String>);
 
-fn victim_from_row(row: &Row<'_>) -> rusqlite::Result<Victim> {
+fn entry_audio_from_row(row: &Row<'_>) -> rusqlite::Result<EntryAudio> {
   Ok((row.get("id")?, row.get("audio_path")?))
 }
 
@@ -204,25 +204,25 @@ impl Db {
 
   /// The entries after the newest `keep`; entries still being transcribed are neither returned
   /// nor counted.
-  pub fn get_beyond_newest(&self, keep: u32) -> Result<Vec<Victim>> {
+  pub fn get_beyond_newest(&self, keep: u32) -> Result<Vec<EntryAudio>> {
     let qs = "
     SELECT id, audio_path FROM entries WHERE status != 'transcribing'
     ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?1;
     ";
 
     let mut stmt = self.db.prepare_cached(qs)?;
-    let items = stmt.query_map([keep], victim_from_row)?.collect::<rusqlite::Result<_>>()?;
+    let items = stmt.query_map([keep], entry_audio_from_row)?.collect::<rusqlite::Result<_>>()?;
     Ok(items)
   }
 
   /// The entries recorded before `at` (Unix ms), but those still being transcribed.
-  pub fn get_created_before(&self, at: i64) -> Result<Vec<Victim>> {
+  pub fn get_created_before(&self, at: i64) -> Result<Vec<EntryAudio>> {
     let qs = "
     SELECT id, audio_path FROM entries WHERE status != 'transcribing' AND created_at < ?1;
     ";
 
     let mut stmt = self.db.prepare_cached(qs)?;
-    let items = stmt.query_map([at], victim_from_row)?.collect::<rusqlite::Result<_>>()?;
+    let items = stmt.query_map([at], entry_audio_from_row)?.collect::<rusqlite::Result<_>>()?;
     Ok(items)
   }
 
@@ -248,7 +248,7 @@ impl Db {
     Ok(self.db.last_insert_rowid())
   }
 
-  // MARK: Updaters
+  // MARK: Updater
 
   /// Sets the outcome; `text` `None` keeps the text the entry has.
   pub fn update_outcome(
@@ -275,6 +275,16 @@ impl Db {
     Ok(())
   }
 
+  /// Puts back `entry`'s status, model, language and error, as they were before
+  /// [`mark_retranscribing`](Self::mark_retranscribing): the text it kept is the one they go with.
+  pub fn update_as_before(&self, entry: &Entry) -> Result<()> {
+    let qs = "UPDATE entries SET status = ?2, model = ?3, language = ?4, error = ?5 WHERE id = ?1;";
+    let status = entry.status.as_str();
+    let args = params![entry.id, status, entry.model, entry.language, entry.error];
+    self.db.prepare_cached(qs)?.execute(args)?;
+    Ok(())
+  }
+
   /// Whether the text was pasted, and if a paste was refused, why.
   pub fn mark_pasted(&self, id: i64, pasted: bool, not_pasted: Option<&str>) -> Result<()> {
     let qs = "UPDATE entries SET pasted = ?2, not_pasted = ?3 WHERE id = ?1;";
@@ -287,8 +297,6 @@ impl Db {
     let qs = "UPDATE entries SET status = 'failed', error = ?1 WHERE status = 'transcribing';";
     Ok(self.db.execute(qs, [STOPPED_TRANSCRIBING])?)
   }
-
-  // MARK: Deleters
 
   pub fn delete_entry(&self, id: i64) -> Result<()> {
     let qs = "DELETE FROM entries WHERE id = ?1;";
@@ -424,6 +432,13 @@ mod tests {
     );
     assert!(entry.pasted && entry.not_pasted.is_none());
     assert_eq!(db.get_entry(id + 1).unwrap(), None);
+
+    // Or the entry is put back as it was before.
+    db.update_outcome(id, Status::Done, None, None).unwrap();
+    let before = db.get_entry(id).unwrap().unwrap();
+    db.mark_retranscribing(id, "parakeet", None).unwrap();
+    db.update_as_before(&before).unwrap();
+    assert_eq!(db.get_entry(id).unwrap().unwrap(), before);
   }
 
   #[test]

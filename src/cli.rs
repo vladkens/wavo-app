@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use crossbeam_channel::bounded;
+use crossbeam_channel::{RecvTimeoutError, bounded};
 use tracing::{info, warn};
 use wavo::hub::Hub;
 
@@ -50,7 +50,7 @@ pub fn transcribe(wav: &Path, model: Option<&str>, language: Option<&str>) -> Re
     return Ok(());
   };
 
-  let engine = Engine::start(EngineConfig::new(model));
+  let engine = Engine::start(EngineConfig::new(model))?;
   let seconds = input.seconds();
   let result = engine.transcribe(input.pcm, language).wait()?;
   let status = engine.status();
@@ -84,9 +84,14 @@ pub fn record(length: Duration, device: Option<&str>, out: &Path) -> Result<()> 
   let started = Instant::now();
   let mut meter = 0.0f32;
   while let Some(left) = length.checked_sub(started.elapsed()) {
-    if let Ok(failure) = recorder.failures().recv_timeout(left.min(Duration::from_millis(33))) {
-      warn!("the microphone stopped early: {failure}");
-      break;
+    match recorder.failures().recv_timeout(left.min(Duration::from_millis(33))) {
+      Ok(failure) => {
+        warn!("the recording stopped early: {failure}");
+        break;
+      }
+      // The audio thread is gone without a word (it panicked): `stop` says so.
+      Err(RecvTimeoutError::Disconnected) => break,
+      Err(RecvTimeoutError::Timeout) => {}
     }
 
     meter = meter.max(recorder.level());
