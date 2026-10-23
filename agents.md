@@ -13,6 +13,7 @@ The dictation app (`wavo-app`, `publish = false`): hold a hotkey, speak, release
 
 - Never open a window on the person's Mac without their permission: no GUI runs, no GUI tests. Headless paths and unit tests are free to run.
 - Tests and manual runs never touch the person's data: a temp `WAVO_HOME` every time.
+- Never record from the real microphone (macOS would ask the person for permission): `WAVO_FAKE_MIC=<wav>` plays a file instead; a test that needs a device is `#[ignore]`.
 - No generated or binary files in git: screenshots and speech fixtures are made into `target/`; the app icon is the one binary.
 - Start every `.rs` file with `// Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app`.
 - `make check` (nightly fmt, clippy with `-D warnings`) and `make test` pass before a commit.
