@@ -49,25 +49,37 @@ fn read_arch(r: &mut (impl Read + Seek)) -> io::Result<Option<String>> {
   Ok(None)
 }
 
+/// Skips a value of type `kind`, forward only: a malformed length fails instead of seeking back.
 fn skip_value(r: &mut (impl Read + Seek), kind: u32) -> io::Result<()> {
   match kind {
     TYPE_STRING => {
       let len = read_u64(r)?;
-      r.seek_relative(len as i64)
+      skip(r, Some(len))
     }
     TYPE_ARRAY => {
       let item = read_u32(r)?;
       let count = read_u64(r)?;
-      match scalar_size(item) {
-        Some(size) => r.seek_relative((count * size) as i64),
-        None => (0..count).try_for_each(|_| skip_value(r, item)),
+      match (item, scalar_size(item)) {
+        (_, Some(size)) => skip(r, count.checked_mul(size)),
+        (TYPE_STRING, None) => (0..count).try_for_each(|_| skip_value(r, item)),
+        _ => Err(invalid(format!("GGUF array of type {item}"))),
       }
     }
     _ => match scalar_size(kind) {
-      Some(size) => r.seek_relative(size as i64),
-      None => Err(io::Error::new(ErrorKind::InvalidData, format!("unknown GGUF type {kind}"))),
+      Some(size) => skip(r, Some(size)),
+      None => Err(invalid(format!("unknown GGUF type {kind}"))),
     },
   }
+}
+
+/// Skips `bytes` forward; `None` (an overflow) or more than a seek takes is malformed.
+fn skip(r: &mut impl Seek, bytes: Option<u64>) -> io::Result<()> {
+  let bytes = bytes.and_then(|n| i64::try_from(n).ok());
+  r.seek_relative(bytes.ok_or_else(|| invalid("GGUF value too long".into()))?)
+}
+
+fn invalid(message: String) -> io::Error {
+  io::Error::new(ErrorKind::InvalidData, message)
 }
 
 fn scalar_size(kind: u32) -> Option<u64> {
@@ -95,12 +107,12 @@ fn read_u64(r: &mut impl Read) -> io::Result<u64> {
 fn read_string(r: &mut impl Read) -> io::Result<String> {
   let len = read_u64(r)?;
   if len > 1 << 16 {
-    return Err(io::Error::new(ErrorKind::InvalidData, format!("GGUF string of {len} bytes")));
+    return Err(invalid(format!("GGUF string of {len} bytes")));
   }
 
   let mut buf = vec![0; len as usize];
   r.read_exact(&mut buf)?;
-  String::from_utf8(buf).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))
+  String::from_utf8(buf).map_err(|e| invalid(e.to_string()))
 }
 
 /// A minimal GGUF v3 header: the given key/value pairs, no tensors.
@@ -191,5 +203,26 @@ mod tests {
     ]);
     header.truncate(header.len() - 3);
     assert_eq!(arch_of(header).as_deref(), Some("whisper"), "nothing past the architecture");
+  }
+
+  #[test]
+  fn malformed_lengths_are_errors_not_seeks_back() {
+    let arch = ("general.architecture", TYPE_STRING, &gguf_string("whisper")[..]);
+    let back = (u64::MAX - 7).to_le_bytes();
+    let mut strings = TYPE_STRING.to_le_bytes().to_vec();
+    strings.extend_from_slice(&u64::MAX.to_le_bytes());
+    strings.extend_from_slice(&back);
+    let mut u32s = 4u32.to_le_bytes().to_vec();
+    u32s.extend_from_slice(&u64::MAX.to_le_bytes());
+    let mut nested = TYPE_ARRAY.to_le_bytes().to_vec();
+    nested.extend_from_slice(&1u64.to_le_bytes());
+    // A string 8 bytes "long" from the end of u64; an endless string array whose first item
+    // would seek back onto its own length; u32s past u64's bytes; an array of arrays.
+    let cases: [(u32, &[u8]); 4] =
+      [(TYPE_STRING, &back), (TYPE_ARRAY, &strings), (TYPE_ARRAY, &u32s), (TYPE_ARRAY, &nested)];
+    for (kind, value) in cases {
+      let header = test_header(&[("x", kind, value), arch]);
+      assert!(read_arch(&mut Cursor::new(header)).is_err(), "{value:?}");
+    }
   }
 }
