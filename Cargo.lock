@@ -1684,7 +1684,7 @@ dependencies = [
 [[package]]
 name = "wavo"
 version = "0.3.1"
-source = "git+https://github.com/vladkens/wavo?rev=52a7282#52a7282a4ae4007b8f17f7623b27eaf99e5b5e29"
+source = "git+https://github.com/vladkens/wavo?branch=main#f985154d80136f1932bd754266ca0e1ee7b72355"
 dependencies = [
  "bytemuck",
  "half",
