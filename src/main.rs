@@ -4,6 +4,8 @@
 
 mod audio;
 mod cli;
+#[cfg_attr(not(test), expect(dead_code, reason = "the session (step 6) is its first user"))]
+mod history;
 #[expect(dead_code, reason = "the session (step 6) is its first user")]
 mod paths;
 #[cfg(test)]
