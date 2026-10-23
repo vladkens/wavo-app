@@ -724,6 +724,45 @@ fn unload_ends_the_engine_now_or_after_its_run() {
   });
 }
 
+/// `ctl unload` or a settings change while the model loads for a recording: the engine stays for
+/// that recording (no second load) and goes once it is done.
+#[test]
+fn an_unload_during_a_recording_waits_for_its_dictation() {
+  let s = with_a_model("session-unload-recording", Deadlines::default());
+  for (take, unload) in [(1, true), (2, false)] {
+    s.faults.load(Fault::Hang);
+    s.send(Request::Start);
+    let loading = s.update_where("loading", |u| u.status.engine.phase == EnginePhase::Loading);
+    poll("a held load", Duration::from_secs(10), || (s.faults.hanging() == 1).then_some(()));
+    if unload {
+      assert_eq!(s.send(Request::Unload).result["state"], "unloading");
+    } else {
+      s.handle.edit_settings(move |s| s.unload_after_minutes = Some(take));
+      s.update_where("the new setting", |u| u.settings.unload_after_minutes == Some(take));
+    }
+
+    assert_eq!(s.status().engine.thread, loading.status.engine.thread, "still loading for it");
+    s.faults.release();
+    wait_for_level(&s, 0.3);
+    s.send(Request::Stop);
+    let done = s.finished(take as u64);
+    assert_eq!(done.last.unwrap().text, "hello there");
+    assert_eq!(s.status().engine.thread, None, "gone after its dictation");
+  }
+}
+
+/// A recording cancelled while its model loads (or one without speech): the engine prewarmed for
+/// it unloads as the settings say, not minutes later.
+#[test]
+fn a_prewarm_without_a_job_unloads_after_the_settings_time() {
+  let settings = Settings { unload_after_minutes: Some(0), ..Settings::default() };
+  let s = InProcess::start("session-prewarm-unload", &settings, Some(&tone(10.0)), ONE_MODEL);
+  s.send(Request::Start);
+  s.update_where("loaded", |u| u.status.engine.phase == EnginePhase::Idle);
+  assert_eq!(s.send(Request::Cancel).result["state"], "idle");
+  s.update_where("the unload", |u| u.status.engine.phase == EnginePhase::Stopped);
+}
+
 /// The idle unload of the settings: the engine goes after its dictation.
 #[test]
 fn an_idle_engine_unloads_after_the_settings_time() {

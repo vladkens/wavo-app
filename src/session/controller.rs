@@ -382,6 +382,8 @@ struct Dictation<T> {
   post_roll_mark: Option<Duration>,
   recorder: Option<Recorder>,
   device: String,
+  /// The engine started loading the model for it: that engine stays until the dictation ends.
+  prewarmed: bool,
   job: Option<JobId>,
   duration_ms: i64,
   warnings: Vec<String>,
@@ -637,12 +639,13 @@ impl<O: TextOutput> Controller<O> {
     self.retire_stale_engine();
   }
 
-  /// Stops an engine that no longer fits, unless it is working for a dictation or an entry; the
-  /// next use starts one with the current settings. The old one shuts down on its own thread: its
-  /// engine thread gets up to a few seconds to drop the model.
+  /// Stops an engine that no longer fits, unless it is working for a dictation (from its prewarm
+  /// on: it would load the model twice) or an entry; the next use starts one with the current
+  /// settings. The old one shuts down on its own thread: its engine thread gets up to a few seconds
+  /// to drop the model.
   fn retire_stale_engine(&mut self) {
-    let busy =
-      self.dictation.as_ref().is_some_and(|d| d.job.is_some()) || !self.retranscribing.is_empty();
+    let dictation = self.dictation.as_ref().is_some_and(|d| d.prewarmed || d.job.is_some());
+    let busy = dictation || !self.retranscribing.is_empty();
     if !self.engine_stale || busy {
       return;
     }
@@ -776,6 +779,7 @@ impl<O: TextOutput> Controller<O> {
       post_roll_mark: None,
       device: recorder.device().to_owned(),
       recorder: Some(recorder),
+      prewarmed: false,
       job: None,
       duration_ms: 0,
       warnings,
@@ -796,7 +800,11 @@ impl<O: TextOutput> Controller<O> {
     // the status saying why from the start.
     match self.engine() {
       Ok(loaded) => loaded.engine.prewarm(),
-      Err(e) => info!("dictation {take}: recording without a model: {}", e.to_string()),
+      Err(e) => return info!("dictation {take}: recording without a model: {}", e.to_string()),
+    }
+
+    if let Some(d) = self.dictation.as_mut().filter(|d| d.last.take == take) {
+      d.prewarmed = true;
     }
   }
 
@@ -1108,13 +1116,18 @@ impl<O: TextOutput> Controller<O> {
     self.complete();
   }
 
-  /// The dictation is over: it becomes the last one, and the retention runs.
+  /// The dictation is over: it becomes the last one, and the retention runs. An engine prewarmed
+  /// for it unloads as usual, also when no job came (cancelled, no speech).
   fn complete(&mut self) {
-    let Some(Dictation { mut last, duration_ms, stopped, device, warnings, .. }) =
+    let Some(Dictation { mut last, duration_ms, stopped, device, prewarmed, warnings, .. }) =
       self.dictation.take()
     else {
       return;
     };
+
+    if let (true, Some(loaded)) = (prewarmed, &self.engine) {
+      loaded.engine.release();
+    }
 
     last.seconds = duration_ms as f64 / 1000.0;
     let after_stop = stopped.map(|s| format!(", {:.0?} after the stop", s.elapsed()));

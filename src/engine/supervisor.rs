@@ -18,7 +18,8 @@
 //!   answers is dropped. While [`MAX_STUCK`] of them are still stuck, jobs fail with
 //!   [`EngineError::Stuck`] instead of loading yet another model.
 //! - An idle engine thread is stopped after [`EngineConfig::unload_after`]: it drops the model and
-//!   ends. A prewarmed one waits for the job it was started for up to [`PREWARM_HOLD`].
+//!   ends. A prewarmed one waits for the job it was started for up to [`PREWARM_HOLD`], unless
+//!   [`Engine::release`] says none comes.
 //!
 //! A job is cut by [`wavo::split`] into pieces of up to the model's
 //! [`max_audio_ms`](SpeechModel::max_audio_ms), one run per piece; [`Status::progress`] counts the
@@ -203,6 +204,7 @@ impl Pending {
 
 enum Request {
   Prewarm,
+  Release,
   Transcribe(Job),
   Cancel(JobId),
   Quit,
@@ -226,6 +228,12 @@ impl Engine {
   /// Starts the engine thread and loads the model ahead of the first job (as a recording starts).
   pub fn prewarm(&self) {
     let _ = self.requests.send(Request::Prewarm);
+  }
+
+  /// The recording a [`prewarm`](Self::prewarm) was for ended without a job (cancelled, no
+  /// speech): the idle unload counts as usual again.
+  pub fn release(&self) {
+    let _ = self.requests.send(Request::Release);
   }
 
   /// Queues a transcription of 16 kHz mono audio, the engine's input (see
@@ -432,6 +440,7 @@ impl Supervisor {
           warn!("prewarm: {e}");
         }
       }
+      Request::Release => self.hold_until = None,
       Request::Transcribe(job) if job.background => self.queue.push_back(job),
       Request::Transcribe(job) => {
         // The recording a prewarm was for has arrived; after it the usual unload timer applies.
@@ -1174,6 +1183,21 @@ mod tests {
     assert_eq!(f.models.live(), 0, "dropped by the time the status says so");
     assert_eq!(f.run().unwrap().text, "text");
     assert_eq!(f.models.loads(), 2, "loaded again");
+  }
+
+  /// A prewarm released without a job (its recording was cancelled) holds the model no longer
+  /// than the idle unload.
+  #[test]
+  fn a_released_prewarm_unloads_as_any_idle_engine() {
+    let unload = |c: &mut EngineConfig| c.unload_after = Some(Duration::ZERO);
+    let f = Fake::start("engine-release", FakeModels::new("text"), unload);
+    f.engine.prewarm();
+    f.wait("the load", |s| s.phase == Phase::Idle);
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(f.engine.status().phase, Phase::Idle, "held for its recording");
+    f.engine.release();
+    f.wait("the unload", |s| s.phase == Phase::Stopped);
+    assert_eq!(f.models.live(), 0);
   }
 
   /// A job's progress shows while its pieces run.
