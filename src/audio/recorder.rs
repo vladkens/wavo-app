@@ -5,8 +5,9 @@
 //! there is sound at all, VAD scores and the WAV file. The microphone is open only between
 //! [`Recorder::start`] and [`Recorder::stop`].
 //!
-//! A device error mid-recording (unplugged, sample rate changed) ends capture but not the
-//! recording: everything up to the error is kept and the error becomes a warning.
+//! A device error mid-recording (unplugged, sample rate changed), or one of the processing thread,
+//! ends capture but not the recording: everything up to the error is kept and the error becomes a
+//! warning.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,7 +56,7 @@ pub struct Recorder {
   rate: u32,
   stop: Arc<AtomicBool>,
   failures: Receiver<String>,
-  thread: Option<JoinHandle<Result<Processed>>>,
+  thread: Option<JoinHandle<Processed>>,
 }
 
 /// What the processing thread tells of the recording as it goes, readable from any thread.
@@ -198,8 +199,8 @@ impl Recorder {
     self.meter().level()
   }
 
-  /// Gets one message if the device fails mid-recording; capture has stopped by then, and
-  /// [`stop`](Recorder::stop) returns what was recorded.
+  /// Gets one message if the device or the processing fails mid-recording; capture has stopped by
+  /// then, and [`stop`](Recorder::stop) returns what was recorded.
   pub fn failures(&self) -> &Receiver<String> {
     &self.failures
   }
@@ -274,7 +275,7 @@ impl Recorder {
     self.stop.store(true, Ordering::Release);
     let thread = self.thread.take().ok_or_else(|| anyhow!("the recording has already stopped"))?;
     thread.thread().unpark(); // no need to wait out the poll interval
-    thread.join().map_err(|_| anyhow!("the audio thread panicked"))?
+    thread.join().map_err(|_| anyhow!("the audio thread panicked"))
   }
 }
 
@@ -294,18 +295,15 @@ fn process(
   stop: &AtomicBool,
   signals: &Signals,
   failures: &Sender<String>,
-) -> Result<Processed> {
+) -> Processed {
   loop {
     // Read the flags before draining, so samples delivered before a stop are all processed.
     let stopping = stop.load(Ordering::Acquire);
-    let failed = signals.failed();
-    let n = ring.slots();
-    if n > 0 {
-      let chunk = ring.read_chunk(n)?;
-      let (a, b) = chunk.as_slices();
-      processor.push(a)?;
-      processor.push(b)?;
-      chunk.commit_all();
+    let mut failed = signals.failed();
+    if let Err(e) = drain(&mut ring, &mut processor) {
+      // As a device error: the recording ends with what was processed up to here.
+      signals.fail(format!("the audio could not be processed: {e:#}"));
+      failed = true;
     }
 
     if failed {
@@ -318,6 +316,21 @@ fn process(
 
     thread::park_timeout(POLL);
   }
+}
+
+/// Hands what the ring holds to the processor.
+fn drain(ring: &mut Consumer<f32>, processor: &mut Processor) -> Result<()> {
+  let n = ring.slots();
+  if n == 0 {
+    return Ok(());
+  }
+
+  let chunk = ring.read_chunk(n)?;
+  let (a, b) = chunk.as_slices();
+  processor.push(a)?;
+  processor.push(b)?;
+  chunk.commit_all();
+  Ok(())
 }
 
 struct Processed {
@@ -345,6 +358,9 @@ struct Processor {
   level: Level,
   live: Arc<Live>,
   warnings: Vec<String>,
+  /// [`push`](Self::push) fails once audio has come through: a resampler error.
+  #[cfg(test)]
+  fail: bool,
 }
 
 impl Processor {
@@ -362,12 +378,19 @@ impl Processor {
       level: Level::default(),
       live: Arc::default(),
       warnings: Vec::new(),
+      #[cfg(test)]
+      fail: false,
     })
   }
 
   fn push(&mut self, mut interleaved: &[f32]) -> Result<()> {
     if interleaved.is_empty() {
       return Ok(());
+    }
+
+    #[cfg(test)]
+    if self.fail && !self.pcm.is_empty() {
+      anyhow::bail!("injected");
     }
 
     self.mono.clear();
@@ -423,9 +446,14 @@ impl Processor {
     self.pcm.extend_from_slice(&self.out);
   }
 
-  fn finish(mut self) -> Result<Processed> {
+  /// The recording, also after an error of [`push`](Self::push): the resampler's tail is lost
+  /// then, with a warning.
+  fn finish(mut self) -> Processed {
     self.out.clear();
-    self.resampler.finish(&mut self.out)?;
+    if let Err(e) = self.resampler.finish(&mut self.out) {
+      self.warnings.push(format!("the end of the recording could not be processed: {e:#}"));
+    }
+
     self.emit();
     let saved = match self.wav.take().map(WavSink::finalize) {
       Some(Ok(())) => true,
@@ -438,7 +466,7 @@ impl Processor {
 
     let dead = self.pcm.len() >= DEAD_SILENCE && self.level.zeros == self.pcm.len();
     let clip = Clip { scores: self.vad.finish(), pcm: self.pcm };
-    Ok(Processed { clip, wav: self.wav_path, saved, warnings: self.warnings, dead })
+    Processed { clip, wav: self.wav_path, saved, warnings: self.warnings, dead }
   }
 }
 
@@ -473,7 +501,7 @@ mod tests {
     let level = p.level.rms;
     assert!((level - 0.5 / 2f32.sqrt()).abs() < 0.01, "level {level}");
 
-    let processed = p.finish().unwrap();
+    let processed = p.finish();
     assert!(processed.warnings.is_empty(), "{:?}", processed.warnings);
     assert!(processed.saved && !processed.dead);
     let pcm = &processed.clip.pcm;
@@ -493,7 +521,7 @@ mod tests {
     input[2_001] = f32::INFINITY;
     input[3_000] = f32::NEG_INFINITY;
     p.push(&input).unwrap();
-    let processed = p.finish().unwrap();
+    let processed = p.finish();
     assert!(processed.clip.pcm.len().abs_diff(8_000) <= 1, "{}", processed.clip.pcm.len());
     assert!(processed.clip.pcm.iter().all(|s| s.is_finite()));
   }
@@ -506,7 +534,7 @@ mod tests {
     p.push(&[0.0; 96_000]).unwrap();
     assert_eq!(p.live.quiet.load(Ordering::Relaxed) as usize, QUIET_MAX, "counted up to a second");
     assert!(p.live.silent.load(Ordering::Relaxed), "said while recording");
-    assert!(p.finish().unwrap().dead);
+    assert!(p.finish().dead);
   }
 
   #[test]
@@ -543,7 +571,7 @@ mod tests {
     let mut p = Processor::new(1, SAMPLE_RATE, sink).unwrap();
     p.wav = None; // as after a write error
     p.push(&[0.5; 1_000]).unwrap();
-    let processed = p.finish().unwrap();
+    let processed = p.finish();
     assert!(!processed.saved);
     assert_eq!(processed.clip.pcm.len(), 1_000, "kept in memory");
   }
@@ -654,6 +682,37 @@ mod tests {
     assert!(rec.warnings.iter().any(|w| w.contains("microphone stopped")), "{:?}", rec.warnings);
     let wav = WavReader::open(&rec.wav).unwrap();
     assert_eq!(wav.len() as usize, pcm.len());
+  }
+
+  /// An error of the processing ends the recording as a device error does: it is said, and the
+  /// audio up to it is kept.
+  #[test]
+  fn a_processing_error_ends_the_recording_and_keeps_the_audio() {
+    let dir = TempDir::new("rec-process-error");
+    let sink = WavSink::create(&dir.path().join("e.wav")).unwrap();
+    let mut p = Processor::new(1, SAMPLE_RATE, sink).unwrap();
+    p.fail = true;
+    let (mut producer, ring) = rtrb::RingBuffer::new(SAMPLE_RATE as usize);
+    let signals = Signals::default();
+    let (stop, (failures_tx, failures)) = (AtomicBool::new(false), bounded(1));
+    signals.push(&mut producer, &[0.5; 1_000], 1);
+    thread::scope(|s| {
+      let processing = s.spawn(|| process(ring, p, &stop, &signals, &failures_tx));
+      let deadline = Instant::now() + Duration::from_secs(10);
+      while producer.slots() < SAMPLE_RATE as usize {
+        assert!(Instant::now() < deadline, "the first audio not processed");
+        thread::sleep(Duration::from_millis(2));
+      }
+
+      signals.push(&mut producer, &[0.5; 1_000], 1);
+      let message = failures.recv_timeout(Duration::from_secs(10)).unwrap();
+      assert_eq!(message, "the audio could not be processed: injected");
+      let processed = processing.join().unwrap();
+      assert_eq!(processed.clip.pcm.len(), 1_000, "what came before the error");
+      assert!(processed.saved);
+    });
+
+    assert!(signals.failed());
   }
 
   #[test]
