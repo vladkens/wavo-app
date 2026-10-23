@@ -275,6 +275,16 @@ impl Db {
     Ok(())
   }
 
+  /// Puts back `entry`'s status, model, language and error, as they were before
+  /// [`mark_retranscribing`](Self::mark_retranscribing): the text it kept is the one they go with.
+  pub fn update_entry(&self, entry: &Entry) -> Result<()> {
+    let qs = "UPDATE entries SET status = ?2, model = ?3, language = ?4, error = ?5 WHERE id = ?1;";
+    let status = entry.status.as_str();
+    let args = params![entry.id, status, entry.model, entry.language, entry.error];
+    self.db.prepare_cached(qs)?.execute(args)?;
+    Ok(())
+  }
+
   /// Whether the text was pasted, and if a paste was refused, why.
   pub fn mark_pasted(&self, id: i64, pasted: bool, not_pasted: Option<&str>) -> Result<()> {
     let qs = "UPDATE entries SET pasted = ?2, not_pasted = ?3 WHERE id = ?1;";
@@ -424,6 +434,13 @@ mod tests {
     );
     assert!(entry.pasted && entry.not_pasted.is_none());
     assert_eq!(db.get_entry(id + 1).unwrap(), None);
+
+    // Or the entry is put back as it was before.
+    db.update_outcome(id, Status::Done, None, None).unwrap();
+    let before = db.get_entry(id).unwrap().unwrap();
+    db.mark_retranscribing(id, "parakeet", None).unwrap();
+    db.update_entry(&before).unwrap();
+    assert_eq!(db.get_entry(id).unwrap().unwrap(), before);
   }
 
   #[test]

@@ -52,7 +52,7 @@ use crate::engine::supervisor::{
   Deadlines, EngineError, JobId, Phase as EnginePhase, Transcription,
 };
 use crate::engine::{Engine, EngineConfig};
-use crate::history::db::{NewEntry, Status as EntryStatus};
+use crate::history::db::{Entry, NewEntry, Status as EntryStatus};
 use crate::history::{History, Retention, now_ms};
 use crate::settings::{self, Activation, Settings};
 
@@ -401,7 +401,8 @@ struct Controller<O: TextOutput> {
   tx: Sender<Msg>,
   dictation: Option<Dictation<O::Target>>,
   last: Option<Last>,
-  retranscribing: Vec<(i64, JobId)>,
+  /// The entries being transcribed again, as they were before.
+  retranscribing: Vec<Entry>,
   error: Option<String>,
   warnings: Vec<String>,
   /// The engine no longer fits (the settings changed, its file is gone, an unload): replace it
@@ -1195,7 +1196,7 @@ impl<O: TextOutput> Controller<O> {
     let loaded = self.engine.as_ref().expect("started above");
     let pending = loaded.engine.transcribe_background(input.pcm, language);
     info!("entry {id}: transcribing {:.1} s again with {model}", clip.seconds());
-    self.retranscribing.push((id, pending.id()));
+    self.retranscribing.push(entry);
     let tx = self.tx.clone();
     spawn_waiter(move || {
       let _ = tx.send(Msg::Retranscribed { entry: id, result: pending.wait() });
@@ -1208,7 +1209,7 @@ impl<O: TextOutput> Controller<O> {
   /// text goes with it: what the person deleted is not kept anywhere.
   fn delete(&mut self, id: i64) -> Result<()> {
     let current = self.dictation.as_ref().is_some_and(|d| d.last.entry == Some(id));
-    if current || self.retranscribing.iter().any(|(e, _)| *e == id) {
+    if current || self.retranscribing.iter().any(|e| e.id == id) {
       bail!("entry {id} is being transcribed");
     }
 
@@ -1224,30 +1225,38 @@ impl<O: TextOutput> Controller<O> {
     Ok(())
   }
 
-  fn on_retranscribed(&mut self, entry: i64, result: Result<Transcription, EngineError>) {
-    self.retranscribing.retain(|(e, _)| *e != entry);
+  /// Entry `id`'s new outcome. One that had text keeps it, with its status and model, unless new
+  /// text replaces it; a failure then is the session's error.
+  fn on_retranscribed(&mut self, id: i64, result: Result<Transcription, EngineError>) {
+    let Some(at) = self.retranscribing.iter().position(|e| e.id == id) else { return };
+    let before = self.retranscribing.remove(at);
     let (outcome, text, error) = match self.outcome(result) {
       // Nothing cancels it today; if something did, the recording would stay to try again.
       (Outcome::Cancelled, ..) => {
         (Outcome::Failed, String::new(), Some("the transcription was cancelled".into()))
       }
-      // No text now, but text from before: it stays.
-      (Outcome::NoText, ..) if self.had_text(entry) => (Outcome::Done, String::new(), None),
       outcome => outcome,
     };
 
-    info!("entry {entry}: transcribed again: {outcome:?}");
-    let status = outcome.entry_status().unwrap_or(EntryStatus::Failed);
-    let text = Some(text.trim()).filter(|t| !t.is_empty());
-    log_history(self.history.db.update_outcome(entry, status, text, error.as_deref()));
+    info!("entry {id}: transcribed again: {outcome:?}");
+    if outcome != Outcome::Done && !before.text.is_empty() {
+      if let Some(e) = &error {
+        let error = format!("entry {id} could not be transcribed again: {e}; its text stays");
+        warn!("{error}");
+        self.error = Some(error);
+      }
+
+      log_history(self.history.db.update_entry(&before));
+    } else {
+      let status = outcome.entry_status().unwrap_or(EntryStatus::Failed);
+      let text = Some(text.trim()).filter(|t| !t.is_empty());
+      log_history(self.history.db.update_outcome(id, status, text, error.as_deref()));
+    }
+
     self.retire_stale_engine();
     if outcome == Outcome::NoModel {
       let _ = self.check_model();
     }
-  }
-
-  fn had_text(&self, entry: i64) -> bool {
-    self.history.db.get_entry(entry).ok().flatten().is_some_and(|e| !e.text.is_empty())
   }
 
   fn cleanup(&mut self) {
@@ -1288,7 +1297,7 @@ impl<O: TextOutput> Controller<O> {
         device: s.device,
       }),
       last: self.last.clone(),
-      retranscribing: self.retranscribing.iter().map(|(e, _)| *e).collect(),
+      retranscribing: self.retranscribing.iter().map(|e| e.id).collect(),
       error: self.error.clone(),
       warnings,
       no_model: self.model_error.clone().or(load_failed),

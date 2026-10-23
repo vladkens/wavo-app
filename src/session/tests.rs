@@ -869,6 +869,23 @@ fn retranscribe_without_speech_and_unknown_entries() {
   assert!(s.send(Request::Retranscribe { id: kept }).error.unwrap().contains("gone"));
 }
 
+/// Transcribing an entry with text again fails: it keeps its text, status and model, and the
+/// status says what went wrong.
+#[test]
+fn a_failed_retranscription_keeps_the_text() {
+  let s = with_a_model("session-again-fails", Deadlines::default());
+  let id = add_entry(s.home.path(), 1_000, EntryStatus::Done, "текст", &tone(1.0));
+  s.faults.run(Fault::Panic);
+  let entry = retranscribed(&s, id);
+  assert_eq!((entry.status, entry.text.as_str()), (EntryStatus::Done, "текст"));
+  assert_eq!((entry.model, entry.error), (None, None));
+  let error = s.status().error.unwrap_or_default();
+  assert!(
+    error.starts_with(&format!("entry {id} could not")) && error.contains("crashed"),
+    "{error}"
+  );
+}
+
 #[test]
 fn delete_takes_the_entry_and_its_recording_and_moves_the_history() {
   let s = InProcess::start("session-delete", &Settings::default(), Some(&silence(0.1)), NO_MODELS);
