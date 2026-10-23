@@ -36,6 +36,15 @@ impl<D> Found<D> {
   fn is_id(&self, wanted: &Choice) -> bool {
     wanted.id.is_some() && self.id == wanted.id
   }
+
+  /// The same device: by ID when both have one (two microphones of a model share a name), else by
+  /// name.
+  fn is(&self, other: &Found<D>) -> bool {
+    match (&self.id, &other.id) {
+      (Some(a), Some(b)) => a == b,
+      _ => self.name == other.name,
+    }
+  }
 }
 
 /// The devices a recorder may open: cpal's in the app, fakes in tests.
@@ -86,21 +95,23 @@ pub fn open<I: Inputs, T>(
         Ok(value) => return Ok(Opened { name: found.name, value, warning: None }),
         Err(e) => {
           warning = Some(format!("could not open the microphone {:?}: {e:#}", wanted.name));
-          tried = Some(found.name);
+          tried = Some(found);
         }
       },
       None => warning = Some(format!("the microphone {:?} is not connected", wanted.name)),
     }
   }
 
-  let Found { name, device, .. } = default.ok_or_else(|| match &warning {
+  let default = default.ok_or_else(|| match &warning {
     Some(w) => anyhow!("{w}, and there is no default microphone"),
     None => anyhow!("no microphone found"),
   })?;
-  if tried.as_deref() == Some(name.as_str()) {
+  if tried.is_some_and(|tried| tried.is(&default)) {
     // The default is the device that just failed to open: no second attempt.
     return Err(anyhow!(warning.unwrap_or_default()));
   }
+
+  let Found { name, device, .. } = default;
 
   let value = open(&name, &device).map_err(|e| match &warning {
     Some(w) => anyhow!("{w}, and the default microphone {name:?} failed too: {e:#}"),
@@ -189,7 +200,7 @@ mod tests {
 
   use super::*;
 
-  /// Devices as `(id, name)`; `broken` names fail to open.
+  /// Devices as `(id, name)`; `broken` IDs fail to open.
   struct Fake {
     devices: Vec<(&'static str, &'static str)>,
     default: Option<(&'static str, &'static str)>,
@@ -218,7 +229,7 @@ mod tests {
     fn open(&self, wanted: Option<&Choice>) -> Result<Opened<Device>> {
       open(self, wanted, |name, &device| {
         assert_eq!(name, device.1);
-        if self.broken.contains(&device.1) {
+        if self.broken.contains(&device.0) {
           bail!("device busy");
         }
 
@@ -289,11 +300,17 @@ mod tests {
 
   #[test]
   fn device_that_fails_to_open_falls_back_too() {
-    let fake = Fake { devices: vec![BUILT_IN, RODE], broken: vec![RODE.1], ..laptop() };
+    let fake = Fake { devices: vec![BUILT_IN, RODE], broken: vec![RODE.0], ..laptop() };
     let opened = fake.open(Some(&choice(RODE))).unwrap();
     assert_eq!(opened.value, BUILT_IN);
     let warning = opened.warning.unwrap();
     assert!(warning.contains("device busy") && warning.contains(BUILT_IN.1), "{warning}");
+
+    // The default is the twin of the broken one: same name, another device.
+    let twins = Fake { devices: vec![RODE, RODE_2], default: Some(RODE), broken: vec![RODE_2.0] };
+    let opened = twins.open(Some(&choice(RODE_2))).unwrap();
+    assert_eq!(opened.value, RODE);
+    assert!(opened.warning.unwrap().contains("device busy"));
   }
 
   #[test]
@@ -303,7 +320,7 @@ mod tests {
     let err = none.open(Some(&choice(RODE))).unwrap_err().to_string();
     assert!(err.contains("not connected") && err.contains("no default"), "{err}");
 
-    let broken_default = Fake { broken: vec![BUILT_IN.1], ..laptop() };
+    let broken_default = Fake { broken: vec![BUILT_IN.0], ..laptop() };
     let err = broken_default.open(Some(&choice(RODE))).unwrap_err().to_string();
     assert!(err.contains("failed too"), "{err}");
 

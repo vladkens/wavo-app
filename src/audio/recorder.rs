@@ -52,6 +52,8 @@ pub struct Recording {
   /// The whole recording, 16 kHz mono, with its VAD scores.
   pub clip: Clip,
   pub wav: PathBuf,
+  /// The WAV file holds the whole recording: no write error.
+  pub saved: bool,
   pub device: String,
   /// Device fallback, a device error that ended capture, lost samples, a WAV write error, no
   /// sound at all.
@@ -160,6 +162,7 @@ impl Recorder {
     Ok(Recording {
       clip: processed.clip,
       wav: processed.wav,
+      saved: processed.saved,
       device: std::mem::take(&mut self.device),
       warnings,
       open_latency: self.open_latency(),
@@ -220,6 +223,7 @@ fn process(
 struct Processed {
   clip: Clip,
   wav: PathBuf,
+  saved: bool,
   warnings: Vec<String>,
   /// Only exact zeros came, at least [`DEAD_SILENCE`] of them.
   dead: bool,
@@ -323,15 +327,18 @@ impl Processor {
     self.out.clear();
     self.resampler.finish(&mut self.out)?;
     self.emit();
-    if let Some(wav) = self.wav.take()
-      && let Err(e) = wav.finalize()
-    {
-      self.warnings.push(format!("the recording could not be saved: {e:#}"));
-    }
+    let saved = match self.wav.take().map(WavSink::finalize) {
+      Some(Ok(())) => true,
+      Some(Err(e)) => {
+        self.warnings.push(format!("the recording could not be saved: {e:#}"));
+        false
+      }
+      None => false, // a write error, already a warning
+    };
 
     let dead = self.pcm.len() >= DEAD_SILENCE && self.pcm.iter().all(|&s| s == 0.0);
     let clip = Clip { scores: self.vad.finish(), pcm: self.pcm };
-    Ok(Processed { clip, wav: self.wav_path, warnings: self.warnings, dead })
+    Ok(Processed { clip, wav: self.wav_path, saved, warnings: self.warnings, dead })
   }
 }
 
@@ -368,7 +375,7 @@ mod tests {
 
     let processed = p.finish().unwrap();
     assert!(processed.warnings.is_empty(), "{:?}", processed.warnings);
-    assert!(!processed.dead);
+    assert!(processed.saved && !processed.dead);
     let pcm = &processed.clip.pcm;
     assert!(pcm.len().abs_diff(16_000) <= 1, "{} samples", pcm.len());
     assert_eq!(processed.clip.scores.len(), pcm.len().div_ceil(FRAME));
@@ -383,6 +390,18 @@ mod tests {
     let mut p = Processor::new(1, 48_000, sink).unwrap();
     p.push(&[0.0; 96_000]).unwrap();
     assert!(p.finish().unwrap().dead);
+  }
+
+  #[test]
+  fn a_recording_without_its_file_is_not_saved() {
+    let dir = TempDir::new("proc-unsaved");
+    let sink = WavSink::create(&dir.path().join("u.wav")).unwrap();
+    let mut p = Processor::new(1, SAMPLE_RATE, sink).unwrap();
+    p.wav = None; // as after a write error
+    p.push(&[0.5; 1_000]).unwrap();
+    let processed = p.finish().unwrap();
+    assert!(!processed.saved);
+    assert_eq!(processed.clip.pcm.len(), 1_000, "kept in memory");
   }
 
   /// 44.1 kHz stereo, as a microphone might deliver it.
@@ -442,6 +461,7 @@ mod tests {
 
     let rec = recorder.stop().unwrap();
     assert!(rec.warnings.is_empty(), "{:?}", rec.warnings);
+    assert!(rec.saved);
     assert!(rec.clip.pcm.iter().any(|s| s.abs() > 0.4));
     let wav = WavReader::open(&rec.wav).unwrap();
     assert_eq!(wav.len() as usize, rec.clip.pcm.len());

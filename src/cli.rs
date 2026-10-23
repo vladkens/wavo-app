@@ -15,11 +15,7 @@ use crate::audio::{SAMPLE_RATE, vad};
 
 /// `wavo-app record`: `seconds` of the microphone (or `WAVO_FAKE_MIC`) into `out`, then a summary
 /// on stderr. A device error ends the recording early; what was recorded is kept.
-pub fn record(seconds: f64, device: Option<&str>, out: &Path) -> Result<()> {
-  if !(seconds.is_finite() && seconds > 0.0) {
-    bail!("--seconds must be a positive number");
-  }
-
+pub fn record(length: Duration, device: Option<&str>, out: &Path) -> Result<()> {
   let source = Source::from_env(device.map(Choice::id_or_name));
   let recorder = Recorder::start(&source, out)?;
   let fallback = recorder.warning().map(str::to_owned);
@@ -27,12 +23,12 @@ pub fn record(seconds: f64, device: Option<&str>, out: &Path) -> Result<()> {
     warn!("{w}");
   }
 
-  info!("recording {seconds} s from {:?} into {}", recorder.device(), out.display());
+  info!("recording {length:.1?} from {:?} into {}", recorder.device(), out.display());
 
   // Samples the level meter at its own rate (~30 Hz) until the time is up or the device fails.
-  let deadline = Instant::now() + Duration::from_secs_f64(seconds);
+  let started = Instant::now();
   let mut meter = 0.0f32;
-  while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+  while let Some(left) = length.checked_sub(started.elapsed()) {
     if let Ok(failure) = recorder.failures().recv_timeout(left.min(Duration::from_millis(33))) {
       warn!("the microphone stopped early: {failure}");
       break;
@@ -64,7 +60,19 @@ pub fn record(seconds: f64, device: Option<&str>, out: &Path) -> Result<()> {
     voiced as f64 * vad::FRAME as f64 / SAMPLE_RATE as f64,
     rec.open_latency.map_or("-".into(), |d| format!("{d:.1?}")),
   );
+  if !rec.saved {
+    bail!("{} does not hold the whole recording", rec.wav.display());
+  }
+
   Ok(())
+}
+
+/// `--seconds`: a positive number of seconds.
+pub fn seconds(s: &str) -> Result<Duration, String> {
+  let length = s.parse::<f64>().ok().and_then(|s| Duration::try_from_secs_f64(s).ok());
+  length
+    .filter(|l| !l.is_zero())
+    .ok_or_else(|| format!("{s:?} is not a positive number of seconds"))
 }
 
 fn dbfs(level: f32) -> f32 {
@@ -91,4 +99,17 @@ pub fn devices() -> Result<()> {
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn seconds_are_positive_and_fit_a_duration() {
+    assert_eq!(seconds("1.5"), Ok(Duration::from_millis(1_500)));
+    for bad in ["0", "-1", "nan", "inf", "1e300", "ten"] {
+      assert!(seconds(bad).is_err(), "{bad}");
+    }
+  }
 }

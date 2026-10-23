@@ -8,6 +8,7 @@ mod cli;
 mod testing;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -27,8 +28,8 @@ enum Command {
   Devices,
   /// Record from the microphone (or the WAV file `WAVO_FAKE_MIC` names) into a 16 kHz mono WAV
   Record {
-    #[arg(long)]
-    seconds: f64,
+    #[arg(long, value_parser = cli::seconds)]
+    seconds: Duration,
     /// Input device ID or name (see `wavo-app devices`); a missing one falls back to the default
     #[arg(long)]
     device: Option<String>,
