@@ -50,10 +50,7 @@ pub struct Recorder {
   warning: Option<String>,
   started: Instant,
   signals: Arc<Signals>,
-  level: Arc<AtomicU32>,
-  silent: Arc<AtomicBool>,
-  quiet: Arc<AtomicU32>,
-  scored: Arc<AtomicU64>,
+  live: Arc<Live>,
   /// Of the device.
   rate: u32,
   stop: Arc<AtomicBool>,
@@ -61,32 +58,45 @@ pub struct Recorder {
   thread: Option<JoinHandle<Result<Processed>>>,
 }
 
-/// [`Recorder::level`] and whether the microphone sends any sound, readable from any thread.
-#[derive(Debug, Clone)]
-pub struct Meter {
-  level: Arc<AtomicU32>,
-  silent: Arc<AtomicBool>,
+/// What the processing thread tells of the recording as it goes, readable from any thread.
+#[derive(Debug, Default)]
+struct Live {
+  /// [`Level::rms`] as bits.
+  level: AtomicU32,
+  /// [`Level::silent`].
+  silent: AtomicBool,
+  /// [`Vad::trailing_quiet`] in frames.
+  quiet: AtomicU32,
+  /// VAD frames scored; it releases `quiet`: whoever sees the count sees the quiet that goes with
+  /// it.
+  scored: AtomicU64,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "the HUD (step 7) is its first user"))]
+/// [`Recorder::level`] and whether the microphone sends any sound, readable from any thread.
+#[derive(Debug, Clone)]
+pub struct Meter(Arc<Live>);
+
 impl Meter {
   /// RMS of the last ~33 ms, linear, 0 to 1.
   pub fn level(&self) -> f32 {
-    f32::from_bits(self.level.load(Ordering::Relaxed))
+    f32::from_bits(self.0.level.load(Ordering::Relaxed))
   }
 
-  /// The microphone has sent no sound for a while (see [`SilenceWatch`]): it may be off, muted or
-  /// the wrong one. Back to `false` as soon as sound comes.
+  /// The microphone has sent no sound for a while (see [`Level::silent`]): it may be off, muted
+  /// or the wrong one. Back to `false` as soon as sound comes.
+  #[cfg_attr(not(test), expect(dead_code, reason = "the HUD (step 7) is its first user"))]
   pub fn silent(&self) -> bool {
-    self.silent.load(Ordering::Relaxed)
+    self.0.silent.load(Ordering::Relaxed)
   }
 }
 
-/// Whether a microphone sends sound, from its 16 kHz samples as they come: exact zeros for
-/// [`LIVE_DEAD`] (digital silence), or a level under [`FAINT`] for [`LIVE_FAINT`], is silent; a
-/// window with sound ends it.
+/// The level of 16 kHz samples as they come, by [`LEVEL_WINDOW`], and whether they are sound at
+/// all: exact zeros for [`LIVE_DEAD`] (digital silence), or a level under [`FAINT`] for
+/// [`LIVE_FAINT`], is silent; a window with sound ends it.
 #[derive(Debug, Default)]
-struct SilenceWatch {
+struct Level {
+  /// RMS of the last whole window.
+  rms: f32,
   /// Exact zeros in a row.
   zeros: usize,
   /// Samples in a row in windows under [`FAINT`].
@@ -95,15 +105,15 @@ struct SilenceWatch {
   n: usize,
 }
 
-impl SilenceWatch {
+impl Level {
   fn push(&mut self, samples: &[f32]) {
     for &s in samples {
       self.zeros = if s == 0.0 { self.zeros + 1 } else { 0 };
       self.sum += f64::from(s * s);
       self.n += 1;
       if self.n == LEVEL_WINDOW {
-        let rms = (self.sum / LEVEL_WINDOW as f64).sqrt() as f32;
-        self.faint = if rms < FAINT { self.faint + LEVEL_WINDOW } else { 0 };
+        self.rms = (self.sum / LEVEL_WINDOW as f64).sqrt() as f32;
+        self.faint = if self.rms < FAINT { self.faint + LEVEL_WINDOW } else { 0 };
         (self.sum, self.n) = (0.0, 0);
       }
     }
@@ -149,8 +159,7 @@ impl Recorder {
   fn run(capture: Capture, ring: Consumer<f32>, sink: WavSink, started: Instant) -> Result<Self> {
     let signals = capture.signals.clone();
     let processor = Processor::new(capture.format.channels as usize, capture.format.rate, sink)?;
-    let (level, silent) = (processor.level.clone(), processor.silent.clone());
-    let (quiet, scored) = (processor.quiet.clone(), processor.scored.clone());
+    let live = processor.live.clone();
     let rate = capture.format.rate;
     let stop = Arc::new(AtomicBool::new(false));
     let (failures_tx, failures) = bounded(1);
@@ -166,10 +175,7 @@ impl Recorder {
       capture: Some(capture),
       started,
       signals,
-      level,
-      silent,
-      quiet,
-      scored,
+      live,
       rate,
       stop,
       failures,
@@ -189,7 +195,7 @@ impl Recorder {
 
   /// RMS of the last ~33 ms, linear, 0 to 1.
   pub fn level(&self) -> f32 {
-    f32::from_bits(self.level.load(Ordering::Relaxed))
+    self.meter().level()
   }
 
   /// Gets one message if the device fails mid-recording; capture has stopped by then, and
@@ -200,8 +206,7 @@ impl Recorder {
 
   /// How long the audio recorded so far ends without speech (at most a second).
   pub fn quiet(&self) -> Duration {
-    let frames = self.quiet.load(Ordering::Relaxed);
-    Duration::from_secs_f64(f64::from(frames) * vad::FRAME as f64 / f64::from(SAMPLE_RATE))
+    vad::duration(self.live.quiet.load(Ordering::Relaxed) as usize)
   }
 
   /// The audio the device has delivered so far.
@@ -213,8 +218,7 @@ impl Recorder {
   /// resampler's block and a VAD frame (up to ~50 ms). [`quiet`](Self::quiet) read after it is at
   /// least as recent.
   pub fn scored(&self) -> Duration {
-    let frames = self.scored.load(Ordering::Acquire);
-    Duration::from_secs_f64(frames as f64 * vad::FRAME as f64 / f64::from(SAMPLE_RATE))
+    vad::duration(self.live.scored.load(Ordering::Acquire) as usize)
   }
 
   /// The device failed: capture has ended.
@@ -224,7 +228,7 @@ impl Recorder {
 
   /// The level for another thread; it stops changing once the recording ends.
   pub fn meter(&self) -> Meter {
-    Meter { level: self.level.clone(), silent: self.silent.clone() }
+    Meter(self.live.clone())
   }
 
   fn open_latency(&self) -> Option<Duration> {
@@ -338,15 +342,8 @@ struct Processor {
   wav_path: PathBuf,
   /// `None` after a write error: recording goes on in memory.
   wav: Option<WavSink>,
-  level: Arc<AtomicU32>,
-  level_sum: f64,
-  level_n: usize,
-  silence: SilenceWatch,
-  silent: Arc<AtomicBool>,
-  /// [`Vad::trailing_quiet`] in frames.
-  quiet: Arc<AtomicU32>,
-  /// VAD frames scored.
-  scored: Arc<AtomicU64>,
+  level: Level,
+  live: Arc<Live>,
   warnings: Vec<String>,
 }
 
@@ -362,13 +359,8 @@ impl Processor {
       vad: Vad::default(),
       wav_path: wav.path().to_owned(),
       wav: Some(wav),
-      level: Arc::new(AtomicU32::new(0)),
-      level_sum: 0.0,
-      level_n: 0,
-      silence: SilenceWatch::default(),
-      silent: Arc::new(AtomicBool::new(false)),
-      quiet: Arc::new(AtomicU32::new(0)),
-      scored: Arc::new(AtomicU64::new(0)),
+      level: Level::default(),
+      live: Arc::default(),
       warnings: Vec::new(),
     })
   }
@@ -422,22 +414,12 @@ impl Processor {
       self.wav = None;
     }
 
-    for &s in &self.out {
-      self.level_sum += (s * s) as f64;
-      self.level_n += 1;
-      if self.level_n == LEVEL_WINDOW {
-        let rms = (self.level_sum / LEVEL_WINDOW as f64).sqrt() as f32;
-        self.level.store(rms.to_bits(), Ordering::Relaxed);
-        (self.level_sum, self.level_n) = (0.0, 0);
-      }
-    }
-
-    self.silence.push(&self.out);
-    self.silent.store(self.silence.silent(), Ordering::Relaxed);
+    self.level.push(&self.out);
+    self.live.level.store(self.level.rms.to_bits(), Ordering::Relaxed);
+    self.live.silent.store(self.level.silent(), Ordering::Relaxed);
     self.vad.push(&self.out);
-    // `scored` releases `quiet`: whoever sees the count sees the quiet that goes with it.
-    self.quiet.store(self.vad.trailing_quiet(QUIET_MAX) as u32, Ordering::Relaxed);
-    self.scored.store(self.vad.scored() as u64, Ordering::Release);
+    self.live.quiet.store(self.vad.trailing_quiet(QUIET_MAX) as u32, Ordering::Relaxed);
+    self.live.scored.store(self.vad.scored() as u64, Ordering::Release);
     self.pcm.extend_from_slice(&self.out);
   }
 
@@ -454,7 +436,7 @@ impl Processor {
       None => false, // a write error, already a warning
     };
 
-    let dead = self.pcm.len() >= DEAD_SILENCE && self.pcm.iter().all(|&s| s == 0.0);
+    let dead = self.pcm.len() >= DEAD_SILENCE && self.level.zeros == self.pcm.len();
     let clip = Clip { scores: self.vad.finish(), pcm: self.pcm };
     Ok(Processed { clip, wav: self.wav_path, saved, warnings: self.warnings, dead })
   }
@@ -470,7 +452,7 @@ mod tests {
   use super::*;
   use crate::audio::capture::Format;
   use crate::audio::vad::FRAME;
-  use crate::testing::TempDir;
+  use crate::testing::{TempDir, tone};
 
   fn sine(rate: u32, channels: u16, seconds: f32) -> Vec<f32> {
     let frames = (rate as f32 * seconds) as usize;
@@ -488,7 +470,7 @@ mod tests {
       p.push(chunk).unwrap(); // odd sizes split stereo frames
     }
 
-    let level = f32::from_bits(p.level.load(Ordering::Relaxed));
+    let level = p.level.rms;
     assert!((level - 0.5 / 2f32.sqrt()).abs() < 0.01, "level {level}");
 
     let processed = p.finish().unwrap();
@@ -522,20 +504,14 @@ mod tests {
     let sink = WavSink::create(&dir.path().join("z.wav")).unwrap();
     let mut p = Processor::new(1, 48_000, sink).unwrap();
     p.push(&[0.0; 96_000]).unwrap();
-    assert_eq!(p.quiet.load(Ordering::Relaxed) as usize, QUIET_MAX, "counted up to a second");
-    assert!(p.silent.load(Ordering::Relaxed), "said while recording");
+    assert_eq!(p.live.quiet.load(Ordering::Relaxed) as usize, QUIET_MAX, "counted up to a second");
+    assert!(p.live.silent.load(Ordering::Relaxed), "said while recording");
     assert!(p.finish().unwrap().dead);
-  }
-
-  /// `seconds` of a sine at amplitude `a`, 16 kHz.
-  fn tone(seconds: f64, a: f32) -> Vec<f32> {
-    let n = (seconds * f64::from(SAMPLE_RATE)) as usize;
-    (0..n).map(|i| a * (TAU * 440.0 * i as f32 / SAMPLE_RATE as f32).sin()).collect()
   }
 
   #[test]
   fn digital_silence_is_seen_within_a_second_and_sound_ends_it() {
-    let mut w = SilenceWatch::default();
+    let mut w = Level::default();
     w.push(&tone(2.0, 0.1));
     assert!(!w.silent());
     w.push(&vec![0.0; SAMPLE_RATE as usize * 9 / 10]);
@@ -548,14 +524,14 @@ mod tests {
 
   #[test]
   fn a_faint_signal_is_silent_only_after_seconds() {
-    let mut w = SilenceWatch::default();
+    let mut w = Level::default();
     // Dither under −80 dBFS: not exact zeros, no sound either.
     w.push(&tone(3.5, 5e-5));
     assert!(!w.silent(), "3.5 s: a pause, not yet");
     w.push(&tone(0.6, 5e-5));
     assert!(w.silent(), "over 4 s");
     // A quiet room (−60 dBFS) is sound.
-    let mut room = SilenceWatch::default();
+    let mut room = Level::default();
     room.push(&tone(10.0, 1.4e-3));
     assert!(!room.silent());
   }

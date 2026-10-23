@@ -95,7 +95,7 @@ pub enum Effect {
   StartRecording { take: Take },
   /// Close the microphone and transcribe the recording.
   StopRecording { take: Take },
-  /// Close the microphone; the audio is kept as a cancelled entry.
+  /// Close the microphone; nothing of the dictation is kept.
   CancelRecording { take: Take },
   /// Close the microphone and drop the recording without a word: the hotkey's press was not one.
   AbortRecording { take: Take },
@@ -182,22 +182,18 @@ impl Machine {
       (Recording { take, .. }, Input::Command(Command::Toggle | Command::Stop)) => self.stop(take),
       (_, Input::Escape | Input::Command(_)) => None,
 
-      (Recording { take, .. }, Input::RecordingFailed { take: t }) if t == take => {
+      (Recording { take, .. }, Input::RecordingFailed { take: t })
+      | (Transcribing { take }, Input::Finished { take: t })
+      | (Pasting { take }, Input::Delivered { take: t })
+        if t == take =>
+      {
         self.state = Idle;
         None
       }
       (Recording { take, .. }, Input::MicStopped { take: t }) if t == take => self.stop(take),
-      (Transcribing { take }, Input::Finished { take: t }) if t == take => {
-        self.state = Idle;
-        None
-      }
       (Transcribing { take }, Input::Transcribed { take: t }) if t == take => {
         self.state = Pasting { take };
         Some(Effect::Deliver { take })
-      }
-      (Pasting { take }, Input::Delivered { take: t }) if t == take => {
-        self.state = Idle;
-        None
       }
       // Late news of a take that is no longer current.
       (
@@ -327,6 +323,7 @@ mod tests {
       // The next press starts afresh.
       assert_eq!(d.down(5_000), Some(StartRecording { take: 2 }));
     }
+
     // A press that stopped a latched recording: what it stopped stays stopped.
     let mut d = Drive::new(Activation::Toggle);
     d.down(0);

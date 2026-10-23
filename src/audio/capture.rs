@@ -140,9 +140,9 @@ pub enum Source {
 }
 
 impl Source {
-  /// The fake microphone if [`FAKE_MIC_ENV`] is set, else the microphone `choice`.
-  pub fn from_env(choice: Option<Choice>) -> Self {
-    match fake_mic() {
+  /// The `fake` microphone ([`fake_mic`]) if there is one, else the microphone `choice`.
+  pub fn new(fake: Option<PathBuf>, choice: Option<Choice>) -> Self {
+    match fake {
       Some(path) => {
         if let Some(choice) = choice {
           info!("{FAKE_MIC_ENV} is set: recording from the file instead of {:?}", choice.name);

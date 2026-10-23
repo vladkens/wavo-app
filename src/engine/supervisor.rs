@@ -22,10 +22,10 @@
 //!
 //! A job is cut by [`wavo::split`] into pieces of up to the model's
 //! [`max_audio_ms`](SpeechModel::max_audio_ms), one run per piece; [`Status::progress`] counts the
-//! finished ones. Dictations go ahead of queued background jobs. [`Engine::cancel`] drops a
-//! queued job; a piece of it the thread is running goes on (wavo cannot stop a run midway) and its
-//! result is dropped. The next job waits for that run, which ends within its deadline, rather than
-//! loading a second model next to it.
+//! finished ones. Dictations go ahead of background jobs, a running one's next piece included.
+//! [`Engine::cancel`] drops a queued job; a piece of it the thread is running goes on (wavo cannot
+//! stop a run midway) and its result is dropped. The next job waits for that run, which ends
+//! within its deadline, rather than loading a second model next to it.
 
 use std::any::Any;
 use std::collections::VecDeque;
@@ -72,8 +72,8 @@ pub struct EngineConfig {
   pub deadlines: Deadlines,
   /// Stop an idle engine thread after this long; `None` keeps it until the [`Engine`] is dropped.
   pub unload_after: Option<Duration>,
-  /// Told when [`Engine::status`]'s phase, thread or load error changes, so the owner shows it
-  /// without polling (a prewarm that loads, or fails to, while nothing else happens).
+  /// Told when [`Engine::status`] changes, so the owner shows it without polling (a prewarm that
+  /// loads, or fails to, while nothing else happens; a long job's progress).
   pub notify: Option<Sender<()>>,
 }
 
@@ -159,7 +159,7 @@ pub enum Phase {
   Running,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Status {
   pub phase: Phase,
   /// The number of the engine thread (`engine-N`, unique in the process): a new one after a
@@ -475,6 +475,26 @@ impl Supervisor {
     self.finish(Err(EngineError::Cancelled));
   }
 
+  /// A dictation waits for the piece of a background job in progress, not for the rest of it:
+  /// between its pieces the background job goes back to the queue, ahead of the other background
+  /// ones, with the pieces it has done.
+  fn dictation_first(&mut self) {
+    let running =
+      matches!(self.worker.as_ref().map(|w| w.state), Some(WorkerState::Running { .. }));
+    if running
+      || !self.job.as_ref().is_some_and(|j| j.background)
+      || !self.queue.front().is_some_and(|j| !j.background)
+    {
+      return;
+    }
+
+    let dictation = self.queue.pop_front();
+    if let Some(background) = std::mem::replace(&mut self.job, dictation) {
+      let at = self.queue.iter().position(|j| j.background).unwrap_or(self.queue.len());
+      self.queue.insert(at, background);
+    }
+  }
+
   /// Moves the current job forward: starts an engine thread for it, or sends its next piece.
   fn pump(&mut self) {
     loop {
@@ -486,6 +506,7 @@ impl Supervisor {
         return;
       }
 
+      self.dictation_first();
       if self.worker.is_none()
         && let Err(e) = self.spawn()
       {
@@ -737,8 +758,7 @@ impl Supervisor {
     }
   }
 
-  /// Publishes the status for [`Engine::status`], and tells the owner when its phase, thread or
-  /// load error changed.
+  /// Publishes the status for [`Engine::status`], and tells the owner when it changed.
   fn share(&self) {
     let worker = self.worker.as_ref();
     let status = Status {
@@ -757,9 +777,8 @@ impl Supervisor {
       load_error: self.load_error.clone(),
     };
 
-    let key = |s: &Status| (s.phase, s.thread, s.load_error.clone());
     let mut shared = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
-    let changed = key(&shared) != key(&status);
+    let changed = *shared != status;
     *shared = status;
     drop(shared);
     if changed && let Some(notify) = &self.config.notify {
@@ -1188,6 +1207,28 @@ mod tests {
     f.faults.release();
     job.wait().unwrap();
     assert_eq!(f.engine.status().progress, None);
+  }
+
+  /// A dictation waits for the piece of a background job in progress, then goes ahead of the rest.
+  #[test]
+  fn a_dictation_goes_ahead_of_the_rest_of_a_background_job() {
+    let models = FakeModels::new("text").max_audio_ms(10_000);
+    let f = Fake::start("engine-background", models, |_| {});
+    f.faults.run(Fault::Hang);
+    let background = f.engine.transcribe_background(vec![0.0; 25 * SAMPLE_RATE as usize], None);
+    f.hanging(1);
+    let dictation = f.engine.transcribe(vec![0.0; 1000], None);
+    // Its reply says the supervisor has the dictation queued.
+    let marker = f.engine.transcribe(vec![0.0; 2000], None);
+    f.engine.cancel(marker.id());
+    assert_eq!(marker.wait().unwrap_err(), EngineError::Cancelled);
+    f.faults.release();
+    dictation.wait().unwrap();
+    let out = background.wait().unwrap();
+    assert_eq!(out.pieces.len(), 3);
+    let piece = out.pieces[0].len();
+    assert_eq!(f.models.runs()[..2], [piece, 1000], "after the piece in progress");
+    assert_eq!(f.models.runs().len(), 4);
   }
 
   #[test]

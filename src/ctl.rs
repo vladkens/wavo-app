@@ -3,11 +3,11 @@
 //! Control socket: `wavo-app ctl` and a second launch talk to the running app over a Unix socket.
 //! One request per connection: a JSON line in, a JSON line out.
 //!
-//! The path is `/tmp/wavo-<uid>-<hash of the app's home>.sock`: one socket per home, so test
-//! instances with their own `WAVO_HOME` never meet the person's app, and short whatever the home
-//! (`sun_path` holds 104 bytes on macOS, 108 on Linux). The socket is `0600`, and a socket file is
-//! only used if it is a socket of this user: `/tmp` is shared, but its sticky bit keeps others
-//! from replacing ours.
+//! The path is `/tmp/wavo-<uid>-<device>-<inode of the app's home>.sock`: one socket per home, so
+//! test instances with their own `WAVO_HOME` never meet the person's app, and short whatever the
+//! home (`sun_path` holds 104 bytes on macOS, 108 on Linux). The socket is `0600`, and a socket
+//! file is only used if it is a socket of this user: `/tmp` is shared, but its sticky bit keeps
+//! others from replacing ours.
 //!
 //! Single instance: the server holds an `flock` on `wavo.lock` in the home for its whole life (the
 //! kernel drops it when the process dies, however it dies). Whoever gets the lock owns the socket
@@ -18,7 +18,6 @@
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -29,7 +28,6 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
 /// Longest socket path macOS accepts (`sun_path` is 104 bytes with the terminating NUL).
@@ -45,24 +43,27 @@ const STARTING_WAIT: Duration = Duration::from_secs(3);
 /// The single-instance lock in the app's home.
 pub const LOCK_FILE: &str = "wavo.lock";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// A request, and `wavo-app ctl`'s subcommands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::Subcommand)]
 #[serde(tag = "cmd", rename_all = "kebab-case")]
 pub enum Request {
+  /// Start or stop dictation
   Toggle,
+  /// Start dictation
   Start,
+  /// Stop dictation and transcribe
   Stop,
+  /// Cancel recording or transcription
   Cancel,
+  /// Print the app's state as JSON
   Status,
-  /// Transcribe a history entry's recording again.
-  Retranscribe {
-    id: i64,
-  },
-  /// Delete a history entry and its recording.
-  Delete {
-    id: i64,
-  },
-  /// Free the model's memory now; the next dictation loads it again.
+  /// Transcribe a history entry's recording again
+  Retranscribe { id: i64 },
+  /// Delete a history entry and its recording
+  Delete { id: i64 },
+  /// Free the model's memory now; the next dictation loads it again
   Unload,
+  /// Quit the running app
   Quit,
 }
 
@@ -87,15 +88,25 @@ impl Reply {
   }
 }
 
-/// The socket of the app whose home is `home`.
-pub fn socket_path(home: &Path) -> PathBuf {
-  // The same home under another spelling (a symlink, `..`) is the same app.
-  let home = home.canonicalize().unwrap_or_else(|_| home.to_owned());
-  let digest = Sha256::digest(home.as_os_str().as_encoded_bytes());
-  let hash: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+impl From<anyhow::Result<Value>> for Reply {
+  fn from(result: anyhow::Result<Value>) -> Self {
+    match result {
+      Ok(result) => Self { error: None, result },
+      Err(e) => Self::error(format!("{e:#}")),
+    }
+  }
+}
+
+/// The socket of the app whose home is `home`, which must exist. The same home under another
+/// spelling (a symlink, `..`) is the same file, so the same app.
+pub fn socket_path(home: &Path) -> io::Result<PathBuf> {
+  let meta = fs::metadata(home)?;
+  Ok(PathBuf::from(format!("/tmp/wavo-{}-{:x}-{:x}.sock", uid(), meta.dev(), meta.ino())))
+}
+
+fn uid() -> u32 {
   // SAFETY: getuid has no preconditions.
-  let uid = unsafe { libc::getuid() };
-  PathBuf::from(format!("/tmp/wavo-{uid}-{hash}.sock"))
+  unsafe { libc::getuid() }
 }
 
 /// The outcome of [`claim`].
@@ -109,20 +120,16 @@ pub enum Claim {
 /// Becomes the instance of the app whose home is `home` (which must exist), unless another one is:
 /// see the module docs.
 pub fn claim(home: &Path) -> io::Result<Claim> {
-  let path = socket_path(home);
+  let path = socket_path(home)?;
   if path.as_os_str().len() > MAX_PATH {
     return Err(io::Error::other(format!("socket path too long: {}", path.display())));
   }
 
   let lock = File::options().create(true).append(true).mode(0o600).open(home.join(LOCK_FILE))?;
-  // SAFETY: flock on a descriptor this function owns.
-  if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-    let e = io::Error::last_os_error();
-    if e.kind() != ErrorKind::WouldBlock {
-      return Err(e);
-    }
-
-    return wait_for_instance(&path);
+  match lock.try_lock() {
+    Ok(()) => {}
+    Err(fs::TryLockError::WouldBlock) => return wait_for_instance(&path),
+    Err(fs::TryLockError::Error(e)) => return Err(e),
   }
 
   // The lock is ours, so whatever is at the path is a dead instance's.
@@ -165,9 +172,7 @@ fn wait_for_instance(path: &Path) -> io::Result<Claim> {
 /// A socket file is only used if it is a socket of this user.
 fn check_ours(path: &Path) -> io::Result<()> {
   let meta = fs::symlink_metadata(path)?;
-  // SAFETY: getuid has no preconditions.
-  let uid = unsafe { libc::getuid() };
-  if !meta.file_type().is_socket() || meta.uid() != uid {
+  if !meta.file_type().is_socket() || meta.uid() != uid() {
     return Err(io::Error::other(format!("{} is not a socket of this user", path.display())));
   }
 
@@ -237,9 +242,10 @@ pub struct Serving {
 impl Drop for Serving {
   fn drop(&mut self) {
     self.stop.store(true, Ordering::Release);
-    // Wakes the thread from `accept`.
-    let _ = UnixStream::connect(&self.path);
-    if let Some(thread) = self.thread.take() {
+    // Wakes the thread from `accept`. With the socket file gone (removed behind the app's back)
+    // nothing can: the thread is left blocked rather than the drop.
+    let woken = UnixStream::connect(&self.path).is_ok();
+    if let Some(thread) = self.thread.take().filter(|_| woken) {
       let _ = thread.join();
     }
 
@@ -272,8 +278,8 @@ fn serve(stream: UnixStream, handler: &impl Fn(Request) -> Reply) -> io::Result<
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
-  #[error("wavo-app is not running")]
-  NotRunning,
+  #[error("wavo-app is not running (no answer on {})", .0.display())]
+  NotRunning(PathBuf),
   #[error("control socket {}: {error}", .path.display())]
   Io { path: PathBuf, error: io::Error },
 }
@@ -282,12 +288,12 @@ pub enum ClientError {
 pub fn request(path: &Path, request: &Request) -> Result<Reply, ClientError> {
   let io = |error: io::Error| ClientError::Io { path: path.to_owned(), error };
   match fs::symlink_metadata(path) {
-    Err(e) if e.kind() == ErrorKind::NotFound => return Err(ClientError::NotRunning),
+    Err(e) if e.kind() == ErrorKind::NotFound => return Err(ClientError::NotRunning(path.into())),
     _ => check_ours(path).map_err(io)?,
   }
 
   let stream = UnixStream::connect(path).map_err(|e| match e.kind() {
-    ErrorKind::NotFound | ErrorKind::ConnectionRefused => ClientError::NotRunning,
+    ErrorKind::NotFound | ErrorKind::ConnectionRefused => ClientError::NotRunning(path.into()),
     _ => io(e),
   })?;
   stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(io)?;
@@ -321,7 +327,7 @@ mod tests {
         Reply::ok(serde_json::json!({ "state": "idle" }))
       })
       .unwrap();
-    (serving, socket_path(home), seen)
+    (serving, socket_path(home).unwrap(), seen)
   }
 
   #[test]
@@ -329,11 +335,12 @@ mod tests {
     let dir = TempDir::new("ctl-path");
     let long = dir.path().join("a".repeat(200)).join("b".repeat(200));
     fs::create_dir_all(&long).unwrap();
-    let path = socket_path(&long);
+    let path = socket_path(&long).unwrap();
     assert!(path.as_os_str().len() <= MAX_PATH, "{} bytes", path.as_os_str().len());
     assert!(path.starts_with("/tmp"), "{}", path.display());
-    assert_eq!(path, socket_path(&long.join("..").join("b".repeat(200))), "same home");
-    assert_ne!(path, socket_path(dir.path()), "another home");
+    let same = long.join("..").join("b".repeat(200));
+    assert_eq!(path, socket_path(&same).unwrap(), "same home");
+    assert_ne!(path, socket_path(dir.path()).unwrap(), "another home");
 
     // And it works: an instance on it answers.
     let (serving, socket, _) = serve_echo(&long);
@@ -376,18 +383,18 @@ mod tests {
   #[test]
   fn nobody_listening_is_not_running() {
     let dir = TempDir::new("ctl-none");
-    let path = socket_path(dir.path());
-    assert!(matches!(request(&path, &Request::Status), Err(ClientError::NotRunning)));
+    let path = socket_path(dir.path()).unwrap();
+    assert!(matches!(request(&path, &Request::Status), Err(ClientError::NotRunning(_))));
   }
 
   #[test]
   fn a_stale_socket_is_replaced() {
     let dir = TempDir::new("ctl-stale");
-    let path = socket_path(dir.path());
+    let path = socket_path(dir.path()).unwrap();
     // A dead instance: the file stays, nobody accepts, nobody holds the lock.
     drop(UnixListener::bind(&path).unwrap());
     assert!(path.exists());
-    assert!(matches!(request(&path, &Request::Status), Err(ClientError::NotRunning)));
+    assert!(matches!(request(&path, &Request::Status), Err(ClientError::NotRunning(_))));
 
     let (_serving, _, seen) = serve_echo(dir.path());
     assert!(request(&path, &Request::Status).unwrap().error.is_none());
@@ -425,7 +432,7 @@ mod tests {
   #[test]
   fn a_file_that_is_not_our_socket_is_left_alone() {
     let dir = TempDir::new("ctl-file");
-    let path = socket_path(dir.path());
+    let path = socket_path(dir.path()).unwrap();
     fs::write(&path, b"data").unwrap();
     let claimed = claim(dir.path()).err().map(|e| e.to_string());
     let asked = request(&path, &Request::Status).err().map(|e| e.to_string());

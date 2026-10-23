@@ -5,6 +5,7 @@
 //! edges trimmed, long pauses shortened).
 
 use std::ops::Range;
+use std::time::Duration;
 
 use earshot::Detector;
 
@@ -31,6 +32,11 @@ pub const KEPT_PAUSE_MS: usize = 300;
 /// Frames in `ms` milliseconds (16 ms each), rounded down.
 pub const fn frames(ms: usize) -> usize {
   ms * SAMPLE_RATE as usize / 1000 / FRAME
+}
+
+/// The length of `frames` frames.
+pub fn duration(frames: usize) -> Duration {
+  Duration::from_secs_f64((frames * FRAME) as f64 / f64::from(SAMPLE_RATE))
 }
 
 /// Streaming detector: feed 16 kHz samples in any chunk sizes, get one score per frame.
@@ -62,8 +68,6 @@ impl Vad {
     }
   }
 
-  /// All scores; a trailing partial frame is scored padded with silence, so frame `i` always
-  /// covers samples `i * FRAME ..` of the audio.
   /// Frames scored so far.
   pub fn scored(&self) -> usize {
     self.scores.len()
@@ -74,6 +78,8 @@ impl Vad {
     self.scores.iter().rev().take(max).take_while(|&&s| s < VOICED).count()
   }
 
+  /// All scores; a trailing partial frame is scored padded with silence, so frame `i` always
+  /// covers samples `i * FRAME ..` of the audio.
   pub fn finish(mut self) -> Vec<f32> {
     if !self.pending.is_empty() {
       self.pending.resize(FRAME, 0.0);

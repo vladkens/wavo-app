@@ -6,12 +6,12 @@
 //!   default), a fake microphone (a WAV file) and [`FakeOutput`]: dictation end to end; the paths
 //!   that never reach the engine (no speech, cancel, a microphone that will not open, retention,
 //!   hotkey input); no model at all, a chosen one gone from the disk, one that does not load; the
-//!   recording is always kept, and transcribed once there is a model. With [`Faults`]: a run that
-//!   panics, one that hangs past its deadline, a cancel while one is held.
+//!   recording is always kept, and transcribed once there is a model; pastes refused, kept on the
+//!   clipboard or off; a model switch. With [`Faults`]: a run that panics, one that hangs past its
+//!   deadline, a cancel while one is held.
 //! - `#[ignore]`, `make test-models`: the headless app (`wavo-app daemon`) as its own process with
 //!   a fake microphone, driven through `wavo-app ctl` and the socket, with GigaAM: a full
-//!   dictation, a cancel, no speech, a second instance; in-process with the real model: a model
-//!   switch, the fake output.
+//!   dictation, a cancel, no speech, a second instance.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -21,8 +21,6 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use crossbeam_channel::{Receiver, bounded, unbounded};
-use hound::{SampleFormat, WavSpec, WavWriter};
-use rusqlite::Connection;
 use wavo::hub::Hub;
 
 use super::controller::{Config, Handle, NoModel, Outcome, Phase, Session, Status, Update};
@@ -30,87 +28,53 @@ use super::machine::{Command, Input};
 use super::output::{FakeOutput, NotPasted};
 use crate::audio::SAMPLE_RATE;
 use crate::ctl::{self, Reply, Request};
-use crate::engine::model::{Loader, Wavo};
 use crate::engine::supervisor::{Deadlines, Phase as EnginePhase};
 use crate::history::db::{Entry, NewEntry, Status as EntryStatus};
-use crate::history::{DB_FILE, History, Retention, now_ms, recordings};
+use crate::history::{History, Retention, now_ms, recordings};
 use crate::settings::{self, Activation, Settings};
 use crate::testing::{
-  FakeModels, Fault, Faults, TempDir, app_exe, download, fixture, fixture_wav, model_ru, wer,
+  FakeModels, Fault, Faults, TempDir, app_exe, download, entry_ids, fixture, fixture_wav, model_ru,
+  poll, wav_count, wer, write_wav,
 };
 
 const MAX_WER: f64 = 0.15;
-
-fn write_wav(path: &Path, pcm: &[f32]) {
-  let spec = WavSpec {
-    channels: 1,
-    sample_rate: SAMPLE_RATE,
-    bits_per_sample: 32,
-    sample_format: SampleFormat::Float,
-  };
-  let mut w = WavWriter::create(path, spec).unwrap();
-  for &s in pcm {
-    w.write_sample(s).unwrap();
-  }
-
-  w.finalize().unwrap();
-}
 
 fn status_of(reply: Reply) -> Status {
   assert_eq!(reply.error, None);
   serde_json::from_value(reply.result).unwrap()
 }
 
-fn poll<T>(what: &str, timeout: Duration, mut f: impl FnMut() -> Option<T>) -> T {
-  let deadline = Instant::now() + timeout;
-  loop {
-    if let Some(v) = f() {
-      return v;
-    }
-
-    assert!(Instant::now() < deadline, "no {what} within {timeout:?}");
-    thread::sleep(Duration::from_millis(5));
-  }
-}
-
 /// Every entry of the history in `home`, oldest first.
 fn entries_in(home: &Path) -> Vec<Entry> {
   let history = History::open(home).unwrap();
-  let db = Connection::open(home.join(DB_FILE)).unwrap();
-  let mut stmt = db.prepare("SELECT id FROM entries ORDER BY id").unwrap();
-  let ids: Vec<i64> = stmt.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
-  ids.into_iter().map(|id| history.db.get_entry(id).unwrap().unwrap()).collect()
+  entry_ids(home).into_iter().map(|id| history.db.get_entry(id).unwrap().unwrap()).collect()
 }
 
 /// How many recordings are in the home `home`, at any depth.
 fn recordings_in(home: &Path) -> usize {
-  fn wavs(dir: &Path) -> usize {
-    let files = fs::read_dir(dir).unwrap().flatten();
-    files
-      .map(|e| match e.path() {
-        path if path.is_dir() => wavs(&path),
-        path => usize::from(path.extension().is_some_and(|x| x == "wav")),
-      })
-      .sum()
-  }
-
-  wavs(&home.join(recordings::DIR))
+  wav_count(&home.join(recordings::DIR))
 }
 
-/// What transcribes in an [`InProcess`] session, through its [`Faults`].
-enum Models {
-  /// [`FakeModels`] answering this text, with these of wavo's models in a Hugging Face cache in
-  /// the temp home ([`InProcess::hub`]).
-  Fake(&'static str, &'static [&'static str]),
-  /// wavo, and the models in this machine's Hugging Face cache.
-  Real,
+/// Polls `status` until dictation `take` has ended.
+fn finished(take: u64, status: impl Fn() -> Status) -> Status {
+  poll("end of the dictation", Duration::from_secs(60), || {
+    let s = status();
+    (s.state == Phase::Idle && s.last.as_ref().is_some_and(|l| l.take == take)).then_some(s)
+  })
 }
+
+/// What transcribes in an [`InProcess`] session, through its [`Faults`]: [`FakeModels`] answering
+/// this text, with these of wavo's models in a Hugging Face cache in the temp home
+/// ([`InProcess::hub`]).
+struct Models(&'static str, &'static [&'static str]);
 
 /// No model at all: nothing can reach an engine.
-const NO_MODELS: Models = Models::Fake("", &[]);
+const NO_MODELS: Models = Models("", &[]);
+/// One model, which makes "hello there" of anything.
+const ONE_MODEL: Models = Models("hello there", &["parakeet-v3"]);
 
-/// A session in a temp home, recording `mic`, with the fake output; what the observer gets goes to
-/// `updates`.
+/// A session in a temp home, recording `mic`, with the fake output; the observer's first update
+/// (after the start's recovery) is `first`, what it gets later goes to `updates`.
 struct InProcess {
   home: TempDir,
   /// Where the session finds its models.
@@ -119,35 +83,30 @@ struct InProcess {
   faults: Faults,
   output: FakeOutput,
   handle: Handle,
+  first: Update,
   updates: Receiver<Update>,
   _session: Session,
 }
 
 impl InProcess {
   fn start(name: &str, settings: &Settings, mic: Option<&[f32]>, models: Models) -> Self {
-    Self::start_with_deadlines(name, settings, mic, models, Deadlines::default())
+    Self::start_in(TempDir::new(name), settings, mic, models, Deadlines::default())
   }
 
-  fn start_with_deadlines(
-    name: &str,
+  /// In `home`, which may have a history already.
+  fn start_in(
+    home: TempDir,
     settings: &Settings,
     mic: Option<&[f32]>,
     models: Models,
     deadlines: Deadlines,
   ) -> Self {
-    let home = TempDir::new(name);
     let faults = Faults::new();
-    let (hub, loader): (Hub, Arc<dyn Loader>) = match models {
-      Models::Fake(text, names) => {
-        let hub = Hub::at(home.path().join("hub"));
-        for name in names {
-          download(&hub, name);
-        }
-
-        (hub, faults.wrap(FakeModels::new(text)))
-      }
-      Models::Real => (Hub::new(), faults.wrap(Wavo)),
-    };
+    let Models(text, names) = models;
+    let hub = Hub::at(home.path().join("hub"));
+    for name in names {
+      download(&hub, name);
+    }
 
     settings.save(&home.path().join(settings::FILE)).unwrap();
     let mic_path = home.path().join("mic.wav");
@@ -158,7 +117,7 @@ impl InProcess {
     let config = Config {
       home: home.path().to_owned(),
       hub: hub.clone(),
-      loader,
+      loader: faults.wrap(FakeModels::new(text)),
       deadlines,
       fake_mic: Some(mic_path),
     };
@@ -168,7 +127,9 @@ impl InProcess {
       let _ = tx.send(update);
     });
     let session = Session::start_observed(config, output.clone(), observer).unwrap();
-    Self { home, hub, faults, output, handle: session.handle(), updates, _session: session }
+    let first = updates.recv_timeout(Duration::from_secs(10)).expect("the first update");
+    let handle = session.handle();
+    Self { home, hub, faults, output, handle, first, updates, _session: session }
   }
 
   /// The next update that `matches`, skipping the others.
@@ -191,12 +152,8 @@ impl InProcess {
     self.handle.request(r)
   }
 
-  /// Waits until dictation `take` has ended.
   fn finished(&self, take: u64) -> Status {
-    poll("end of the dictation", Duration::from_secs(60), || {
-      let s = self.status();
-      (s.state == Phase::Idle && s.last.as_ref().is_some_and(|l| l.take == take)).then_some(s)
-    })
+    finished(take, || self.status())
   }
 
   fn history(&self) -> History {
@@ -222,15 +179,12 @@ fn silence(seconds: f64) -> Vec<f32> {
 
 /// A 440 Hz sine of amplitude 0.5: a level of about 0.35.
 fn tone(seconds: f64) -> Vec<f32> {
-  let n = (seconds * SAMPLE_RATE as f64) as usize;
-  (0..n)
-    .map(|i| 0.5 * (i as f32 * 440.0 * std::f32::consts::TAU / SAMPLE_RATE as f32).sin())
-    .collect()
+  crate::testing::tone(seconds, 0.5)
 }
 
 /// The tone at -60 dBFS: a quiet room, with a level above zero that shows the audio arrives.
 fn quiet(seconds: f64) -> Vec<f32> {
-  tone(seconds).into_iter().map(|s| s / 500.0).collect()
+  crate::testing::tone(seconds, 0.001)
 }
 
 /// Waits until the recording's level is above `level`: the fake microphone's audio arrives.
@@ -298,9 +252,7 @@ fn the_microphone_opens_before_the_focus_check() {
 
 #[test]
 fn a_model_still_loading_never_holds_up_the_recording() {
-  let models = Models::Fake("hello there", &["parakeet-v3"]);
-  let s = InProcess::start("session-slow-load", &Settings::default(), Some(&tone(10.0)), models);
-  s.update_where("the first", |_| true);
+  let s = InProcess::start("session-slow-load", &Settings::default(), Some(&tone(10.0)), ONE_MODEL);
   s.faults.load(Fault::Hang);
   let (go, gate) = bounded(0);
   s.output.log().target_gate = Some(gate);
@@ -385,12 +337,13 @@ fn retranscribed(s: &InProcess, id: i64) -> Entry {
   })
 }
 
-/// A dictation pasted where it started and kept with its recording; the observer sees the meter
-/// while it records.
+/// Dictations transcribed and kept with their recordings, the text pasted where each started; the
+/// observer sees the meter while it records. Then a paste refused (the focus moved: the text is
+/// only in the history), the text kept on the clipboard, and auto-paste off (copied, whatever
+/// "keep" says).
 #[test]
-fn a_dictation_is_transcribed_kept_and_pasted() {
-  let models = Models::Fake("hello there", &["parakeet-v3"]);
-  let s = InProcess::start("session-done", &Settings::default(), Some(&tone(10.0)), models);
+fn dictations_are_transcribed_kept_and_delivered() {
+  let s = InProcess::start("session-done", &Settings::default(), Some(&tone(10.0)), ONE_MODEL);
   s.send(Request::Start);
   let recording = s.update_where("recording", |u| u.status.state == Phase::Recording);
   let meter = recording.meter.expect("a meter while recording");
@@ -399,19 +352,73 @@ fn a_dictation_is_transcribed_kept_and_pasted() {
   thread::sleep(Duration::from_millis(300));
   s.send(Request::Stop);
   let status = s.finished(1);
-  let last = status.last.clone().unwrap();
-  assert_eq!((last.outcome, last.text.as_str(), last.pasted), (Outcome::Done, "hello there", true));
-  assert_eq!(s.output.log().pasted, [("hello there".to_owned(), 1, false)]);
   assert_eq!(status.engine.model.as_deref(), Some("parakeet-tdt-0.6b-v3-Q8_0"));
   assert_eq!(status.engine.device.as_deref(), Some("fake"));
-
   let entry = kept(&s, &status);
-  assert_eq!(
-    (entry.status, entry.text.as_str(), entry.pasted),
-    (EntryStatus::Done, "hello there", true)
-  );
   assert_eq!((entry.model.as_deref(), entry.language), (Some("parakeet-tdt-0.6b-v3-Q8_0"), None));
   assert!(entry.duration_ms > 0);
+
+  for take in 1..=4 {
+    match take {
+      1 => {}
+      2 => s.output.log().refuse = Some(NotPasted::FocusChanged),
+      3 => {
+        s.output.log().refuse = None;
+        s.handle.edit_settings(|s| s.keep_in_clipboard = true);
+        s.update_where("keep in clipboard", |u| u.settings.keep_in_clipboard);
+      }
+      _ => {
+        s.handle.edit_settings(|s| s.auto_paste = false);
+        s.update_where("auto-paste off", |u| !u.settings.auto_paste);
+      }
+    }
+
+    let status = if take == 1 { status.clone() } else { dictate(&s, take) };
+    let last = status.last.clone().unwrap();
+    assert_eq!((last.outcome, last.text.as_str()), (Outcome::Done, "hello there"), "{take}");
+    let entry = kept(&s, &status);
+    assert_eq!((entry.status, entry.text.as_str()), (EntryStatus::Done, "hello there"));
+    assert_eq!(last.pasted, entry.pasted);
+    let log = s.output.log();
+    let text = || last.text.clone();
+    match take {
+      1 => {
+        assert!(last.pasted);
+        assert_eq!(log.pasted, [(text(), 1, false)], "where the dictation started");
+      }
+      2 => {
+        assert!(!last.pasted);
+        assert!(last.not_pasted.as_deref().unwrap().contains("focus"), "{:?}", last.not_pasted);
+        assert_eq!(log.pasted.len(), 1);
+      }
+      3 => {
+        assert!(last.pasted);
+        assert_eq!(log.pasted[1], (text(), 3, true), "pasted, and kept");
+      }
+      _ => {
+        assert!(!last.pasted);
+        assert_eq!(log.pasted.len(), 2, "not pasted");
+        assert_eq!(log.copied, [text()]);
+        assert!(last.not_pasted.as_deref().unwrap().contains("clipboard"), "{:?}", last.not_pasted);
+      }
+    }
+  }
+}
+
+/// Another model in the settings replaces the engine once it is idle.
+#[test]
+fn another_model_replaces_the_engine_once_it_is_idle() {
+  let settings = Settings { model: Some("parakeet-v3".into()), ..Settings::default() };
+  let models = Models("hello there", &["parakeet-v3", "whisper-tiny"]);
+  let s = InProcess::start("session-model-switch", &settings, Some(&tone(10.0)), models);
+  let first = dictate(&s, 1).engine.thread.expect("an engine thread");
+  s.handle.edit_settings(|s| s.model = Some("whisper-tiny".into()));
+  s.update_where("the new model", |u| u.settings.model.as_deref() == Some("whisper-tiny"));
+  assert_eq!(s.status().engine.thread, None, "the old engine is gone");
+  let second = dictate(&s, 2);
+  assert_eq!(second.last.as_ref().unwrap().outcome, Outcome::Done);
+  assert_eq!(second.engine.model.as_deref(), Some("whisper-tiny-Q8_0"));
+  assert_ne!(second.engine.thread, Some(first));
 }
 
 /// Speech of which the model makes nothing is no success: the dictation ends as nothing
@@ -419,7 +426,7 @@ fn a_dictation_is_transcribed_kept_and_pasted() {
 /// again keeps it so while the model still makes nothing of it.
 #[test]
 fn speech_without_text_is_nothing_recognized_and_kept() {
-  let models = Models::Fake("  ", &["parakeet-v2"]);
+  let models = Models("  ", &["parakeet-v2"]);
   let s = InProcess::start("session-no-text", &Settings::default(), Some(&tone(10.0)), models);
   let status = dictate(&s, 1);
   let last = status.last.clone().unwrap();
@@ -445,9 +452,9 @@ fn speech_without_text_is_nothing_recognized_and_kept() {
 /// text.
 #[test]
 fn without_any_model_the_recording_waits_for_one() {
-  let models = Models::Fake("hello there", &[]);
+  let models = Models("hello there", &[]);
   let s = InProcess::start("session-no-model", &Settings::default(), Some(&tone(10.0)), models);
-  let first = s.update_where("the first", |_| true);
+  let first = &s.first;
   assert_eq!(first.status.no_model, Some(NoModel::NoneDownloaded));
   let status = dictate(&s, 1);
   let last = status.last.clone().unwrap();
@@ -476,7 +483,7 @@ fn without_any_model_the_recording_waits_for_one() {
 #[test]
 fn a_chosen_model_gone_behind_the_apps_back_gives_way_to_the_next() {
   let settings = Settings { model: Some("parakeet-tdt-0.6b-v3".into()), ..Settings::default() };
-  let models = Models::Fake("hello there", &["parakeet-v3", "whisper-tiny"]);
+  let models = Models("hello there", &["parakeet-v3", "whisper-tiny"]);
   let s = InProcess::start("session-model-gone", &settings, Some(&tone(10.0)), models);
   let first = dictate(&s, 1);
   assert_eq!(first.last.as_ref().unwrap().outcome, Outcome::Done);
@@ -501,9 +508,9 @@ fn a_chosen_model_gone_behind_the_apps_back_gives_way_to_the_next() {
 #[test]
 fn a_chosen_model_gone_with_none_left_keeps_the_recording_until_it_is_back() {
   let settings = Settings { model: Some("parakeet-v3".into()), ..Settings::default() };
-  let models = Models::Fake("hello there", &[]);
+  let models = Models("hello there", &[]);
   let s = InProcess::start("session-model-missing", &settings, Some(&tone(10.0)), models);
-  let first = s.update_where("the first", |_| true);
+  let first = &s.first;
   let gone = NoModel::Gone { model: "parakeet-tdt-0.6b-v3".into() };
   assert_eq!(first.status.no_model, Some(gone.clone()));
   assert_eq!(first.settings.model.as_deref(), Some("parakeet-v3"), "the choice stays");
@@ -533,7 +540,6 @@ fn a_chosen_model_gone_with_none_left_keeps_the_recording_until_it_is_back() {
 fn a_model_that_does_not_load_says_so_and_keeps_the_recording() {
   let s =
     InProcess::start("session-load-fails", &Settings::default(), Some(&tone(10.0)), NO_MODELS);
-  s.update_where("the first", |_| true);
   let broken = s.home.path().join("broken.gguf");
   fs::write(&broken, b"BROKEN").unwrap();
   let model = broken.display().to_string();
@@ -561,9 +567,8 @@ fn a_model_that_does_not_load_says_so_and_keeps_the_recording() {
 /// loading when its recording was cancelled shows loaded once it is, never stuck loading.
 #[test]
 fn the_shell_sees_a_load_end_after_the_recording_is_cancelled() {
-  let models = Models::Fake("hello there", &["parakeet-v3"]);
-  let s = InProcess::start("session-load-shown", &Settings::default(), Some(&tone(10.0)), models);
-  s.update_where("the first", |_| true);
+  let s =
+    InProcess::start("session-load-shown", &Settings::default(), Some(&tone(10.0)), ONE_MODEL);
   s.faults.load(Fault::Hang);
   s.send(Request::Start);
   s.update_where("loading", |u| u.status.engine.phase == EnginePhase::Loading);
@@ -578,8 +583,8 @@ fn the_shell_sees_a_load_end_after_the_recording_is_cancelled() {
 
 /// A session with the fake engine answering "hello there" and one model in its cache.
 fn with_a_model(name: &str, deadlines: Deadlines) -> InProcess {
-  let models = Models::Fake("hello there", &["parakeet-v3"]);
-  InProcess::start_with_deadlines(name, &Settings::default(), Some(&tone(10.0)), models, deadlines)
+  let home = TempDir::new(name);
+  InProcess::start_in(home, &Settings::default(), Some(&tone(10.0)), ONE_MODEL, deadlines)
 }
 
 /// Starts and stops a recording of the tone, then waits until the engine holds its run in
@@ -723,8 +728,7 @@ fn unload_ends_the_engine_now_or_after_its_run() {
 #[test]
 fn an_idle_engine_unloads_after_the_settings_time() {
   let settings = Settings { unload_after_minutes: Some(0), ..Settings::default() };
-  let models = Models::Fake("hello there", &["parakeet-v3"]);
-  let s = InProcess::start("session-idle-unload", &settings, Some(&tone(10.0)), models);
+  let s = InProcess::start("session-idle-unload", &settings, Some(&tone(10.0)), ONE_MODEL);
   assert_eq!(dictate(&s, 1).last.unwrap().outcome, Outcome::Done);
   s.update_where("the unload", |u| u.status.engine.phase == EnginePhase::Stopped);
 }
@@ -783,7 +787,6 @@ fn retention_runs_after_each_dictation() {
   let settings = Settings { history_retention: Retention::Count(1), ..Settings::default() };
   let s = InProcess::start("session-retention", &settings, Some(&silence(0.1)), NO_MODELS);
   // The first retention (in the background, on the empty history) is long done by then.
-  s.update_where("the first", |_| true);
   thread::sleep(Duration::from_millis(300));
   let ids: Vec<i64> = (1..=3)
     .map(|i| add_entry(s.home.path(), i * 1_000, EntryStatus::Done, "текст", &silence(0.1)))
@@ -801,8 +804,8 @@ fn retention_runs_after_each_dictation() {
 #[test]
 fn retranscribe_without_speech_and_unknown_entries() {
   let s = InProcess::start("session-again", &Settings::default(), Some(&silence(0.1)), NO_MODELS);
-  // After the start's recovery: it would take a WAV written meanwhile for an orphan.
-  s.update_where("the first", |_| true);
+  // After the start's recovery (the first update): it would take a WAV written meanwhile for an
+  // orphan.
   // A failed entry whose recording has no speech: nothing to keep, it goes.
   let failed = add_entry(s.home.path(), 1_000, EntryStatus::Failed, "", &silence(0.2));
   let reply = s.send(Request::Retranscribe { id: failed });
@@ -824,8 +827,9 @@ fn retranscribe_without_speech_and_unknown_entries() {
 #[test]
 fn delete_takes_the_entry_and_its_recording_and_moves_the_history() {
   let s = InProcess::start("session-delete", &Settings::default(), Some(&silence(0.1)), NO_MODELS);
-  // After the start's recovery: it would take a WAV written meanwhile for an orphan.
-  let first = s.update_where("the first", |_| true).history;
+  // After the start's recovery (the first update): it would take a WAV written meanwhile for an
+  // orphan.
+  let first = s.first.history;
   let id = add_entry(s.home.path(), 1_000, EntryStatus::Done, "текст", &silence(0.1));
   let wav = s.history().audio_file(&s.entries()[0]).unwrap();
 
@@ -867,7 +871,7 @@ fn start_recovers_what_a_crash_left() {
 #[test]
 fn the_observer_sees_each_change_once() {
   let s = InProcess::start("session-observer", &Settings::default(), Some(&tone(10.0)), NO_MODELS);
-  let first = s.update_where("the first", |_| true);
+  let first = &s.first;
   assert_eq!((first.status.state, &first.settings), (Phase::Idle, &Settings::default()));
   assert!(first.meter.is_none());
   // Questions change nothing: no update.
@@ -886,7 +890,6 @@ fn the_observer_sees_each_change_once() {
 fn new_settings_are_saved_and_used() {
   let s =
     InProcess::start("session-settings", &Settings::default(), Some(&silence(0.5)), NO_MODELS);
-  s.update_where("the first", |_| true);
   s.handle.edit_settings(|s| s.activation = Activation::Toggle);
   let toggle = Settings { activation: Activation::Toggle, ..Settings::default() };
   let update = s.update_where("new settings", |u| u.settings == toggle);
@@ -903,21 +906,11 @@ fn new_settings_are_saved_and_used() {
 #[test]
 fn the_first_cleanup_runs_in_the_background() {
   let home = TempDir::new("session-first-cleanup");
-  let history = History::open(home.path()).unwrap();
-  let old = now_ms() - 10 * 24 * 60 * 60 * 1000;
+  let ten_days = 10 * 24 * 60 * 60 * 1000;
   for i in 0..40 {
-    let (name, path) = history.recordings.new_file(old - i);
-    write_wav(&path, &silence(0.01));
-    let entry = NewEntry {
-      created_at: old - i,
-      audio_path: Some(&name),
-      status: Some(EntryStatus::Done),
-      ..NewEntry::default()
-    };
-    history.db.insert_entry(&entry).unwrap();
+    add_entry(home.path(), ten_days + i, EntryStatus::Done, "", &silence(0.01));
   }
 
-  drop(history);
   let settings = Settings { history_retention: Retention::Days3, ..Settings::default() };
   settings.save(&home.path().join(settings::FILE)).unwrap();
   let session = bare(&home);
@@ -963,7 +956,7 @@ impl Daemon {
       }
     });
 
-    let socket = ctl::socket_path(home.path());
+    let socket = ctl::socket_path(home.path()).unwrap();
     let daemon = Self { home, child: Some(child), socket, lines, log };
     poll("daemon", Duration::from_secs(10), || ctl::request(&daemon.socket, &Request::Status).ok());
     daemon
@@ -991,10 +984,7 @@ impl Daemon {
   }
 
   fn finished(&self, take: u64) -> Status {
-    poll("end of the dictation", Duration::from_secs(60), || {
-      let s = self.status();
-      (s.state == Phase::Idle && s.last.as_ref().is_some_and(|l| l.take == take)).then_some(s)
-    })
+    finished(take, || self.status())
   }
 
   fn entry(&self, id: i64) -> Entry {
@@ -1147,90 +1137,4 @@ fn daemon_second_instance_exits_and_quit_ends_the_first() {
   poll("socket removed", Duration::from_secs(5), || (!d.socket.exists()).then_some(()));
   let out = d.ctl(&["status"]);
   assert!(String::from_utf8_lossy(&out.stderr).contains("not running"));
-}
-
-#[test]
-#[ignore = "needs models: make test-models"]
-fn another_model_replaces_the_engine_once_it_is_idle() {
-  let model = model_ru();
-  let settings =
-    Settings { model: Some(model.to_string_lossy().into_owned()), ..Settings::default() };
-  let pcm = fixture("ru-short").pcm;
-  let s = InProcess::start("session-model-switch", &settings, Some(&pcm), Models::Real);
-  let dictate = |take| {
-    s.send(Request::Start);
-    thread::sleep(Duration::from_secs_f64(pcm.len() as f64 / SAMPLE_RATE as f64 + 0.3));
-    s.send(Request::Stop);
-    let status = s.finished(take);
-    assert_eq!(status.last.unwrap().outcome, Outcome::Done);
-    status.engine.thread.expect("an engine thread")
-  };
-  let first = dictate(1);
-  // The same file by another path: other settings, so a new engine.
-  let other = model.parent().unwrap().join(".").join(model.file_name().unwrap());
-  let other = other.to_string_lossy().into_owned();
-  let choice = other.clone();
-  s.handle.edit_settings(move |s| s.model = Some(choice));
-  s.update_where("the new model", |u| u.settings.model.as_deref() == Some(&*other));
-  assert_eq!(s.status().engine.thread, None, "the old engine is gone");
-  let second = dictate(2);
-  assert_ne!(first, second);
-}
-
-#[test]
-#[ignore = "needs models: make test-models"]
-fn full_cycle_with_the_fake_output() {
-  let reference = fixture("ru-short");
-  let settings =
-    Settings { model: Some(model_ru().to_string_lossy().into_owned()), ..Settings::default() };
-  let s = InProcess::start("session-cycle", &settings, Some(&reference.pcm), Models::Real);
-  for take in 1..=4 {
-    match take {
-      2 => s.output.log().refuse = Some(NotPasted::FocusChanged),
-      3 => {
-        s.output.log().refuse = None;
-        s.handle.edit_settings(|s| s.keep_in_clipboard = true);
-        s.update_where("keep in clipboard", |u| u.settings.keep_in_clipboard);
-      }
-      4 => {
-        s.handle.edit_settings(|s| s.auto_paste = false);
-        s.update_where("auto-paste off", |u| !u.settings.auto_paste);
-      }
-      _ => {}
-    }
-
-    assert_eq!(s.send(Request::Start).result["state"], "recording");
-    thread::sleep(Duration::from_secs_f64(reference.seconds() + 0.3));
-    assert_eq!(s.send(Request::Stop).result["state"], "transcribing");
-    let last = s.finished(take).last.unwrap();
-    assert_eq!(last.outcome, Outcome::Done, "{:?}", last.error);
-    assert!(wer(&reference.text, &last.text) <= MAX_WER, "{}", last.text);
-    let entry = s.entry(last.entry.unwrap()).unwrap();
-    assert_eq!((entry.status, entry.text.as_str()), (EntryStatus::Done, last.text.as_str()));
-    assert_eq!(last.pasted, entry.pasted);
-    let log = s.output.log();
-    match take {
-      1 => {
-        assert!(last.pasted);
-        assert_eq!(log.pasted, [(last.text.clone(), 1, false)], "where the dictation started");
-      }
-      // The focus moved: the text is only in the history.
-      2 => {
-        assert!(!last.pasted);
-        assert!(last.not_pasted.as_deref().unwrap().contains("focus"), "{:?}", last.not_pasted);
-        assert_eq!(log.pasted.len(), 1);
-      }
-      3 => {
-        assert!(last.pasted);
-        assert_eq!(log.pasted[1], (last.text.clone(), 3, true), "pasted, and kept");
-      }
-      // Auto-paste off: copied, whatever «keep» says.
-      _ => {
-        assert!(!last.pasted);
-        assert_eq!(log.pasted.len(), 2, "not pasted");
-        assert_eq!(log.copied, std::slice::from_ref(&last.text));
-        assert!(last.not_pasted.as_deref().unwrap().contains("clipboard"), "{:?}", last.not_pasted);
-      }
-    }
-  }
 }

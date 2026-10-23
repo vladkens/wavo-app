@@ -189,12 +189,10 @@ impl History {
 mod tests {
   use std::fs;
 
-  use rusqlite::Connection;
-
   use super::*;
   use crate::audio::wav::WavSink;
   use crate::history::db::STOPPED_TRANSCRIBING;
-  use crate::testing::TempDir;
+  use crate::testing::{TempDir, entry_ids, wav_count, write_wav};
 
   const DAY: i64 = 24 * 60 * 60 * 1000;
   /// A fixed "now" for the fake clock: 2026-10-09 00:00 UTC.
@@ -203,9 +201,7 @@ mod tests {
   /// An entry with a real WAV file, `age` ms before [`NOW`].
   fn add(h: &History, age: i64, status: Status) -> (i64, PathBuf) {
     let (name, path) = h.recordings.new_file(NOW - age);
-    let mut sink = WavSink::create(&path).unwrap();
-    sink.write(&[0.1; 1_600]).unwrap();
-    sink.finalize().unwrap();
+    write_wav(&path, &[0.1; 1_600]);
 
     let id = h
       .db
@@ -220,32 +216,14 @@ mod tests {
     (id, path)
   }
 
-  /// Every entry's id in the history in `home`, in order.
-  fn ids(home: &Path) -> Vec<i64> {
-    let db = Connection::open(home.join(DB_FILE)).unwrap();
-    let mut stmt = db.prepare("SELECT id FROM entries ORDER BY id").unwrap();
-    stmt.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect()
-  }
-
   /// The files and folders at the top of the recordings directory in `home`, and how many `.wav`
   /// files are there at any depth.
   fn top(home: &Path) -> (Vec<String>, usize) {
-    fn wavs(dir: &Path) -> usize {
-      fs::read_dir(dir)
-        .unwrap()
-        .flatten()
-        .map(|e| match e.path() {
-          path if path.is_dir() => wavs(&path),
-          path => usize::from(path.extension().is_some_and(|x| x == "wav")),
-        })
-        .sum()
-    }
-
     let dir = home.join(recordings::DIR);
     let mut names: Vec<String> =
       fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     names.sort();
-    (names, wavs(&dir))
+    (names, wav_count(&dir))
   }
 
   /// Speech nothing was recognized in stays, with its recording, through a restart's recovery.
@@ -329,7 +307,7 @@ mod tests {
     assert_eq!(h.cleanup(Retention::Unlimited, NOW).unwrap(), 0);
     assert_eq!(h.cleanup(Retention::Count(2), NOW).unwrap(), 3);
 
-    assert_eq!(ids(dir.path()), [entries[3].0, entries[4].0, busy]);
+    assert_eq!(entry_ids(dir.path()), [entries[3].0, entries[4].0, busy]);
     for (i, (_, path)) in entries.iter().enumerate() {
       assert_eq!(path.exists(), i >= 3, "{}", path.display());
     }
@@ -347,7 +325,7 @@ mod tests {
     let ages = [DAY, 3 * DAY - 1, 3 * DAY + 1, 13 * DAY, 15 * DAY, 89 * DAY, 91 * DAY];
     let entries: Vec<(i64, PathBuf)> = ages.iter().map(|&a| add(&h, a, Status::Done)).collect();
     let (busy, busy_wav) = add(&h, 400 * DAY, Status::Transcribing);
-    let left = || ids(dir.path()).len() - 1;
+    let left = || entry_ids(dir.path()).len() - 1;
 
     assert_eq!(h.cleanup(Retention::Months3, NOW).unwrap(), 1);
     assert_eq!(left(), 6);
@@ -355,13 +333,13 @@ mod tests {
     assert_eq!(h.cleanup(Retention::Weeks2, NOW).unwrap(), 2);
     assert_eq!(left(), 4);
     assert_eq!(h.cleanup(Retention::Days3, NOW).unwrap(), 2);
-    assert_eq!(ids(dir.path()), [entries[0].0, entries[1].0, busy]);
+    assert_eq!(entry_ids(dir.path()), [entries[0].0, entries[1].0, busy]);
     assert_eq!(top(dir.path()).1, 3);
     assert!(entries[1].1.exists() && !entries[2].1.exists() && busy_wav.exists());
 
     // Time passes: a day later the 3-day-old entry goes too.
     assert_eq!(h.cleanup(Retention::Days3, NOW + DAY).unwrap(), 1);
-    assert_eq!(ids(dir.path()), [entries[0].0, busy]);
+    assert_eq!(entry_ids(dir.path()), [entries[0].0, busy]);
   }
 
   #[test]
@@ -371,7 +349,7 @@ mod tests {
     let (_, path) = add(&h, 10 * DAY, Status::Done);
     fs::remove_file(&path).unwrap();
     assert_eq!(h.cleanup(Retention::Days3, NOW).unwrap(), 1);
-    assert!(ids(dir.path()).is_empty());
+    assert!(entry_ids(dir.path()).is_empty());
   }
 
   #[test]
@@ -396,7 +374,7 @@ mod tests {
       (Status::Failed, Some(STOPPED_TRANSCRIBING))
     );
 
-    let adopted = h.db.get_entry(*ids(dir.path()).last().unwrap()).unwrap().unwrap();
+    let adopted = h.db.get_entry(*entry_ids(dir.path()).last().unwrap()).unwrap().unwrap();
     assert_eq!(adopted.audio_path.as_deref(), Some(name.as_str()));
     assert_eq!((adopted.created_at, adopted.status), (NOW + 5, Status::Failed));
     assert_eq!(adopted.error.as_deref(), Some(STOPPED_RECORDING));
@@ -413,13 +391,13 @@ mod tests {
     assert!(h.delete(id).unwrap());
     assert!(!path.exists() && other_path.exists());
     assert_eq!(h.db.get_entry(id).unwrap(), None);
-    assert_eq!(ids(dir.path()), [other]);
+    assert_eq!(entry_ids(dir.path()), [other]);
     assert!(!h.delete(id).unwrap(), "already gone");
 
     // A recording that is gone already does not keep the entry.
     fs::remove_file(&other_path).unwrap();
     assert!(h.delete(other).unwrap());
-    assert!(ids(dir.path()).is_empty());
+    assert!(entry_ids(dir.path()).is_empty());
   }
 
   #[test]

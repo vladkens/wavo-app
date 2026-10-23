@@ -49,7 +49,7 @@ enum Command {
   /// Control the running app
   Ctl {
     #[command(subcommand)]
-    action: CtlAction,
+    request: Request,
   },
   /// List audio input devices
   Devices,
@@ -64,44 +64,6 @@ enum Command {
   },
 }
 
-#[derive(Subcommand)]
-enum CtlAction {
-  /// Start or stop dictation
-  Toggle,
-  /// Start dictation
-  Start,
-  /// Stop dictation and transcribe
-  Stop,
-  /// Cancel recording or transcription
-  Cancel,
-  /// Print the app's state as JSON
-  Status,
-  /// Transcribe a history entry's recording again
-  Retranscribe { id: i64 },
-  /// Delete a history entry and its recording
-  Delete { id: i64 },
-  /// Free the model's memory now; the next dictation loads it again
-  Unload,
-  /// Quit the running app
-  Quit,
-}
-
-impl From<CtlAction> for Request {
-  fn from(action: CtlAction) -> Self {
-    match action {
-      CtlAction::Toggle => Request::Toggle,
-      CtlAction::Start => Request::Start,
-      CtlAction::Stop => Request::Stop,
-      CtlAction::Cancel => Request::Cancel,
-      CtlAction::Status => Request::Status,
-      CtlAction::Retranscribe { id } => Request::Retranscribe { id },
-      CtlAction::Delete { id } => Request::Delete { id },
-      CtlAction::Unload => Request::Unload,
-      CtlAction::Quit => Request::Quit,
-    }
-  }
-}
-
 fn main() -> Result<()> {
   let cli = Cli::parse();
   init_tracing();
@@ -110,7 +72,7 @@ fn main() -> Result<()> {
       cli::transcribe(&wav, model.as_deref(), language.as_deref())
     }
     Command::Daemon => cli::daemon(),
-    Command::Ctl { action } => cli::ctl(action.into()),
+    Command::Ctl { request } => cli::ctl(request),
     Command::Devices => cli::devices(),
     Command::Record { seconds, device, out } => cli::record(seconds, device.as_deref(), &out),
   }

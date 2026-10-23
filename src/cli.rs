@@ -11,12 +11,12 @@ use crossbeam_channel::bounded;
 use tracing::{info, warn};
 use wavo::hub::Hub;
 
-use crate::audio::capture::Source;
+use crate::audio::capture::{self, Source};
 use crate::audio::devices::{self, Choice};
 use crate::audio::recorder::Recorder;
 use crate::audio::vad::Clip;
 use crate::audio::{SAMPLE_RATE, vad, wav};
-use crate::ctl::{self, Claim, ClientError, Reply, Request};
+use crate::ctl::{self, Claim, Reply, Request};
 use crate::engine::{Engine, EngineConfig, model};
 use crate::session::output::Stdout;
 use crate::session::{self, Session};
@@ -32,11 +32,17 @@ pub fn transcribe(wav: &Path, model: Option<&str>, language: Option<&str>) -> Re
     warn!("{w}");
   }
 
-  let model = model::find(model.or(settings.model.as_deref()), &Hub::new())?;
-  let language = match language {
-    Some(l) => Some(l).filter(|l| !l.eq_ignore_ascii_case("auto")).map(str::to_owned),
-    None => settings.engine_language(),
+  // As the app does, the settings' model gone from the disk gives way to the first one found.
+  let hub = Hub::new();
+  let model = match (model, settings.model.as_deref()) {
+    (None, Some(chosen)) => model::find(Some(chosen), &hub).or_else(|e| {
+      warn!("the settings' model: {e:#}");
+      model::find(None, &hub)
+    })?,
+    (model, _) => model::find(model, &hub)?,
   };
+
+  let language = language.map_or_else(|| settings.engine_language(), settings::engine_language);
 
   let clip = Clip::analyze(wav::read(wav)?);
   let Some(input) = clip.engine_input() else {
@@ -65,7 +71,7 @@ pub fn transcribe(wav: &Path, model: Option<&str>, language: Option<&str>) -> Re
 /// `wavo-app record`: `seconds` of the microphone (or `WAVO_FAKE_MIC`) into `out`, then a summary
 /// on stderr. A device error ends the recording early; what was recorded is kept.
 pub fn record(length: Duration, device: Option<&str>, out: &Path) -> Result<()> {
-  let source = Source::from_env(device.map(Choice::id_or_name));
+  let source = Source::new(capture::fake_mic(), device.map(Choice::id_or_name));
   let recorder = Recorder::start(&source, out)?;
   let fallback = recorder.warning().map(str::to_owned);
   if let Some(w) = &fallback {
@@ -134,7 +140,7 @@ pub fn daemon() -> Result<()> {
   let config = session::Config::from_env();
   let home = config.home.clone();
   std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
-  let socket = ctl::socket_path(&home);
+  let socket = ctl::socket_path(&home)?;
   let server = match ctl::claim(&home).with_context(|| format!("claim {}", socket.display()))? {
     Claim::Server(server) => server,
     Claim::Running => {
@@ -167,13 +173,12 @@ pub fn daemon() -> Result<()> {
 /// `wavo-app ctl`: one request to the running app. Commands print the state they leave, `status`
 /// the whole status as JSON.
 pub fn ctl(request: Request) -> Result<()> {
-  let socket = ctl::socket_path(&crate::home());
-  let reply = match ctl::request(&socket, &request) {
-    Err(ClientError::NotRunning) => {
-      bail!("wavo-app is not running (no answer on {})", socket.display())
-    }
-    reply => reply?,
+  let home = crate::home();
+  let Ok(socket) = ctl::socket_path(&home) else {
+    bail!("wavo-app is not running (no {})", home.display())
   };
+
+  let reply = ctl::request(&socket, &request)?;
 
   if let Some(error) = reply.error {
     bail!("{error}");

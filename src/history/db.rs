@@ -2,7 +2,6 @@
 
 //! `history.db`: the entries, one per dictation kept.
 
-use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
@@ -167,8 +166,6 @@ fn victim_from_row(row: &Row<'_>) -> rusqlite::Result<Victim> {
 
 pub struct Db {
   db: Connection,
-  /// Changes [`mark_changed`](Self::mark_changed) noted.
-  marked: Cell<u64>,
 }
 
 impl Db {
@@ -179,18 +176,14 @@ impl Db {
     db.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     migrate(&db).with_context(|| format!("migrate {}", path.display()))?;
-    Ok(Self { db, marked: Cell::new(0) })
+    Ok(Self { db })
   }
 
-  /// Moves on every row this connection writes, and on [`mark_changed`](Self::mark_changed): a
-  /// history window reloads when it does.
+  /// Moves on every row this connection writes, and on every commit of another one (the
+  /// background cleanup): a history window reloads when it does.
   pub fn changes(&self) -> u64 {
-    self.db.total_changes() + self.marked.get()
-  }
-
-  /// Another connection changed the history (the background cleanup).
-  pub fn mark_changed(&self) {
-    self.marked.set(self.marked.get() + 1);
+    let others: i64 = self.db.query_row("PRAGMA data_version", [], |r| r.get(0)).unwrap_or(0);
+    self.db.total_changes() + others as u64
   }
 
   // MARK: Getters
@@ -355,8 +348,8 @@ mod tests {
     db.update_outcome(id, Status::Done, Some("text"), None).unwrap();
     db.get_entry(id).unwrap();
     assert_eq!(db.changes(), start + 2, "reads change nothing");
-    db.mark_changed();
-    assert_eq!(db.changes(), start + 3);
+    insert(&open(&dir), Status::Done);
+    assert_ne!(db.changes(), start + 2, "another connection's write");
   }
 
   #[test]

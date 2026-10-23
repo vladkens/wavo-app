@@ -166,15 +166,20 @@ impl Settings {
     Ok(())
   }
 
-  /// `language` for the engine: `None` leaves it to the model.
+  /// `language` for the engine: see [`engine_language`].
   pub fn engine_language(&self) -> Option<String> {
-    let language = self.language.trim();
-    (!language.is_empty() && !language.eq_ignore_ascii_case("auto")).then(|| language.to_owned())
+    engine_language(&self.language)
   }
 
   pub fn unload_after(&self) -> Option<Duration> {
     self.unload_after_minutes.map(|m| Duration::from_secs(u64::from(m) * 60))
   }
+}
+
+/// A language code for the engine; empty or `auto` is `None`, which leaves it to the model.
+pub fn engine_language(code: &str) -> Option<String> {
+  let code = code.trim();
+  (!code.is_empty() && !code.eq_ignore_ascii_case("auto")).then(|| code.to_owned())
 }
 
 #[cfg(test)]
