@@ -8,6 +8,8 @@ mod cli;
 mod history;
 #[expect(dead_code, reason = "the session (step 6) is its first user")]
 mod paths;
+#[cfg_attr(not(test), expect(dead_code, reason = "the session (step 6) is its first user"))]
+mod settings;
 #[cfg(test)]
 mod testing;
 
