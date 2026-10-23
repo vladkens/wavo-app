@@ -125,16 +125,17 @@ pub fn models() -> Result<()> {
 /// then its path on stdout; an interrupted download resumes.
 pub fn pull(name: &str) -> Result<()> {
   let model = hub::lookup(name)?;
+  let file = model.file();
   let mut shown = None;
   let path = download::pull(&Hub::new(), model, |p| {
-    let percent = p.received * 100 / p.total.max(1);
+    let percent = p.done * 100 / p.total.max(1);
     if shown != Some(percent) {
-      eprintln!("{}: {percent}% of {}", p.file, human_size(p.total));
+      eprintln!("{file}: {percent}% of {}", human_size(p.total));
       shown = Some(percent);
     }
   });
 
-  let path = path.with_context(|| format!("download {}", model.file()))?;
+  let path = path.with_context(|| format!("download {file}"))?;
   println!("{}", path.display());
   Ok(())
 }
