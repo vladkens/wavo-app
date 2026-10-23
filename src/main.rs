@@ -1,16 +1,22 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! wavo-app: local dictation. For now headless: the dictation daemon and its command-line tools.
+//! wavo-app: local dictation. The menu bar app on macOS (`gui`, the default), the dictation
+//! daemon and the command-line tools.
 
 mod audio;
 mod cli;
 mod ctl;
 mod engine;
 mod history;
+#[cfg(target_os = "macos")]
+mod macos;
 mod session;
 mod settings;
 #[cfg(test)]
 mod testing;
+// The macOS shell's; elsewhere built for its tests.
+#[cfg(any(test, target_os = "macos"))]
+mod ui;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -23,14 +29,17 @@ use tracing_subscriber::prelude::*;
 use crate::ctl::Request;
 
 #[derive(Parser)]
-#[command(version, about = "Local dictation")]
+#[command(version, about = "Local dictation", subcommand_required = !cfg!(target_os = "macos"))]
 struct Cli {
   #[command(subcommand)]
-  command: Command,
+  command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+  /// Run the menu bar app (the default without a command)
+  #[cfg(target_os = "macos")]
+  Gui,
   /// Transcribe a WAV file without capture or paste
   Transcribe {
     wav: PathBuf,
@@ -67,7 +76,16 @@ enum Command {
 fn main() -> Result<()> {
   let cli = Cli::parse();
   init_tracing();
-  match cli.command {
+  let Some(command) = cli.command else {
+    #[cfg(target_os = "macos")]
+    return macos::run();
+    #[cfg(not(target_os = "macos"))]
+    unreachable!("clap asks for a command");
+  };
+
+  match command {
+    #[cfg(target_os = "macos")]
+    Command::Gui => macos::run(),
     Command::Transcribe { wav, model, language } => {
       cli::transcribe(&wav, model.as_deref(), language.as_deref())
     }

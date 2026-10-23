@@ -63,8 +63,24 @@ pub enum Request {
   Delete { id: i64 },
   /// Free the model's memory now; the next dictation loads it again
   Unload,
+  /// Open the settings window
+  OpenSettings,
+  /// Launch at login
+  Autostart {
+    #[arg(value_enum)]
+    state: Autostart,
+  },
   /// Quit the running app
   Quit,
+}
+
+/// `wavo-app ctl autostart`: turn it on or off, or tell whether it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Autostart {
+  On,
+  Off,
+  Status,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -361,6 +377,8 @@ mod tests {
       Request::Retranscribe { id: 42 },
       Request::Delete { id: 7 },
       Request::Unload,
+      Request::OpenSettings,
+      Request::Autostart { state: Autostart::On },
     ];
     for r in &requests {
       let reply = request(&path, r).unwrap();
@@ -370,6 +388,8 @@ mod tests {
     assert_eq!(*seen.lock().unwrap(), requests);
     let json = serde_json::to_string(&Request::Delete { id: 7 }).unwrap();
     assert_eq!(json, r#"{"cmd":"delete","id":7}"#);
+    let json = serde_json::to_string(&Request::Autostart { state: Autostart::Status }).unwrap();
+    assert_eq!(json, r#"{"cmd":"autostart","state":"status"}"#);
 
     // A malformed request gets an error, and the server goes on.
     let mut raw = UnixStream::connect(&path).unwrap();

@@ -162,6 +162,7 @@ pub fn daemon() -> Result<()> {
       let _ = quit.try_send(());
       Reply::ok(serde_json::json!({ "state": "quitting" }))
     }
+    Request::OpenSettings | Request::Autostart { .. } => Reply::error("the daemon has no GUI"),
     request => handle.request(request),
   })?;
 

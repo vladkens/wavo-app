@@ -29,9 +29,10 @@ pub trait TextOutput: Send + 'static {
 /// Why a text was not pasted. It is in the history either way.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NotPasted {
-  #[cfg_attr(not(test), expect(dead_code, reason = "the macOS shell (step 7) is its first user"))]
   #[error("the focus moved to another window during the dictation")]
   FocusChanged,
+  #[error("the focused field is a password field")]
+  SecureField,
   #[error("{0}")]
   Failed(String),
 }
