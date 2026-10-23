@@ -12,6 +12,7 @@
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -98,8 +99,8 @@ impl Default for Settings {
 impl Settings {
   /// The settings at `path`, and a warning if they could not all be used.
   pub fn load(path: &Path) -> (Self, Option<String>) {
-    let text = match fs::read_to_string(path) {
-      Ok(text) => text,
+    let bytes = match fs::read(path) {
+      Ok(bytes) => bytes,
       Err(e) if e.kind() == ErrorKind::NotFound => return (Self::default(), None),
       Err(e) => {
         return (
@@ -109,7 +110,7 @@ impl Settings {
       }
     };
 
-    match serde_json::from_str::<Self>(&text) {
+    match serde_json::from_slice::<Self>(&bytes) {
       Ok(settings) if settings.schema_version > SCHEMA_VERSION => {
         let warning = format!(
           "{} is from a newer Wavo (schema {}): settings this version does not know are ignored",
@@ -121,7 +122,7 @@ impl Settings {
       Ok(settings) => (Self { schema_version: SCHEMA_VERSION, ..settings }, None),
       Err(e) => {
         let bad = path.with_extension("json.bad");
-        let kept = match fs::write(&bad, &text) {
+        let kept = match fs::write(&bad, &bytes) {
           Ok(()) => format!("kept as {}", bad.display()),
           Err(e) => format!("could not keep a copy: {e}"),
         };
@@ -141,11 +142,13 @@ impl Settings {
     let mut json = serde_json::to_vec_pretty(self)?;
     json.push(b'\n');
 
+    // Its own temporary file per save: two saves at once must not write into one.
+    static SAVES: AtomicU32 = AtomicU32::new(0);
     let mut tmp = path.file_name().unwrap_or_default().to_owned();
-    tmp.push(format!(".tmp-{}", std::process::id()));
+    tmp.push(format!(".tmp-{}-{}", std::process::id(), SAVES.fetch_add(1, Ordering::Relaxed)));
     let tmp = path.with_file_name(tmp);
     let write = || -> std::io::Result<()> {
-      let mut file = File::create(&tmp)?;
+      let mut file = File::create_new(&tmp)?;
       file.write_all(&json)?;
       file.sync_all()?;
       fs::rename(&tmp, path)
@@ -240,6 +243,39 @@ mod tests {
     let warning = warning.unwrap();
     assert!(warning.contains("invalid") && warning.contains("settings.json.bad"), "{warning}");
     assert_eq!(fs::read_to_string(dir.path().join("settings.json.bad")).unwrap(), text);
+  }
+
+  #[test]
+  fn a_file_that_is_not_utf8_is_kept_aside_too() {
+    let dir = TempDir::new("settings-bytes");
+    let path = dir.path().join(FILE);
+    let bytes = b"{\"language\": \"\xff\"}";
+    fs::write(&path, bytes).unwrap();
+
+    let (settings, warning) = Settings::load(&path);
+    assert_eq!(settings, Settings::default());
+    assert!(warning.unwrap().contains("invalid"));
+    assert_eq!(fs::read(dir.path().join("settings.json.bad")).unwrap(), bytes);
+  }
+
+  #[test]
+  fn saves_at_once_leave_one_whole_file() {
+    let dir = TempDir::new("settings-race");
+    let path = dir.path().join(FILE);
+    std::thread::scope(|s| {
+      for i in 0..8 {
+        let path = &path;
+        s.spawn(move || {
+          let settings = Settings { language: "x".repeat(i * 1_000), ..Settings::default() };
+          for _ in 0..20 {
+            settings.save(path).unwrap();
+          }
+        });
+      }
+    });
+
+    assert_eq!(Settings::load(&path).1, None);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1, "no temporary file left");
   }
 
   #[test]
