@@ -101,7 +101,7 @@ impl Focus {
 
   /// The app with the keyboard focus, asked live (NSWorkspace's frontmost app is updated by the
   /// run loop), is still the one of the start; unknown counts as yes.
-  pub fn still_in_focus(&self) -> Result<(), NotPasted> {
+  fn still_in_focus(&self) -> Result<(), NotPasted> {
     match focused_app() {
       Some(pid) if pid != self.pid => {
         info!("not pasted: pid {pid} has the keyboard focus, not {} ({})", self.app, self.pid);

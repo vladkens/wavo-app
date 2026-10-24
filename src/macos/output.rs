@@ -53,8 +53,8 @@ impl TextOutput for MacOutput {
         warn!("paste: Secure Input is on (some app holds it): ⌘V may not arrive");
       }
 
-      // Right before ⌘V, live: where the keys will go.
-      paste::paste(mtm, &text, keep, || gate.start(), || target.still_in_focus())
+      // Again right before ⌘V, after the clipboard's snapshot, which may take a while.
+      paste::paste(mtm, &text, keep, || gate.start(), || target.check())
     });
     pasted.unwrap_or_else(|e| Err(NotPasted::Failed(e.into())))
   }
