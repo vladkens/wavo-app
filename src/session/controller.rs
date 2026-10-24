@@ -554,7 +554,7 @@ impl<O: TextOutput> Controller<O> {
       // An engine of another model than the one to use now (its file gone, the first one
       // downloaded another) stops.
       Msg::CheckModel => {
-        let path = self.check_model().ok();
+        let path = self.check_model().ok().map(|(path, _)| path);
         if let Some(loaded) = &self.engine
           && path.as_ref() != Some(&loaded.path)
         {
