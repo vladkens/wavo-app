@@ -28,7 +28,7 @@ update:
 clean:
 	cargo clean
 
-.PHONY: bundle run install fixtures test-models unload-memory
+.PHONY: bundle run install shots fixtures test-models unload-memory
 
 ICON := target/Wavo.icns
 APP := target/Wavo.app
@@ -50,6 +50,9 @@ run: # quit the running Wavo, start target/Wavo.app built with the quick fast pr
 install: # the same, installed into /Applications
 	$(MAKE) bundle PROFILE=fast
 	scripts/run.sh $(APP) /Applications/Wavo.app
+
+shots: # the settings window's pages, headless, into target/shots/
+	WAVO_SHOTS=$(CURDIR)/target/shots cargo test --release every_page_renders
 
 # WAV fixtures and reference transcripts in target/fixtures/ (scripts/gen-fixtures.sh, macOS
 # voices and ffmpeg); regenerated when the script or a text changes.
