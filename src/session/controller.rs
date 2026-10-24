@@ -664,6 +664,7 @@ impl<O: TextOutput> Controller<O> {
   }
 
   fn apply_settings(&mut self, new: Settings) {
+    let new = new.changed_from(&self.settings);
     if new == self.settings {
       return;
     }
