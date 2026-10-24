@@ -8,6 +8,7 @@ mod cli;
 mod ctl;
 mod engine;
 mod history;
+mod language;
 #[cfg(target_os = "macos")]
 mod macos;
 mod session;
@@ -17,6 +18,7 @@ mod testing;
 // The macOS shell's; elsewhere built for its tests.
 #[cfg(any(test, target_os = "macos"))]
 mod ui;
+mod window;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -52,6 +54,17 @@ enum Command {
     /// settings'
     #[arg(long)]
     language: Option<String>,
+  },
+  /// Render the settings window headless with nimbo's harness flags (`--shot <png>`,
+  /// `--appearance light|dark`, `--size <w>x<h>`, `--scale <n>`); `wavo-app ctl open-settings`
+  /// opens the running app's
+  Settings {
+    /// The page it shows
+    #[arg(long, value_enum, default_value = "general")]
+    page: window::Page,
+    /// nimbo's harness flags
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    harness: Vec<String>,
   },
   /// Run dictation without a GUI, controlled by `wavo-app ctl`; texts go to stdout
   Daemon,
@@ -89,6 +102,7 @@ fn main() -> Result<()> {
     Command::Transcribe { wav, model, language } => {
       cli::transcribe(&wav, model.as_deref(), language.as_deref())
     }
+    Command::Settings { page, harness } => cli::settings(page, &harness),
     Command::Daemon => cli::daemon(),
     Command::Ctl { request } => cli::ctl(request),
     Command::Devices => cli::devices(),
