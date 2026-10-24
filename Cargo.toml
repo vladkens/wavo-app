@@ -14,11 +14,12 @@ cpal = "0.18.2"
 crossbeam-channel = "0.5.17"
 earshot = "1.2.2"
 hound = "3.5.1"
+isolang = "2.4.0"
 libc = "0.2.191"
 nimbo = { git = "https://github.com/vladkens/nimbo", branch = "main" }
 rtrb = "0.4.0"
 rubato = "5.0.1"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "functions"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
@@ -39,3 +40,6 @@ inherits = "release"
 lto = false
 incremental = true
 codegen-units = 256
+
+[build-dependencies]
+png = "0.18.1"
