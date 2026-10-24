@@ -254,6 +254,8 @@ enum Msg {
   },
   /// The background thread removed entries.
   Cleaned,
+  /// Another connection added entries.
+  Imported,
   CheckModel,
   Quit,
 }
@@ -354,6 +356,12 @@ impl Handle {
   /// transcribe is looked at again, and an engine of another model than that lets go of it.
   pub fn check_model(&self) {
     let _ = self.0.send(Msg::CheckModel);
+  }
+
+  /// Another connection added entries (an import): the session publishes the history's change,
+  /// and transcribes those without text the model has not tried.
+  pub fn history_imported(&self) {
+    let _ = self.0.send(Msg::Imported);
   }
 
   /// Handles a control request; `quit` is refused, the app answers it.
@@ -589,6 +597,7 @@ impl<O: TextOutput> Controller<O> {
       Msg::Transcribed { take, result } => self.on_transcribed(take, result),
       Msg::Retranscribed { entry, result } => self.on_retranscribed(entry, result),
       Msg::Cleaned => {} // the history's changes show it
+      Msg::Imported => (self.untried, self.untried_on_load) = (true, false),
       // An engine of another model than the one to use now (its file gone, the first one
       // downloaded another) stops.
       Msg::CheckModel => {
@@ -1307,6 +1316,13 @@ impl<O: TextOutput> Controller<O> {
     current || self.retranscribing.iter().any(|r| r.entry == id)
   }
 
+  /// Whether entry `id` is busy in the history but not in this session: an import adds it, its
+  /// recording may not be there yet.
+  fn is_imported(&self, id: i64) -> bool {
+    let entry = self.history.db.get_entry(id).inspect_err(|e| warn!("history: {e:#}"));
+    entry.ok().flatten().is_some_and(|e| e.busy)
+  }
+
   /// `entry`'s recording through the engine again, behind any dictation (`auto`: by itself, see
   /// [`transcribe_untried`](Self::transcribe_untried)). Returns the entry's state now:
   /// `transcribing`, or `deleted` at once when it has no text and its recording no speech (or it
@@ -1315,6 +1331,10 @@ impl<O: TextOutput> Controller<O> {
     let id = entry.id;
     if self.is_busy(id) {
       bail!("entry {id} is being transcribed");
+    }
+
+    if entry.busy {
+      bail!("entry {id} is being imported");
     }
 
     let clip = match self.history.audio_file(&entry) {
@@ -1388,6 +1408,10 @@ impl<O: TextOutput> Controller<O> {
   fn delete(&mut self, id: i64) -> Result<()> {
     if self.is_busy(id) {
       bail!("entry {id} is being transcribed");
+    }
+
+    if self.is_imported(id) {
+      bail!("entry {id} is being imported");
     }
 
     if !self.history.delete(id)? {

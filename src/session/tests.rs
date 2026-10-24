@@ -1377,3 +1377,20 @@ fn daemon_second_instance_exits_and_quit_ends_the_first() {
   let out = d.ctl(&["status"]);
   assert!(String::from_utf8_lossy(&out.stderr).contains("not running"));
 }
+
+/// An entry an import is adding (busy in the history, its recording maybe not copied yet) is
+/// neither transcribed again nor deleted.
+#[test]
+fn entries_being_imported_are_left_alone() {
+  let s = with_a_model("session-importing", Deadlines::default());
+  let entry = Entry { created_at: 1_000, audio_path: Some("1000.wav".into()), ..Entry::default() };
+  let id = s.history().db.insert_imported(&[entry]).unwrap()[0];
+  for request in [Request::Retranscribe { id }, Request::Delete { id }] {
+    let refused = s.send(request).error.unwrap();
+    assert!(refused.contains("being imported"), "{refused}");
+  }
+
+  assert!(s.entry(id).is_some());
+  s.history().db.mark_imported(&[id]).unwrap();
+  assert_eq!(s.send(Request::Delete { id }).result["state"], "deleted");
+}
