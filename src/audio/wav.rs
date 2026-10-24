@@ -22,19 +22,25 @@ pub struct Interleaved {
 
 /// Any PCM WAV, as [`read_interleaved`] takes, downmixed to mono and resampled to 16 kHz.
 pub fn read(path: &Path) -> Result<Vec<f32>> {
-  let Interleaved { samples, rate, channels } = read_interleaved(path)?;
-  let channels = channels as usize;
-  let mono: Vec<f32> = samples
-    .chunks_exact(channels)
-    .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-    .map(|s| if s.is_finite() { s } else { 0.0 }) // a NaN would panic the resampler's FFT
-    .collect();
-
+  let (mono, rate) = read_mono(path)?;
   let mut pcm = Vec::new();
   let mut resampler = To16k::new(rate)?;
   resampler.push(&mono, &mut pcm)?;
   resampler.finish(&mut pcm)?;
   Ok(pcm)
+}
+
+/// Any PCM WAV, as [`read_interleaved`] takes, downmixed to mono at its rate: the samples and
+/// the rate.
+pub fn read_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
+  let Interleaved { samples, rate, channels } = read_interleaved(path)?;
+  let channels = channels as usize;
+  let mono = samples
+    .chunks_exact(channels)
+    .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+    .map(|s| if s.is_finite() { s } else { 0.0 }) // a NaN would panic the resampler's FFT
+    .collect();
+  Ok((mono, rate))
 }
 
 /// Any PCM WAV (8/16/24/32-bit integer or 32-bit float, any channel count and rate), without

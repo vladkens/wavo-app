@@ -1388,7 +1388,7 @@ fn file_stem(path: &Path) -> String {
 /// What a model choice (wavo's name, a file's path or name) is called where it shows, also once
 /// its file is gone: wavo's full name (`parakeet-tdt-0.6b-v3`), else the file's name without
 /// extension.
-fn label(model: &str) -> String {
+pub fn label(model: &str) -> String {
   if let Ok(info) = hub::lookup(model) {
     return info.full_name.into();
   }

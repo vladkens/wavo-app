@@ -53,6 +53,13 @@ impl Downloads {
     self.0.lock().unwrap().get(name).map(|j| j.state.clone())
   }
 
+  /// The download of `name` goes on as `state`, unless it is gone.
+  fn set(&self, name: &str, state: Download) {
+    if let Some(job) = self.0.lock().unwrap().get_mut(name) {
+      job.state = state;
+    }
+  }
+
   /// Stops the download of `name` before its next chunk (or the next step of preparing), or
   /// forgets its failure.
   pub fn cancel(&self, name: &str) {
@@ -99,13 +106,7 @@ impl Downloads {
       jobs.insert(model.name, Job { state, cancel: cancel.clone() });
     }
 
-    let jobs = self.0.clone();
-    let set = move |state: Download| {
-      if let Some(job) = jobs.lock().unwrap().get_mut(model.name) {
-        job.state = state;
-      }
-    };
-    let jobs = self.0.clone();
+    let downloads = self.clone();
     let work = move || {
       let (started, mut told) = (Instant::now(), None::<Instant>);
       let mut from = None;
@@ -121,7 +122,7 @@ impl Downloads {
           }
         };
         let tell = state == Download::Preparing || told.is_none_or(|t| t.elapsed() >= TELL);
-        set(state);
+        downloads.set(model.name, state);
         if tell {
           told = Some(Instant::now());
           changed(false);
@@ -133,18 +134,12 @@ impl Downloads {
         }
       };
 
-      let result = pull(&mut step);
-      {
-        let mut jobs = jobs.lock().unwrap();
-        match result {
-          Err(e) if !cancel.load(Ordering::Relaxed) => {
-            warn!("download {}: {e}", model.name);
-            if let Some(job) = jobs.get_mut(model.name) {
-              job.state = Download::Failed(e);
-            }
-          }
-          _ => _ = jobs.remove(model.name),
+      match pull(&mut step) {
+        Err(e) if !cancel.load(Ordering::Relaxed) => {
+          warn!("download {}: {e}", model.name);
+          downloads.set(model.name, Download::Failed(e));
         }
+        _ => _ = downloads.0.lock().unwrap().remove(model.name),
       }
 
       changed(true);
@@ -152,10 +147,7 @@ impl Downloads {
 
     let spawned = std::thread::Builder::new().name("download".into()).spawn(work);
     if let Err(e) = spawned {
-      let failed = Download::Failed(format!("could not start: {e}"));
-      if let Some(job) = self.0.lock().unwrap().get_mut(model.name) {
-        job.state = failed;
-      }
+      self.set(model.name, Download::Failed(format!("could not start: {e}")));
     }
   }
 }

@@ -90,11 +90,7 @@ impl Drop for Playback {
 
 /// Plays the WAV at `path` to its end, or until `control` is stopped. On the player's thread.
 fn play(path: &Path, control: &Control) -> Result<()> {
-  let wav::Interleaved { samples, rate, channels } = wav::read_interleaved(path)?;
-  let mono: Vec<f32> = match channels as usize {
-    1 => samples,
-    n => samples.chunks_exact(n).map(|f| f.iter().sum::<f32>() / n as f32).collect(),
-  };
+  let (mono, rate) = wav::read_mono(path)?;
   let device = cpal::default_host().default_output_device().context("no output device")?;
   let supported = device.default_output_config().context("output format")?;
   let config = supported.config();

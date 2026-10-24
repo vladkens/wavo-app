@@ -759,7 +759,7 @@ fn models_are_found_downloaded_and_used() {
   assert_eq!(shown(&h).len(), all);
 
   // The language pop-up keeps the models meant for it, and the one in use.
-  let hebrew = page::languages_list().iter().position(|l| l.1 == "he").unwrap();
+  let hebrew = page::LANGUAGES.iter().position(|l| l.1 == "he").unwrap();
   h.app_mut().models.lang = hebrew;
   h.rt.waker().wake();
   h.frame();

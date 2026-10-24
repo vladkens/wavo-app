@@ -35,6 +35,7 @@ use nimbo::{Answer, App, Color, Config, Dialog, FormStyle, Icon, Style, Ui, grow
 use wavo::hub::{self, Hub, ModelInfo};
 
 use self::downloads::Download;
+use self::models::{Found, Pick};
 use crate::audio::devices;
 use crate::session::controller::{NoModel, Status};
 use crate::settings::Settings;
@@ -99,8 +100,7 @@ pub enum Ask {
   /// A model, and when it is the one in use, what takes its place: the first other one
   /// downloaded, if any.
   Model { model: &'static ModelInfo, in_use: bool, next: Option<&'static str> },
-  /// A history entry: its id, the start of its text ([`history::text_start`]), whether it has a
-  /// recording.
+  /// A history entry: its id, the start of its text, whether it has a recording.
   Dictation { id: i64, start: String, audio: bool },
 }
 
@@ -223,9 +223,6 @@ impl Problem {
   }
 }
 
-/// A downloaded model: wavo's, and its file.
-type Found = (&'static ModelInfo, PathBuf);
-
 /// The settings window's app.
 pub struct Prefs {
   pub page: Page,
@@ -238,6 +235,8 @@ pub struct Prefs {
   hub: Hub,
   devices: Vec<devices::Info>,
   found: Vec<Found>,
+  /// Which of them transcribes: looked at again when they or the choice change.
+  pick: Pick,
   login: general::Login,
   access: Access,
   recordings: general::Folder,
@@ -262,6 +261,7 @@ impl Prefs {
       hub,
       devices: Vec::new(),
       found: Vec::new(),
+      pick: Pick::default(),
       login: general::Login::default(),
       access: Access::default(),
       recordings: general::Folder::new(home.join(crate::history::recordings::DIR)),
@@ -276,8 +276,9 @@ impl Prefs {
 
   /// The session changed: its settings, status and history.
   pub fn update(&mut self, settings: &Settings, status: &Status, history: u64) {
-    if self.settings != *settings {
-      self.settings = settings.clone();
+    let model = std::mem::replace(&mut self.settings, settings.clone()).model;
+    if model != self.settings.model {
+      self.repick();
     }
 
     self.status = Some(status.clone());
@@ -302,6 +303,13 @@ impl Prefs {
       self.found = found;
       self.shell.check_model();
     }
+
+    self.repick();
+  }
+
+  /// Which model transcribes, after the models on disk or the choice changed.
+  fn repick(&mut self) {
+    self.pick = Pick::new(&self.hub, self.settings.model.as_deref(), &self.found);
   }
 
   /// [`Shell::delete_model`] of `model` ended: the bytes freed, or why not. A choice of the
@@ -321,38 +329,29 @@ impl Prefs {
 
   /// Changes the settings here and in the session.
   fn edit(&mut self, edit: impl Fn(&mut Settings) + Send + 'static) {
+    let model = self.settings.model.clone();
     edit(&mut self.settings);
+    if self.settings.model != model {
+      self.repick();
+    }
+
     self.shell.edit(Box::new(move |s| edit(s)));
   }
 
-  /// The chosen model's file, when it is on disk: one of wavo's in the cache or a file of its own.
-  fn chosen(&self) -> Option<PathBuf> {
-    self.hub.resolve(self.settings.model.as_deref()?).ok()
-  }
-
-  /// The chosen model when it is not on disk: what it is called.
-  fn chosen_gone(&self) -> Option<String> {
-    let query = self.settings.model.as_deref()?;
-    self.chosen().is_none().then(|| models::label(query))
-  }
-
-  /// The model that transcribes, as the session picks it: the chosen one, else the first
-  /// downloaded. `None` also for a chosen file outside the cache.
+  /// The model that transcribes, as the session picks it ([`Pick`]).
   fn active(&self) -> Option<&Found> {
-    match self.chosen() {
-      Some(path) => self.found.iter().find(|f| f.1 == path),
-      None => self.found.first(),
-    }
+    self.found.get(self.pick.active?)
   }
 
   /// Why no model transcribes as chosen, as the window sees it: the chosen one gone from the
   /// disk, else none downloaded, else what the session says (a model that does not load).
   pub fn model_problem(&self) -> Option<Problem> {
-    if let Some(chosen) = self.chosen_gone() {
-      return Some(Problem::Gone { chosen, instead: self.found.first().map(|f| f.0.full_name) });
+    if let Some(chosen) = self.pick.gone() {
+      let instead = self.active().map(|f| f.0.full_name);
+      return Some(Problem::Gone { chosen: chosen.to_owned(), instead });
     }
 
-    if self.found.is_empty() && self.chosen().is_none() {
+    if self.found.is_empty() && self.pick.other.is_none() {
       return Some(Problem::NoneDownloaded);
     }
 

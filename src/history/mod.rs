@@ -50,10 +50,35 @@ pub struct Local {
   pub minute: u32,
 }
 
+const MONTHS: [&str; 12] = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
 impl Local {
   /// The calendar day: year, month, day.
   pub fn date(self) -> (i32, u32, u32) {
     (self.year, self.month, self.day)
+  }
+
+  /// `October`.
+  pub fn month_name(self) -> &'static str {
+    MONTHS[(self.month as usize).clamp(1, 12) - 1]
+  }
+
+  /// `09:05`.
+  pub fn hm(self) -> String {
+    format!("{:02}:{:02}", self.hour, self.minute)
   }
 }
 
@@ -81,6 +106,31 @@ pub fn local_time(ms: i64) -> Option<Local> {
     hour: tm.tm_hour as u32,
     minute: tm.tm_min as u32,
   })
+}
+
+/// A dictation's text on one line, its first words up to `max` characters, `…` where it is cut
+/// (a word longer than that cut inside).
+pub fn shorten(text: &str, max: usize) -> String {
+  let mut start = String::new();
+  for (i, w) in text.split_whitespace().enumerate() {
+    let len = start.chars().count() + usize::from(i > 0) + w.chars().count();
+    if len > max {
+      if start.is_empty() {
+        start = w.chars().take(max).collect();
+      }
+
+      let start = start.trim_end_matches([',', ';', ':', '.', '—', '-']);
+      return format!("{start}…");
+    }
+
+    if i > 0 {
+      start.push(' ');
+    }
+
+    start.push_str(w);
+  }
+
+  start
 }
 
 /// What a search of the history compares: lower case in every script, `ё` as `е`.
