@@ -1,9 +1,9 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! Command-line tools that run without the GUI: `wavo-app transcribe`, `devices`, `record`, the
-//! headless `daemon` and its `ctl` client.
+//! headless `daemon` and its `ctl` client, the settings window's shots (`settings`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -21,6 +21,8 @@ use crate::engine::{Engine, EngineConfig, model};
 use crate::session::output::Stdout;
 use crate::session::{self, Session};
 use crate::settings::{self, Settings};
+use crate::window::downloads::Download;
+use crate::window::{self, Access, Page, Prefs, Shell};
 
 /// `wavo-app transcribe`: the dictation pipeline on a file, without capture and paste. The text
 /// goes to stdout, timings and warnings to stderr. Without speech nothing is printed and the engine
@@ -162,7 +164,9 @@ pub fn daemon() -> Result<()> {
       let _ = quit.try_send(());
       Reply::ok(serde_json::json!({ "state": "quitting" }))
     }
-    Request::OpenSettings | Request::Autostart { .. } => Reply::error("the daemon has no GUI"),
+    Request::OpenSettings | Request::OpenHistory | Request::Autostart { .. } => {
+      Reply::error("the daemon has no GUI")
+    }
     request => handle.request(request),
   })?;
 
@@ -198,6 +202,74 @@ pub fn ctl(request: Request) -> Result<()> {
   }
 
   Ok(())
+}
+
+/// `wavo-app settings --shot <png>`: the settings window on `page`, rendered headless by nimbo's
+/// harness (`harness`: its flags) over the saved settings, the models in the Hugging Face cache
+/// and the history; whatever it would change goes nowhere.
+pub fn settings(page: Page, harness: &[String]) -> Result<()> {
+  if !harness.iter().any(|a| a == "--shot") {
+    bail!("it renders headless only (--shot <png>); `wavo-app ctl open-settings` opens the window");
+  }
+
+  let home = crate::home();
+  let (saved, warning) = Settings::load(&home.join(settings::FILE));
+  if let Some(w) = warning {
+    warn!("{w}");
+  }
+
+  let mut prefs = Prefs::new(Box::new(Headless), saved, Hub::new(), &home);
+  prefs.page = page;
+  // A few frames first: the window takes its height from the one before.
+  let settle = |h: &mut nimbo::Harness<Prefs>| {
+    for _ in 0..3 {
+      h.frame();
+    }
+  };
+  nimbo::run_args(window::config(page), prefs, settle, harness);
+  Ok(())
+}
+
+/// The settings window's shell for a shot: it shows what is there and does nothing.
+struct Headless;
+
+impl Shell for Headless {
+  fn edit(&self, _: Box<dyn FnOnce(&mut Settings) + Send>) {}
+  fn pause_hotkey(&self, _: bool) {}
+
+  fn devices(&self) -> Vec<devices::Info> {
+    devices::list()
+  }
+
+  fn download(&self, _: &'static wavo::hub::ModelInfo) {}
+  fn cancel_download(&self, _: &str) {}
+
+  fn download_state(&self, _: &str) -> Option<Download> {
+    None
+  }
+
+  fn delete_model(&self, _: &'static wavo::hub::ModelInfo) {}
+  fn check_model(&self) {}
+  fn retranscribe(&self, _: i64) {}
+  fn delete_entry(&self, _: i64) {}
+
+  fn autostart(&self) -> Result<nimbo::autostart::State, String> {
+    Err(String::new())
+  }
+
+  fn set_autostart(&self, _: bool) {}
+
+  fn access(&self) -> Access {
+    Access { accessibility: nimbo::permissions::accessibility(false), microphone: None }
+  }
+
+  fn folder_size(&self, dir: PathBuf, done: Box<dyn FnOnce(u64) + Send>) {
+    done(window::folder_size(&dir));
+  }
+
+  fn open_pane(&self, _: nimbo::permissions::Pane) {}
+  fn open_url(&self, _: &str) {}
+  fn reveal(&self, _: &Path) {}
 }
 
 /// `wavo-app devices`: input devices, the system default marked with `*`.
