@@ -208,7 +208,6 @@ pub struct Last {
 }
 
 /// What a platform shell shows, sent to the [`Observer`] after every change.
-#[cfg_attr(not(test), expect(dead_code, reason = "the macOS shell (step 7) is its first user"))]
 #[derive(Debug, Clone)]
 pub struct Update {
   pub status: Status,
@@ -217,6 +216,7 @@ pub struct Update {
   pub meter: Option<Meter>,
   /// Moves on every change of the history (an entry added, finished, deleted, cleaned up): a
   /// history window reloads then.
+  #[cfg_attr(not(test), expect(dead_code, reason = "the History page (step 8) is its first user"))]
   pub history: u64,
 }
 
@@ -236,10 +236,8 @@ pub struct Session {
 pub struct Handle(Sender<Msg>);
 
 enum Msg {
-  #[cfg_attr(not(test), expect(dead_code, reason = "the hotkey (step 7) is its first user"))]
   Input(Input),
   Request(Request, Sender<Reply>),
-  #[cfg_attr(not(test), expect(dead_code, reason = "the macOS shell (step 7) is its first user"))]
   Edit(Box<dyn FnOnce(&mut Settings) + Send>),
   Transcribed {
     take: Take,
@@ -263,7 +261,6 @@ impl Session {
 
   /// [`start`](Self::start) with an observer, called once the history is recovered and then after
   /// every change.
-  #[cfg_attr(not(test), expect(dead_code, reason = "the macOS shell (step 7) is its first user"))]
   pub fn start_observed<O: TextOutput>(
     config: Config,
     output: O,
@@ -332,7 +329,6 @@ impl Drop for Session {
 
 impl Handle {
   /// A hotkey event from the platform shell.
-  #[cfg_attr(not(test), expect(dead_code, reason = "the hotkey (step 7) is its first user"))]
   pub fn input(&self, input: Input) {
     let _ = self.0.send(Msg::Input(input));
   }
@@ -341,7 +337,6 @@ impl Handle {
   /// from now on. Edits apply in order to the latest settings, so two quick changes never undo
   /// each other. A new model or unload timeout takes effect once the engine is not busy; the old
   /// engine is stopped in the background.
-  #[cfg_attr(not(test), expect(dead_code, reason = "the macOS shell (step 7) is its first user"))]
   pub fn edit_settings(&self, edit: impl FnOnce(&mut Settings) + Send + 'static) {
     let _ = self.0.send(Msg::Edit(Box::new(edit)));
   }
@@ -527,7 +522,14 @@ impl<O: TextOutput> Controller<O> {
 
   fn on_msg(&mut self, msg: Msg) {
     match msg {
-      Msg::Input(input) => self.feed(input),
+      Msg::Input(input) => {
+        // A press is a new attempt: the last one's error goes, to come back if it fails again.
+        if matches!(input, Input::KeyDown { repeat: false, .. }) && self.error.take().is_some() {
+          self.publish();
+        }
+
+        self.feed(input)
+      }
       Msg::Request(request, reply) => {
         let _ = reply.send(self.on_request(request).into());
       }
@@ -564,7 +566,9 @@ impl<O: TextOutput> Controller<O> {
         let state = if self.engine.is_some() { "unloading" } else { "unloaded" };
         return Ok(json!({ "state": state }));
       }
-      Request::Quit => bail!("quit is not handled by the session"),
+      Request::OpenSettings | Request::Autostart { .. } | Request::Quit => {
+        bail!("{request:?} is not handled by the session")
+      }
     };
 
     self.error = None;

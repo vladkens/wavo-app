@@ -85,7 +85,6 @@ impl Meter {
 
   /// The microphone has sent no sound for a while (see [`Level::silent`]): it may be off, muted
   /// or the wrong one. Back to `false` as soon as sound comes.
-  #[cfg_attr(not(test), expect(dead_code, reason = "the HUD (step 7) is its first user"))]
   pub fn silent(&self) -> bool {
     self.0.silent.load(Ordering::Relaxed)
   }

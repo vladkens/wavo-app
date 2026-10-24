@@ -11,6 +11,8 @@
 
 use std::time::{Duration, Instant};
 
+use nimbo::hotkey::Edge;
+
 use crate::settings::Activation;
 
 /// In [`Activation::HoldOrToggle`], a press held at least this long is push-to-talk; a shorter
@@ -49,7 +51,6 @@ pub enum Command {
   Cancel,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "the hotkey (step 7) sends the key inputs"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Input {
   /// The hotkey went down at `at`; `repeat` is keyboard autorepeat.
@@ -87,6 +88,18 @@ pub enum Input {
   Delivered {
     take: Take,
   },
+}
+
+/// The hotkey's edges as nimbo reports them; a modifier key alone sends the same.
+impl From<Edge> for Input {
+  fn from(edge: Edge) -> Self {
+    match edge {
+      Edge::Down { at, repeat } => Input::KeyDown { at, repeat },
+      Edge::Up { at } => Input::KeyUp { at },
+      Edge::Escape => Input::Escape,
+      Edge::Aborted => Input::KeyAborted,
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,5 +574,29 @@ mod tests {
     // Nothing to paste: no speech, a failure, an empty text.
     assert_eq!(d.m.handle(Finished { take: 2 }), None);
     assert_eq!(d.state(), State::Idle);
+  }
+
+  /// nimbo's edges for a hotkey, a modifier key alone too (its press, its release, or a press that
+  /// became the person's chord), drive the dictation: held, it records until the release; tapped,
+  /// it latches and the next press stops; aborted, the take is dropped.
+  #[test]
+  fn nimbos_edges_drive_the_dictation() {
+    use nimbo::hotkey::Edge;
+
+    let mut m = Machine::new(Activation::HoldOrToggle);
+    let t0 = Instant::now();
+    let down = |ms| Edge::Down { at: t0 + Duration::from_millis(ms), repeat: false };
+    let up = |ms| Edge::Up { at: t0 + Duration::from_millis(ms) };
+    assert_eq!(m.handle(down(0).into()), Some(StartRecording { take: 1 }));
+    let repeat = Edge::Down { at: t0 + Duration::from_millis(500), repeat: true };
+    assert_eq!(m.handle(repeat.into()), None);
+    assert_eq!(m.handle(up(2_000).into()), Some(StopRecording { take: 1 }));
+    m.handle(Finished { take: 1 });
+
+    m.handle(down(3_000).into());
+    assert_eq!(m.handle(up(3_100).into()), None, "a tap latches");
+    assert_eq!(m.handle(Edge::Escape.into()), Some(CancelRecording { take: 2 }));
+    m.handle(down(4_000).into());
+    assert_eq!(m.handle(Edge::Aborted.into()), Some(AbortRecording { take: 3 }));
   }
 }

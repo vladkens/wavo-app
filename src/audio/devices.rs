@@ -140,6 +140,20 @@ impl Inputs for Cpal {
   }
 }
 
+/// Sets up the audio system ahead of the first recording, off the caller's thread: the first
+/// device query in a process costs CoreAudio 40–50 ms.
+#[cfg(target_os = "macos")]
+pub fn warm_up() {
+  let warm = || {
+    let started = std::time::Instant::now();
+    let name = Cpal::new().default_input().map(|f| f.name);
+    debug!("audio warmed up in {:.0?} (default input {name:?})", started.elapsed());
+  };
+  if let Err(e) = std::thread::Builder::new().name("audio-warm-up".into()).spawn(warm) {
+    debug!("audio warm-up: {e}");
+  }
+}
+
 /// An input device as `wavo-app devices` shows it.
 #[derive(Debug, Clone)]
 pub struct Info {

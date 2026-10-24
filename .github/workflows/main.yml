@@ -22,7 +22,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      # ALSA for cpal; fonts and text libraries for the HUD's tests in nimbo's harness.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libfontconfig1 libfreetype6 libharfbuzz0b fonts-dejavu-core
       - run: rustup toolchain install nightly --profile minimal --component rustfmt
       - run: make check
+      - run: make test
+
+  # The macOS shell builds only there: its clippy and tests, the rest's again.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: cargo clippy --release --all-targets -- -D warnings
       - run: make test
