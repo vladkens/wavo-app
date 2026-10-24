@@ -32,7 +32,7 @@ use super::history::{COPY, DELETE, PLAY, RETRANSCRIBE, ROW, SEARCH, TEXT};
 use super::models::{self as page, CANCEL, DOWNLOAD, INFO, USE};
 use super::*;
 use crate::audio::devices::Choice;
-use crate::history::db::{NewEntry, Status as EntryStatus};
+use crate::history::db::NewEntry;
 use crate::history::{History, now_ms};
 use crate::session::controller::{EngineStatus, Phase};
 use crate::settings::Activation;
@@ -183,6 +183,7 @@ fn status(state: Phase) -> Status {
     error: None,
     warnings: Vec::new(),
     no_model: None,
+    failed_recording: None,
   }
 }
 
@@ -225,11 +226,10 @@ fn history_of(home: &Path, items: &[(&str, i64, f32)], audio: bool) -> Vec<i64> 
         duration_ms: (secs * 1000.0) as i64,
         model: Some("parakeet-tdt-0.6b-v3-Q8_0"),
         audio_path: audio.then_some(name.as_str()),
+        text,
         ..NewEntry::default()
       };
-      let id = h.db.insert_entry(&entry).unwrap();
-      h.db.update_outcome(id, EntryStatus::Done, Some(text), None).unwrap();
-      id
+      h.db.insert_entry(&entry).unwrap()
     })
     .collect()
 }

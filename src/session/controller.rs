@@ -585,7 +585,7 @@ impl<O: TextOutput> Controller<O> {
       Msg::CheckModel => {
         let path = self.check_model().ok();
         if let Some(loaded) = &self.engine
-          && path.as_ref() != Some(&loaded.path)
+          && path.as_ref().map(|(path, _)| path) != Some(&loaded.path)
         {
           info!("model {}: another is to transcribe, its engine stops", loaded.name);
           self.retire_engine();
