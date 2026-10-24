@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ startsWith(github.event.head_commit.message, 'release:') && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -22,13 +22,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
-      # ALSA for cpal; fonts and text libraries for the HUD's tests in nimbo's harness.
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libfontconfig1 libfreetype6 libharfbuzz0b fonts-dejavu-core
       - run: rustup toolchain install nightly --profile minimal --component rustfmt
       - run: make check
       - run: make test
 
-  # The macOS shell builds only there: its clippy and tests, the rest's again.
   macos:
     runs-on: macos-latest
     timeout-minutes: 20
@@ -36,6 +34,57 @@ jobs:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
         with:
+          shared-key: macos
           save-if: ${{ github.event_name != 'pull_request' }}
       - run: cargo clippy --release --all-targets -- -D warnings
       - run: make test
+
+  bundle:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos
+          save-if: false
+      - run: make bundle
+      - run: ditto -c -k --keepParent target/Wavo.app Wavo.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Wavo
+          path: Wavo.zip
+          if-no-files-found: error
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: [test, macos, bundle]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-${{ startsWith(github.event.head_commit.message, 'release:') && github.sha || 'dev' }}
+    env:
+      RELEASE: ${{ startsWith(github.event.head_commit.message, 'release:') }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: Wavo
+          path: dist
+      - if: env.RELEASE == 'true'
+        id: check
+        uses: vladkens/actions/release-check@v1
+      - if: env.RELEASE == 'true'
+        uses: vladkens/actions/github-release@v1
+        with:
+          tag: ${{ steps.check.outputs.tag }}
+          notes: ${{ steps.check.outputs.notes }}
+          files: dist/Wavo.zip
+          rename-from: Wavo.zip
+          rename-to: Wavo-${{ steps.check.outputs.tag }}.zip
+      - if: env.RELEASE != 'true'
+        uses: vladkens/actions/dev-release@v1
+        with:
+          files: dist/Wavo.zip
