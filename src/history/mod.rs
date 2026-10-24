@@ -8,7 +8,7 @@
 //!   transcribe again; a cancelled dictation and one without speech leave nothing.
 //! - [`History::cleanup`] applies the retention: entries and their audio files go together, the
 //!   file first, so a crash in between leaves a row whose file is already gone, never a file
-//!   nothing points to.
+//!   nothing points to. Entries being transcribed again are never removed.
 //! - [`History::recover`] runs on start: empty day folders go, and it returns the recordings
 //!   without an entry (the app died while recording or transcribing), for the session to
 //!   transcribe.
@@ -97,16 +97,18 @@ impl History {
     Ok(true)
   }
 
-  /// Applies `retention` at `now` (Unix ms): removes older entries with their audio. An entry
-  /// whose file cannot be deleted stays, to be tried again next time. Returns how many entries
-  /// were removed.
-  pub fn cleanup(&self, retention: Retention, now: i64) -> Result<usize> {
-    let doomed: Vec<EntryAudio> = match (retention, retention.max_age()) {
+  /// Applies `retention` at `now` (Unix ms): removes older entries with their audio, but the
+  /// `busy` ones (being transcribed again). An entry whose file cannot be deleted stays, to be
+  /// tried again next time. Returns how many entries were removed.
+  pub fn cleanup(&self, retention: Retention, now: i64, busy: &[i64]) -> Result<usize> {
+    let mut doomed: Vec<EntryAudio> = match (retention, retention.max_age()) {
       (Retention::Unlimited, _) => return Ok(0),
       (Retention::Count(n), _) => self.db.get_beyond_newest(n.max(1))?,
       (_, Some(age)) => self.db.get_created_before(now - age.as_millis() as i64)?,
       (_, None) => unreachable!("every other retention has an age"),
     };
+
+    doomed.retain(|(id, _)| !busy.contains(id));
 
     let mut removed = Vec::with_capacity(doomed.len());
     let mut emptied = HashSet::new();
@@ -227,7 +229,7 @@ mod tests {
     }
 
     let (_, kept) = add(&h, 0);
-    assert_eq!(h.cleanup(Retention::Days3, NOW).unwrap(), 3);
+    assert_eq!(h.cleanup(Retention::Days3, NOW, &[]).unwrap(), 3);
     let kept_day = kept.parent().unwrap().file_name().unwrap().to_str().unwrap().to_owned();
     assert_eq!(top(dir.path()), (vec![kept_day], 1));
     fs::remove_file(&kept).unwrap();
@@ -242,8 +244,12 @@ mod tests {
     let dir = TempDir::new("history-count");
     let h = History::open(dir.path()).unwrap();
     let entries: Vec<(i64, PathBuf)> = (0..5).map(|i| add(&h, (5 - i) * 1_000)).collect();
-    assert_eq!(h.cleanup(Retention::Unlimited, NOW).unwrap(), 0);
-    assert_eq!(h.cleanup(Retention::Count(2), NOW).unwrap(), 3);
+    assert_eq!(h.cleanup(Retention::Unlimited, NOW, &[]).unwrap(), 0);
+    // Those being transcribed again stay.
+    let busy = [entries[0].0, entries[1].0];
+    assert_eq!(h.cleanup(Retention::Count(2), NOW, &busy).unwrap(), 1);
+    assert!(entries[0].1.exists() && !entries[2].1.exists());
+    assert_eq!(h.cleanup(Retention::Count(2), NOW, &[]).unwrap(), 2);
 
     assert_eq!(entry_ids(dir.path()), [entries[3].0, entries[4].0]);
     for (i, (_, path)) in entries.iter().enumerate() {
@@ -251,9 +257,9 @@ mod tests {
     }
 
     assert_eq!(top(dir.path()).1, 2);
-    assert_eq!(h.cleanup(Retention::Count(2), NOW).unwrap(), 0, "idempotent");
+    assert_eq!(h.cleanup(Retention::Count(2), NOW, &[]).unwrap(), 0, "idempotent");
     // Zero keeps one: the retention never empties the history entirely.
-    assert_eq!(h.cleanup(Retention::Count(0), NOW).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Count(0), NOW, &[]).unwrap(), 1);
   }
 
   #[test]
@@ -264,18 +270,18 @@ mod tests {
     let entries: Vec<(i64, PathBuf)> = ages.iter().map(|&a| add(&h, a)).collect();
     let left = || entry_ids(dir.path()).len();
 
-    assert_eq!(h.cleanup(Retention::Months3, NOW).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Months3, NOW, &[]).unwrap(), 1);
     assert_eq!(left(), 6);
     assert!(!entries[6].1.exists());
-    assert_eq!(h.cleanup(Retention::Weeks2, NOW).unwrap(), 2);
+    assert_eq!(h.cleanup(Retention::Weeks2, NOW, &[]).unwrap(), 2);
     assert_eq!(left(), 4);
-    assert_eq!(h.cleanup(Retention::Days3, NOW).unwrap(), 2);
+    assert_eq!(h.cleanup(Retention::Days3, NOW, &[]).unwrap(), 2);
     assert_eq!(entry_ids(dir.path()), [entries[0].0, entries[1].0]);
     assert_eq!(top(dir.path()).1, 2);
     assert!(entries[1].1.exists() && !entries[2].1.exists());
 
     // Time passes: a day later the 3-day-old entry goes too.
-    assert_eq!(h.cleanup(Retention::Days3, NOW + DAY).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Days3, NOW + DAY, &[]).unwrap(), 1);
     assert_eq!(entry_ids(dir.path()), [entries[0].0]);
   }
 
@@ -285,7 +291,7 @@ mod tests {
     let h = History::open(dir.path()).unwrap();
     let (_, path) = add(&h, 10 * DAY);
     fs::remove_file(&path).unwrap();
-    assert_eq!(h.cleanup(Retention::Days3, NOW).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Days3, NOW, &[]).unwrap(), 1);
     assert!(entry_ids(dir.path()).is_empty());
   }
 

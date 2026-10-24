@@ -506,6 +506,7 @@ impl<O: TextOutput> Controller<O> {
   /// connection. Rows are deleted after their files, so the two never disagree.
   fn cleanup_in_background(&self) {
     let (home, retention) = (self.config.home.clone(), self.settings.history_retention);
+    let busy = self.retranscribing_entries();
     if retention == Retention::Unlimited {
       return;
     }
@@ -517,7 +518,7 @@ impl<O: TextOutput> Controller<O> {
         Err(e) => return warn!("history: {e:#}"),
       };
 
-      if retain(&history, retention) > 0 {
+      if retain(&history, retention, &busy) > 0 {
         let _ = tx.send(Msg::Cleaned);
       }
     };
@@ -579,8 +580,8 @@ impl<O: TextOutput> Controller<O> {
       Request::Cancel => Command::Cancel,
       Request::Status => return Ok(serde_json::to_value(self.status())?),
       Request::Retranscribe { id } => {
-        let state = self.retranscribe(id)?;
-        return Ok(json!({ "entry": id, "state": state }));
+        self.retranscribe(id)?;
+        return Ok(json!({ "entry": id, "state": "transcribing" }));
       }
       Request::RetranscribeLast => {
         let state = self.retranscribe_last()?;
@@ -1005,7 +1006,7 @@ impl<O: TextOutput> Controller<O> {
           audio_path: Some(&d.audio),
           model: d.model.as_deref(),
           language: d.language.as_deref(),
-          text: &d.last.text,
+          text: d.last.text.trim(),
         };
 
         d.last.entry = add_entry(&self.history, &entry);
@@ -1186,8 +1187,8 @@ impl<O: TextOutput> Controller<O> {
   }
 
   /// Entry `id`'s recording through the engine again, behind any dictation; its text stays until
-  /// new text replaces it. Returns the state: `transcribing`.
-  fn retranscribe(&mut self, id: i64) -> Result<&'static str> {
+  /// new text replaces it.
+  fn retranscribe(&mut self, id: i64) -> Result<()> {
     let entry = self.history.db.get_entry(id)?.ok_or_else(|| anyhow!("no history entry {id}"))?;
     if self.retranscribing.iter().any(|b| b.target == Target::Entry(id)) {
       bail!("entry {id} is being transcribed");
@@ -1201,7 +1202,7 @@ impl<O: TextOutput> Controller<O> {
       bail!("no speech in the recording of entry {id}: it stays as it is");
     }
 
-    Ok("transcribing")
+    Ok(())
   }
 
   /// The last failed recording through the engine again, as [`Target::Recording`]. Returns the
@@ -1233,10 +1234,10 @@ impl<O: TextOutput> Controller<O> {
   }
 
   /// Recordings a crash left, one at a time once none is running: each holds its audio in memory
-  /// until it is transcribed.
+  /// until it is transcribed. Without a model they stay where they are, for a start with one.
   fn transcribe_orphans(&mut self) {
     let running = self.retranscribing.iter().any(|b| matches!(b.target, Target::Recording(_)));
-    if running {
+    if running || self.orphans.is_empty() || self.check_model().is_err() {
       return;
     }
 
@@ -1252,10 +1253,12 @@ impl<O: TextOutput> Controller<O> {
 
   /// Recording `wav` for `target` to the engine, behind any dictation; false if it has no speech.
   fn transcribe_background(&mut self, target: Target, wav: &Path) -> Result<bool> {
+    // The model first: without one the recording is not worth reading.
+    self.engine()?;
     let clip = Clip::analyze(wav::read(wav)?);
     let Some(input) = clip.engine_input() else { return Ok(false) };
     let language = self.settings.engine_language();
-    let loaded = self.engine()?;
+    let loaded = self.engine.as_ref().expect("started above");
     let model = loaded.name.clone();
     info!("{target:?}: transcribing {:.1} s with {model}", clip.seconds());
     let pending = loaded.engine.transcribe_background(input.pcm, language.clone());
@@ -1299,8 +1302,11 @@ impl<O: TextOutput> Controller<O> {
     let language = language.as_deref();
     match (target, outcome) {
       (Target::Entry(id), Outcome::Done) => {
-        info!("entry {id}: transcribed again");
-        log_history(self.history.db.update_text(id, text, &model, language));
+        match self.history.db.update_text(id, text, &model, language) {
+          Ok(true) => info!("entry {id}: transcribed again"),
+          Ok(false) => info!("entry {id}: transcribed again, but deleted meanwhile"),
+          Err(e) => warn!("history: {e:#}"),
+        }
       }
       (Target::Recording(name), Outcome::Done) => {
         let entry = NewEntry {
@@ -1313,6 +1319,7 @@ impl<O: TextOutput> Controller<O> {
         };
 
         add_entry(&self.history, &entry);
+        self.cleanup();
       }
       (target, _) => {
         let why = error.unwrap_or_default();
@@ -1337,7 +1344,16 @@ impl<O: TextOutput> Controller<O> {
   }
 
   fn cleanup(&mut self) {
-    retain(&self.history, self.settings.history_retention);
+    retain(&self.history, self.settings.history_retention, &self.retranscribing_entries());
+  }
+
+  /// The entries being transcribed again.
+  fn retranscribing_entries(&self) -> Vec<i64> {
+    let entries = self.retranscribing.iter().filter_map(|b| match b.target {
+      Target::Entry(id) => Some(id),
+      Target::Recording(_) => None,
+    });
+    entries.collect()
   }
 
   fn status(&self) -> Status {
@@ -1374,12 +1390,7 @@ impl<O: TextOutput> Controller<O> {
         device: s.device,
       }),
       last: self.last.clone(),
-      retranscribing: (self.retranscribing.iter())
-        .filter_map(|b| match b.target {
-          Target::Entry(id) => Some(id),
-          Target::Recording(_) => None,
-        })
-        .collect(),
+      retranscribing: self.retranscribing_entries(),
       failed_recording: self.failed_recording,
       error: self.error.clone(),
       warnings,
@@ -1388,10 +1399,10 @@ impl<O: TextOutput> Controller<O> {
   }
 }
 
-/// Applies `retention` to `history`; how many entries went.
-fn retain(history: &History, retention: Retention) -> usize {
+/// Applies `retention` to `history`, but to the `busy` entries; how many entries went.
+fn retain(history: &History, retention: Retention, busy: &[i64]) -> usize {
   let started = Instant::now();
-  match history.cleanup(retention, now_ms()) {
+  match history.cleanup(retention, now_ms(), busy) {
     Ok(0) => 0,
     Ok(n) => {
       info!("history: {n} old entries removed ({retention:?}) in {:.0?}", started.elapsed());

@@ -894,7 +894,7 @@ fn retention_runs_after_each_dictation() {
 
 #[test]
 fn retranscribe_without_speech_and_unknown_entries() {
-  let s = InProcess::start("session-again", &Settings::default(), Some(&silence(0.1)), NO_MODELS);
+  let s = InProcess::start("session-again", &Settings::default(), Some(&silence(0.1)), ONE_MODEL);
   // After the start's recovery (the first update): it would take a WAV written meanwhile for an
   // orphan. An entry whose recording has no speech stays as it is.
   let kept = add_entry(s.home.path(), 2_000, "текст", &silence(0.2));
@@ -985,17 +985,30 @@ fn start_transcribes_what_a_crash_left() {
 }
 
 /// What a crash left that cannot be transcribed is the last failed recording, the status says so;
-/// one without speech goes.
+/// one without speech goes. Without any model they stay as they are, for a start with one.
 #[test]
 fn start_keeps_what_a_crash_left_as_the_last_failed_recording() {
   let home = TempDir::new("session-recover-fails");
   orphan(home.path(), 2_000, &silence(1.0));
   let (_, created_at) = orphan(home.path(), 1_000, &tone(1.0));
-  let s = InProcess::start_in(home, &Settings::default(), None, NO_MODELS, Deadlines::default());
-  let status = &s.first.status;
+  let deadlines = Deadlines::default();
+  let s = InProcess::start_in(home, &Settings::default(), None, NO_MODELS, deadlines);
+  assert_eq!((s.first.status.failed_recording, &s.first.status.error), (None, &None));
+  assert_eq!((s.entries().len(), s.recordings()), (0, 2), "left for a model");
+
+  let InProcess { home, _session, .. } = s;
+  drop(_session);
+  let broken = home.path().join("broken.gguf");
+  fs::write(&broken, b"BROKEN").unwrap();
+  let model = Some(broken.display().to_string());
+  let settings = Settings { model, ..Settings::default() };
+  let s = InProcess::start_in(home, &settings, None, NO_MODELS, deadlines);
+  let status = poll("the failure", Duration::from_secs(10), || {
+    Some(s.status()).filter(|s| s.failed_recording.is_some())
+  });
   assert_eq!(status.failed_recording, Some(created_at));
-  let error = status.error.clone().unwrap_or_default();
-  assert!(error.contains("could not be transcribed") && error.contains("no model"), "{error}");
+  let error = status.error.unwrap_or_default();
+  assert!(error.contains("could not be transcribed") && error.contains("broken"), "{error}");
   assert!(s.entries().is_empty());
   assert_eq!(s.recordings(), 1, "the one without speech went");
 }

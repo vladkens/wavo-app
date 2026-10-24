@@ -195,17 +195,18 @@ impl Db {
 
   // MARK: Updater
 
-  /// The text of a new transcription, with the model and language it was made with.
+  /// The text of a new transcription, with the model and language it was made with; false if
+  /// there is no such entry.
   pub fn update_text(
     &self,
     id: i64,
     text: &str,
     model: &str,
     language: Option<&str>,
-  ) -> Result<()> {
+  ) -> Result<bool> {
     let qs = "UPDATE entries SET text = ?2, model = ?3, language = ?4 WHERE id = ?1;";
-    self.db.prepare_cached(qs)?.execute(params![id, text, model, language])?;
-    Ok(())
+    let changed = self.db.prepare_cached(qs)?.execute(params![id, text, model, language])?;
+    Ok(changed > 0)
   }
 
   /// Whether the text was pasted, and if a paste was refused, why.
@@ -330,11 +331,12 @@ mod tests {
     db.mark_pasted(id, true, None).unwrap();
 
     // Again with another model: the new text with what made it.
-    db.update_text(id, "Привет!", "whisper", Some("ru")).unwrap();
+    assert!(db.update_text(id, "Привет!", "whisper", Some("ru")).unwrap());
     let entry = db.get_entry(id).unwrap().unwrap();
     assert_eq!(entry.text, "Привет!");
     assert_eq!((entry.model.as_deref(), entry.language.as_deref()), (Some("whisper"), Some("ru")));
     assert!(entry.pasted && entry.not_pasted.is_none());
     assert_eq!(db.get_entry(id + 1).unwrap(), None);
+    assert!(!db.update_text(id + 1, "x", "whisper", None).unwrap(), "no such entry");
   }
 }
