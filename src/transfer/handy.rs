@@ -157,27 +157,32 @@ fn read(dir: &Path) -> Result<Read> {
     }
   };
 
+  // Two dictations of one second name one file, which the later one wrote: it is that one's.
+  let rows: Vec<(String, i64, String)> = rows.collect::<rusqlite::Result<_>>()?;
+  let owner: HashMap<&str, usize> =
+    rows.iter().enumerate().map(|(i, (file, _, _))| (file.as_str(), i)).collect();
+
   let mut read = Read { items: Vec::new(), bytes: 0 };
-  for row in rows {
-    let (file, at, text) = row?;
+  for (i, (file, at, text)) in rows.iter().enumerate() {
     if text.trim().is_empty() {
       continue;
     }
 
-    let size = sizes.get(&file).filter(|_| recordings::is_plain(&file));
+    let own = owner.get(file.as_str()) == Some(&i) && recordings::is_plain(file);
+    let size = sizes.get(file).filter(|_| own);
     read.bytes += size.copied().unwrap_or(0);
     let entry = Entry {
       id: 0,
-      created_at: at,
+      created_at: *at,
       duration_ms: size.map_or(0, |len| (len.saturating_sub(WAV_HEADER) / WAV_BYTES_PER_MS) as i64),
       audio_path: None,
       model: Some(MODEL.into()),
       language: None,
-      text,
+      text: text.clone(),
       pasted: false,
       not_pasted: None,
     };
-    read.items.push(Item { entry, audio: size.map(|_| recordings.join(&file)) });
+    read.items.push(Item { entry, audio: size.map(|_| recordings.join(file)) });
   }
 
   Ok(read)
@@ -343,6 +348,9 @@ mod tests {
     handy(src.path(), &[(NOW, "one", None, Some(0.5)), (NOW, "two", None, None)]);
     let report = import(home.path(), src.path(), false).unwrap().1;
     assert_eq!(report, Report { entries: 2, added: 2, copied: 1, failed: 0 });
+    let entries = History::open(home.path()).unwrap().db.get_entries().unwrap();
+    let audio: Vec<_> = entries.iter().map(|e| (e.text.as_str(), e.audio_path.is_some())).collect();
+    assert_eq!(audio, [("one", false), ("two", true)], "the file is the later one's");
     let report = import(home.path(), src.path(), false).unwrap().1;
     assert_eq!(report, Report { entries: 2, ..Report::default() });
   }

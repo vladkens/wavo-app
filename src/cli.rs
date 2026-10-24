@@ -266,8 +266,13 @@ fn print_report(home: &Path, r: &Report, would: &str) {
     );
   }
 
-  // The cleanup applies it to imported entries as to any.
-  let retention = Settings::load(&home.join(settings::FILE)).0.history_retention;
+  // The cleanup applies it to imported entries as to any. Read as it is: `Settings::load` would
+  // set a bad file aside, and a dry run writes nothing.
+  let file = std::fs::read(home.join(settings::FILE)).unwrap_or_default();
+  let retention = serde_json::from_slice::<serde_json::Value>(&file)
+    .ok()
+    .and_then(|v| serde_json::from_value::<Retention>(v.get("history_retention")?.clone()).ok())
+    .unwrap_or_default();
   if r.added > 0 && retention != Retention::Unlimited {
     println!("the history keeps {retention:?}: older entries go at the next cleanup");
   }

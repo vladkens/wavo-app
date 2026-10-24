@@ -214,10 +214,14 @@ fn via_part<E: From<io::Error>>(
   done
 }
 
-/// Writes `src` into recording `dst` (see [`via_part`]). Not synced: a full sync per file would
-/// take minutes for a big history.
-fn write_recording(dst: &Path, src: &mut impl Read) -> io::Result<()> {
-  via_part(dst, |part| io::copy(src, &mut File::create(part)?).map(drop))
+/// Writes the `len` bytes of `src` into recording `dst` (see [`via_part`]); fewer (an archive cut
+/// short) are an error, not a recording. Not synced: a full sync per file would take minutes for a
+/// big history.
+fn write_recording(dst: &Path, src: &mut impl Read, len: u64) -> io::Result<()> {
+  via_part(dst, |part| match io::copy(src, &mut File::create(part)?)? {
+    n if n == len => Ok(()),
+    n => Err(io::Error::new(io::ErrorKind::UnexpectedEof, format!("{n} of {len} bytes"))),
+  })
 }
 
 /// Copies the file `src` into recording `dst` (see [`via_part`]); on APFS it is a clone, taking no

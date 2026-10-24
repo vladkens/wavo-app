@@ -212,7 +212,8 @@ pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> R
         };
 
         let Some(dst) = copies.remove(rec) else { continue };
-        report.count(super::write_recording(&dst, &mut entry), &dst);
+        let len = entry.size();
+        report.count(super::write_recording(&dst, &mut entry, len), &dst);
         progress.tick();
       }
     }
@@ -334,6 +335,33 @@ mod tests {
       Imported { report: Report { entries: 4, ..Report::default() }, settings: true }
     );
     assert_eq!((entry_ids(to.path()).len(), hotkey(to.path())), (5, "ctrl+x".into()));
+  }
+
+  /// A recording an archive cut short holds part of is not taken; the whole archive brings it.
+  #[test]
+  fn a_cut_archive_leaves_no_cut_recording() {
+    let (from, to, out) = (
+      TempDir::new("archive-cut-from"),
+      TempDir::new("archive-cut-to"),
+      TempDir::new("archive-cut"),
+    );
+    let h = History::open(from.path()).unwrap();
+    add(&h, NOW, "one", Some(0.5));
+    add(&h, NOW + 1_000, "two", Some(2.0));
+    let (file, cut) = (out.path().join("wavo.tar"), out.path().join("cut.tar"));
+    export(from.path(), &file).unwrap();
+    let bytes = fs::read(&file).unwrap();
+    fs::write(&cut, &bytes[..bytes.len() - 40_000]).unwrap(); // in the last recording
+
+    let report = import(to.path(), &cut, false, false).map(|x| x.report);
+    let h = History::open(to.path()).unwrap();
+    let entries = h.db.get_entries().unwrap();
+    assert_eq!(entries.len(), 2, "{report:?}");
+    assert!(h.audio_file(&entries[0]).is_some() && h.audio_file(&entries[1]).is_none());
+
+    let report = import(to.path(), &file, false, false).unwrap().report;
+    assert_eq!(report, Report { entries: 2, added: 0, copied: 1, failed: 0 });
+    assert!(h.audio_file(&entries[1]).is_some());
   }
 
   /// Settings this Wavo cannot use do not replace the person's, and nothing is imported.
