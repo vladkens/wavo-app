@@ -256,8 +256,7 @@ impl SpeechModel for FakeModel {
     let count = pieces.len();
     for (index, range) in pieces.into_iter().enumerate() {
       self.models.runs.lock().unwrap().push(range.len());
-      let start_ms = (range.start * 1000 / SAMPLE_RATE as usize) as u32;
-      if on_piece(Piece { index, count, start_ms }).is_break() {
+      if on_piece(Piece { index, count }).is_break() {
         return Err(wavo::Error::Cancelled.into());
       }
     }

@@ -22,8 +22,6 @@ pub struct Piece {
   pub index: usize,
   /// How many pieces the audio is cut into.
   pub count: usize,
-  /// Where it starts, in ms from the start of the audio.
-  pub start_ms: u32,
 }
 
 /// A loaded model. It lives and is dropped on the engine thread that loaded it.
@@ -31,8 +29,9 @@ pub trait SpeechModel {
   /// The device it runs on, as wavo shows it: `Apple M2 (Metal, integrated)`.
   fn device(&self) -> String;
 
-  /// The longest audio it was trained on, in ms, which no piece of a run is longer than; `None`
-  /// for a model without a window (Parakeet on the GPU).
+  /// The longest audio it was trained on, in ms, which bounds each piece's deadline; `None` for a
+  /// model without one (Parakeet on the GPU, which wavo still cuts at 60 s): the deadline is for
+  /// the rest of the run.
   fn max_audio_ms(&self) -> Option<u32>;
 
   /// The text of 16 kHz mono audio of any length, cut at pauses into pieces the model takes, one
@@ -64,7 +63,9 @@ impl SpeechModel for wavo::Model {
     wavo::Model::max_audio_ms(self)
   }
 
-  /// A model that cannot be told a language (Parakeet v3) is not told one: it detects it.
+  /// A language the model cannot be told (any for Parakeet v3, another than its own for a model of
+  /// one) is not sent: the model goes by the speech, and a model meant for one language that hears
+  /// another makes nothing of it.
   fn transcribe(
     &self,
     pcm: &[f32],
@@ -72,15 +73,17 @@ impl SpeechModel for wavo::Model {
     on_piece: &mut dyn FnMut(Piece) -> ControlFlow<()>,
   ) -> Result<String> {
     let mut options = wavo::Options::default();
-    options.language = language.filter(|_| self.takes_language()).map(str::to_owned);
-    if let (Some(code), None) = (language, &options.language) {
-      debug!("language {code} not sent: the model detects it");
+    match language {
+      Some(code) if self.takes_language() && self.languages().iter().any(|l| l == code) => {
+        options.language = Some(code.to_owned());
+      }
+      Some(code) => debug!("language {code} not sent: the model cannot be told it"),
+      None => {}
     }
 
     let started = Instant::now();
-    let transcript = self.transcribe_long(pcm, &options, |p| {
-      on_piece(Piece { index: p.index, count: p.count, start_ms: p.start_ms })
-    })?;
+    let transcript = self
+      .transcribe_long(pcm, &options, |p| on_piece(Piece { index: p.index, count: p.count }))?;
 
     debug!(samples = pcm.len(), ms = started.elapsed().as_millis() as u64, "run");
     Ok(transcript.text.trim().to_owned())

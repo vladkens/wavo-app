@@ -12,12 +12,13 @@
 //!   [`EngineError::Failed`]. Either way the thread drops the model and ends, and the next job
 //!   loads a fresh one on a new thread. A native crash (a segfault or an abort in a driver) is not
 //!   a panic: it ends the app.
-//! - Deadlines ([`Deadlines`]): the model load, each piece of a run max(a minimum, a factor ×
-//!   audio), from the end of the one before. A thread cannot be stopped from outside: one past its
-//!   deadline is left to end on its own, its job fails with [`EngineError::TimedOut`] and the next
-//!   job starts a fresh thread. **The stuck thread keeps its model (memory, GPU buffers) until its
-//!   run returns**, then drops it and ends; what it answers is dropped. While [`MAX_STUCK`] of them
-//!   are still stuck, jobs fail with [`EngineError::Stuck`] instead of loading yet another model.
+//! - Deadlines ([`Deadlines`]): the model load, each piece of a run max(a minimum, a factor × the
+//!   run's audio up to the model's window), from the end of the one before. A thread cannot be
+//!   stopped from outside: one past its deadline is left to end on its own, its job fails with
+//!   [`EngineError::TimedOut`] and the next job starts a fresh thread. **The stuck thread keeps its
+//!   model (memory, GPU buffers) until its run returns**, then drops it and ends; what it answers
+//!   is dropped. While [`MAX_STUCK`] of them are still stuck, jobs fail with [`EngineError::Stuck`]
+//!   instead of loading yet another model.
 //! - An idle engine thread is stopped after [`EngineConfig::unload_after`]: it drops the model and
 //!   ends. A prewarmed one waits for the job it was started for up to [`PREWARM_HOLD`], unless
 //!   [`Engine::release`] says none comes.
@@ -108,13 +109,11 @@ impl Default for Deadlines {
 }
 
 impl Deadlines {
-  /// Deadline for the next piece of a run of `samples` of 16 kHz audio, after one that started at
-  /// `start_ms` (0: the first piece): for what is left from there, up to the model's window.
-  fn piece(&self, samples: usize, start_ms: u32, window_ms: Option<u32>) -> Duration {
-    let per_ms = SAMPLE_RATE as usize / 1000;
-    let left = samples.saturating_sub(start_ms as usize * per_ms);
-    let piece = window_ms.map_or(left, |w| left.min(w as usize * per_ms));
-    let audio = Duration::from_secs_f64(piece as f64 / SAMPLE_RATE as f64);
+  /// Deadline for each piece of a run of `samples` of 16 kHz audio: for the run, up to the model's
+  /// window.
+  fn piece(&self, samples: usize, window_ms: Option<u32>) -> Duration {
+    let window = window_ms.map_or(samples, |w| w as usize * (SAMPLE_RATE as usize / 1000));
+    let audio = Duration::from_secs_f64(samples.min(window) as f64 / SAMPLE_RATE as f64);
     self.request_min.max(audio.mul_f64(self.request_factor))
   }
 }
@@ -260,7 +259,8 @@ impl Engine {
     let (reply, rx) = bounded(1);
     let id = self.next_job.fetch_add(1, Ordering::Relaxed);
     let submitted = Instant::now();
-    let job = Job { id, background, pcm: pcm.into(), language, reply, submitted, progress: None };
+    let job =
+      Job { id, background, pcm: Arc::new(pcm), language, reply, submitted, progress: None };
 
     // If the supervisor is gone the job, and with it the reply sender, is dropped: `Stopped`.
     let _ = self.requests.send(Request::Transcribe(job));
@@ -293,7 +293,7 @@ struct Job {
   id: JobId,
   /// Behind dictations: [`Engine::transcribe_background`].
   background: bool,
-  pcm: Arc<[f32]>,
+  pcm: Arc<Vec<f32>>,
   language: Option<String>,
   reply: Sender<Result<Transcription, EngineError>>,
   submitted: Instant,
@@ -316,6 +316,16 @@ struct Worker {
   state: WorkerState,
 }
 
+impl Worker {
+  /// Has the run in progress stop after its piece in progress, for `why`; whether one runs.
+  fn stop_run(&mut self, why: Stop) -> bool {
+    let WorkerState::Running { stop, .. } = &mut self.state else { return false };
+    *stop = why;
+    self.stop.store(true, Ordering::Relaxed);
+    true
+  }
+}
+
 /// What the supervisor knows of a loaded model.
 #[derive(Debug, Clone)]
 struct ModelInfo {
@@ -329,12 +339,10 @@ enum WorkerState {
     deadline: Instant,
   },
   Idle,
-  /// `deadline` and `timeout` of the piece in progress; `samples` of the run's input, which bound
-  /// the next piece's.
+  /// `deadline` of the piece in progress, `timeout` of each piece.
   Running {
     deadline: Instant,
     timeout: Duration,
-    samples: usize,
     stop: Stop,
   },
 }
@@ -352,7 +360,7 @@ enum Stop {
 /// Supervisor → engine thread: a job's audio to transcribe; one at a time, the next one once its
 /// result is in.
 struct Run {
-  pcm: Arc<[f32]>,
+  pcm: Arc<Vec<f32>>,
   language: Option<String>,
 }
 
@@ -479,11 +487,9 @@ impl Supervisor {
 
     // Its run stops after the piece in progress, for nothing.
     if let Some(worker) = &mut self.worker
-      && let WorkerState::Running { stop, .. } = &mut worker.state
+      && worker.stop_run(Stop::Cancel)
     {
       info!("engine thread {}: transcription cancelled; its run ends unread", worker.thread);
-      *stop = Stop::Cancel;
-      worker.stop.store(true, Ordering::Relaxed);
     }
 
     self.finish(Err(EngineError::Cancelled));
@@ -493,14 +499,13 @@ impl Supervisor {
   /// run stops after that piece, and the job starts over after the dictations.
   fn dictation_first(&mut self) {
     let (Some(job), Some(worker)) = (&self.job, &mut self.worker) else { return };
-    let WorkerState::Running { stop, .. } = &mut worker.state else { return };
-    if !job.background || *stop != Stop::No || !self.queue.front().is_some_and(|j| !j.background) {
+    let running = matches!(worker.state, WorkerState::Running { stop: Stop::No, .. });
+    if !running || !job.background || !self.queue.front().is_some_and(|j| !j.background) {
       return;
     }
 
     debug!(id = job.id, "a dictation goes first: the background job stops after its piece");
-    *stop = Stop::Yield;
-    worker.stop.store(true, Ordering::Relaxed);
+    worker.stop_run(Stop::Yield);
   }
 
   /// Sends the next job to the engine thread, started for it if need be, once it is free.
@@ -515,30 +520,28 @@ impl Supervisor {
       if self.worker.is_none()
         && let Err(e) = self.spawn()
       {
-        self.fail_next(e);
+        self.fail(e);
         continue;
       }
 
       let Some(worker) = &mut self.worker else { return };
       // Loading, or running a cancelled job (it ends within its deadline).
       let (WorkerState::Idle, Some(model)) = (worker.state, &worker.model) else { return };
-      let job = self.queue.pop_front().unwrap();
+      let job = self.job.insert(self.queue.pop_front().unwrap());
       worker.stop.store(false, Ordering::Relaxed);
       if worker.runs.send(Run { pcm: job.pcm.clone(), language: job.language.clone() }).is_err() {
         // The thread ends only after saying why (or when told to): this is a bug.
         warn!("engine thread {} is gone without a word", worker.thread);
         self.worker = None;
-        self.job = Some(job);
         self.finish(Err(EngineError::Crashed("without a word".into())));
         continue;
       }
 
       let samples = job.pcm.len();
-      let timeout = self.config.deadlines.piece(samples, 0, model.max_audio_ms);
+      let timeout = self.config.deadlines.piece(samples, model.max_audio_ms);
       let deadline = Instant::now() + timeout;
-      worker.state = WorkerState::Running { deadline, timeout, samples, stop: Stop::No };
+      worker.state = WorkerState::Running { deadline, timeout, stop: Stop::No };
       debug!(samples, ?timeout, "run sent");
-      self.job = Some(job);
       return;
     }
   }
@@ -569,20 +572,16 @@ impl Supervisor {
         warn!("engine could not load {}: {error}", self.config.model.display());
         self.load_error = Some(error.clone());
         self.worker = None; // the thread has ended
-        self.fail_next(EngineError::Load(error));
+        self.fail(EngineError::Load(error));
       }
 
       Event::Piece(piece) => {
-        let window = worker.model.as_ref().and_then(|m| m.max_audio_ms);
-        let WorkerState::Running { deadline, timeout, samples, stop } = &mut worker.state else {
-          return;
-        };
+        if let WorkerState::Running { deadline, timeout, .. } = &mut worker.state {
+          *deadline = Instant::now() + *timeout; // the next piece's
+        }
 
-        *timeout = self.config.deadlines.piece(*samples, piece.start_ms, window);
-        *deadline = Instant::now() + *timeout;
-        if *stop != Stop::Cancel
-          && let Some(job) = &mut self.job
-        {
+        // None once cancelled.
+        if let Some(job) = &mut self.job {
           job.progress = Some((piece.index + 1, piece.count));
         }
       }
@@ -668,13 +667,8 @@ impl Supervisor {
       "engine thread {thread}: {what} took longer than {timeout:?}; it is left to end on its \
        own, holding its model until then, and a fresh thread takes the next job"
     );
-    let loading = matches!(worker.state, WorkerState::Loading { .. });
     self.leave_stuck();
-    if loading {
-      self.fail_next(EngineError::TimedOut(timeout));
-    } else if self.job.is_some() {
-      self.finish(Err(EngineError::TimedOut(timeout)));
-    }
+    self.fail(EngineError::TimedOut(timeout));
   }
 
   /// When the supervisor must wake up without a message: the deadline of a load or a run, or the
@@ -747,9 +741,12 @@ impl Supervisor {
     }
   }
 
-  /// Fails the next job: its engine thread did not start or load.
-  fn fail_next(&mut self, error: EngineError) {
-    self.job = self.queue.pop_front();
+  /// Fails the current job, else the next one, whose engine thread did not start or load.
+  fn fail(&mut self, error: EngineError) {
+    if self.job.is_none() {
+      self.job = self.queue.pop_front();
+    }
+
     self.finish(Err(error));
   }
 
@@ -971,16 +968,15 @@ mod tests {
     assert!(runs.iter().all(|&n| n <= 10 * second), "{runs:?}");
   }
 
-  /// Each piece's deadline is for what is left of the run, up to the model's window.
+  /// Each piece's deadline is for the run, up to the model's window.
   #[test]
   fn each_piece_has_a_deadline_of_its_own() {
     let d =
       Deadlines { load: Duration::ZERO, request_min: Duration::from_secs(1), request_factor: 2.0 };
     let n = 25 * SAMPLE_RATE as usize;
-    assert_eq!(d.piece(n, 0, Some(10_000)), Duration::from_secs(20), "the window");
-    assert_eq!(d.piece(n, 20_000, Some(10_000)), Duration::from_secs(10), "what is left");
-    assert_eq!(d.piece(n, 0, None), Duration::from_secs(50), "no window: all of it");
-    assert_eq!(d.piece(n, 25_000, None), Duration::from_secs(1), "the minimum");
+    assert_eq!(d.piece(n, Some(10_000)), Duration::from_secs(20), "the window");
+    assert_eq!(d.piece(n, None), Duration::from_secs(50), "no window: all of it");
+    assert_eq!(d.piece(n / 100, None), Duration::from_secs(1), "the minimum");
   }
 
   /// A load that fails (not a model, the file gone) fails the job and stays in the status until a
