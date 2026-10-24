@@ -23,7 +23,7 @@
 mod about;
 pub mod downloads;
 mod general;
-mod history;
+pub mod history;
 pub mod models;
 #[cfg(test)]
 mod tests;
@@ -163,6 +163,9 @@ pub trait Shell {
   fn check_model(&self);
   /// Transcribes a history entry's recording again (the session does, off the main thread).
   fn retranscribe(&self, id: i64);
+  /// Puts back the text a history entry's last transcription replaced (the session does, off the
+  /// main thread).
+  fn undo_transcribe(&self, id: i64);
   /// Deletes a history entry and its recording (the session does, off the main thread); a
   /// failure goes to [`Prefs::entry_not_deleted`] on the main thread.
   fn delete_entry(&self, id: i64);

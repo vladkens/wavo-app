@@ -118,6 +118,10 @@ impl Clip {
     self.pcm.len() as f64 / SAMPLE_RATE as f64
   }
 
+  pub fn duration_ms(&self) -> i64 {
+    self.pcm.len() as i64 * 1000 / i64::from(SAMPLE_RATE)
+  }
+
   pub fn voiced_frames(&self) -> usize {
     self.scores.iter().filter(|&&s| s >= VOICED).count()
   }

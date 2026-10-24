@@ -30,6 +30,7 @@ use super::output::GuiOutput;
 use super::paste;
 use crate::audio::devices;
 use crate::ctl::{self, Autostart, Claim, Reply, Request, Serving};
+use crate::history::db::Entry;
 use crate::history::{self, History};
 use crate::session::controller::{Handle, Phase, Update};
 use crate::session::{self, Session};
@@ -39,6 +40,7 @@ use crate::ui::icons::Icon;
 use crate::ui::menu::{self, Models, Warning};
 use crate::ui::overlay::{self, Overlay, Show};
 use crate::window::downloads::{Download, Downloads};
+use crate::window::history::no_text;
 use crate::window::models::{Found, Pick};
 use crate::window::{self, Page, Prefs};
 
@@ -87,12 +89,11 @@ struct App {
   /// The settings window while it is open.
   window: Option<Window<Prefs>>,
   downloads: Downloads,
-  /// The models downloaded and the recent dictations (their texts and times), as the menu last
-  /// opened.
+  /// The models downloaded and the recent dictations, as the menu last opened.
   found: Vec<Found>,
   /// Which of them transcribes, for the menu's check.
   pick: Pick,
-  recent: Vec<(String, i64)>,
+  recent: Vec<Entry>,
   /// The history, for «Recent».
   history: Option<History>,
   accessibility: bool,
@@ -276,8 +277,12 @@ fn shutdown() {
 /// A menu item was chosen, after the menu closed.
 fn chosen(main: &mut Main, id: &str) {
   let index = |prefix: &str| id.strip_prefix(prefix).and_then(|i| i.parse::<usize>().ok());
+  // One without text has nothing to copy: History shows it, with Transcribe Again.
   if let Some(i) = index("recent:") {
-    with_app(|app| app.copy_recent(i));
+    if with_app(|app| app.copy_recent(i)) == Some(false) {
+      open_window(main, Some(Page::History));
+    }
+
     return;
   }
 
@@ -481,6 +486,15 @@ impl window::Shell for MacShell {
     spawn("retranscribe", move || {
       if let Some(e) = handle.request(Request::Retranscribe { id }).error {
         warn!("transcribe history entry {id} again: {e}");
+      }
+    });
+  }
+
+  fn undo_transcribe(&self, id: i64) {
+    let handle = self.handle.clone();
+    spawn("undo-transcribe", move || {
+      if let Some(e) = handle.request(Request::UndoTranscribe { id }).error {
+        warn!("undo the transcription of history entry {id}: {e}");
       }
     });
   }
@@ -753,7 +767,7 @@ impl App {
     let Some(history) = &self.history else { return };
     let entries = history.db.get_page("", menu::RECENT);
     self.recent = match entries {
-      Ok(entries) => entries.into_iter().map(|e| (e.text, e.created_at)).collect(),
+      Ok(entries) => entries,
       Err(e) => {
         warn!("the menu's recent dictations: {e:#}");
         Vec::new()
@@ -761,12 +775,12 @@ impl App {
     };
   }
 
-  /// Copies «Recent»'s item `i`.
-  fn copy_recent(&mut self, i: usize) {
-    if let Some((text, _)) = self.recent.get(i) {
-      SystemClipboard.write(text);
-      info!("a recent dictation is on the clipboard");
-    }
+  /// Copies «Recent»'s item `i`; false if it has no text.
+  fn copy_recent(&mut self, i: usize) -> bool {
+    let Some(e) = self.recent.get(i).filter(|e| !e.text.is_empty()) else { return false };
+    SystemClipboard.write(&e.text);
+    info!("a recent dictation is on the clipboard");
+    true
   }
 
   /// The menu's model `i` is used from now on.
@@ -811,8 +825,12 @@ impl App {
 
     let hotkey = self.hotkeys.status().hotkey.map(|h| h.label());
     let now = history::now_ms();
-    let recent: Vec<String> =
-      self.recent.iter().map(|(text, at)| menu::recent_title(text, *at, now)).collect();
+    let recent: Vec<String> = (self.recent.iter())
+      .map(|e| {
+        let empty = e.text.is_empty().then(|| no_text(e.tried_model.as_deref()));
+        menu::recent_title(empty.as_deref().unwrap_or(&e.text), e.created_at, now)
+      })
+      .collect();
     let menu = menu::menu(
       hotkey.as_deref(),
       &update.status,

@@ -30,11 +30,11 @@ use super::general::{
   OPEN_ACCESSIBILITY, OPEN_MICROPHONE, PASTE, RECORDINGS_FOLDER, RESET, RETENTION, TRAY_ONLY,
   UNLOAD, row,
 };
-use super::history::{COPY, DELETE, PLAY, RETRANSCRIBE, ROW, SEARCH, TEXT};
+use super::history::{COPY, DELETE, PLAY, RETRANSCRIBE, ROW, SEARCH, TEXT, UNDO};
 use super::models::{self as page, CANCEL, DOWNLOAD, INFO, USE};
 use super::*;
 use crate::audio::devices::Choice;
-use crate::history::db::{NewEntry, Status as EntryStatus};
+use crate::history::db::NewEntry;
 use crate::history::{History, now_ms};
 use crate::session::controller::{EngineStatus, Phase};
 use crate::settings::Activation;
@@ -51,6 +51,7 @@ struct Log {
   states: HashMap<&'static str, Download>,
   cancelled: Vec<String>,
   retranscribed: Vec<i64>,
+  undone: Vec<i64>,
   deleted: Vec<i64>,
   urls: Vec<String>,
   folders: Vec<PathBuf>,
@@ -144,6 +145,10 @@ impl Shell for Fake {
     self.log().retranscribed.push(id);
   }
 
+  fn undo_transcribe(&self, id: i64) {
+    self.log().undone.push(id);
+  }
+
   fn delete_entry(&self, id: i64) {
     self.log().deleted.push(id);
   }
@@ -218,7 +223,7 @@ impl Home {
 }
 
 /// Dictations in `home`'s history, `(text, minutes ago, seconds)`, the oldest first, with a
-/// recording each when `audio`; their ids.
+/// recording each when `audio`; one without text was tried by whisper-tiny. Their ids.
 fn history_of(home: &Path, items: &[(&str, i64, f32)], audio: bool) -> Vec<i64> {
   let h = History::open(home).unwrap();
   let now = now_ms();
@@ -229,16 +234,17 @@ fn history_of(home: &Path, items: &[(&str, i64, f32)], audio: bool) -> Vec<i64> 
         crate::testing::write_wav(&path, &[0.0; 1_600]);
       }
 
+      let (model, tried) = ("parakeet-tdt-0.6b-v3-Q8_0", "whisper-tiny-Q8_0");
       let entry = NewEntry {
         created_at: now - ago * 60_000,
         duration_ms: (secs * 1000.0) as i64,
-        model: Some("parakeet-tdt-0.6b-v3-Q8_0"),
         audio_path: audio.then_some(name.as_str()),
+        text,
+        model: (!text.is_empty()).then_some(model),
+        tried_model: text.is_empty().then_some(tried),
         ..NewEntry::default()
       };
-      let id = h.db.insert_entry(&entry).unwrap();
-      h.db.update_outcome(id, EntryStatus::Done, Some(text), None).unwrap();
-      id
+      h.db.insert_entry(&entry).unwrap()
     })
     .collect()
 }
@@ -256,9 +262,10 @@ fn dictations(home: &Path) -> Vec<i64> {
   )
 }
 
-/// Today's and yesterday's dictations, more than the window holds, with recordings.
+/// Today's and yesterday's dictations, more than the window holds, with recordings: one without
+/// text, and the newest transcribed again (it can be undone).
 fn many_dictations(home: &Path) -> Vec<i64> {
-  history_of(
+  let ids = history_of(
     home,
     &[
       ("Draft a reply to Anna: the build is green, the release goes out on Monday.", 1500, 8.4),
@@ -275,10 +282,15 @@ fn many_dictations(home: &Path) -> Vec<i64> {
         2,
         11.9,
       ),
-      ("Отдельно я хотел бы, чтобы ты импортировал эту штуку отдельным экшеном.", 1, 6.5),
+      ("Отдельно я хотел бы чтобы ты импортировал эту штуку отдельным экшеном", 1, 6.5),
+      ("", 4, 2.1),
     ],
     true,
-  )
+  );
+  let again = "Отдельно я хотел бы, чтобы ты импортировал эту штуку отдельным экшеном.";
+  let h = History::open(home).unwrap();
+  h.db.update_text(ids[8], again, "whisper-large-v3-turbo-Q8_0", None).unwrap();
+  ids
 }
 
 /// The two models most tests have downloaded: the first two of wavo's list.
@@ -1087,28 +1099,42 @@ fn the_history_selects_copies_and_deletes() {
 }
 
 /// Re-transcribe asks the session for an entry with its recording, and waits while it runs or
-/// while no model can.
+/// while no model can. An entry without text is listed, with nothing to copy; one transcribed
+/// again offers Undo.
 #[test]
 fn a_dictation_is_transcribed_again() {
   let home = Home::new("window-retranscribe", &TWO);
-  let id = history_of(home.path(), &[("Hello there.", 1, 1.5)], true)[0];
+  let ids = history_of(home.path(), &[("Hello there.", 1, 1.5), ("", 2, 1.0)], true);
+  let (id, untranscribed) = (ids[0], ids[1]);
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
   tab(&mut h, Page::History);
+  assert_eq!(hover(&mut h, Id::of((COPY, untranscribed))), (Cursor::Arrow, 0), "nothing to copy");
+  assert!(h.rect(Id::of((UNDO, id))).is_none(), "nothing to undo yet");
+  click(&mut h, Id::of((RETRANSCRIBE, untranscribed)));
   click(&mut h, Id::of((RETRANSCRIBE, id)));
-  assert_eq!(fake.log().retranscribed, [id]);
+  assert_eq!(fake.log().retranscribed, [untranscribed, id]);
+
+  // Its new text came: Undo puts back the one before.
+  let history = History::open(home.path()).unwrap();
+  history.db.update_text(id, "Hello, there.", "whisper-tiny-Q8_0", None).unwrap();
+  let settings = h.app().settings.clone();
+  h.app_mut().update(&settings, &status(Phase::Idle), 2);
+  h.rt.waker().wake();
+  h.frame();
+  click(&mut h, Id::of((UNDO, id)));
+  assert_eq!(fake.log().undone, [id]);
 
   let mut st = status(Phase::Idle);
   st.retranscribing = vec![id];
-  let settings = h.app().settings.clone();
-  h.app_mut().update(&settings, &st, 2);
+  h.app_mut().update(&settings, &st, 3);
   h.rt.waker().wake();
   h.frame();
   assert_eq!(hover(&mut h, Id::of((RETRANSCRIBE, id))), (Cursor::Arrow, 0));
   assert_eq!(hover(&mut h, Id::of((DELETE, id))), (Cursor::Arrow, 0), "nor deleted meanwhile");
 
   // A delete the session refused: the entry is back, and why is said.
-  h.app_mut().update(&settings, &status(Phase::Idle), 3);
+  h.app_mut().update(&settings, &status(Phase::Idle), 4);
   h.app_mut().delete_entry(id);
   h.app_mut().entry_not_deleted("entry 1 is being transcribed");
   h.rt.waker().wake();
