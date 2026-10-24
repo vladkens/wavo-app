@@ -215,7 +215,6 @@ pub struct Update {
   pub meter: Option<Meter>,
   /// Moves on every change of the history (an entry added, finished, deleted, cleaned up): a
   /// history window reloads then.
-  #[cfg_attr(not(test), expect(dead_code, reason = "the History page (step 8) is its first user"))]
   pub history: u64,
 }
 
@@ -248,6 +247,7 @@ enum Msg {
   },
   /// The background thread removed entries.
   Cleaned,
+  CheckModel,
   Quit,
 }
 
@@ -340,6 +340,12 @@ impl Handle {
   /// engine is stopped in the background.
   pub fn edit_settings(&self, edit: impl FnOnce(&mut Settings) + Send + 'static) {
     let _ = self.0.send(Msg::Edit(Box::new(edit)));
+  }
+
+  /// The models on disk changed (a download ended, a model was deleted): whether one can
+  /// transcribe is looked at again, and an engine of another model than that lets go of it.
+  pub fn check_model(&self) {
+    let _ = self.0.send(Msg::CheckModel);
   }
 
   /// Handles a control request; `quit` is refused, the app answers it.
@@ -574,6 +580,17 @@ impl<O: TextOutput> Controller<O> {
       Msg::Transcribed { take, result } => self.on_transcribed(take, result),
       Msg::Retranscribed { target, result } => self.on_retranscribed(target, result),
       Msg::Cleaned => {} // the history's changes show it
+      // An engine of another model than the one to use now (its file gone, the first one
+      // downloaded another) stops.
+      Msg::CheckModel => {
+        let path = self.check_model().ok();
+        if let Some(loaded) = &self.engine
+          && path.as_ref() != Some(&loaded.path)
+        {
+          info!("model {}: another is to transcribe, its engine stops", loaded.name);
+          self.retire_engine();
+        }
+      }
       Msg::Quit => unreachable!("handled by the loop"),
     }
   }
@@ -603,7 +620,7 @@ impl<O: TextOutput> Controller<O> {
         let state = if self.engine.is_some() { "unloading" } else { "unloaded" };
         return Ok(json!({ "state": state }));
       }
-      Request::OpenSettings | Request::Autostart { .. } | Request::Quit => {
+      Request::OpenSettings | Request::OpenHistory | Request::Autostart { .. } | Request::Quit => {
         bail!("{request:?} is not handled by the session")
       }
     };
@@ -1476,7 +1493,7 @@ fn file_stem(path: &Path) -> String {
 /// What a model choice (wavo's name, or a file's path) is called where it shows, also once its
 /// file is gone: wavo's full name (`parakeet-tdt-0.6b-v3`), else the file's name without
 /// extension.
-fn label(choice: &str) -> String {
+pub fn label(choice: &str) -> String {
   hub::lookup(choice).map_or_else(|_| file_stem(Path::new(choice)), |m| m.full_name.into())
 }
 

@@ -19,7 +19,7 @@ libc = "0.2.191"
 nimbo = { git = "https://github.com/vladkens/nimbo", branch = "main" }
 rtrb = "0.4.0"
 rubato = "5.0.1"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "functions"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tar = { version = "0.4.46", default-features = false }
@@ -50,3 +50,6 @@ objc2-application-services = { version = "0.3.2", default-features = false, feat
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSObject", "NSString"] }
+
+[build-dependencies]
+png = "0.18.1"

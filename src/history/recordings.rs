@@ -9,9 +9,9 @@
 //! `recordings/last-failed/`, to transcribe again: one recording, the newest failure's.
 
 use std::collections::HashSet;
+use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::{fs, mem};
 
 use anyhow::{Context, Result, bail};
 
@@ -196,25 +196,10 @@ pub fn started_at(name: &str) -> Option<i64> {
   file.strip_suffix(".wav")?.split('-').next()?.parse().ok()
 }
 
-/// The day folder of a recording started at `ms` (Unix ms): its local date (the C runtime's time
-/// zone), `YYYY-MM-DD`.
+/// The day folder of a recording started at `ms` (Unix ms): its local date, `YYYY-MM-DD`.
 pub fn day_of(ms: i64) -> Option<String> {
-  let time = ms.div_euclid(1000) as libc::time_t;
-  // SAFETY: `tm` is plain data, and `localtime_r` writes only to it.
-  let mut tm: libc::tm = unsafe { mem::zeroed() };
-  #[cfg(unix)]
-  if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
-    return None;
-  }
-
-  // SAFETY: as above, Windows' C runtime's version.
-  #[cfg(windows)]
-  if unsafe { libc::localtime_s(&mut tm, &time) } != 0 {
-    return None;
-  }
-
-  let year = tm.tm_year + 1900;
-  (1970..=9999).contains(&year).then(|| format!("{year:04}-{:02}-{:02}", tm.tm_mon + 1, tm.tm_mday))
+  let (year, month, day) = super::local_time(ms)?.date();
+  Some(format!("{year:04}-{month:02}-{day:02}"))
 }
 
 /// `YYYY-MM-DD`: the name of a day folder.

@@ -7,7 +7,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
+
+use super::fold;
 
 /// How long a query waits for another connection's write.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -147,6 +150,9 @@ impl Db {
     db.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     migrate(&db).with_context(|| format!("migrate {}", path.display()))?;
+    // What a search compares the text by.
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    db.create_scalar_function("wavo_fold", 1, flags, |ctx| Ok(fold(&ctx.get::<String>(0)?)))?;
     Ok(Self { db })
   }
 
@@ -176,6 +182,20 @@ impl Db {
     let qs = "SELECT * FROM entries WHERE id = ?1;";
     let item = self.db.prepare_cached(qs)?.query_row([id], entry_from_row).optional()?;
     Ok(item)
+  }
+
+  /// The newest `limit` entries, newest first by recording time, whose text holds `search` in
+  /// any case ([`fold`]; empty: all).
+  pub fn get_page(&self, search: &str, limit: usize) -> Result<Vec<Entry>> {
+    let qs = "
+    SELECT * FROM entries
+    WHERE (?1 = '' OR instr(wavo_fold(text), ?1) > 0)
+    ORDER BY created_at DESC, id DESC LIMIT ?2;
+    ";
+
+    let mut stmt = self.db.prepare_cached(qs)?;
+    let items = stmt.query_map(params![fold(search), limit as i64], entry_from_row)?;
+    Ok(items.collect::<rusqlite::Result<_>>()?)
   }
 
   /// The recordings entries name.
@@ -465,5 +485,30 @@ mod tests {
     assert!(ro.update_without_audio(&names).is_err());
     db.db.pragma_update(None, "user_version", 0).unwrap();
     assert!(Db::open_read_only(&dir.path().join("history.db")).is_err(), "another layout");
+  }
+
+  #[test]
+  fn pages_are_newest_first_with_text_and_searched_in_any_case() {
+    let dir = TempDir::new("db-page");
+    let db = open(&dir);
+    let texts = ["Добрый день.", "Ещё раз", "hello World", "ДОБРЫЙ вечер", "еще одно"];
+    let ids: Vec<i64> = (texts.iter().enumerate())
+      .map(|(i, &text)| {
+        let entry = NewEntry { created_at: 10_000 - i as i64 * 1_000, text, ..NewEntry::default() };
+        db.insert_entry(&entry).unwrap()
+      })
+      .collect();
+
+    let page = |search: &str, limit| -> Vec<i64> {
+      db.get_page(search, limit).unwrap().iter().map(|e| e.id).collect()
+    };
+    let all = ids.clone();
+    assert_eq!(page("", 100), all);
+    assert_eq!(page("", 2), all[..2]);
+    // Case in Cyrillic and Latin, `ё` as `е`; a quote or a percent sign is just text.
+    assert_eq!(page("добрый", 100), [ids[0], ids[3]]);
+    assert_eq!(page("WORLD", 100), [ids[2]]);
+    assert_eq!(page("ещё", 100), [ids[1], ids[4]]);
+    assert!(page("%", 100).is_empty() && page("'", 100).is_empty());
   }
 }

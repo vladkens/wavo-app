@@ -1,8 +1,11 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! `wavo-app gui`: the menu bar app on nimbo's app platform ([nimbo::app]), an accessory app with
-//! no window: the [Tray] with the [menu], the [Hotkeys] that feed the session's input, the HUD in
-//! an [Overlay]. The session and the control socket are `wavo-app daemon`'s.
+//! `wavo-app gui`: the menu bar app on nimbo's app platform ([nimbo::app]), an accessory app: the
+//! [Tray] with the [menu], the [Hotkeys] that feed the session's input, the HUD in an [Overlay],
+//! the settings window ([Prefs]) on demand: at launch unless the person starts in the menu bar
+//! only, from the menu, `wavo-app ctl open-settings` and `open-history`, a second launch and the
+//! app opened again (Finder, Spotlight). The session and the control socket are `wavo-app
+//! daemon`'s.
 //!
 //! The main thread owns the app ([App], in a thread local). Other threads reach it only through
 //! nimbo's [Proxy] ([proxy]): the session's observer posts every [Update] there, which goes on to
@@ -10,6 +13,7 @@
 //! answer from it runs on a thread of its own.
 
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -23,19 +27,24 @@ use objc2_app_kit::{NSAlert, NSApplication};
 use objc2_foundation::NSString;
 use serde_json::{Value, json};
 use tracing::{info, warn};
+use wavo::hub::{Hub, ModelInfo};
 
 use super::microphone::{self, Access as Microphone};
 use super::output::MacOutput;
 use super::paste;
 use crate::audio::devices;
 use crate::ctl::{self, Autostart, Claim, Reply, Request, Serving};
+use crate::history::{self, History};
 use crate::session::controller::{Handle, Phase, Update};
 use crate::session::{self, Session};
-use crate::settings::HudPosition;
+use crate::settings::{self, HudPosition, Settings};
 use crate::ui::hud::{self, Mode};
 use crate::ui::icons::Icon;
-use crate::ui::menu::{self, Warning};
+use crate::ui::menu::{self, Models, Warning};
 use crate::ui::overlay::{self, Overlay, Show};
+use crate::window::downloads::{Download, Downloads};
+use crate::window::models::{Found, Pick};
+use crate::window::{self, Access, Page, Prefs};
 
 /// The app as the system knows it: its menu bar presence, its login item.
 const INFO: AppInfo =
@@ -78,8 +87,21 @@ struct App {
   /// The HUD's window and where it shows.
   hud: (Window<Overlay>, HudPosition),
   handle: Handle,
+  home: PathBuf,
+  hub: Hub,
   /// The session's last; none before its first.
   update: Option<Update>,
+  /// The settings window while it is open.
+  window: Option<Window<Prefs>>,
+  downloads: Downloads,
+  /// The models downloaded and the recent dictations (their texts and times), as the menu last
+  /// opened.
+  found: Vec<Found>,
+  /// Which of them transcribes, for the menu's check.
+  pick: Pick,
+  recent: Vec<(String, i64)>,
+  /// The history, for «Recent».
+  history: Option<History>,
   accessibility: bool,
   microphone: Microphone,
   /// The paste may read the clipboard to restore it ([paste::readable]).
@@ -138,6 +160,8 @@ fn alert(title: &str, text: &str) {
 fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Result<()> {
   let _ = PROXY.set(main.proxy());
   let fake_mic = config.fake_mic.is_some();
+  let (home, hub) = (config.home.clone(), config.hub.clone());
+  let (saved, _) = Settings::load(&home.join(settings::FILE));
   let observer = Box::new(|update: Update| {
     proxy().post(move |main| _ = with_app(|app| app.on_update(main, update)))
   });
@@ -164,7 +188,15 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     hotkeys,
     hud: (open_hud(main, position), position),
     handle,
+    home,
+    hub,
     update: None,
+    window: None,
+    downloads: Downloads::default(),
+    found: Vec::new(),
+    pick: Pick::default(),
+    recent: Vec::new(),
+    history: None,
     accessibility: false,
     microphone: microphone::access(),
     clipboard: paste::readable(),
@@ -175,7 +207,16 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   };
   // No system dialog at launch: the menu's warning asks for Accessibility.
   app.check_access();
+  app.read_models();
+  // Without Accessibility the window opens on Advanced, whose button asks for it.
+  let page = (!app.accessibility).then_some(Page::Advanced);
   APP.with(|cell| *cell.borrow_mut() = Some(app));
+  // Opened again while it runs: the settings window, as for a second launch.
+  main.on_reopen(|main| open_window(main, None));
+  if !saved.start_in_tray || page.is_some() {
+    proxy().post(move |main| open_window(main, page));
+  }
+
   Ok(())
 }
 
@@ -197,7 +238,11 @@ fn serve(request: Request, handle: &Handle) -> Reply {
 
       reply
     }
-    Request::OpenSettings => Reply::error("there is no settings window yet"),
+    Request::OpenSettings | Request::OpenHistory => {
+      let page = (request == Request::OpenHistory).then_some(Page::History);
+      proxy().post(move |main| open_window(main, page));
+      Reply::ok(json!({ "state": "opened" }))
+    }
     // Here: the system takes a while, and the main thread draws meanwhile.
     Request::Autostart { state } => autostart(state, handle),
     Request::Quit => {
@@ -248,9 +293,23 @@ fn shutdown() {
 /// A menu item was chosen, after the menu closed.
 fn chosen(main: &mut Main, id: &str) {
   let opened = |done: Result<(), String>| done.unwrap_or_else(|e| warn!("{id}: {e}"));
+  let index = |prefix: &str| id.strip_prefix(prefix).and_then(|i| i.parse::<usize>().ok());
+  if let Some(i) = index("recent:") {
+    with_app(|app| app.copy_recent(i));
+    return;
+  }
+
+  if let Some(name) = id.strip_prefix("model:") {
+    with_app(|app| app.select_model(name));
+    return;
+  }
+
   match id {
     "copy-last" => _ = with_app(App::copy_last),
     "unload" => _ = with_app(App::unload),
+    "models" => open_window(main, Some(Page::Models)),
+    "history" => open_window(main, Some(Page::History)),
+    "settings" => open_window(main, None),
     "quit" => main.quit(),
     // The system's dialog adds the app to the Accessibility list, which the pane alone does not.
     "warn:accessibility" => _ = permissions::accessibility(true),
@@ -260,8 +319,221 @@ fn chosen(main: &mut Main, id: &str) {
   }
 }
 
+/// Opens the settings window on `page` (or where it was), or brings it to the front.
+fn open_window(main: &mut Main, page: Option<Page>) {
+  let open = with_app(|app| app.window.clone()).flatten().filter(Window::is_open);
+  if let Some(w) = open {
+    w.with(|prefs| {
+      if let Some(page) = page {
+        prefs.page = page;
+      }
+
+      prefs.refresh();
+    });
+    w.front();
+    return;
+  }
+
+  let Some((shell, update, hub, home)) = with_app(|app| {
+    let shell = MacShell {
+      handle: app.handle.clone(),
+      hub: app.hub.clone(),
+      downloads: app.downloads.clone(),
+    };
+    (shell, app.update.clone(), app.hub.clone(), app.home.clone())
+  }) else {
+    return;
+  };
+
+  let settings = update.as_ref().map(|u| u.settings.clone()).unwrap_or_default();
+  let mut prefs = Prefs::new(Box::new(shell), settings, hub, &home);
+  if let Some(u) = &update {
+    prefs.update(&u.settings, &u.status, u.history);
+  }
+
+  prefs.page = page.unwrap_or(Page::General);
+  let w = main.open(&window::config(prefs.page), prefs);
+  // The recorder may have paused the hotkey; a playback stops with the window.
+  w.on_close(|_| {
+    with_app(|app| {
+      app.window = None;
+      app.hotkeys.pause(false);
+    });
+  });
+  w.front();
+  with_app(|app| app.window = Some(w));
+}
+
+/// Runs `f` on a thread of its own named `name`.
+fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
+  if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(f) {
+    warn!("start a thread for {name}: {e}");
+  }
+}
+
+/// Runs `f` on the settings window on the main thread, if it is open; while the window is busy
+/// further up the stack (a pop-up's menu runs its own loop), again a moment later: `f` brings a
+/// result the window waits for.
+fn with_window(f: impl FnOnce(&mut Prefs) + Send + 'static) {
+  proxy().post(|_| {
+    let Some(w) = with_app(|app| app.window.clone()).flatten() else { return };
+    let mut f = Some(f);
+    w.with(|prefs| f.take().map(|f| f(prefs)));
+    if let Some(f) = f.filter(|_| w.is_open()) {
+      proxy().after(Duration::from_millis(50), |_| with_window(f));
+    }
+  });
+}
+
+/// The settings window's way to the app: the session's handle, the downloads, and the main
+/// thread's proxy for whatever touches the app's state (the window runs inside a borrow of it at
+/// times). What may wait (the system's login items, a folder's size, a deletion) runs on a
+/// thread of its own: the window keeps drawing.
+struct MacShell {
+  handle: Handle,
+  hub: Hub,
+  downloads: Downloads,
+}
+
+impl window::Shell for MacShell {
+  fn edit(&self, edit: Box<dyn FnOnce(&mut Settings) + Send>) {
+    self.handle.edit_settings(edit);
+  }
+
+  fn pause_hotkey(&self, paused: bool) {
+    proxy().post(move |_| _ = with_app(|app| app.hotkeys.pause(paused)));
+  }
+
+  fn devices(&self) -> Vec<devices::Info> {
+    devices::list()
+  }
+
+  /// The window shows how it goes; once it ends the models are looked at again: the menu's (and
+  /// so the session's) and the window's.
+  fn download(&self, model: &'static ModelInfo) {
+    self.downloads.pull(self.hub.clone(), model, |ended| {
+      if ended {
+        proxy().post(|_| _ = with_app(App::read_models));
+      }
+
+      with_window(move |prefs| {
+        if ended {
+          prefs.models_changed();
+        }
+      });
+    });
+  }
+
+  fn cancel_download(&self, name: &str) {
+    self.downloads.cancel(name);
+  }
+
+  fn download_state(&self, name: &str) -> Option<Download> {
+    self.downloads.get(name)
+  }
+
+  /// Once it is gone, the session forgets a choice of it (the first model left takes its
+  /// place) and lets go of its file.
+  fn delete_model(&self, model: &'static ModelInfo) {
+    let (handle, hub) = (self.handle.clone(), self.hub.clone());
+    spawn("model-delete", move || {
+      let result = window::models::delete(&hub, model);
+      if result.is_ok() {
+        let root = hub.clone();
+        handle.edit_settings(move |s| window::models::forget(s, &root, model));
+        handle.check_model();
+      }
+
+      with_window(move |prefs| prefs.model_deleted(model, result));
+    });
+  }
+
+  fn check_model(&self) {
+    self.handle.check_model();
+  }
+
+  fn retranscribe(&self, id: i64) {
+    let handle = self.handle.clone();
+    spawn("retranscribe", move || {
+      if let Some(e) = handle.request(Request::Retranscribe { id }).error {
+        warn!("transcribe history entry {id} again: {e}");
+      }
+    });
+  }
+
+  fn delete_entry(&self, id: i64) {
+    let handle = self.handle.clone();
+    spawn("history-delete", move || {
+      if let Some(e) = handle.request(Request::Delete { id }).error {
+        warn!("delete history entry {id}: {e}");
+        with_window(move |prefs| prefs.entry_not_deleted(&e));
+      }
+    });
+  }
+
+  fn autostart(&self) -> Result<autostart::State, String> {
+    autostart::state(&INFO)
+  }
+
+  /// The system's register and unregister wait for it (and show its notification).
+  fn set_autostart(&self, on: bool) {
+    let handle = self.handle.clone();
+    spawn("autostart", move || {
+      let result = autostart::set(&INFO, on);
+      if result.is_ok() {
+        handle.edit_settings(move |s| s.autostart = on);
+      }
+
+      with_window(move |prefs| prefs.autostart_set(on, result));
+    });
+  }
+
+  fn access(&self) -> Access {
+    let microphone = match microphone::access() {
+      Microphone::Authorized => Some(true),
+      Microphone::Denied | Microphone::Restricted => Some(false),
+      Microphone::NotDetermined => None,
+    };
+    Access { accessibility: permissions::accessibility(false), microphone }
+  }
+
+  fn folder_size(&self, dir: PathBuf, done: Box<dyn FnOnce(u64) + Send>) {
+    spawn("folder-size", move || done(window::folder_size(&dir)));
+  }
+
+  /// The system's dialog adds the app to the Accessibility list, which opening the pane alone
+  /// does not; the person asked for it with the button.
+  fn open_pane(&self, pane: Pane) {
+    if pane == Pane::Accessibility && !permissions::accessibility(false) {
+      info!("no Accessibility access: asking for it");
+      permissions::accessibility(true);
+      return;
+    }
+
+    if let Err(e) = permissions::open_pane(pane) {
+      warn!("open {pane:?}: {e}");
+    }
+  }
+
+  fn open_url(&self, url: &str) {
+    if let Err(e) = nimbo::open::url(url) {
+      warn!("open {url}: {e}");
+    }
+  }
+
+  fn reveal(&self, dir: &Path) {
+    if let Err(e) = nimbo::open::reveal(dir) {
+      warn!("show {}: {e}", dir.display());
+    }
+  }
+}
+
 impl App {
   fn on_update(&mut self, main: &mut Main, update: Update) {
+    if let Some(w) = &self.window {
+      w.with(|prefs| prefs.update(&update.settings, &update.status, update.history));
+    }
+
     let status = &update.status;
     // Its error shows in the menu.
     let _ = self.hotkeys.set(&update.settings.hotkey);
@@ -304,7 +576,13 @@ impl App {
 
   /// Keeps `update` as the last and shows it in the icon and the menu.
   fn keep(&mut self, update: Update) {
+    let model = |u: &Option<Update>| u.as_ref().map(|u| u.settings.model.clone());
+    let chosen = model(&self.update);
     self.update = Some(update);
+    if model(&self.update) != chosen {
+      self.repick();
+    }
+
     self.refresh();
   }
 
@@ -344,14 +622,11 @@ impl App {
 
   fn unload(&mut self) {
     let handle = self.handle.clone();
-    let unload = move || {
+    spawn("unload", move || {
       if let Some(e) = handle.request(Request::Unload).error {
         warn!("unload the model: {e}");
       }
-    };
-    if let Err(e) = std::thread::Builder::new().name("unload".into()).spawn(unload) {
-      warn!("unload the model: {e}");
-    }
+    });
   }
 
   /// Checks Accessibility; without it the event tap cannot start (chords still work through
@@ -394,11 +669,63 @@ impl App {
     }
   }
 
-  /// The menu opens: what the system does not tell the app is looked at again.
+  /// The menu opens: what the system does not tell the app is looked at again, and the models
+  /// and the history.
   fn menu_opening(&mut self) {
     self.microphone = microphone::access();
     self.clipboard = paste::readable();
+    self.read_models();
+    self.read_recent();
     self.refresh();
+  }
+
+  /// The models downloaded, for the menu; the session looks too when they changed.
+  fn read_models(&mut self) {
+    let found = self.hub.downloaded();
+    if found != self.found {
+      self.found = found;
+      self.handle.check_model();
+    }
+
+    self.repick();
+  }
+
+  /// The latest dictations, for «Recent», from the history opened the first time.
+  fn read_recent(&mut self) {
+    if self.history.is_none() {
+      self.history = History::open(&self.home).inspect_err(|e| warn!("the history: {e:#}")).ok();
+    }
+
+    let Some(history) = &self.history else { return };
+    let entries = history.db.get_page("", menu::RECENT);
+    self.recent = match entries {
+      Ok(entries) => entries.into_iter().map(|e| (e.text, e.created_at)).collect(),
+      Err(e) => {
+        warn!("the menu's recent dictations: {e:#}");
+        Vec::new()
+      }
+    };
+  }
+
+  /// Copies «Recent»'s item `i`.
+  fn copy_recent(&mut self, i: usize) {
+    if let Some((text, _)) = self.recent.get(i) {
+      SystemClipboard.write(text);
+      info!("a recent dictation is on the clipboard");
+    }
+  }
+
+  /// The menu's model `i` is used from now on.
+  fn select_model(&mut self, name: &str) {
+    info!("model {name} chosen in the menu");
+    let name = name.to_owned();
+    self.handle.edit_settings(move |s| s.model = Some(name));
+  }
+
+  /// Which model transcribes, after the models on disk or the choice changed.
+  fn repick(&mut self) {
+    let query = self.update.as_ref().and_then(|u| u.settings.model.as_deref());
+    self.pick = Pick::new(&self.hub, query, &self.found);
   }
 
   /// What needs the person's attention, as the session and the system have it now.
@@ -430,7 +757,16 @@ impl App {
     }
 
     let hotkey = self.hotkeys.status().hotkey.map(|h| h.label());
-    let menu = menu::menu(hotkey.as_deref(), &update.status, &warnings);
+    let now = history::now_ms();
+    let recent: Vec<String> =
+      self.recent.iter().map(|(text, at)| menu::recent_title(text, *at, now)).collect();
+    let menu = menu::menu(
+      hotkey.as_deref(),
+      &update.status,
+      &warnings,
+      &recent,
+      &Models::new(&self.found, &self.pick),
+    );
     if menu != self.menu {
       self.tray.set_menu(&menu);
       self.menu = menu;
