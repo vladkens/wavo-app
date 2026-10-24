@@ -5,10 +5,11 @@
 //! - In-process, on [`FakeModels`] with models in a Hugging Face cache in the temp home (none by
 //!   default), a fake microphone (a WAV file) and [`FakeOutput`]: dictation end to end; the paths
 //!   that never reach the engine (no speech, cancel, a microphone that will not open, retention,
-//!   hotkey input); no model at all, a chosen one gone from the disk, one that does not load; the
-//!   recording is always kept, and transcribed once there is a model; pastes refused, kept on the
-//!   clipboard or off; a model switch. With [`Faults`]: a run that panics, one that hangs past its
-//!   deadline, a cancel while one is held.
+//!   hotkey input); no model at all, a chosen one gone from the disk, one that does not load; only
+//!   text is an entry, a failure's recording is the last failed one and transcribed again once
+//!   there is a model; what a crash left; pastes refused, kept on the clipboard or off; a model
+//!   switch. With [`Faults`]: a run that panics, one that hangs past its deadline, a cancel while
+//!   one is held.
 //! - `#[ignore]`, `make test-models`: the headless app (`wavo-app daemon`) as its own process with
 //!   a fake microphone, driven through `wavo-app ctl` and the socket, with GigaAM: a full
 //!   dictation, a cancel, no speech, a second instance.
@@ -29,7 +30,7 @@ use super::output::{FakeOutput, NotPasted};
 use crate::audio::SAMPLE_RATE;
 use crate::ctl::{self, Reply, Request};
 use crate::engine::supervisor::{Deadlines, Phase as EnginePhase};
-use crate::history::db::{Entry, NewEntry, Status as EntryStatus};
+use crate::history::db::{Entry, NewEntry};
 use crate::history::{History, Retention, now_ms, recordings};
 use crate::settings::{self, Activation, Settings};
 use crate::testing::{
@@ -333,8 +334,26 @@ fn retranscribed(s: &InProcess, id: i64) -> Entry {
   let reply = s.send(Request::Retranscribe { id });
   assert_eq!(reply.result["state"], "transcribing", "{reply:?}");
   poll("transcribed again", Duration::from_secs(10), || {
-    s.entry(id).filter(|e| e.status != EntryStatus::Transcribing)
-  })
+    (!s.status().retranscribing.contains(&id)).then_some(())
+  });
+  s.entry(id).unwrap()
+}
+
+/// The dictation that ended last failed: no entry, its recording is the last failed one and the
+/// only one left.
+fn kept_as_failed(s: &InProcess, status: &Status) {
+  assert_eq!(status.last.as_ref().unwrap().entry, None);
+  assert!(status.failed_recording.is_some(), "the recording is kept");
+  assert!(s.entries().is_empty(), "no entry");
+  assert_eq!(s.recordings(), 1);
+}
+
+/// The last failed recording transcribed again: once it is an entry, that entry.
+fn retranscribed_last(s: &InProcess) -> Entry {
+  let reply = s.send(Request::RetranscribeLast);
+  assert_eq!(reply.result["state"], "transcribing", "{reply:?}");
+  assert_eq!(s.status().failed_recording, None, "taken out while it runs");
+  poll("the new entry", Duration::from_secs(10), || s.entries().pop())
 }
 
 /// Dictations transcribed and kept with their recordings, the text pasted where each started; the
@@ -377,7 +396,7 @@ fn dictations_are_transcribed_kept_and_delivered() {
     let last = status.last.clone().unwrap();
     assert_eq!((last.outcome, last.text.as_str()), (Outcome::Done, "hello there"), "{take}");
     let entry = kept(&s, &status);
-    assert_eq!((entry.status, entry.text.as_str()), (EntryStatus::Done, "hello there"));
+    assert_eq!(entry.text, "hello there");
     assert_eq!(last.pasted, entry.pasted);
     let log = s.output.log();
     let text = || last.text.clone();
@@ -422,10 +441,10 @@ fn another_model_replaces_the_engine_once_it_is_idle() {
 }
 
 /// Speech of which the model makes nothing is no success: the dictation ends as nothing
-/// recognized, nothing pasted nor copied; the entry stays with its recording, and transcribing it
-/// again keeps it so while the model still makes nothing of it.
+/// recognized, nothing pasted nor copied, no entry; its recording is the last failed one, and
+/// transcribing it again keeps it so while the model still makes nothing of it.
 #[test]
-fn speech_without_text_is_nothing_recognized_and_kept() {
+fn speech_without_text_is_nothing_recognized_and_no_entry() {
   let models = Models("  ", &["parakeet-v2"]);
   let s = InProcess::start("session-no-text", &Settings::default(), Some(&tone(10.0)), models);
   let status = dictate(&s, 1);
@@ -434,22 +453,23 @@ fn speech_without_text_is_nothing_recognized_and_kept() {
   let log = s.output.log();
   assert!(log.pasted.is_empty() && log.copied.is_empty(), "nothing pasted nor copied");
   drop(log);
+  kept_as_failed(&s, &status);
 
-  // Kept, with its recording, for another model.
-  let entry = kept(&s, &status);
-  assert_eq!((entry.status, entry.text.as_str()), (EntryStatus::NoText, ""));
-  assert_eq!(entry.model.as_deref(), Some("parakeet-tdt-0.6b-v2-Q8_0"));
-
-  // Transcribed again: the same model makes nothing of it again; it stays.
-  let again = retranscribed(&s, entry.id);
-  assert_eq!(again.status, EntryStatus::NoText);
-  assert!(s.history().audio_file(&again).is_some());
-  assert!(s.status().retranscribing.is_empty());
+  // Transcribed again: the same model makes nothing of it again; it stays the last failed one.
+  let kept = status.failed_recording;
+  assert_eq!(s.send(Request::RetranscribeLast).result["state"], "transcribing");
+  let status = poll("transcribed again", Duration::from_secs(10), || {
+    Some(s.status()).filter(|s| s.failed_recording.is_some())
+  });
+  assert_eq!(status.failed_recording, kept);
+  let error = status.error.unwrap_or_default();
+  assert!(error.contains("nothing recognized"), "{error}");
+  assert!(s.entries().is_empty());
 }
 
-/// No model at all: the status says so from the start; it records anyway and keeps the dictation
-/// with its recording, waiting for a model. Once one is downloaded, transcribing it again makes its
-/// text.
+/// No model at all: the status says so from the start; it records anyway, no entry, the recording
+/// kept as the last failed one. Once a model is downloaded, transcribing it again makes its text an
+/// entry.
 #[test]
 fn without_any_model_the_recording_waits_for_one() {
   let models = Models("hello there", &[]);
@@ -460,21 +480,24 @@ fn without_any_model_the_recording_waits_for_one() {
   let last = status.last.clone().unwrap();
   assert_eq!((last.outcome, last.pasted), (Outcome::NoModel, false));
   assert_eq!(last.error.as_deref(), Some("no model is downloaded"));
-  let entry = kept(&s, &status);
-  assert_eq!((entry.status, entry.text.as_str()), (EntryStatus::NoModel, ""));
-  assert_eq!(entry.error.as_deref(), Some("no model is downloaded"));
+  kept_as_failed(&s, &status);
   assert!(s.output.log().pasted.is_empty());
-  let refused = s.send(Request::Retranscribe { id: entry.id }).error.unwrap();
+  let refused = s.send(Request::RetranscribeLast).error.unwrap();
   assert!(refused.contains("no model"), "{refused}");
-  assert_eq!(s.entry(entry.id).unwrap().status, EntryStatus::NoModel);
+  assert_eq!(s.status().failed_recording, status.failed_recording, "it stays");
 
-  // A model arrives: the entry gets its text, its recording stays.
+  // A model arrives: the recording becomes an entry with its text.
   download(&s.hub, "parakeet-v3");
-  let again = retranscribed(&s, entry.id);
-  assert_eq!((again.status, again.text.as_str()), (EntryStatus::Done, "hello there"));
-  assert_eq!(again.error, None, "the reason is gone with the text");
-  assert!(s.history().audio_file(&again).is_some());
-  assert_eq!(s.status().no_model, None);
+  let entry = retranscribed_last(&s);
+  assert_eq!(entry.text, "hello there");
+  assert_eq!(Some(entry.created_at), status.failed_recording);
+  assert!(entry.duration_ms > 0);
+  assert!(s.history().audio_file(&entry).is_some());
+  assert_eq!(s.recordings(), 1);
+  let status = s.status();
+  assert_eq!((status.failed_recording, status.no_model), (None, None));
+  let none = s.send(Request::RetranscribeLast).error.unwrap();
+  assert!(none.contains("no failed recording"), "{none}");
 }
 
 /// The chosen model's file deleted behind the app's back while its engine has it loaded: the next
@@ -529,7 +552,7 @@ fn a_model_gone_while_it_loads_for_a_recording_gives_way_at_once() {
 }
 
 /// The chosen model gone with none left: the choice stays, the status says it is not on disk, the
-/// recording is kept; downloaded again, it is the choice again and transcribes the recording.
+/// recording is the last failed one; downloaded again, it is the choice again and transcribes it.
 #[test]
 fn a_chosen_model_gone_with_none_left_keeps_the_recording_until_it_is_back() {
   let settings = Settings { model: Some("parakeet-v3".into()), ..Settings::default() };
@@ -549,18 +572,18 @@ fn a_chosen_model_gone_with_none_left_keeps_the_recording_until_it_is_back() {
   let last = status.last.clone().unwrap();
   assert_eq!(last.outcome, Outcome::NoModel);
   assert_eq!(last.error.as_deref(), Some("parakeet-tdt-0.6b-v3 is not on disk"));
-  let entry = kept(&s, &status);
+  kept_as_failed(&s, &status);
 
   download(&s.hub, "parakeet-v3");
-  let again = retranscribed(&s, entry.id);
-  assert_eq!((again.status, again.text.as_str()), (EntryStatus::Done, "hello there"));
-  assert_eq!(again.model.as_deref(), Some("parakeet-tdt-0.6b-v3-Q8_0"));
+  let entry = retranscribed_last(&s);
+  assert_eq!(entry.text, "hello there");
+  assert_eq!(entry.model.as_deref(), Some("parakeet-tdt-0.6b-v3-Q8_0"));
   let (saved, _) = Settings::load(&s.home.path().join(settings::FILE));
   assert_eq!(saved.model.as_deref(), Some("parakeet-v3"), "still the choice");
 }
 
 /// A model that is there but does not load: the status says so as soon as the prewarm fails, while
-/// recording, with nothing left loading; the recording is kept.
+/// recording, with nothing left loading; the recording is the last failed one.
 #[test]
 fn a_model_that_does_not_load_says_so_and_keeps_the_recording() {
   let s =
@@ -585,7 +608,7 @@ fn a_model_that_does_not_load_says_so_and_keeps_the_recording() {
   assert_eq!(last.outcome, Outcome::NoModel);
   let error = "broken could not be loaded: not a speech model";
   assert_eq!(last.error.as_deref(), Some(error));
-  assert_eq!(kept(&s, &status).error.as_deref(), Some(error));
+  kept_as_failed(&s, &status);
 }
 
 /// The shell sees the engine's phase as it changes with nothing else happening: a model still
@@ -624,9 +647,9 @@ fn record_into_a_held_run(s: &InProcess) -> Status {
   })
 }
 
-/// A run that panics fails its dictation as an engine crash (the entry and its recording are
-/// kept); the next dictation loads a fresh model and is done, and the failed one is transcribed
-/// again.
+/// A run that panics fails its dictation as an engine crash (no entry, the recording is the last
+/// failed one); the next dictation loads a fresh model and is done, and the failed one is
+/// transcribed again.
 #[test]
 fn a_panic_in_a_run_fails_the_dictation_and_the_next_one_is_done() {
   let s = with_a_model("session-panic", Deadlines::default());
@@ -639,14 +662,18 @@ fn a_panic_in_a_run_fails_the_dictation_and_the_next_one_is_done() {
   let error = last.error.clone().unwrap_or_default();
   assert!(error.contains("crashed") && error.contains("panicked"), "{error}");
   assert_eq!(status.engine.phase, EnginePhase::Stopped, "the broken model is gone");
-  let entry = kept(&s, &status);
-  assert_eq!(entry.status, EntryStatus::Failed);
+  assert!(status.failed_recording.is_some());
+  assert_eq!((s.entries().len(), s.recordings()), (1, 2), "the first dictation's entry only");
 
   let third = dictate(&s, 3);
   assert_eq!(third.last.as_ref().unwrap().text, "hello there");
   assert_ne!(third.engine.thread, first.engine.thread, "a fresh engine thread");
-  let again = retranscribed(&s, entry.id);
-  assert_eq!((again.status, again.text.as_str()), (EntryStatus::Done, "hello there"));
+  assert_eq!(third.failed_recording, status.failed_recording, "kept through a dictation");
+  s.send(Request::RetranscribeLast);
+  poll("the failed one's entry", Duration::from_secs(10), || {
+    (s.entries().len() == 3).then_some(())
+  });
+  assert_eq!(s.entries()[2].text, "hello there");
   assert_eq!(s.output.log().pasted.len(), 2, "the failed one pasted nothing");
 }
 
@@ -663,7 +690,7 @@ fn a_hung_run_times_out_and_the_next_dictation_is_done() {
   let last = status.last.clone().unwrap();
   assert_eq!(last.outcome, Outcome::Failed);
   assert!(last.error.as_deref().is_some_and(|e| e.contains("timed out")), "{:?}", last.error);
-  kept(&s, &status);
+  kept_as_failed(&s, &status);
   let next = dictate(&s, 2);
   assert_eq!(next.last.as_ref().unwrap().text, "hello there");
   s.faults.release();
@@ -682,9 +709,7 @@ fn cancel_while_transcribing_drops_the_result_and_keeps_the_engine() {
   let busy = record_into_a_held_run(&s);
   assert_eq!(busy.state, Phase::Transcribing);
   assert_eq!(s.send(Request::Toggle).result["state"], "transcribing", "toggle waits");
-  let entry = busy.entry.expect("the entry is there while it is transcribed");
-  let refused = s.send(Request::Delete { id: entry }).error.unwrap();
-  assert!(refused.contains("being transcribed"), "{refused}");
+  assert_eq!(busy.entry, None, "no entry before there is text");
   let times: Vec<Duration> = (0..50)
     .map(|_| {
       let started = Instant::now();
@@ -827,23 +852,26 @@ fn a_microphone_that_will_not_open_leaves_nothing_behind() {
   assert_eq!(fs::read_dir(dir).unwrap().count(), 0, "nor its day folder");
 }
 
+/// A recording `age_ms` old of `pcm` in the home `home`, without an entry: a crash left it.
+fn orphan(home: &Path, age_ms: i64, pcm: &[f32]) -> (String, i64) {
+  let created_at = now_ms() - age_ms;
+  let (name, path) = History::open(home).unwrap().recordings.new_file(created_at);
+  write_wav(&path, pcm);
+  (name, created_at)
+}
+
 /// An entry with a recording of `pcm`, `age_ms` old, in the history of `home` (another connection
 /// than the session's: WAL lets both write).
-fn add_entry(home: &Path, age_ms: i64, status: EntryStatus, text: &str, pcm: &[f32]) -> i64 {
-  let history = History::open(home).unwrap();
-  let created_at = now_ms() - age_ms;
-  let (name, path) = history.recordings.new_file(created_at);
-  write_wav(&path, pcm);
+fn add_entry(home: &Path, age_ms: i64, text: &str, pcm: &[f32]) -> i64 {
+  let (name, created_at) = orphan(home, age_ms, pcm);
   let entry = NewEntry {
     created_at,
     duration_ms: pcm.len() as i64 * 1000 / i64::from(SAMPLE_RATE),
     audio_path: Some(&name),
-    status: Some(status),
+    text,
     ..NewEntry::default()
   };
-  let id = history.db.insert_entry(&entry).unwrap();
-  history.db.update_outcome(id, status, Some(text).filter(|t| !t.is_empty()), None).unwrap();
-  id
+  History::open(home).unwrap().db.insert_entry(&entry).unwrap()
 }
 
 #[test]
@@ -852,9 +880,8 @@ fn retention_runs_after_each_dictation() {
   let s = InProcess::start("session-retention", &settings, Some(&silence(0.1)), NO_MODELS);
   // The first retention (in the background, on the empty history) is long done by then.
   thread::sleep(Duration::from_millis(300));
-  let ids: Vec<i64> = (1..=3)
-    .map(|i| add_entry(s.home.path(), i * 1_000, EntryStatus::Done, "текст", &silence(0.1)))
-    .collect();
+  let ids: Vec<i64> =
+    (1..=3).map(|i| add_entry(s.home.path(), i * 1_000, "текст", &silence(0.1))).collect();
   // A dictation without speech keeps nothing, and the retention runs after it.
   s.send(Request::Start);
   thread::sleep(Duration::from_millis(150));
@@ -869,16 +896,8 @@ fn retention_runs_after_each_dictation() {
 fn retranscribe_without_speech_and_unknown_entries() {
   let s = InProcess::start("session-again", &Settings::default(), Some(&silence(0.1)), NO_MODELS);
   // After the start's recovery (the first update): it would take a WAV written meanwhile for an
-  // orphan.
-  // A failed entry whose recording has no speech: nothing to keep, it goes.
-  let failed = add_entry(s.home.path(), 1_000, EntryStatus::Failed, "", &silence(0.2));
-  let reply = s.send(Request::Retranscribe { id: failed });
-  assert_eq!(reply.result["state"], "deleted");
-  assert_eq!(s.entry(failed), None);
-  assert_eq!(s.recordings(), 0);
-
-  // One with text stays as it is.
-  let kept = add_entry(s.home.path(), 2_000, EntryStatus::Done, "текст", &silence(0.2));
+  // orphan. An entry whose recording has no speech stays as it is.
+  let kept = add_entry(s.home.path(), 2_000, "текст", &silence(0.2));
   let error = s.send(Request::Retranscribe { id: kept }).error.unwrap();
   assert!(error.contains("no speech") && error.contains("stays"), "{error}");
   assert_eq!(s.entry(kept).unwrap().text, "текст");
@@ -886,18 +905,33 @@ fn retranscribe_without_speech_and_unknown_entries() {
   assert!(unknown.contains("no history entry"));
   fs::remove_file(s.history().audio_file(&s.entries()[0]).unwrap()).unwrap();
   assert!(s.send(Request::Retranscribe { id: kept }).error.unwrap().contains("gone"));
+  let none = s.send(Request::RetranscribeLast).error.unwrap();
+  assert!(none.contains("no failed recording"), "{none}");
 }
 
-/// Transcribing an entry with text again fails: it keeps its text, status and model, and the
-/// status says what went wrong.
+/// An entry being transcribed again can be neither deleted nor transcribed once more meanwhile; the
+/// new text replaces its text, with the model that made it. A failure keeps both, and the status
+/// says what went wrong.
 #[test]
 fn a_failed_retranscription_keeps_the_text() {
   let s = with_a_model("session-again-fails", Deadlines::default());
-  let id = add_entry(s.home.path(), 1_000, EntryStatus::Done, "текст", &tone(1.0));
+  let id = add_entry(s.home.path(), 1_000, "текст", &tone(1.0));
+  s.faults.run(Fault::Hang);
+  assert_eq!(s.send(Request::Retranscribe { id }).result["state"], "transcribing");
+  poll("a held run", Duration::from_secs(10), || (s.faults.hanging() == 1).then_some(()));
+  assert_eq!(s.status().retranscribing, [id]);
+  for request in [Request::Delete { id }, Request::Retranscribe { id }] {
+    let refused = s.send(request).error.unwrap();
+    assert!(refused.contains("being transcribed"), "{refused}");
+  }
+
+  s.faults.release();
+  poll("the run", Duration::from_secs(10), || s.status().retranscribing.is_empty().then_some(()));
+  let before = s.entry(id).unwrap();
+  let made = (before.text.as_str(), before.model.as_deref());
+  assert_eq!(made, ("hello there", Some("parakeet-tdt-0.6b-v3-Q8_0")));
   s.faults.run(Fault::Panic);
-  let entry = retranscribed(&s, id);
-  assert_eq!((entry.status, entry.text.as_str()), (EntryStatus::Done, "текст"));
-  assert_eq!((entry.model, entry.error), (None, None));
+  assert_eq!(retranscribed(&s, id), before);
   let error = s.status().error.unwrap_or_default();
   assert!(
     error.starts_with(&format!("entry {id} could not")) && error.contains("crashed"),
@@ -911,7 +945,7 @@ fn delete_takes_the_entry_and_its_recording_and_moves_the_history() {
   // After the start's recovery (the first update): it would take a WAV written meanwhile for an
   // orphan.
   let first = s.first.history;
-  let id = add_entry(s.home.path(), 1_000, EntryStatus::Done, "текст", &silence(0.1));
+  let id = add_entry(s.home.path(), 1_000, "текст", &silence(0.1));
   let wav = s.history().audio_file(&s.entries()[0]).unwrap();
 
   let reply = s.send(Request::Delete { id });
@@ -936,17 +970,34 @@ fn bare(home: &TempDir) -> Session {
   Session::start(config, FakeOutput::default()).unwrap()
 }
 
+/// What a crash left is transcribed on start: the text becomes an entry.
 #[test]
-fn start_recovers_what_a_crash_left() {
+fn start_transcribes_what_a_crash_left() {
   let home = TempDir::new("session-recover");
-  let history = History::open(home.path()).unwrap();
-  let id =
-    history.db.insert_entry(&NewEntry { created_at: now_ms(), ..NewEntry::default() }).unwrap();
-  drop(history);
-  let session = bare(&home);
-  status_of(session.handle().request(Request::Status));
-  let entry = History::open(home.path()).unwrap().db.get_entry(id).unwrap().unwrap();
-  assert_eq!(entry.status, EntryStatus::Failed);
+  let (name, created_at) = orphan(home.path(), 1_000, &tone(1.0));
+  let s = InProcess::start_in(home, &Settings::default(), None, ONE_MODEL, Deadlines::default());
+  let entry = poll("the entry", Duration::from_secs(10), || s.entries().pop());
+  assert_eq!((entry.text.as_str(), entry.audio_path), ("hello there", Some(name)));
+  assert_eq!(entry.created_at, created_at);
+  assert!((900..=1_100).contains(&entry.duration_ms), "{}", entry.duration_ms);
+  assert_eq!((s.recordings(), s.status().failed_recording), (1, None));
+  assert!(s.output.log().pasted.is_empty(), "nothing pasted");
+}
+
+/// What a crash left that cannot be transcribed is the last failed recording, the status says so;
+/// one without speech goes.
+#[test]
+fn start_keeps_what_a_crash_left_as_the_last_failed_recording() {
+  let home = TempDir::new("session-recover-fails");
+  orphan(home.path(), 2_000, &silence(1.0));
+  let (_, created_at) = orphan(home.path(), 1_000, &tone(1.0));
+  let s = InProcess::start_in(home, &Settings::default(), None, NO_MODELS, Deadlines::default());
+  let status = &s.first.status;
+  assert_eq!(status.failed_recording, Some(created_at));
+  let error = status.error.clone().unwrap_or_default();
+  assert!(error.contains("could not be transcribed") && error.contains("no model"), "{error}");
+  assert!(s.entries().is_empty());
+  assert_eq!(s.recordings(), 1, "the one without speech went");
 }
 
 #[test]
@@ -989,7 +1040,7 @@ fn the_first_cleanup_runs_in_the_background() {
   let home = TempDir::new("session-first-cleanup");
   let ten_days = 10 * 24 * 60 * 60 * 1000;
   for i in 0..40 {
-    add_entry(home.path(), ten_days + i, EntryStatus::Done, "", &silence(0.01));
+    add_entry(home.path(), ten_days + i, "текст", &silence(0.01));
   }
 
   let settings = Settings { history_retention: Retention::Days3, ..Settings::default() };
@@ -1130,8 +1181,7 @@ fn daemon_full_cycle_via_ctl() {
     let w = wer(&reference.text, &line);
     assert!(w <= MAX_WER, "WER {:.1}%: {line}", w * 100.0);
     let entry = d.entry(last.entry.unwrap());
-    let kept = (entry.status, entry.pasted, entry.text.as_str());
-    assert_eq!(kept, (EntryStatus::Done, true, line.as_str()));
+    assert_eq!((entry.pasted, entry.text.as_str()), (true, line.as_str()));
     assert_eq!(entry.model.as_deref(), Some("gigaam-v3-e2e-rnnt-Q8_0"));
     let recorded = entry.duration_ms as f64 / 1000.0;
     assert!(recorded >= reference.seconds(), "{recorded} s recorded");

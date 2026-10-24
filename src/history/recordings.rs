@@ -4,6 +4,9 @@
 //! recording without VAD trimming), in a folder per local date of the recording's start: one flat
 //! folder of a year's dictations is more than Finder copes with. A day folder goes with its last
 //! recording.
+//!
+//! A dictation that fails leaves no entry; its recording is kept as the last failed one, in
+//! `recordings/last-failed/`, to transcribe again: one recording, the newest failure's.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -12,6 +15,8 @@ use std::{fs, mem};
 use anyhow::{Context, Result, bail};
 
 pub const DIR: &str = "recordings";
+/// The folder of the last failed recording: not a day folder, so no entry names it.
+const LAST_FAILED: &str = "last-failed";
 
 pub struct Recordings {
   dir: PathBuf,
@@ -126,12 +131,46 @@ impl Recordings {
     Ok(found)
   }
 
-  /// How long recording `name` is by its header, 0 if it cannot be read.
-  pub fn duration_ms(&self, name: &str) -> i64 {
-    let Some(path) = self.path(name) else { return 0 };
-    hound::WavReader::open(path)
-      .map(|r| i64::from(r.duration()) * 1000 / i64::from(r.spec().sample_rate.max(1)))
-      .unwrap_or(0)
+  /// The last failed recording ([`keep_failed`](Self::keep_failed)) and when it started (Unix ms).
+  pub fn last_failed(&self) -> Option<(PathBuf, i64)> {
+    let files = fs::read_dir(self.dir.join(LAST_FAILED)).ok()?.flatten();
+    let started = |e: fs::DirEntry| Some((started_at(e.file_name().to_str()?)?, e.path()));
+    let (at, path) = files.filter_map(started).max()?;
+    Some((path, at))
+  }
+
+  /// Keeps recording `name` as the last failed one, in place of the one before, unless that one
+  /// is newer: the older of the two goes. Returns when the one kept started.
+  pub fn keep_failed(&self, name: &str) -> Result<i64> {
+    let Some(path) = self.path(name) else { bail!("not a recording: {name:?}") };
+    let Some(at) = started_at(name) else { bail!("not a recording: {name:?}") };
+    if let Some((_, newer)) = self.last_failed().filter(|&(_, kept)| kept > at) {
+      self.discard(name)?;
+      return Ok(newer);
+    }
+
+    let dir = self.dir.join(LAST_FAILED);
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let file = path.file_name().expect("a recording's path names a file");
+    let kept = dir.join(file);
+    fs::rename(&path, &kept).with_context(|| format!("move {}", path.display()))?;
+    self.prune(&path);
+    for e in fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))?.flatten() {
+      if e.path() != kept {
+        let _ = fs::remove_file(e.path());
+      }
+    }
+
+    Ok(at)
+  }
+
+  /// Moves the last failed recording back into its day folder, where an entry can name it, and
+  /// returns its name there; `None` if there is none.
+  pub fn restore_failed(&self) -> Result<Option<String>> {
+    let Some((path, at)) = self.last_failed() else { return Ok(None) };
+    let (name, to) = self.new_file(at);
+    fs::rename(&path, &to).with_context(|| format!("move {}", path.display()))?;
+    Ok(Some(name))
   }
 }
 
@@ -257,6 +296,37 @@ mod tests {
     assert_eq!(started_at("1791504000000.wav"), Some(NOW));
     assert_eq!(started_at("2026-10-09/1791504000000-2.wav"), Some(NOW));
     assert_eq!((started_at("notes.wav"), started_at("1791504000000.txt")), (None, None));
+  }
+
+  /// One failed recording is kept, the newest; restored, it is a recording like any other.
+  #[test]
+  fn the_newest_failed_recording_is_kept() {
+    let dir = TempDir::new("recordings-failed");
+    let r = Recordings::open(dir.path()).unwrap();
+    let record = |at: i64| {
+      let (name, path) = r.new_file(at);
+      fs::write(&path, b"RIFF").unwrap();
+      name
+    };
+
+    assert_eq!(r.last_failed(), None);
+    let (old, new) = (record(NOW), record(NOW + 1));
+    assert_eq!(r.keep_failed(&new).unwrap(), NOW + 1);
+    assert_eq!(r.keep_failed(&old).unwrap(), NOW + 1, "an older one goes");
+    let kept = r.dir.join(LAST_FAILED).join(format!("{}.wav", NOW + 1));
+    assert_eq!(r.last_failed(), Some((kept, NOW + 1)));
+    assert!(r.list().unwrap().is_empty(), "no entry's recording, and no day folder left");
+    assert_eq!(fs::read_dir(&r.dir).unwrap().count(), 1);
+
+    let newest = record(NOW + 2);
+    assert_eq!(r.keep_failed(&newest).unwrap(), NOW + 2, "a newer one takes its place");
+    assert_eq!(r.last_failed().map(|(_, at)| at), Some(NOW + 2));
+    assert_eq!(fs::read_dir(r.dir.join(LAST_FAILED)).unwrap().count(), 1, "the one before goes");
+    assert!(r.keep_failed("../history.db").is_err());
+
+    let name = r.restore_failed().unwrap().unwrap();
+    assert_eq!((started_at(&name), r.list().unwrap()), (Some(NOW + 2), vec![name]));
+    assert_eq!((r.last_failed(), r.restore_failed().unwrap()), (None, None));
   }
 
   #[test]

@@ -59,6 +59,8 @@ pub enum Request {
   Status,
   /// Transcribe a history entry's recording again
   Retranscribe { id: i64 },
+  /// Transcribe the last failed dictation's recording; its text goes to the history
+  RetranscribeLast,
   /// Delete a history entry and its recording
   Delete { id: i64 },
   /// Free the model's memory now; the next dictation loads it again
@@ -359,6 +361,7 @@ mod tests {
     let requests = [
       Request::Toggle,
       Request::Retranscribe { id: 42 },
+      Request::RetranscribeLast,
       Request::Delete { id: 7 },
       Request::Unload,
     ];
@@ -370,6 +373,8 @@ mod tests {
     assert_eq!(*seen.lock().unwrap(), requests);
     let json = serde_json::to_string(&Request::Delete { id: 7 }).unwrap();
     assert_eq!(json, r#"{"cmd":"delete","id":7}"#);
+    let json = serde_json::to_string(&Request::RetranscribeLast).unwrap();
+    assert_eq!(json, r#"{"cmd":"retranscribe-last"}"#);
 
     // A malformed request gets an error, and the server goes on.
     let mut raw = UnixStream::connect(&path).unwrap();
