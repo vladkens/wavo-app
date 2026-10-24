@@ -260,8 +260,11 @@ impl Shell for Headless {
   fn set_autostart(&self, _: bool) {}
 
   fn access(&self) -> Access {
-    Access { accessibility: nimbo::permissions::accessibility(false), microphone: None }
+    let accessibility = nimbo::permissions::accessibility(false);
+    Access { accessibility, ..Access::default() }
   }
+
+  fn request_microphone(&self) {}
 
   fn folder_size(&self, dir: PathBuf, done: Box<dyn FnOnce(u64) + Send>) {
     done(window::folder_size(&dir));

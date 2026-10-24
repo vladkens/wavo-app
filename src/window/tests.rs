@@ -25,8 +25,9 @@ use nimbo::{
 use wavo::hub;
 
 use super::general::{
-  ACTIVATION, HOTKEY, HUD, KEEP, LANG, LOGIN, MIC, MODEL, MODEL_FOLDER, OPEN_ACCESSIBILITY,
-  OPEN_MICROPHONE, PASTE, RECORDINGS_FOLDER, RESET, RETENTION, TRAY_ONLY, UNLOAD, row,
+  ACTIVATION, DOWNLOAD_MODEL, HOTKEY, HUD, KEEP, LANG, LOGIN, MIC, MODEL, MODEL_FOLDER,
+  OPEN_ACCESSIBILITY, OPEN_MICROPHONE, PASTE, RECORDINGS_FOLDER, RESET, RETENTION, TRAY_ONLY,
+  UNLOAD, row,
 };
 use super::history::{COPY, DELETE, PLAY, RETRANSCRIBE, ROW, SEARCH, TEXT};
 use super::models::{self as page, CANCEL, DOWNLOAD, INFO, USE};
@@ -62,6 +63,11 @@ struct Log {
   autostarts: Vec<bool>,
   /// The recordings' size, added up unless set.
   recordings_size: Option<u64>,
+  /// What the system allows, as the test sets it: Accessibility only missing unless set.
+  access: Option<Access>,
+  /// The panes opened and the microphone prompts shown.
+  panes: Vec<Pane>,
+  microphone_asked: usize,
 }
 
 #[derive(Clone, Default)]
@@ -151,7 +157,12 @@ impl Shell for Fake {
   }
 
   fn access(&self) -> Access {
-    Access { accessibility: false, microphone: Some(true) }
+    let missing = Access { microphone: Some(true), ..Access::default() };
+    self.log().access.unwrap_or(missing)
+  }
+
+  fn request_microphone(&self) {
+    self.log().microphone_asked += 1;
   }
 
   /// At once, on the window's thread.
@@ -160,7 +171,9 @@ impl Shell for Fake {
     done(size.unwrap_or_else(|| folder_size(&dir)));
   }
 
-  fn open_pane(&self, _: Pane) {}
+  fn open_pane(&self, pane: Pane) {
+    self.log().panes.push(pane);
+  }
 
   fn open_url(&self, url: &str) {
     self.log().urls.push(url.to_owned());
@@ -363,17 +376,16 @@ fn pages_fit_or_scroll_and_the_toolbar_switches_them() {
   let oldest = *history_of(home.path(), &older, false).last().unwrap();
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
-  let general =
-    [HOTKEY, RESET, ACTIVATION, MIC, MODEL, LANG, PASTE, KEEP, HUD, UNLOAD, RETENTION, LOGIN]
-      .map(Id::of)
-      .into_iter()
-      .chain([Id::of(TRAY_ONLY)])
-      .collect();
+  let general = [OPEN_ACCESSIBILITY, OPEN_MICROPHONE, HOTKEY, RESET, ACTIVATION, MIC, MODEL, LANG]
+    .into_iter()
+    .chain([PASTE, KEEP, HUD, LOGIN, TRAY_ONLY])
+    .map(Id::of)
+    .collect();
   let controls: [Vec<Id>; 5] = [
     general,
     vec![Id::of(page::SEARCH), Id::of(page::LANG), Id::of((INFO, TWO[0])), Id::of((USE, TWO[1]))],
     vec![Id::of(SEARCH), Id::of((COPY, ids[8])), Id::of((PLAY, ids[8]))],
-    [MODEL_FOLDER, RECORDINGS_FOLDER, OPEN_MICROPHONE, OPEN_ACCESSIBILITY].map(Id::of).to_vec(),
+    [UNLOAD, RETENTION, MODEL_FOLDER, RECORDINGS_FOLDER].map(Id::of).to_vec(),
     vec![Id::of((about::LINK, "source")), Id::of((about::LINK, "models"))],
   ];
   let last_model = hub::MODELS.last().unwrap().name;
@@ -428,9 +440,10 @@ fn controls_show_hover_and_tooltips() {
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
   let info = |name: &str| row(name).key("info");
-  let mut general = vec![Id::of(HOTKEY), info(ACTIVATION), Id::of(MIC), Id::of(MODEL)];
+  let mut general = vec![Id::of(OPEN_ACCESSIBILITY), Id::of(OPEN_MICROPHONE), Id::of(HOTKEY)];
+  general.extend([info(ACTIVATION), Id::of(MIC), Id::of(MODEL)]);
   general.extend([Id::of(LANG), Id::of(PASTE), Id::of(HUD)]);
-  general.extend([info(UNLOAD), Id::of(RETENTION), Id::of(LOGIN), Id::of(TABS).key(1)]);
+  general.extend([Id::of(LOGIN), Id::of(TABS).key(1)]);
   hovers_on(&mut h, &general);
   assert_eq!(hover(&mut h, Id::of(RESET)), (Cursor::Arrow, 0), "reset is disabled at the default");
 
@@ -467,8 +480,8 @@ fn controls_show_hover_and_tooltips() {
   hovers_on(&mut h, &[Id::of(SEARCH).key("clear")]);
 
   tab(&mut h, Page::Advanced);
-  let advanced = [MODEL_FOLDER, RECORDINGS_FOLDER, OPEN_MICROPHONE, OPEN_ACCESSIBILITY];
-  hovers_on(&mut h, &advanced.map(Id::of));
+  let advanced = [info(UNLOAD), Id::of(RETENTION), Id::of(MODEL_FOLDER), Id::of(RECORDINGS_FOLDER)];
+  hovers_on(&mut h, &advanced);
   click(&mut h, Id::of(MODEL_FOLDER));
   click(&mut h, Id::of(RECORDINGS_FOLDER));
   let recordings = home.path().join(crate::history::recordings::DIR);
@@ -565,10 +578,6 @@ fn selects_and_switches_edit_the_settings() {
   let usb = Choice { id: Some("usb mic".into()), name: "USB Mic".into() };
   assert_eq!(fake.log().settings.microphone, Some(usb));
 
-  click(&mut h, Id::of(RETENTION));
-  click(&mut h, Id::of(RETENTION).key(("item", 1)));
-  assert_eq!(fake.log().settings.history_retention, crate::history::Retention::Count(100));
-
   click(&mut h, Id::of(KEEP));
   assert!(fake.log().settings.keep_in_clipboard);
   click(&mut h, Id::of(PASTE));
@@ -581,6 +590,11 @@ fn selects_and_switches_edit_the_settings() {
   // Launch at login goes to the system, not through the settings' edits.
   click(&mut h, Id::of(LOGIN));
   assert_eq!(fake.log().autostarts, [true]);
+
+  tab(&mut h, Page::Advanced);
+  click(&mut h, Id::of(RETENTION));
+  click(&mut h, Id::of(RETENTION).key(("item", 1)));
+  assert_eq!(fake.log().settings.history_retention, crate::history::Retention::Count(100));
   assert_eq!(fake.log().edits, 6);
 }
 
@@ -655,6 +669,7 @@ fn pop_ups_select_by_typing() {
   type_select(&mut h, Id::of(MIC), 'r');
   let rode = Choice { id: Some("røde podmic usb".into()), name: "RØDE PodMic USB".into() };
   assert_eq!(fake.log().settings.microphone, Some(rode));
+  tab(&mut h, Page::Advanced);
   type_select(&mut h, Id::of(UNLOAD), 'r');
   assert_eq!(fake.log().settings.unload_after_minutes, Some(0), "Right after each dictation");
 }
@@ -875,7 +890,7 @@ fn the_model_in_use_is_deleted_and_the_next_takes_its_place() {
   assert!(message.ends_with("It is the only model: dictation stops until you download another."));
   tab(&mut h, Page::General);
   let caption = h.text(row(MODEL).key("caption"));
-  assert_eq!(caption, Some("No model downloaded: get one in Models."));
+  assert_eq!(caption, Some("Dictation needs a speech model: download one to start."));
 }
 
 /// The chosen model's file deleted behind the window's back: the next frame sees it, looks at the
@@ -1109,6 +1124,37 @@ fn a_dictation_is_transcribed_again() {
   );
 }
 
+/// The first launch: General shows what is missing, each with a button that asks the system for
+/// it, and with no model a button to the Models page in place of the model pop-up. A permission
+/// given shows so and its button opens System Settings; a denied microphone is not asked again.
+#[test]
+fn general_guides_the_first_launch() {
+  let home = Home::new("window-first-run", &[]);
+  let fake = Fake::default();
+  fake.log().access = Some(Access::default());
+  let mut h = harness(&fake, Settings::default(), &home);
+  assert!(h.rect(Id::of(MODEL)).is_none(), "no pop-up without a model");
+  let caption = h.text(row(MODEL).key("caption"));
+  assert_eq!(caption, Some("Dictation needs a speech model: download one to start."));
+
+  click(&mut h, Id::of(OPEN_ACCESSIBILITY));
+  click(&mut h, Id::of(OPEN_MICROPHONE));
+  assert_eq!(fake.log().panes, [Pane::Accessibility]);
+  assert_eq!(fake.log().microphone_asked, 1);
+
+  // Allowed, back in the window: Open Settings, the microphone's pane.
+  let given = Access { accessibility: true, microphone: Some(false), ..Access::default() };
+  fake.log().access = Some(given);
+  h.app_mut().access_changed();
+  h.frame();
+  click(&mut h, Id::of(OPEN_MICROPHONE));
+  assert_eq!(fake.log().panes, [Pane::Accessibility, Pane::Microphone]);
+  assert_eq!(fake.log().microphone_asked, 1, "denied: only System Settings changes it");
+
+  click(&mut h, Id::of(DOWNLOAD_MODEL));
+  assert_eq!(h.app().page, Page::Models);
+}
+
 /// Every page in both looks, as people see them: two models downloaded and one downloading, a
 /// history of today's and yesterday's dictations with one selected; written to `WAVO_SHOTS` when
 /// it is set. General and Models also with an English-only model in use and with the chosen model
@@ -1148,6 +1194,13 @@ fn every_page_renders_in_both_looks() {
       shot(&mut h, &format!("{}-{look}", name.to_lowercase()));
       match page {
         Page::General => {
+          let empty = Home::new("window-shots-first-run", &[]);
+          let first = Fake::default();
+          first.log().access = Some(Access::default());
+          let mut first_run = harness(&first, Settings::default(), &empty);
+          first_run.event(Event::Appearance(appearance));
+          shot(&mut first_run, &format!("general-first-run-{look}"));
+
           click(&mut h, Id::of(MODEL));
           click(&mut h, Id::of(MODEL).key(("item", 1)));
           assert!(h.app().model_note().is_some(), "{look}: the note");

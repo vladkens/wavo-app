@@ -1,19 +1,21 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! The General and Advanced pages: the hotkey and how it records, the microphone, the model (a
-//! quick switch among the downloaded ones, and the way to the Models page), the language, the
-//! output, the model's unload, the history's retention, launch at login, the menu bar start; what
-//! the system allows and where the files are (the models, the recordings).
+//! The General and Advanced pages. General first guides through what the app needs: what the
+//! system allows (Accessibility, the microphone: their state and a button that asks or opens
+//! System Settings), then the model (a quick switch among the downloaded ones, the way to the
+//! Models page, or with none a button to download one) and the language; then the hotkey and how
+//! it records, the microphone, the output, launch at login, the menu bar start. Advanced: the
+//! model's unload, the history's retention, where the files are (the models, the recordings).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nimbo::autostart::State as Autostart;
 use nimbo::permissions::Pane;
-use nimbo::{FormRow, FormStyle, Hotkey, Icon, Id, Select, Tile, Tone, Ui, open, paths};
+use nimbo::{Button, FormRow, FormStyle, Hotkey, Icon, Id, Select, Tile, Tone, Ui, open, paths};
 use tracing::{info, warn};
 
-use super::{Page, Prefs, models};
+use super::{Page, Prefs, Problem, models};
 use crate::audio::devices::Choice;
 use crate::history::Retention;
 use crate::language;
@@ -25,6 +27,8 @@ pub const ACTIVATION: &str = "activation";
 pub const MIC: &str = "mic";
 /// The model pop-up: the downloaded models, then "Manage models…".
 pub const MODEL: &str = "use-model";
+/// With no model downloaded, in place of [`MODEL`]: the Models page.
+pub const DOWNLOAD_MODEL: &str = "download-model";
 pub const LANG: &str = "lang";
 pub const PASTE: &str = "paste";
 pub const KEEP: &str = "keep";
@@ -52,6 +56,10 @@ const FN_NOTE: &str =
   "Set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”, or macOS acts on it too.";
 const ACTIVATION_HELP: &str = "How the hotkey records: while you hold it, from one press to the \
   next, or both (a short tap latches the recording on).";
+const SECURE_INPUT_NOTE: &str = "Secure Input is on (a password field, or a terminal’s Secure \
+  Keyboard Entry): the shortcut works through a backup path, and Esc may not cancel.";
+const CLIPBOARD_NOTE: &str = "Wavo can’t put the clipboard back after a paste: allow it in System \
+  Settings › Privacy & Security › Paste from Other Apps.";
 const MANAGE_MODELS: &str = "Manage models…";
 const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle this long. The next \
   dictation loads it again, which takes a moment.";
@@ -261,10 +269,17 @@ impl Prefs {
   }
 
   pub(super) fn general(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    ui.form_section(fs, "Recording", |ui| {
+    self.permissions(ui, fs);
+    ui.form_section(fs, "Dictation", |ui| {
+      self.model(ui, fs);
+      let notes = [
+        (self.settings.hotkey == "fn").then_some(FN_NOTE),
+        self.access.secure_input.then_some(SECURE_INPUT_NOTE),
+      ];
+      let note = notes.into_iter().flatten().collect::<Vec<_>>().join(" ");
       let mut row = FormRow::new("Shortcut");
-      if self.settings.hotkey == "fn" {
-        row = row.caption(FN_NOTE);
+      if !note.is_empty() {
+        row = row.caption(&note);
       }
 
       ui.form_row(fs, row, |ui| self.shortcut(ui));
@@ -285,35 +300,6 @@ impl Prefs {
           self.edit(move |s| s.microphone = choice.clone());
         }
       });
-
-      // A model that can't transcribe as chosen says so in the warning colour, else one meant
-      // for one language says which.
-      let (labels, at) = self.model_choices();
-      let problem = self.model_problem().map(|p| p.text());
-      let note = problem.clone().or_else(|| self.model_note());
-      let mut row = FormRow::new("Model");
-      if let Some(note) = &note {
-        row = row.caption(note);
-      }
-
-      let warned = super::caption_in(fs, ui.theme().warning);
-      let row_fs = if problem.is_some() { &warned } else { fs };
-      let mut picked = None;
-      ui.with_id(self::row(MODEL)).form_row(row_fs, row, |ui| {
-        picked = pick(ui, MODEL, &labels, at, &[labels.len() - 2]);
-      });
-      if let Some(i) = picked {
-        self.model_picked(i, labels.len());
-      }
-
-      let (langs, at) = self.languages();
-      let labels: Vec<String> = langs.iter().map(|(l, _)| l.clone()).collect();
-      ui.form_row(fs, FormRow::new("Language"), |ui| {
-        if let Some(i) = pick(ui, LANG, &labels, at, &[0]) {
-          let code = langs[i].1.clone();
-          self.edit(move |s| s.language = code.clone());
-        }
-      });
     });
 
     ui.form_section(fs, "Output", |ui| {
@@ -325,7 +311,13 @@ impl Prefs {
         }
       });
       // Without pasting the text only goes to the clipboard, and stays there.
-      let row = FormRow::new("Keep the text on the clipboard").disabled(!self.settings.auto_paste);
+      let settings = &self.settings;
+      let mut row = FormRow::new("Keep the text on the clipboard").disabled(!settings.auto_paste);
+      let restores = settings.auto_paste && !settings.keep_in_clipboard;
+      if restores && self.access.clipboard_unread {
+        row = row.caption(CLIPBOARD_NOTE);
+      }
+
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.keep_in_clipboard;
         if ui.id(KEEP).toggle(&mut on, "").changed {
@@ -341,36 +333,6 @@ impl Prefs {
     });
 
     ui.form_section(fs, "App", |ui| {
-      let mut unloads = UNLOADS.to_vec();
-      if !unloads.contains(&self.settings.unload_after_minutes) {
-        unloads.push(self.settings.unload_after_minutes);
-      }
-
-      let labels: Vec<String> = unloads.iter().map(|&u| unload_title(u)).collect();
-      let row = FormRow::new("Unload the model").info(UNLOAD_HELP);
-      ui.with_id(self::row(UNLOAD)).form_row(fs, row, |ui| {
-        let current = self.settings.unload_after_minutes;
-        let at = unloads.iter().position(|&u| u == current).unwrap_or(0);
-        if let Some(i) = pick(ui, UNLOAD, &labels, at, &[0]) {
-          let minutes = unloads[i];
-          self.edit(move |s| s.unload_after_minutes = minutes);
-        }
-      });
-
-      let mut all = RETENTIONS.to_vec();
-      if !all.contains(&self.settings.history_retention) {
-        all.insert(1, self.settings.history_retention);
-      }
-
-      let labels: Vec<String> = all.iter().map(|&r| retention_title(r)).collect();
-      ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
-        let at = all.iter().position(|&r| r == self.settings.history_retention).unwrap_or(0);
-        if let Some(i) = pick(ui, RETENTION, &labels, at, &[]) {
-          let r = all[i];
-          self.edit(move |s| s.history_retention = r);
-        }
-      });
-
       self.login(ui, fs);
       ui.form_row(fs, FormRow::new("Start in the menu bar only"), |ui| {
         let mut on = self.settings.start_in_tray;
@@ -490,20 +452,35 @@ impl Prefs {
   }
 
   pub(super) fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    let access = self.access;
-    ui.form_section(fs, "Permissions", |ui| {
-      let row = FormRow::new("Microphone")
-        .caption("Records your voice while you dictate.")
-        .tile(Tile::Icon(Icon::MIC));
-      ui.form_row(fs, row, |ui| {
-        self.permission(ui, access.microphone, OPEN_MICROPHONE, Pane::Microphone)
+    ui.form_section(fs, "Model and History", |ui| {
+      let mut unloads = UNLOADS.to_vec();
+      if !unloads.contains(&self.settings.unload_after_minutes) {
+        unloads.push(self.settings.unload_after_minutes);
+      }
+
+      let labels: Vec<String> = unloads.iter().map(|&u| unload_title(u)).collect();
+      let row = FormRow::new("Unload the model").info(UNLOAD_HELP);
+      ui.with_id(self::row(UNLOAD)).form_row(fs, row, |ui| {
+        let current = self.settings.unload_after_minutes;
+        let at = unloads.iter().position(|&u| u == current).unwrap_or(0);
+        if let Some(i) = pick(ui, UNLOAD, &labels, at, &[0]) {
+          let minutes = unloads[i];
+          self.edit(move |s| s.unload_after_minutes = minutes);
+        }
       });
-      let row = FormRow::new("Accessibility")
-        .caption("Lets the shortcut work in every app and pastes the text.")
-        .tile(Tile::Icon(Icon::ACCESSIBILITY));
-      ui.form_row(fs, row, |ui| {
-        let allowed = Some(access.accessibility);
-        self.permission(ui, allowed, OPEN_ACCESSIBILITY, Pane::Accessibility)
+
+      let mut all = RETENTIONS.to_vec();
+      if !all.contains(&self.settings.history_retention) {
+        all.insert(1, self.settings.history_retention);
+      }
+
+      let labels: Vec<String> = all.iter().map(|&r| retention_title(r)).collect();
+      ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
+        let at = all.iter().position(|&r| r == self.settings.history_retention).unwrap_or(0);
+        if let Some(i) = pick(ui, RETENTION, &labels, at, &[]) {
+          let r = all[i];
+          self.edit(move |s| s.history_retention = r);
+        }
       });
     });
 
@@ -539,7 +516,29 @@ impl Prefs {
     }
   }
 
-  /// A permission's state and a button to its pane in System Settings.
+  /// What the system allows, first: what the app can't work without.
+  fn permissions(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    let access = self.access;
+    ui.form_section(fs, "Permissions", |ui| {
+      let row = FormRow::new("Accessibility")
+        .caption("Lets the shortcut work in every app and pastes the text.")
+        .tile(Tile::Icon(Icon::ACCESSIBILITY));
+      ui.form_row(fs, row, |ui| {
+        let allowed = Some(access.accessibility);
+        self.permission(ui, allowed, OPEN_ACCESSIBILITY, Pane::Accessibility)
+      });
+      let row = FormRow::new("Microphone")
+        .caption("Records your voice while you dictate.")
+        .tile(Tile::Icon(Icon::MIC));
+      ui.form_row(fs, row, |ui| {
+        self.permission(ui, access.microphone, OPEN_MICROPHONE, Pane::Microphone)
+      });
+    });
+  }
+
+  /// A permission's state and its button: Allow asks the system (its dialog adds the app to the
+  /// Accessibility list, [`super::Shell::open_pane`]); once answered, Open Settings opens its pane
+  /// in System Settings.
   fn permission(&mut self, ui: &mut Ui, allowed: Option<bool>, id: &str, pane: Pane) {
     match allowed {
       Some(true) => ui.badge("Allowed", Tone::Success),
@@ -547,9 +546,61 @@ impl Prefs {
       None => ui.badge("Not asked yet", Tone::Neutral),
     };
 
-    if ui.id(id).button("Open Settings").clicked {
-      self.shell.open_pane(pane);
+    // A denied microphone is not asked again: only System Settings changes it.
+    let ask = match pane {
+      Pane::Microphone => allowed.is_none(),
+      _ => allowed != Some(true),
+    };
+    let button = if ask { Button::new("Allow").primary() } else { Button::new("Open Settings") };
+    if !button.show(ui.id(id)).clicked {
+      return;
     }
+
+    match pane {
+      Pane::Microphone if ask => self.shell.request_microphone(),
+      _ => self.shell.open_pane(pane),
+    }
+  }
+
+  /// The model and the language rows; with no model downloaded, the way to download one.
+  fn model(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    // A model that can't transcribe as chosen says so in the warning colour, else one meant
+    // for one language says which.
+    let (labels, at) = self.model_choices();
+    let problem = self.model_problem();
+    let none = problem == Some(Problem::NoneDownloaded);
+    let note = problem.as_ref().map(Problem::text).or_else(|| self.model_note());
+    let mut row = FormRow::new("Model");
+    if let Some(note) = &note {
+      row = row.caption(note);
+    }
+
+    let warned = super::caption_in(fs, ui.theme().warning);
+    let row_fs = if problem.is_some() { &warned } else { fs };
+    let (mut picked, mut download) = (None, false);
+    ui.with_id(self::row(MODEL)).form_row(row_fs, row, |ui| match none {
+      true => {
+        let button = Button::new("Download a Model…").primary();
+        download = button.show(ui.id(DOWNLOAD_MODEL)).clicked;
+      }
+      false => picked = pick(ui, MODEL, &labels, at, &[labels.len() - 2]),
+    });
+    if download {
+      self.page = Page::Models;
+    }
+
+    if let Some(i) = picked {
+      self.model_picked(i, labels.len());
+    }
+
+    let (langs, at) = self.languages();
+    let labels: Vec<String> = langs.iter().map(|(l, _)| l.clone()).collect();
+    ui.form_row(fs, FormRow::new("Language"), |ui| {
+      if let Some(i) = pick(ui, LANG, &labels, at, &[0]) {
+        let code = langs[i].1.clone();
+        self.edit(move |s| s.language = code.clone());
+      }
+    });
   }
 }
 

@@ -1,10 +1,11 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! The settings window on nimbo, as macOS System Settings looks: toolbar tabs (General, Models,
-//! History, Advanced, About) over pages of grey plates, in a window [`WIDTH`] wide. General,
-//! Advanced and About are as high as their content ([`Ui::fit_window_height`]); Models and
-//! History scroll in a window [`SCROLLING`] high, under their search row. Light or dark and in
-//! the accent the system has.
+//! History, Advanced, About) over pages of grey plates, in a window [`WIDTH`] wide. General starts
+//! with what the app needs to work, the first launch's guide: the permissions, then the model (or
+//! the way to download one). General, Advanced and About are as high as their content
+//! ([`Ui::fit_window_height`]); Models and History scroll in a window [`SCROLLING`] high, under
+//! their search row. Light or dark and in the accent the system has.
 //!
 //! The window is a plain [`App`]: it shows a copy of the settings and the session's status,
 //! which the shell keeps current ([`Prefs::update`]), and reaches the rest of the app only
@@ -85,13 +86,17 @@ pub fn config(page: Page) -> Config {
   Config::new("Wavo", WIDTH, h).fixed()
 }
 
-/// What the system allows the app, as the Advanced page shows it.
+/// What the system allows the app, as the General page shows it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Access {
   /// Accessibility: the event tap and the paste.
   pub accessibility: bool,
   /// `None`: not asked yet; then whether it was allowed.
   pub microphone: Option<bool>,
+  /// Another app holds Secure Input: the hotkey goes through its backup path.
+  pub secure_input: bool,
+  /// The paste can't read the clipboard to put it back (Paste from Other Apps).
+  pub clipboard_unread: bool,
 }
 
 /// A delete the dialog asks about ([`CONFIRM`]).
@@ -161,6 +166,8 @@ pub trait Shell {
   /// why not, to [`Prefs::autostart_set`] on the main thread.
   fn set_autostart(&self, on: bool);
   fn access(&self) -> Access;
+  /// Shows the system's microphone prompt; the answer goes to [`Prefs::access_changed`].
+  fn request_microphone(&self);
   /// Adds up the sizes of the files in `dir` off the main thread (a long history has many) and
   /// hands the bytes to `done`, on that thread.
   fn folder_size(&self, dir: PathBuf, done: Box<dyn FnOnce(u64) + Send>);
@@ -207,7 +214,7 @@ impl Problem {
   /// What General's Model row and the Models page say.
   pub fn text(&self) -> String {
     match self {
-      Problem::NoneDownloaded => "No model downloaded: get one in Models.".into(),
+      Problem::NoneDownloaded => "Dictation needs a speech model: download one to start.".into(),
       Problem::Gone { chosen, instead: Some(instead) } => {
         format!("{chosen} is not on disk: {instead} transcribes instead.")
       }
@@ -294,9 +301,15 @@ impl Prefs {
   pub fn refresh(&mut self) {
     self.devices = self.shell.devices();
     self.models_changed();
-    self.access = self.shell.access();
+    self.access_changed();
     self.login.state = self.shell.autostart();
     self.recordings.asked = false;
+  }
+
+  /// What the system allows may have changed: a prompt was answered, the person is back from
+  /// System Settings.
+  pub fn access_changed(&mut self) {
+    self.access = self.shell.access();
   }
 
   /// Models came or went (a download ended, one was deleted), or may have: the window looks
@@ -447,7 +460,7 @@ impl App for Prefs {
     // allows is looked at again.
     let focused = ui.window_focused();
     if focused && !self.focused {
-      self.access = self.shell.access();
+      self.access_changed();
     }
 
     self.focused = focused;

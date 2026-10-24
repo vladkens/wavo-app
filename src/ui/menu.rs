@@ -1,9 +1,10 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! The menu bar menu and icon, from the session's status and what the system says ([System]):
-//! a header with the app, the hotkey and the state; the warnings that need the person, some
-//! opening where to fix them; Copy Last Dictation and the recent dictations; the model in use
-//! with the others downloaded, Unload Model; History…, Settings… and Quit.
+//! a header with the app, the hotkey and the state; the warnings that need the person, short, most
+//! opening where to fix them (the settings window says more); Copy Last Dictation and the recent
+//! dictations; the model in use with the others downloaded, Unload Model; History…, Settings… and
+//! Quit.
 
 use nimbo::tray::{Item, Menu};
 
@@ -32,74 +33,83 @@ pub struct System {
   pub hotkey_error: Option<String>,
   /// Why the hotkey's fallback (Carbon's, under Secure Input) is not registered.
   pub fallback_error: Option<String>,
-  pub microphone_denied: bool,
+  /// The microphone is not allowed, or not asked for yet.
+  pub no_microphone: bool,
   /// The paste restores the clipboard, which the app may not read (Paste from Other Apps).
   pub clipboard_unread: bool,
   pub secure_input: bool,
 }
 
-/// A warning in the menu (and the icon): its item's id, its text, and whether a click opens where
-/// it is fixed.
+/// A warning in the menu (and the icon): its item's id, its text, whether a click opens where it
+/// is fixed, and whether the menu marks it with ⚠︎ (not a step of the setup, as downloading a
+/// model).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Warning {
   pub id: &'static str,
   pub text: String,
   pub action: bool,
+  pub marked: bool,
 }
 
 /// What needs the person's attention now, the system's first.
 pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> {
   let mut list = Vec::new();
-  let mut add = |id, text: String, action| list.push(Warning { id, text, action });
+  let warn = |id, text: String, action| Warning { id, text, action, marked: true };
   if !system.accessibility {
-    let text = "No Accessibility access: the text is not pasted. Open System Settings…";
-    add("warn:accessibility", text.into(), true);
+    list.push(warn("warn:accessibility", "Allow Accessibility…".into(), true));
   } else if system.tap_failed {
-    add("warn:tap", "The hotkey is not intercepted: the event tap was not created".into(), false);
+    list.push(warn(
+      "warn:tap",
+      "The hotkey is not intercepted: the event tap was not created".into(),
+      false,
+    ));
   }
 
   if let Some(e) = &system.hotkey_error {
-    add("warn:hotkey", format!("The hotkey “{hotkey}” does not work: {e}"), false);
+    list.push(warn("warn:hotkey", format!("The hotkey “{hotkey}” does not work: {e}"), false));
   }
 
   if let Some(e) = &system.fallback_error {
-    add("warn:fallback", format!("The backup hotkey is not registered: {e}"), false);
+    list.push(warn("warn:fallback", format!("The backup hotkey is not registered: {e}"), false));
   }
 
-  if system.microphone_denied {
-    add("warn:microphone", "No microphone access. Open System Settings…".into(), true);
+  if system.no_microphone {
+    list.push(warn("warn:microphone", "Allow Microphone…".into(), true));
   }
 
   if system.clipboard_unread {
-    let text = "The clipboard is not restored after a paste: allow Wavo in Paste from Other Apps…";
-    add("warn:clipboard", text.into(), true);
+    list.push(warn("warn:clipboard", "Allow Paste…".into(), true));
   }
 
   if system.secure_input {
-    let text = "Secure Input is on: the hotkey works through the backup path, Esc may not";
-    add("warn:secure-input", text.into(), false);
+    list.push(warn("warn:secure-input", "Secure Input is on…".into(), true));
   }
 
   match &status.no_model {
-    Some(NoModel::NoneDownloaded) => add("warn:model", "No speech model yet".into(), false),
-    Some(NoModel::Gone { model }) => add("warn:model", format!("{model} is not on disk"), false),
+    Some(NoModel::NoneDownloaded) => {
+      let download = warn("warn:model", "Download a Speech Model…".into(), true);
+      list.push(Warning { marked: false, ..download });
+    }
+    Some(NoModel::Gone { model }) => {
+      list.push(warn("warn:model", format!("{model} is not on disk…"), true))
+    }
     Some(NoModel::LoadFailed { model, .. }) => {
-      add("warn:model", format!("{model} does not load"), false)
+      list.push(warn("warn:model", format!("{model} does not load…"), true))
     }
     None => {}
   }
 
   if let Some(e) = &status.error {
-    add("warn:error", format!("Error: {e}"), false);
+    list.push(warn("warn:error", format!("Error: {e}"), false));
   }
 
   if let Some(last) = status.last.as_ref().filter(|l| l.outcome == Outcome::Failed) {
     let e = last.error.as_deref().unwrap_or("unknown error");
-    add("warn:last", format!("The last dictation failed: {e}"), false);
+    list.push(warn("warn:last", format!("The last dictation failed: {e}"), false));
   }
 
   for w in &status.warnings {
-    add("warn:session", capitalized(w), false);
+    list.push(warn("warn:session", capitalized(w), false));
   }
 
   list
@@ -186,7 +196,8 @@ pub fn menu(
   let header = header.collect::<Vec<_>>().join(" · ");
   let mut items = vec![Item::new("header", &header).enabled(false)];
   for w in warnings {
-    items.push(Item::new(w.id, &format!("⚠︎ {}", w.text)).enabled(w.action));
+    let label = if w.marked { format!("⚠︎ {}", w.text) } else { w.text.clone() };
+    items.push(Item::new(w.id, &label).enabled(w.action));
   }
 
   let last = status.last.as_ref().is_some_and(|l| !l.text.is_empty());
@@ -382,7 +393,7 @@ mod tests {
       tap_failed: true,
       hotkey_error: Some("taken".into()),
       fallback_error: None,
-      microphone_denied: true,
+      no_microphone: true,
       clipboard_unread: true,
       secure_input: true,
     };
@@ -397,14 +408,14 @@ mod tests {
         ("warn:hotkey", false),
         ("warn:microphone", true),
         ("warn:clipboard", true),
-        ("warn:secure-input", false),
-        ("warn:model", false),
+        ("warn:secure-input", true),
+        ("warn:model", true),
         ("warn:session", false),
         ("warn:session", false),
       ]
     );
     assert_eq!(list[1].text, "The hotkey “f5” does not work: taken");
-    assert_eq!(list[5].text, "whisper-turbo is not on disk");
+    assert_eq!(list[5].text, "whisper-turbo is not on disk…");
     assert_eq!(
       (list[6].text.as_str(), list[7].text.as_str()),
       ("No sound from USB Mic", "The settings: x")
@@ -417,5 +428,42 @@ mod tests {
     assert_eq!(items[1].label, format!("⚠︎ {}", list[0].text));
     assert!(items[1].enabled && !items[2].enabled);
     assert_eq!(capitalized("dictation x: y"), "Dictation x: y");
+  }
+
+  /// The setup's warnings are short lines that open where it is done; the window says more.
+  #[test]
+  fn setup_warnings_are_short() {
+    let system = System {
+      accessibility: false,
+      no_microphone: true,
+      clipboard_unread: true,
+      secure_input: true,
+      ..System::default()
+    };
+    let mut s = status(Phase::Idle);
+    s.no_model = Some(NoModel::NoneDownloaded);
+    let list = warnings(&system, "f5", &s);
+    assert!(list.iter().all(|w| w.action), "each opens where it is fixed");
+    let items = menu(None, &s, &list, &[], &Models::new(&[], &Pick::default())).items;
+    let labels: Vec<&str> = items[1..=5].iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(
+      labels,
+      [
+        "⚠︎ Allow Accessibility…",
+        "⚠︎ Allow Microphone…",
+        "⚠︎ Allow Paste…",
+        "⚠︎ Secure Input is on…",
+        "Download a Speech Model…",
+      ]
+    );
+    let ids: Vec<&str> = items[1..=5].iter().map(|i| i.id.as_str()).collect();
+    let expected = [
+      "warn:accessibility",
+      "warn:microphone",
+      "warn:clipboard",
+      "warn:secure-input",
+      "warn:model",
+    ];
+    assert_eq!(ids, expected);
   }
 }

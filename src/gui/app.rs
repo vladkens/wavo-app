@@ -3,9 +3,9 @@
 //! `wavo-app gui`: the menu bar app on nimbo's app platform ([nimbo::app]), an accessory app: the
 //! [Tray] with the [menu], the [Hotkeys] that feed the session's input, the HUD in an [Overlay],
 //! the settings window ([Prefs]) on demand: at launch unless the person starts in the menu bar
-//! only, from the menu, `wavo-app ctl open-settings` and `open-history`, a second launch and the
-//! app opened again (Finder, Spotlight). The session and the control socket are `wavo-app
-//! daemon`'s.
+//! only and nothing is missing (a permission, asked for at once), from the menu, `wavo-app ctl
+//! open-settings` and `open-history`, a second launch and the app opened again (Finder, Spotlight).
+//! The session and the control socket are `wavo-app daemon`'s.
 //!
 //! The main thread owns the app ([App], in a thread local). Other threads reach it only through
 //! nimbo's [Proxy] ([proxy]): the session's observer posts every [Update] there, which goes on to
@@ -188,16 +188,16 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     session,
     serving,
   };
-  // No system dialog at launch: the menu's warning asks for Accessibility.
   app.check_access();
   app.read_models();
-  // Without Accessibility the window opens on Advanced, whose button asks for it.
-  let page = (!app.accessibility).then_some(Page::Advanced);
+  // What is missing is asked for at once, and the window opens on General, which shows it: the
+  // first launch's guide (the window opens at launch unless the person chose the menu bar only).
+  let missing = app.ask_missing();
   APP.with(|cell| *cell.borrow_mut() = Some(app));
   // Opened again while it runs: the settings window, as for a second launch.
   main.on_reopen(|main| open_window(main, None));
-  if !saved.start_in_tray || page.is_some() {
-    proxy().post(move |main| open_window(main, page));
+  if !saved.start_in_tray || missing {
+    proxy().post(|main| open_window(main, None));
   }
 
   Ok(())
@@ -296,8 +296,14 @@ fn chosen(main: &mut Main, id: &str) {
     "quit" => main.quit(),
     // The system's dialog adds the app to the Accessibility list, which the pane alone does not.
     "warn:accessibility" => _ = permissions::accessibility(true),
+    "warn:microphone" if permissions::microphone() == Access::NotDetermined => {
+      request_microphone(|| {})
+    }
     "warn:microphone" => opened(permissions::open_pane(Pane::Microphone)),
     "warn:clipboard" => opened(permissions::open_pane(Pane::Pasteboard)),
+    // General explains it under the shortcut.
+    "warn:secure-input" => open_window(main, Some(Page::General)),
+    "warn:model" => open_window(main, Some(Page::Models)),
     _ => {}
   }
 }
@@ -345,6 +351,20 @@ fn open_window(main: &mut Main, page: Option<Page>) {
   });
   w.front();
   with_app(|app| app.window = Some(w));
+}
+
+/// Shows the system's microphone prompt; once it is answered the app and the window look again,
+/// then `then` runs, on the main thread.
+fn request_microphone(then: impl FnOnce() + Send + 'static) {
+  info!("asking for microphone access");
+  permissions::request_microphone(|granted| {
+    info!("microphone access {}", if granted { "granted" } else { "denied" });
+    proxy().post(|_| {
+      with_app(App::microphone_answered);
+      with_window(Prefs::access_changed);
+      then();
+    });
+  });
 }
 
 /// Runs `f` on a thread of its own named `name`.
@@ -477,7 +497,16 @@ impl window::Shell for MacShell {
       Access::Denied | Access::Restricted => Some(false),
       Access::NotDetermined => None,
     };
-    window::Access { accessibility: permissions::accessibility(false), microphone }
+    window::Access {
+      accessibility: permissions::accessibility(false),
+      microphone,
+      secure_input: permissions::secure_input(),
+      clipboard_unread: !SystemClipboard.readable(),
+    }
+  }
+
+  fn request_microphone(&self) {
+    request_microphone(|| {});
   }
 
   fn folder_size(&self, dir: PathBuf, done: Box<dyn FnOnce(u64) + Send>) {
@@ -527,7 +556,7 @@ impl App {
       Phase::Recording => {
         let recording = self.update.as_ref().is_some_and(|u| u.status.state == Phase::Recording);
         if !recording {
-          self.ask_microphone();
+          self.ask_microphone(|| {});
         }
 
         let r = status.recording.as_ref();
@@ -643,16 +672,41 @@ impl App {
     }
   }
 
-  /// A recording starts: the system's prompt, the first time it was never answered.
-  fn ask_microphone(&mut self) {
-    self.microphone = permissions::microphone();
-    if !self.fake_mic && self.microphone == Access::NotDetermined && !self.asked_microphone {
-      self.asked_microphone = true;
-      info!("asking for microphone access");
-      permissions::request_microphone(|granted| {
-        info!("microphone access {}", if granted { "granted" } else { "denied" });
-      });
+  /// At launch: the system's prompts for what is missing, the microphone's first, then
+  /// Accessibility's (its dialog adds the app to the list); whether anything was.
+  fn ask_missing(&mut self) -> bool {
+    let accessibility = self.accessibility;
+    let ask_accessibility = move || {
+      if !accessibility {
+        info!("no Accessibility access: asking for it");
+        permissions::accessibility(true);
+      }
+    };
+    let missing = !accessibility || (!self.fake_mic && self.microphone != Access::Granted);
+    if !self.ask_microphone(ask_accessibility) {
+      ask_accessibility();
     }
+
+    missing
+  }
+
+  /// The system's microphone prompt, the first time in this run it was never answered, then
+  /// `then`; whether it asked. At launch, and when a recording starts.
+  fn ask_microphone(&mut self, then: impl FnOnce() + Send + 'static) -> bool {
+    self.microphone = permissions::microphone();
+    let ask = !self.fake_mic && self.microphone == Access::NotDetermined && !self.asked_microphone;
+    if ask {
+      self.asked_microphone = true;
+      request_microphone(then);
+    }
+
+    ask
+  }
+
+  /// The microphone's prompt was answered.
+  fn microphone_answered(&mut self) {
+    self.microphone = permissions::microphone();
+    self.refresh();
   }
 
   /// The menu opens: what the system does not tell the app is looked at again, and the models
@@ -724,7 +778,7 @@ impl App {
       tap_failed: hotkeys.listener == Listener::Failed,
       hotkey_error: hotkeys.error,
       fallback_error: hotkeys.fallback_error,
-      microphone_denied: matches!(self.microphone, Access::Denied | Access::Restricted),
+      no_microphone: !self.fake_mic && self.microphone != Access::Granted,
       clipboard_unread: restores && !self.clipboard,
       secure_input: hotkeys.secure_input,
     };
