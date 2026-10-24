@@ -1,7 +1,8 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Command-line tools that run without the GUI: `wavo-app transcribe`, `devices`, `record`, the
-//! headless `daemon` and its `ctl` client, the settings window's shots (`settings`).
+//! Command-line tools that run without the GUI: `wavo-app transcribe`, `devices`, `record`,
+//! `export`, `import`, the headless `daemon` and its `ctl` client, the settings window's shots
+//! (`settings`).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -18,9 +19,11 @@ use crate::audio::vad::Clip;
 use crate::audio::{SAMPLE_RATE, vad, wav};
 use crate::ctl::{self, Claim, Reply, Request};
 use crate::engine::{Engine, EngineConfig, model};
+use crate::history::Retention;
 use crate::session::output::Stdout;
 use crate::session::{self, Session};
 use crate::settings::{self, Settings};
+use crate::transfer::{self, Report, archive, handy};
 use crate::window::downloads::Download;
 use crate::window::{self, Access, Page, Prefs, Shell};
 
@@ -270,6 +273,83 @@ impl Shell for Headless {
   fn open_pane(&self, _: nimbo::permissions::Pane) {}
   fn open_url(&self, _: &str) {}
   fn reveal(&self, _: &Path) {}
+}
+
+/// `wavo-app export`: the data home into the archive `file`, a summary on stdout.
+pub fn export(file: &Path) -> Result<()> {
+  let done = archive::export(&crate::home(), file)?;
+  println!(
+    "{}: {} entries, {} recordings, {}",
+    file.display(),
+    done.entries,
+    done.recordings,
+    transfer::size(done.bytes)
+  );
+  Ok(())
+}
+
+/// `wavo-app import`: an archive of `wavo-app export`, or `handy`; a summary on stdout.
+pub fn import(source: &Path, take_settings: bool, dry_run: bool) -> Result<()> {
+  let home = crate::home();
+  let would = if dry_run { "would be " } else { "" };
+  if source == Path::new("handy") {
+    if take_settings {
+      bail!("Handy's settings are not imported: leave out --settings");
+    }
+
+    let (found, report) = handy::import(&home, &handy::dir(), dry_run)?;
+    let days =
+      |at: Option<i64>| at.and_then(crate::history::recordings::day_of).unwrap_or_default();
+    println!(
+      "Handy in {}: {} entries with text from {} to {}, {} recordings ({})",
+      found.dir.display(),
+      found.entries,
+      days(found.first),
+      days(found.last),
+      found.recordings,
+      transfer::size(found.bytes)
+    );
+    print_report(&home, &report, would);
+    return Ok(());
+  }
+
+  let done = archive::import(&home, source, take_settings, dry_run)?;
+  print_report(&home, &done.report, would);
+  match (done.settings, take_settings) {
+    (true, _) => println!("settings {would}replaced with the archive's"),
+    (false, true) => println!("no settings in the archive: these stay"),
+    (false, false) => {}
+  }
+
+  Ok(())
+}
+
+fn print_report(home: &Path, r: &Report, would: &str) {
+  println!(
+    "{} entries with text: {} {would}added, {} there already; {} recordings {would}copied",
+    r.entries,
+    r.added,
+    r.entries - r.added,
+    r.copied
+  );
+  if r.failed > 0 {
+    println!(
+      "{} recordings could not be copied: their entries name a missing file until an import \
+       copies it",
+      r.failed
+    );
+  }
+
+  // The cleanup applies it to imported entries as to any. Read as it is: `Settings::load` would
+  // set a bad file aside, and a dry run writes nothing.
+  let file = std::fs::read(home.join(settings::FILE)).unwrap_or_default();
+  let retention = serde_json::from_slice::<serde_json::Value>(&file)
+    .ok()
+    .and_then(|v| serde_json::from_value::<Retention>(v.get("history_retention")?.clone()).ok())
+    .unwrap_or_default();
+  if r.added > 0 && retention != Retention::Unlimited {
+    println!("the history keeps {retention:?}: older entries go at the next cleanup");
+  }
 }
 
 /// `wavo-app devices`: input devices, the system default marked with `*`.

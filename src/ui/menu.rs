@@ -261,6 +261,7 @@ mod tests {
       error: None,
       warnings: Vec::new(),
       no_model: None,
+      failed_recording: None,
     }
   }
 

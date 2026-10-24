@@ -8,25 +8,28 @@
 //! - Start → the microphone opens and the observer sees the recording first; then where the person
 //!   types is noted and the engine starts loading the model. The session never waits for the model:
 //!   the transcription is queued until it is loaded.
-//! - Stop → after the post-roll (the end of a word the key-up cut) the microphone closes, the entry
-//!   is created (`transcribing`). A recording is kept even when no model can transcribe it (none
-//!   downloaded, the chosen one gone from the disk, one that does not load): it is `no_model` and
-//!   can be transcribed again once there is one. Without speech, or cancelled, nothing is kept: no
-//!   entry, and the recording is deleted.
+//! - Stop → after the post-roll (the end of a word the key-up cut) the microphone closes and the
+//!   recording goes to the engine. Without speech, or cancelled, nothing is kept: the recording is
+//!   deleted.
 //! - Whether a model can transcribe is looked at without loading one ([`NoModel`] in the status):
 //!   at the start, when an engine starts, when a setting changes the model and when a load fails. A
 //!   loaded model whose file is gone goes with its engine at the next recording. A chosen model
 //!   that is not on disk gives way to the first one found while it is not, a warning in the status
 //!   saying so; the choice stays (downloading it again brings it back).
-//! - The result goes to the history first, then it is pasted (`pasted` says whether it was). Speech
-//!   of which the engine made no text (a model that does not know the language) is no success: the
-//!   entry and its recording stay as `no_text`, to transcribe again with another model.
+//! - The text goes to the history first, then it is pasted (`pasted` says whether it was). The
+//!   history keeps transcriptions only: a dictation that fails (no model can transcribe it, the
+//!   engine fails, nothing is recognized in its speech) ends with its error in the status, and its
+//!   recording is kept as the last failed one, to transcribe again (`ctl retranscribe-last`); the
+//!   next failure takes its place.
 //! - Every dictation ends with the history retention.
-//! - On start, what a crash left is recovered on the session thread, before any recording; the
-//!   first retention runs on a thread of its own: it may have a lot to delete.
+//! - On start, before any recording, the recordings a crash left without an entry are transcribed
+//!   in the background, as the last failed one is again: the text becomes an entry, a failure the
+//!   last failed recording. The first retention runs on a thread of its own: it may have a lot to
+//!   delete.
 //! - A platform shell can observe the session: [`Session::start_observed`] calls the observer on
 //!   the session thread after every change, with the status, the settings and the level meter.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -52,8 +55,8 @@ use crate::engine::supervisor::{
   Deadlines, EngineError, JobId, Phase as EnginePhase, Transcription,
 };
 use crate::engine::{Engine, EngineConfig};
-use crate::history::db::{Entry, NewEntry, Status as EntryStatus};
-use crate::history::{History, Retention, now_ms};
+use crate::history::db::NewEntry;
+use crate::history::{History, Retention, now_ms, recordings};
 use crate::settings::{self, Activation, Settings};
 
 /// How long a request waits for the session thread; less than `wavo-app ctl` waits for the reply,
@@ -103,7 +106,7 @@ impl Config {
 pub struct Status {
   pub state: Phase,
   pub activation: Activation,
-  /// The current dictation's history entry, once it has one.
+  /// The current dictation's history entry, once its text is kept.
   pub entry: Option<i64>,
   pub recording: Option<RecordingStatus>,
   pub engine: EngineStatus,
@@ -111,7 +114,11 @@ pub struct Status {
   pub last: Option<Last>,
   /// Entries being transcribed again.
   pub retranscribing: Vec<i64>,
-  /// The last problem that is no entry's: the microphone did not open, no model…
+  /// When the last failed dictation's recording started (Unix ms), kept to transcribe again
+  /// (`ctl retranscribe-last`); `None` while that runs.
+  pub failed_recording: Option<i64>,
+  /// The last problem that is no dictation's: the microphone did not open, a recording that could
+  /// not be transcribed again…
   pub error: Option<String>,
   /// Settings problems, and the current or last dictation's (device fallback, lost samples…).
   pub warnings: Vec<String>,
@@ -119,8 +126,8 @@ pub struct Status {
   pub no_model: Option<NoModel>,
 }
 
-/// Why no model can transcribe ([`Status::no_model`]); the shells say it in their own words, a
-/// history entry as it displays: `parakeet-tdt-0.6b-v3 is not on disk`.
+/// Why no model can transcribe ([`Status::no_model`]); the shells say it in their own words, the
+/// last dictation's error as it displays: `parakeet-tdt-0.6b-v3 is not on disk`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case", tag = "why")]
 pub enum NoModel {
@@ -165,33 +172,23 @@ pub struct EngineStatus {
   pub device: Option<String>,
 }
 
-/// How a dictation ended: as its history entry keeps it, or with no entry at all.
+/// How a dictation ended. Only `Done` is a history entry; `Failed`, `NoText` and `NoModel` keep
+/// the recording as the last failed one ([`Status::failed_recording`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
   Done,
   Failed,
-  /// See [`EntryStatus::NoText`].
+  /// Speech (the VAD said so) of which the engine made no text: a model that does not know the
+  /// language, most likely.
   NoText,
-  /// See [`EntryStatus::NoModel`].
+  /// Speech recorded while no model could transcribe it (none downloaded, the chosen one gone
+  /// from the disk, one that does not load); the error says why.
   NoModel,
   /// No speech in the recording; the engine was not called. Nothing is kept.
   NoSpeech,
   /// Nothing is kept.
   Cancelled,
-}
-
-impl Outcome {
-  /// The status of the entry it keeps, if it keeps one.
-  fn entry_status(self) -> Option<EntryStatus> {
-    match self {
-      Outcome::Done => Some(EntryStatus::Done),
-      Outcome::Failed => Some(EntryStatus::Failed),
-      Outcome::NoText => Some(EntryStatus::NoText),
-      Outcome::NoModel => Some(EntryStatus::NoModel),
-      Outcome::NoSpeech | Outcome::Cancelled => None,
-    }
-  }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -243,7 +240,7 @@ enum Msg {
     result: Result<Transcription, EngineError>,
   },
   Retranscribed {
-    entry: i64,
+    target: Target,
     result: Result<Transcription, EngineError>,
   },
   /// The background thread removed entries.
@@ -295,6 +292,8 @@ impl Session {
       dictation: None,
       last: None,
       retranscribing: Vec::new(),
+      orphans: VecDeque::new(),
+      failed_recording: None,
       error: None,
       warnings: warning.into_iter().collect(),
       engine_stale: false,
@@ -367,6 +366,26 @@ struct Loaded {
   engine: Engine,
 }
 
+/// What a background transcription is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Target {
+  /// A history entry: new text replaces its text, a failure leaves it as it was.
+  Entry(i64),
+  /// A recording no entry names (left by a crash, the last failed one), as
+  /// [`Recordings`](crate::history::recordings::Recordings) names it: its text becomes an entry, a
+  /// failure keeps it as the last failed recording.
+  Recording(String),
+}
+
+/// A background transcription, with the model and language it runs with.
+struct Background {
+  target: Target,
+  model: String,
+  language: Option<String>,
+  /// How long the recording is.
+  duration_ms: i64,
+}
+
 /// The dictation in progress.
 struct Dictation<T> {
   /// How it ends, as it goes: the last dictation once it has ended (`outcome` until then:
@@ -387,6 +406,9 @@ struct Dictation<T> {
   /// The engine started loading the model for it: that engine stays until the dictation ends.
   prewarmed: bool,
   job: Option<JobId>,
+  /// The model and language of its job.
+  model: Option<String>,
+  language: Option<String>,
   duration_ms: i64,
   warnings: Vec<String>,
 }
@@ -402,8 +424,11 @@ struct Controller<O: TextOutput> {
   tx: Sender<Msg>,
   dictation: Option<Dictation<O::Target>>,
   last: Option<Last>,
-  /// The entries being transcribed again, as they were before.
-  retranscribing: Vec<Entry>,
+  retranscribing: Vec<Background>,
+  /// Recordings a crash left, waiting for their turn ([`Controller::transcribe_orphans`]).
+  orphans: VecDeque<String>,
+  /// When the last failed recording started, as last looked ([`Status::failed_recording`]).
+  failed_recording: Option<i64>,
   error: Option<String>,
   warnings: Vec<String>,
   /// The engine no longer fits (the settings changed, its file is gone, an unload): replace it
@@ -463,15 +488,18 @@ impl<O: TextOutput> Controller<O> {
     }
   }
 
-  /// Recovers what a crash left (before any recording can make new files), then starts the first
-  /// retention in the background: with a lot to delete it would hold up the hotkey and `wavo-app
-  /// ctl`.
+  /// Recovers what a crash left (before any recording can make new files): its recordings go to
+  /// the engine in the background. Then starts the first retention in the background: with a lot
+  /// to delete it would hold up the hotkey and `wavo-app ctl`.
   fn startup(&mut self) {
     let _ = self.check_model();
-    if let Err(e) = self.history.recover(now_ms()) {
-      warn!("history recovery: {e:#}");
+    self.failed_recording = self.history.recordings.last_failed().map(|(_, at)| at);
+    match self.history.recover() {
+      Ok(orphans) => self.orphans = orphans.into(),
+      Err(e) => warn!("history recovery: {e:#}"),
     }
 
+    self.transcribe_orphans();
     self.cleanup_in_background();
   }
 
@@ -479,6 +507,7 @@ impl<O: TextOutput> Controller<O> {
   /// connection. Rows are deleted after their files, so the two never disagree.
   fn cleanup_in_background(&self) {
     let (home, retention) = (self.config.home.clone(), self.settings.history_retention);
+    let busy = self.retranscribing_entries();
     if retention == Retention::Unlimited {
       return;
     }
@@ -490,7 +519,7 @@ impl<O: TextOutput> Controller<O> {
         Err(e) => return warn!("history: {e:#}"),
       };
 
-      if retain(&history, retention) > 0 {
+      if retain(&history, retention, &busy) > 0 {
         let _ = tx.send(Msg::Cleaned);
       }
     };
@@ -545,7 +574,7 @@ impl<O: TextOutput> Controller<O> {
         self.apply_settings(settings);
       }
       Msg::Transcribed { take, result } => self.on_transcribed(take, result),
-      Msg::Retranscribed { entry, result } => self.on_retranscribed(entry, result),
+      Msg::Retranscribed { target, result } => self.on_retranscribed(target, result),
       Msg::Cleaned => {} // the history's changes show it
       Msg::CheckModel => {
         if let Some(loaded) = &self.engine
@@ -569,8 +598,12 @@ impl<O: TextOutput> Controller<O> {
       Request::Cancel => Command::Cancel,
       Request::Status => return Ok(serde_json::to_value(self.status())?),
       Request::Retranscribe { id } => {
-        let state = self.retranscribe(id)?;
-        return Ok(json!({ "entry": id, "state": state }));
+        self.retranscribe(id)?;
+        return Ok(json!({ "entry": id, "state": "transcribing" }));
+      }
+      Request::RetranscribeLast => {
+        let state = self.retranscribe_last()?;
+        return Ok(json!({ "state": state }));
       }
       Request::Delete { id } => {
         self.delete(id)?;
@@ -833,6 +866,8 @@ impl<O: TextOutput> Controller<O> {
       recorder: Some(recorder),
       prewarmed: false,
       job: None,
+      model: None,
+      language: None,
       duration_ms: 0,
       warnings,
     });
@@ -952,23 +987,18 @@ impl<O: TextOutput> Controller<O> {
     let language = self.settings.engine_language();
     let (model, pending) = match self.engine() {
       Ok(loaded) => (loaded.name.clone(), loaded.engine.transcribe(input.pcm, language.clone())),
-      // Kept, to transcribe once there is a model.
       Err(e) => return self.end(take, Outcome::NoModel, Some(e.to_string())),
     };
 
-    let language = language.as_deref();
-    let entry = self.add_entry(take, EntryStatus::Transcribing, Some(&model), language, None);
     let d = self.dictation.as_mut().unwrap();
-    d.last.entry = entry;
-    d.job = Some(pending.id());
+    (d.job, d.model, d.language) = (Some(pending.id()), Some(model), language);
     let tx = self.tx.clone();
     spawn_waiter(move || {
       let _ = tx.send(Msg::Transcribed { take, result: pending.wait() });
     });
   }
 
-  /// Ends dictation `take` before it reached the engine: an entry with `outcome` (no speech: no
-  /// entry, and the recording goes), then idle.
+  /// Ends dictation `take` before it reached the engine with `outcome`, then idle.
   fn end(&mut self, take: Take, outcome: Outcome, error: Option<String>) {
     if let Some(e) = &error {
       warn!("dictation {take}: {e}");
@@ -976,71 +1006,54 @@ impl<O: TextOutput> Controller<O> {
 
     if let Some(d) = self.dictation.as_mut() {
       d.last.outcome = outcome;
-      d.last.error = error.clone();
+      d.last.error = error;
     }
 
-    match outcome.entry_status() {
-      None => self.discard(take),
-      Some(status) => {
-        let model = self.engine.as_ref().map(|l| l.name.clone());
-        let language = self.settings.engine_language();
-        let (model, language) = (model.as_deref(), language.as_deref());
-        let entry = self.add_entry(take, status, model, language, error.as_deref());
-        if let Some(d) = self.dictation.as_mut() {
-          d.last.entry = entry;
-        }
-      }
-    }
-
+    self.settle(take);
     self.feed(Input::Finished { take });
     self.complete();
   }
 
-  /// Nothing of dictation `take` is kept (cancelled, no speech): its entry, if it has one, and its
-  /// recording go. An entry that cannot go is `failed`, not left `transcribing`.
-  fn discard(&mut self, take: Take) {
+  /// Keeps what dictation `take` leaves by its outcome: its text as an entry, a failure's
+  /// recording as the last failed one; nothing of the rest (cancelled, no speech).
+  fn settle(&mut self, take: Take) {
     let Some(d) = self.dictation.as_mut().filter(|d| d.last.take == take) else { return };
-    let entry = d.last.entry.take();
-    let result = match entry {
-      Some(entry) => self.history.delete(entry).map(drop),
-      None => self.history.recordings.discard(&d.audio),
-    };
+    match d.last.outcome {
+      Outcome::Done => {
+        let entry = NewEntry {
+          created_at: d.created_at,
+          duration_ms: d.duration_ms,
+          audio_path: Some(&d.audio),
+          model: d.model.as_deref(),
+          language: d.language.as_deref(),
+          text: d.last.text.trim(),
+        };
 
-    if let Err(e) = result {
-      warn!("dictation {take}: {e:#}");
-      if let Some(entry) = entry {
-        let error = format!("could not delete it: {e:#}");
-        log_history(self.history.db.update_outcome(entry, EntryStatus::Failed, None, Some(&error)));
-        d.last.entry = Some(entry);
+        d.last.entry = add_entry(&self.history, &entry);
+      }
+      Outcome::Failed | Outcome::NoText | Outcome::NoModel => {
+        let audio = d.audio.clone();
+        self.keep_failed(&audio);
+      }
+      Outcome::NoSpeech | Outcome::Cancelled => {
+        if let Err(e) = self.history.recordings.discard(&d.audio) {
+          warn!("dictation {take}: {e:#}");
+        }
       }
     }
   }
 
-  fn add_entry(
-    &self,
-    take: Take,
-    status: EntryStatus,
-    model: Option<&str>,
-    language: Option<&str>,
-    error: Option<&str>,
-  ) -> Option<i64> {
-    let d = self.dictation.as_ref().filter(|d| d.last.take == take)?;
-    let entry = NewEntry {
-      created_at: d.created_at,
-      duration_ms: d.duration_ms,
-      audio_path: Some(&d.audio),
-      model,
-      language,
-      status: Some(status),
-      error,
-    };
-
-    match self.history.db.insert_entry(&entry) {
-      Ok(id) => Some(id),
+  /// Keeps recording `name` as the last failed one (unless that is newer).
+  fn keep_failed(&mut self, name: &str) {
+    match self.history.recordings.keep_failed(name) {
+      Ok(at) => {
+        let kept = recordings::started_at(name) == Some(at);
+        info!("recording {name}: {}", if kept { "kept to try again" } else { "deleted, older" });
+        self.failed_recording = Some(at);
+      }
       Err(e) => {
-        // The text still reaches the person; only its history entry is missing.
-        warn!("dictation {take}: could not add it to the history: {e:#}");
-        None
+        warn!("recording {name}: {e:#}");
+        self.failed_recording = self.history.recordings.last_failed().map(|(_, at)| at);
       }
     }
   }
@@ -1052,38 +1065,30 @@ impl<O: TextOutput> Controller<O> {
     }
 
     let (outcome, text, error) = self.outcome(result);
-    if let Some(problem) = result_summary(outcome, error.as_deref()) {
-      warn!("dictation {take}: {problem}");
+    if let Some(e) = &error {
+      warn!("dictation {take}: {outcome:?}: {e}");
     }
 
     let d = self.dictation.as_mut().unwrap();
     d.job = None;
     (d.last.outcome, d.last.text, d.last.error) = (outcome, text, error);
-    match (outcome.entry_status(), d.last.entry) {
-      (None, _) => self.discard(take),
-      (Some(status), Some(entry)) => {
-        let text = Some(d.last.text.as_str()).filter(|t| !t.is_empty());
-        log_history(self.history.db.update_outcome(entry, status, text, d.last.error.as_deref()));
-      }
-      (Some(_), None) => {}
-    }
-
+    self.settle(take);
     if outcome == Outcome::NoModel {
       // The model did not load: its file may be gone.
       let _ = self.check_model();
     }
 
-    if self.dictation.as_ref().unwrap().last.text.is_empty() {
+    if outcome == Outcome::Done {
+      self.feed(Input::Transcribed { take });
+    } else {
       self.feed(Input::Finished { take });
       self.complete();
-    } else {
-      self.feed(Input::Transcribed { take });
     }
   }
 
-  /// The outcome, text and error of an engine's result. A transcription without text, of speech
-  /// the VAD heard, is [`Outcome::NoText`]; a model that does not load leaves the recording
-  /// waiting for one: [`Outcome::NoModel`].
+  /// The outcome, text and error of an engine's result: an error for every outcome but
+  /// [`Outcome::Done`]. A transcription without text, of speech the VAD heard, is
+  /// [`Outcome::NoText`]; a model that does not load, [`Outcome::NoModel`].
   fn outcome(
     &self,
     result: Result<Transcription, EngineError>,
@@ -1092,11 +1097,13 @@ impl<O: TextOutput> Controller<O> {
       Ok(t) => {
         debug!("{:.2?} on {} in {} piece(s)", t.elapsed, t.device, t.pieces.len());
         match t.text.trim() {
-          "" => (Outcome::NoText, String::new(), None),
+          "" => (Outcome::NoText, String::new(), Some("nothing recognized".into())),
           _ => (Outcome::Done, t.text, None),
         }
       }
-      Err(EngineError::Cancelled) => (Outcome::Cancelled, String::new(), None),
+      Err(EngineError::Cancelled) => {
+        (Outcome::Cancelled, String::new(), Some("the transcription was cancelled".into()))
+      }
       Err(EngineError::Load(error)) => {
         let model = self.engine.as_ref().map_or_else(|| "the model".into(), |l| label(&l.name));
         (Outcome::NoModel, String::new(), Some(NoModel::LoadFailed { model, error }.to_string()))
@@ -1148,10 +1155,11 @@ impl<O: TextOutput> Controller<O> {
       _ => None,
     };
 
-    self.discard(take);
     if let Some(d) = self.dictation.as_mut() {
       (d.last.outcome, d.last.error) = (Outcome::Cancelled, error);
     }
+
+    self.settle(take);
 
     self.complete();
   }
@@ -1164,7 +1172,7 @@ impl<O: TextOutput> Controller<O> {
       loaded.engine.cancel(job);
     }
 
-    self.discard(take);
+    self.settle(take);
     self.complete();
   }
 
@@ -1198,12 +1206,11 @@ impl<O: TextOutput> Controller<O> {
     self.retire_stale_engine();
   }
 
-  /// Entry `id`'s recording through the engine again, behind any dictation. Returns the entry's
-  /// state now: `transcribing`, or `deleted` at once when the recording has no speech and the
-  /// entry no text (no speech is not kept); one with text stays as it is.
-  fn retranscribe(&mut self, id: i64) -> Result<&'static str> {
+  /// Entry `id`'s recording through the engine again, behind any dictation; its text stays until
+  /// new text replaces it.
+  fn retranscribe(&mut self, id: i64) -> Result<()> {
     let entry = self.history.db.get_entry(id)?.ok_or_else(|| anyhow!("no history entry {id}"))?;
-    if entry.status == EntryStatus::Transcribing {
+    if self.retranscribing.iter().any(|b| b.target == Target::Entry(id)) {
       bail!("entry {id} is being transcribed");
     }
 
@@ -1211,38 +1218,86 @@ impl<O: TextOutput> Controller<O> {
       .history
       .audio_file(&entry)
       .ok_or_else(|| anyhow!("the recording of entry {id} is gone"))?;
-    let clip = Clip::analyze(wav::read(&wav)?);
-    let Some(input) = clip.engine_input() else {
-      if !entry.text.is_empty() {
-        bail!("no speech in the recording of entry {id}: it stays as it is");
+    if !self.transcribe_background(Target::Entry(id), &wav)? {
+      bail!("no speech in the recording of entry {id}: it stays as it is");
+    }
+
+    Ok(())
+  }
+
+  /// The last failed recording through the engine again, as [`Target::Recording`]. Returns the
+  /// state: `transcribing`, or `discarded` for a recording without speech.
+  fn retranscribe_last(&mut self) -> Result<&'static str> {
+    let name = self.history.recordings.restore_failed()?;
+    let name = name.ok_or_else(|| anyhow!("no failed recording to transcribe again"))?;
+    self.failed_recording = None;
+    self.transcribe_recording(name)
+  }
+
+  /// Recording `name`, which no entry names, through the engine in the background (see
+  /// [`Target::Recording`]); one without speech goes. Returns the state: `transcribing` or
+  /// `discarded`. If it cannot start, the recording is the last failed one.
+  fn transcribe_recording(&mut self, name: String) -> Result<&'static str> {
+    let path = self.history.recordings.path(&name).context("not a recording");
+    match path.and_then(|path| self.transcribe_background(Target::Recording(name.clone()), &path)) {
+      Ok(true) => Ok("transcribing"),
+      Ok(false) => {
+        info!("recording {name}: no speech, deleted");
+        self.history.recordings.discard(&name)?;
+        Ok("discarded")
       }
+      Err(e) => {
+        self.keep_failed(&name);
+        Err(e)
+      }
+    }
+  }
 
-      info!("entry {id}: no speech in the recording");
-      self.delete(id)?;
-      return Ok("deleted");
-    };
+  /// Recordings a crash left, one at a time once none is running: each holds its audio in memory
+  /// until it is transcribed. Without a model they stay where they are, for a start with one.
+  fn transcribe_orphans(&mut self) {
+    let running = self.retranscribing.iter().any(|b| matches!(b.target, Target::Recording(_)));
+    if running || self.orphans.is_empty() || self.check_model().is_err() {
+      return;
+    }
 
+    while let Some(name) = self.orphans.pop_front() {
+      info!("recording {name}: left without an entry, transcribed in the background");
+      match self.transcribe_recording(name) {
+        Ok("transcribing") => return,
+        Ok(_) => {}
+        Err(e) => self.error = Some(format!("a recording could not be transcribed: {e:#}")),
+      }
+    }
+  }
+
+  /// Recording `wav` for `target` to the engine, behind any dictation; false if it has no speech.
+  fn transcribe_background(&mut self, target: Target, wav: &Path) -> Result<bool> {
+    // The model first: without one the recording is not worth reading.
+    self.engine()?;
+    let clip = Clip::analyze(wav::read(wav)?);
+    let Some(input) = clip.engine_input() else { return Ok(false) };
     let language = self.settings.engine_language();
-    let model = self.engine()?.name.clone();
-    // The entry first: if that fails, no job runs whose result could not be kept.
-    self.history.db.mark_retranscribing(id, &model, language.as_deref())?;
     let loaded = self.engine.as_ref().expect("started above");
-    let pending = loaded.engine.transcribe_background(input.pcm, language);
-    info!("entry {id}: transcribing {:.1} s again with {model}", clip.seconds());
-    self.retranscribing.push(entry);
+    let model = loaded.name.clone();
+    info!("{target:?}: transcribing {:.1} s with {model}", clip.seconds());
+    let pending = loaded.engine.transcribe_background(input.pcm, language.clone());
+    let duration_ms = (clip.seconds() * 1000.0) as i64;
+    let job = Background { target: target.clone(), model, language, duration_ms };
+    self.retranscribing.push(job);
     let tx = self.tx.clone();
     spawn_waiter(move || {
-      let _ = tx.send(Msg::Retranscribed { entry: id, result: pending.wait() });
+      let _ = tx.send(Msg::Retranscribed { target, result: pending.wait() });
     });
 
-    Ok("transcribing")
+    Ok(true)
   }
 
   /// Deletes entry `id` with its recording, unless it is being transcribed. The last dictation's
   /// text goes with it: what the person deleted is not kept anywhere.
   fn delete(&mut self, id: i64) -> Result<()> {
     let current = self.dictation.as_ref().is_some_and(|d| d.last.entry == Some(id));
-    if current || self.retranscribing.iter().any(|e| e.id == id) {
+    if current || self.retranscribing.iter().any(|b| b.target == Target::Entry(id)) {
       bail!("entry {id} is being transcribed");
     }
 
@@ -1258,34 +1313,50 @@ impl<O: TextOutput> Controller<O> {
     Ok(())
   }
 
-  /// Entry `id`'s new outcome. One that had text keeps it, with its status and model, unless new
-  /// text replaces it; a failure then is the session's error.
-  fn on_retranscribed(&mut self, id: i64, result: Result<Transcription, EngineError>) {
-    let Some(at) = self.retranscribing.iter().position(|e| e.id == id) else { return };
-    let before = self.retranscribing.remove(at);
-    let (outcome, text, error) = match self.outcome(result) {
-      // Nothing cancels it today; if something did, the recording would stay to try again.
-      (Outcome::Cancelled, ..) => {
-        (Outcome::Failed, String::new(), Some("the transcription was cancelled".into()))
+  /// A background transcription's result (see [`Target`]); a failure is the session's error.
+  fn on_retranscribed(&mut self, target: Target, result: Result<Transcription, EngineError>) {
+    let Some(at) = self.retranscribing.iter().position(|b| b.target == target) else { return };
+    let Background { target, model, language, duration_ms } = self.retranscribing.remove(at);
+    let (outcome, text, error) = self.outcome(result);
+    let text = text.trim();
+    let language = language.as_deref();
+    match (target, outcome) {
+      (Target::Entry(id), Outcome::Done) => {
+        match self.history.db.update_text(id, text, &model, language) {
+          Ok(true) => info!("entry {id}: transcribed again"),
+          Ok(false) => info!("entry {id}: transcribed again, but deleted meanwhile"),
+          Err(e) => warn!("history: {e:#}"),
+        }
       }
-      outcome => outcome,
-    };
+      (Target::Recording(name), Outcome::Done) => {
+        let entry = NewEntry {
+          created_at: recordings::started_at(&name).unwrap_or_else(now_ms),
+          duration_ms,
+          audio_path: Some(&name),
+          model: Some(&model),
+          language,
+          text,
+        };
 
-    info!("entry {id}: transcribed again: {outcome:?}");
-    if outcome != Outcome::Done && !before.text.is_empty() {
-      if let Some(e) = &error {
-        let error = format!("entry {id} could not be transcribed again: {e}; its text stays");
+        add_entry(&self.history, &entry);
+        self.cleanup();
+      }
+      (target, _) => {
+        let why = error.unwrap_or_default();
+        let error = match target {
+          Target::Entry(id) => format!("entry {id} could not be transcribed again: {why}"),
+          Target::Recording(name) => {
+            self.keep_failed(&name);
+            format!("a recording could not be transcribed: {why}")
+          }
+        };
+
         warn!("{error}");
         self.error = Some(error);
       }
-
-      log_history(self.history.db.update_as_before(&before));
-    } else {
-      let status = outcome.entry_status().unwrap_or(EntryStatus::Failed);
-      let text = Some(text.trim()).filter(|t| !t.is_empty());
-      log_history(self.history.db.update_outcome(id, status, text, error.as_deref()));
     }
 
+    self.transcribe_orphans();
     self.retire_stale_engine();
     if outcome == Outcome::NoModel {
       let _ = self.check_model();
@@ -1293,7 +1364,16 @@ impl<O: TextOutput> Controller<O> {
   }
 
   fn cleanup(&mut self) {
-    retain(&self.history, self.settings.history_retention);
+    retain(&self.history, self.settings.history_retention, &self.retranscribing_entries());
+  }
+
+  /// The entries being transcribed again.
+  fn retranscribing_entries(&self) -> Vec<i64> {
+    let entries = self.retranscribing.iter().filter_map(|b| match b.target {
+      Target::Entry(id) => Some(id),
+      Target::Recording(_) => None,
+    });
+    entries.collect()
   }
 
   fn status(&self) -> Status {
@@ -1330,7 +1410,8 @@ impl<O: TextOutput> Controller<O> {
         device: s.device,
       }),
       last: self.last.clone(),
-      retranscribing: self.retranscribing.iter().map(|e| e.id).collect(),
+      retranscribing: self.retranscribing_entries(),
+      failed_recording: self.failed_recording,
       error: self.error.clone(),
       warnings,
       no_model: self.model_error.clone().or(load_failed),
@@ -1338,10 +1419,10 @@ impl<O: TextOutput> Controller<O> {
   }
 }
 
-/// Applies `retention` to `history`; how many entries went.
-fn retain(history: &History, retention: Retention) -> usize {
+/// Applies `retention` to `history`, but to the `busy` entries; how many entries went.
+fn retain(history: &History, retention: Retention, busy: &[i64]) -> usize {
   let started = Instant::now();
-  match history.cleanup(retention, now_ms()) {
+  match history.cleanup(retention, now_ms(), busy) {
     Ok(0) => 0,
     Ok(n) => {
       info!("history: {n} old entries removed ({retention:?}) in {:.0?}", started.elapsed());
@@ -1360,12 +1441,15 @@ fn log_history(result: Result<()>) {
   }
 }
 
-fn result_summary(outcome: Outcome, error: Option<&str>) -> Option<String> {
-  match (outcome, error) {
-    (Outcome::Done, _) => None,
-    (Outcome::NoText, _) => Some("nothing recognized".into()),
-    (outcome, Some(e)) => Some(format!("{outcome:?}: {e}")),
-    (outcome, None) => Some(format!("{outcome:?}")),
+/// Adds `entry` to `history`; without it the text still reaches the person, and its recording,
+/// which no entry names, is transcribed again on the next start.
+fn add_entry(history: &History, entry: &NewEntry<'_>) -> Option<i64> {
+  match history.db.insert_entry(entry) {
+    Ok(id) => Some(id),
+    Err(e) => {
+      warn!("{:?}: could not add it to the history: {e:#}", entry.audio_path);
+      None
+    }
   }
 }
 

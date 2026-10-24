@@ -1,19 +1,19 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! `history.db`: the entries, one per dictation kept.
+//! `history.db`: the entries, one per dictation transcribed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rusqlite::functions::FunctionFlags;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
 use super::fold;
 
-/// The error of an entry left `transcribing` by a crash ([`Db::mark_interrupted`]).
-pub const STOPPED_TRANSCRIBING: &str = "Wavo stopped during the transcription";
+/// How long a query waits for another connection's write.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 // MARK: Migrations
 
@@ -28,9 +28,7 @@ fn migrate_v1(db: &Connection) -> Result<()> {
       audio_path TEXT,
       model TEXT,
       language TEXT,
-      text TEXT NOT NULL DEFAULT '',
-      status TEXT NOT NULL,
-      error TEXT,
+      text TEXT NOT NULL CHECK (text != ''),
       pasted INTEGER NOT NULL DEFAULT 0,
       not_pasted TEXT
     );",
@@ -45,10 +43,14 @@ fn migrate_v1(db: &Connection) -> Result<()> {
   Ok(())
 }
 
+fn migrations() -> Vec<fn(&Connection) -> Result<()>> {
+  vec![migrate_v1]
+}
+
 /// Runs the migrations the database has not had, each in its own transaction. A database from a
 /// newer version is refused rather than written in a layout this version does not know.
 fn migrate(db: &Connection) -> Result<()> {
-  let migrations: Vec<fn(&Connection) -> Result<()>> = vec![migrate_v1];
+  let migrations = migrations();
   let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
   let known = migrations.len() as i64;
   if version > known {
@@ -70,43 +72,8 @@ fn migrate(db: &Connection) -> Result<()> {
 
 // MARK: Models
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
-  Transcribing,
-  Done,
-  /// Text that the engine could only get in part (aborted, truncated or repeating decode).
-  Partial,
-  Failed,
-  /// Speech (the VAD said so) of which the engine made no text: a model that does not know the
-  /// language, most likely. Kept with its recording, to transcribe again with another model; the
-  /// error says what is known (`parakeet-tdt-0.6b-v2 understands English only`).
-  NoText,
-  /// Speech recorded while no model could transcribe it (none downloaded, the chosen one gone
-  /// from the disk, one that does not load). Kept with its recording, to transcribe once there is
-  /// one; the error says why (`parakeet-tdt-0.6b-v3 is not on disk`).
-  NoModel,
-}
-
-impl Status {
-  const ALL: [Self; 6] =
-    [Self::Transcribing, Self::Done, Self::Partial, Self::Failed, Self::NoText, Self::NoModel];
-
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Status::Transcribing => "transcribing",
-      Status::Done => "done",
-      Status::Partial => "partial",
-      Status::Failed => "failed",
-      Status::NoText => "no_text",
-      Status::NoModel => "no_model",
-    }
-  }
-
-  fn parse(s: &str) -> Option<Self> {
-    Self::ALL.into_iter().find(|status| status.as_str() == s)
-  }
-}
-
+/// A dictation transcribed: the history keeps nothing else (a failed dictation's recording is kept
+/// on its own, [`Recordings::keep_failed`](super::recordings::Recordings::keep_failed)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
   pub id: i64,
@@ -119,16 +86,15 @@ pub struct Entry {
   pub model: Option<String>,
   /// Language asked for; `None` is detected by the model.
   pub language: Option<String>,
+  /// Never empty.
   pub text: String,
-  pub status: Status,
-  pub error: Option<String>,
   pub pasted: bool,
   /// Why a paste was refused (the focus moved, a password field…); `None` also without
   /// auto-paste.
   pub not_pasted: Option<String>,
 }
 
-/// A new entry; the rest of [`Entry`] starts empty.
+/// A new entry; it is not pasted yet.
 #[derive(Debug, Clone, Default)]
 pub struct NewEntry<'a> {
   pub created_at: i64,
@@ -136,13 +102,10 @@ pub struct NewEntry<'a> {
   pub audio_path: Option<&'a str>,
   pub model: Option<&'a str>,
   pub language: Option<&'a str>,
-  /// `None` is [`Status::Transcribing`].
-  pub status: Option<Status>,
-  pub error: Option<&'a str>,
+  pub text: &'a str,
 }
 
 fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<Entry> {
-  let status: String = row.get("status")?;
   Ok(Entry {
     id: row.get("id")?,
     created_at: row.get("created_at")?,
@@ -151,8 +114,6 @@ fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<Entry> {
     model: row.get("model")?,
     language: row.get("language")?,
     text: row.get("text")?,
-    status: Status::parse(&status).unwrap_or(Status::Failed),
-    error: row.get("error")?,
     pasted: row.get("pasted")?,
     not_pasted: row.get("not_pasted")?,
   })
@@ -167,6 +128,16 @@ fn entry_audio_from_row(row: &Row<'_>) -> rusqlite::Result<EntryAudio> {
 
 // MARK: Db
 
+/// Opens the SQLite file at `path` read-only, any app's: it takes a shared lock and writes nothing,
+/// not even a journal (but for a database in WAL mode: its shared-memory file).
+pub fn read_only(path: &Path) -> Result<Connection> {
+  let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+  let db =
+    Connection::open_with_flags(path, flags).with_context(|| format!("open {}", path.display()))?;
+  db.busy_timeout(BUSY_TIMEOUT)?;
+  Ok(db)
+}
+
 pub struct Db {
   db: Connection,
 }
@@ -175,13 +146,26 @@ impl Db {
   /// Opens (creating, migrating) the database at `path`.
   pub fn open(path: &Path) -> Result<Self> {
     let db = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
-    db.busy_timeout(Duration::from_secs(2))?;
+    db.busy_timeout(BUSY_TIMEOUT)?;
     db.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     migrate(&db).with_context(|| format!("migrate {}", path.display()))?;
     // What a search compares the text by.
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
     db.create_scalar_function("wavo_fold", 1, flags, |ctx| Ok(fold(&ctx.get::<String>(0)?)))?;
+    Ok(Self { db })
+  }
+
+  /// Opens the database at `path` read-only ([`read_only`]), as it is: one in a layout other than
+  /// this version's is refused, not migrated.
+  pub fn open_read_only(path: &Path) -> Result<Self> {
+    let db = read_only(path)?;
+    let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let known = migrations().len() as i64;
+    if version != known {
+      bail!("{} has schema {version}, this Wavo reads {known}", path.display());
+    }
+
     Ok(Self { db })
   }
 
@@ -200,7 +184,7 @@ impl Db {
     Ok(item)
   }
 
-  /// Up to `limit` entries with text, newest first by recording time, whose text holds `search`
+  /// Up to `limit` entries, newest first by recording time, whose text holds `search`
   /// in any case ([`fold`]; empty: all); after `after`, the `(created_at, id)` of the last entry
   /// of the page before.
   pub fn get_page(
@@ -211,7 +195,7 @@ impl Db {
   ) -> Result<Vec<Entry>> {
     let qs = "
     SELECT * FROM entries
-    WHERE text != '' AND (?1 = '' OR instr(wavo_fold(text), ?1) > 0)
+    WHERE (?1 = '' OR instr(wavo_fold(text), ?1) > 0)
       AND (?2 IS NULL OR (created_at, id) < (?2, ?3))
     ORDER BY created_at DESC, id DESC LIMIT ?4;
     ";
@@ -231,27 +215,37 @@ impl Db {
     Ok(items)
   }
 
-  /// The entries after the newest `keep`; entries still being transcribed are neither returned
-  /// nor counted.
+  /// The entries after the newest `keep`.
   pub fn get_beyond_newest(&self, keep: u32) -> Result<Vec<EntryAudio>> {
-    let qs = "
-    SELECT id, audio_path FROM entries WHERE status != 'transcribing'
-    ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?1;
-    ";
-
+    let qs =
+      "SELECT id, audio_path FROM entries ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?1;";
     let mut stmt = self.db.prepare_cached(qs)?;
     let items = stmt.query_map([keep], entry_audio_from_row)?.collect::<rusqlite::Result<_>>()?;
     Ok(items)
   }
 
-  /// The entries recorded before `at` (Unix ms), but those still being transcribed.
+  /// The entries recorded before `at` (Unix ms).
   pub fn get_created_before(&self, at: i64) -> Result<Vec<EntryAudio>> {
-    let qs = "
-    SELECT id, audio_path FROM entries WHERE status != 'transcribing' AND created_at < ?1;
-    ";
-
+    let qs = "SELECT id, audio_path FROM entries WHERE created_at < ?1;";
     let mut stmt = self.db.prepare_cached(qs)?;
     let items = stmt.query_map([at], entry_audio_from_row)?.collect::<rusqlite::Result<_>>()?;
+    Ok(items)
+  }
+
+  /// Every entry, oldest first.
+  pub fn get_entries(&self) -> Result<Vec<Entry>> {
+    let qs = "SELECT * FROM entries ORDER BY created_at, id;";
+    let mut stmt = self.db.prepare(qs)?;
+    let items = stmt.query_map([], entry_from_row)?.collect::<rusqlite::Result<_>>()?;
+    Ok(items)
+  }
+
+  /// Every entry's start time (Unix ms) with its recording: what an import matches entries by.
+  pub fn get_starts(&self) -> Result<HashMap<i64, Option<String>>> {
+    let qs = "SELECT created_at, audio_path FROM entries;";
+    let mut stmt = self.db.prepare(qs)?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let items = rows.collect::<rusqlite::Result<_>>()?;
     Ok(items)
   }
 
@@ -259,59 +253,83 @@ impl Db {
 
   pub fn insert_entry(&self, entry: &NewEntry<'_>) -> Result<i64> {
     let qs = "
-    INSERT INTO entries (created_at, duration_ms, audio_path, model, language, status, error)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);
+    INSERT INTO entries (created_at, duration_ms, audio_path, model, language, text)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6);
     ";
 
-    let status = entry.status.unwrap_or(Status::Transcribing);
     self.db.prepare_cached(qs)?.execute(params![
       entry.created_at,
       entry.duration_ms,
       entry.audio_path,
       entry.model,
       entry.language,
-      status.as_str(),
-      entry.error,
+      entry.text,
     ])?;
 
     Ok(self.db.last_insert_rowid())
   }
 
-  // MARK: Updater
-
-  /// Sets the outcome; `text` `None` keeps the text the entry has.
-  pub fn update_outcome(
-    &self,
-    id: i64,
-    status: Status,
-    text: Option<&str>,
-    error: Option<&str>,
-  ) -> Result<()> {
-    let qs = "UPDATE entries SET status = ?2, text = COALESCE(?3, text), error = ?4 WHERE id = ?1;";
-    self.db.prepare_cached(qs)?.execute(params![id, status.as_str(), text, error])?;
-    Ok(())
-  }
-
-  /// Marks an entry as being transcribed again, with `model` and `language`. Its text stays until
-  /// the new result replaces it.
-  pub fn mark_retranscribing(&self, id: i64, model: &str, language: Option<&str>) -> Result<()> {
+  /// Adds entries from another history, as they were, in one transaction; their ids are new.
+  pub fn insert_imported(&self, entries: &[Entry]) -> Result<()> {
     let qs = "
-    UPDATE entries SET status = 'transcribing', error = NULL, model = ?2, language = ?3
-    WHERE id = ?1;
+    INSERT INTO entries (
+      created_at, duration_ms, audio_path, model, language, text, pasted, not_pasted
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);
     ";
 
-    self.db.prepare_cached(qs)?.execute(params![id, model, language])?;
+    let tx = self.db.unchecked_transaction()?;
+    {
+      let mut stmt = tx.prepare_cached(qs)?;
+      for e in entries {
+        stmt.execute(params![
+          e.created_at,
+          e.duration_ms,
+          e.audio_path,
+          e.model,
+          e.language,
+          e.text,
+          e.pasted,
+          e.not_pasted,
+        ])?;
+      }
+    }
+
+    tx.commit()?;
     Ok(())
   }
 
-  /// Puts back `entry`'s status, model, language and error, as they were before
-  /// [`mark_retranscribing`](Self::mark_retranscribing): the text it kept is the one they go with.
-  pub fn update_as_before(&self, entry: &Entry) -> Result<()> {
-    let qs = "UPDATE entries SET status = ?2, model = ?3, language = ?4, error = ?5 WHERE id = ?1;";
-    let status = entry.status.as_str();
-    let args = params![entry.id, status, entry.model, entry.language, entry.error];
-    self.db.prepare_cached(qs)?.execute(args)?;
+  // MARK: Updater
+
+  /// The entries naming one of `names` name no recording, in one transaction.
+  pub fn update_without_audio<'a>(
+    &self,
+    names: impl IntoIterator<Item = &'a String>,
+  ) -> Result<()> {
+    let qs = "UPDATE entries SET audio_path = NULL WHERE audio_path = ?1;";
+    let tx = self.db.unchecked_transaction()?;
+    {
+      let mut stmt = tx.prepare_cached(qs)?;
+      for name in names {
+        stmt.execute([name])?;
+      }
+    }
+
+    tx.commit()?;
     Ok(())
+  }
+
+  /// The text of a new transcription, with the model and language it was made with; false if
+  /// there is no such entry.
+  pub fn update_text(
+    &self,
+    id: i64,
+    text: &str,
+    model: &str,
+    language: Option<&str>,
+  ) -> Result<bool> {
+    let qs = "UPDATE entries SET text = ?2, model = ?3, language = ?4 WHERE id = ?1;";
+    let changed = self.db.prepare_cached(qs)?.execute(params![id, text, model, language])?;
+    Ok(changed > 0)
   }
 
   /// Whether the text was pasted, and if a paste was refused, why.
@@ -319,12 +337,6 @@ impl Db {
     let qs = "UPDATE entries SET pasted = ?2, not_pasted = ?3 WHERE id = ?1;";
     self.db.prepare_cached(qs)?.execute(params![id, pasted, not_pasted])?;
     Ok(())
-  }
-
-  /// Entries left `transcribing` by a crash become `failed`; returns how many.
-  pub fn mark_interrupted(&self) -> Result<usize> {
-    let qs = "UPDATE entries SET status = 'failed', error = ?1 WHERE status = 'transcribing';";
-    Ok(self.db.execute(qs, [STOPPED_TRANSCRIBING])?)
   }
 
   pub fn delete_entry(&self, id: i64) -> Result<()> {
@@ -358,8 +370,8 @@ mod tests {
     Db::open(&dir.path().join("history.db")).unwrap()
   }
 
-  fn insert(db: &Db, status: Status) -> i64 {
-    db.insert_entry(&NewEntry { status: Some(status), ..NewEntry::default() }).unwrap()
+  fn insert(db: &Db) -> i64 {
+    db.insert_entry(&NewEntry { text: "текст", ..NewEntry::default() }).unwrap()
   }
 
   #[test]
@@ -368,12 +380,12 @@ mod tests {
     let db = open(&dir);
     let version: i64 = db.db.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
     assert_eq!(version, 1);
-    let id = insert(&db, Status::Done);
+    let id = insert(&db);
     drop(db);
 
     // Reopening keeps the data and runs no migration again.
     let db = open(&dir);
-    assert_eq!(db.get_entry(id).unwrap().map(|e| e.status), Some(Status::Done));
+    assert_eq!(db.get_entry(id).unwrap().map(|e| e.text), Some("текст".into()));
   }
 
   #[test]
@@ -381,11 +393,11 @@ mod tests {
     let dir = TempDir::new("db-changes");
     let db = open(&dir);
     let start = db.changes();
-    let id = insert(&db, Status::Transcribing);
-    db.update_outcome(id, Status::Done, Some("text"), None).unwrap();
+    let id = insert(&db);
+    db.mark_pasted(id, true, None).unwrap();
     db.get_entry(id).unwrap();
     assert_eq!(db.changes(), start + 2, "reads change nothing");
-    insert(&open(&dir), Status::Done);
+    insert(&open(&dir));
     assert_ne!(db.changes(), start + 2, "another connection's write");
   }
 
@@ -401,24 +413,21 @@ mod tests {
   fn ids_are_never_used_again() {
     let dir = TempDir::new("db-ids");
     let db = open(&dir);
-    let first = insert(&db, Status::Done);
-    let newest = insert(&db, Status::Done);
+    let first = insert(&db);
+    let newest = insert(&db);
     db.delete_entry(newest).unwrap();
-    let next = insert(&db, Status::Done);
+    let next = insert(&db);
     assert_eq!((first, newest, next), (1, 2, 3), "the deleted newest id is not used again");
   }
 
   #[test]
-  fn statuses_read_back_and_an_unknown_one_is_failed() {
-    for status in Status::ALL {
-      assert_eq!(Status::parse(status.as_str()), Some(status));
-    }
-
-    let dir = TempDir::new("db-status");
+  fn an_entry_without_text_is_refused() {
+    let dir = TempDir::new("db-no-text");
     let db = open(&dir);
-    let id = insert(&db, Status::Done);
-    db.db.execute("UPDATE entries SET status = 'cancelled' WHERE id = ?1", [id]).unwrap();
-    assert_eq!(db.get_entry(id).unwrap().unwrap().status, Status::Failed);
+    assert!(db.insert_entry(&NewEntry::default()).is_err());
+    let id = insert(&db);
+    assert!(db.update_text(id, "", "whisper", None).is_err());
+    assert_eq!(db.get_entry(id).unwrap().unwrap().text, "текст");
   }
 
   #[test]
@@ -431,80 +440,79 @@ mod tests {
         duration_ms: 4_200,
         audio_path: Some("2026-10-09/1000.wav"),
         model: Some("gigaam-v3-e2e-rnnt-Q8_0"),
-        ..NewEntry::default()
+        language: None,
+        text: "Привет",
       })
       .unwrap();
     let entry = db.get_entry(id).unwrap().unwrap();
-    assert_eq!(
-      (entry.status, entry.text.as_str(), entry.pasted),
-      (Status::Transcribing, "", false)
-    );
+    assert_eq!((entry.text.as_str(), entry.pasted), ("Привет", false));
     assert_eq!((entry.created_at, entry.duration_ms), (1_000, 4_200));
     assert_eq!(entry.audio_path.as_deref(), Some("2026-10-09/1000.wav"));
 
-    db.update_outcome(id, Status::Done, Some("Привет"), None).unwrap();
     db.mark_pasted(id, false, Some("the focus moved")).unwrap();
     assert_eq!(db.get_entry(id).unwrap().unwrap().not_pasted.as_deref(), Some("the focus moved"));
     db.mark_pasted(id, true, None).unwrap();
 
-    // Again with another model: the text stays until the new result; a failure keeps it.
-    db.mark_retranscribing(id, "whisper", Some("ru")).unwrap();
+    // Again with another model: the new text with what made it.
+    assert!(db.update_text(id, "Привет!", "whisper", Some("ru")).unwrap());
     let entry = db.get_entry(id).unwrap().unwrap();
-    assert_eq!((entry.status, entry.text.as_str()), (Status::Transcribing, "Привет"));
+    assert_eq!(entry.text, "Привет!");
     assert_eq!((entry.model.as_deref(), entry.language.as_deref()), (Some("whisper"), Some("ru")));
-    db.update_outcome(id, Status::Failed, None, Some("the engine crashed")).unwrap();
-    let entry = db.get_entry(id).unwrap().unwrap();
-    assert_eq!(entry.status, Status::Failed);
-    assert_eq!(
-      (entry.text.as_str(), entry.error.as_deref()),
-      ("Привет", Some("the engine crashed"))
-    );
     assert!(entry.pasted && entry.not_pasted.is_none());
     assert_eq!(db.get_entry(id + 1).unwrap(), None);
-
-    // Or the entry is put back as it was before.
-    db.update_outcome(id, Status::Done, None, None).unwrap();
-    let before = db.get_entry(id).unwrap().unwrap();
-    db.mark_retranscribing(id, "parakeet", None).unwrap();
-    db.update_as_before(&before).unwrap();
-    assert_eq!(db.get_entry(id).unwrap().unwrap(), before);
+    assert!(!db.update_text(id + 1, "x", "whisper", None).unwrap(), "no such entry");
   }
 
   #[test]
-  fn interrupted_transcriptions_are_marked_failed() {
-    let dir = TempDir::new("db-interrupted");
+  fn imported_entries_are_found_by_their_start() {
+    let dir = TempDir::new("db-imported");
     let db = open(&dir);
-    let done = insert(&db, Status::Done);
-    let stuck = insert(&db, Status::Transcribing);
-    assert_eq!(db.mark_interrupted().unwrap(), 1);
-    assert_eq!(db.get_entry(done).unwrap().unwrap().status, Status::Done);
-    let stuck = db.get_entry(stuck).unwrap().unwrap();
-    assert_eq!(
-      (stuck.status, stuck.error.as_deref()),
-      (Status::Failed, Some(STOPPED_TRANSCRIBING))
-    );
-    assert_eq!(db.mark_interrupted().unwrap(), 0);
+    let entry = Entry {
+      id: 0,
+      created_at: 1_000,
+      duration_ms: 2_500,
+      audio_path: Some("1000.wav".into()),
+      model: Some("handy".into()),
+      language: Some("en".into()),
+      text: "hello".into(),
+      pasted: true,
+      not_pasted: None,
+    };
+    let other = Entry { created_at: 2_000, audio_path: None, ..entry.clone() };
+    db.insert_imported(&[other, entry.clone()]).unwrap();
+    assert_eq!(db.get_entry(2).unwrap(), Some(Entry { id: 2, ..entry.clone() }));
+    let starts = db.get_starts().unwrap();
+    assert_eq!(starts, HashMap::from([(1_000, Some("1000.wav".into())), (2_000, None)]));
+    assert_eq!(db.get_entries().unwrap()[0], Entry { id: 2, ..entry });
+    let names = ["1000.wav".to_owned()];
+    db.update_without_audio(&names).unwrap();
+    assert!(db.get_audio_paths().unwrap().is_empty());
+
+    // Read-only, as it is.
+    let ro = Db::open_read_only(&dir.path().join("history.db")).unwrap();
+    assert_eq!(ro.get_entries().unwrap().len(), 2);
+    assert!(ro.update_without_audio(&names).is_err());
+    db.db.pragma_update(None, "user_version", 0).unwrap();
+    assert!(Db::open_read_only(&dir.path().join("history.db")).is_err(), "another layout");
   }
 
   #[test]
   fn pages_are_newest_first_with_text_and_searched_in_any_case() {
     let dir = TempDir::new("db-page");
     let db = open(&dir);
-    let texts = ["Добрый день.", "Ещё раз", "hello World", "ДОБРЫЙ вечер", "", "еще одно"];
+    let texts = ["Добрый день.", "Ещё раз", "hello World", "ДОБРЫЙ вечер", "еще одно"];
     let ids: Vec<i64> = (texts.iter().enumerate())
-      .map(|(i, text)| {
-        let entry = NewEntry { created_at: 10_000 - i as i64 * 1_000, ..NewEntry::default() };
-        let id = db.insert_entry(&entry).unwrap();
-        db.update_outcome(id, Status::Done, Some(text), None).unwrap();
-        id
+      .map(|(i, &text)| {
+        let entry = NewEntry { created_at: 10_000 - i as i64 * 1_000, text, ..NewEntry::default() };
+        db.insert_entry(&entry).unwrap()
       })
       .collect();
 
     let page = |search: &str, after: Option<(i64, i64)>, limit| -> Vec<i64> {
       db.get_page(search, after, limit).unwrap().iter().map(|e| e.id).collect()
     };
-    let all = [ids[0], ids[1], ids[2], ids[3], ids[5]];
-    assert_eq!(page("", None, 100), all, "the one without text is left out");
+    let all = ids.clone();
+    assert_eq!(page("", None, 100), all);
 
     // Pages of 2 cover everything once, in order.
     let mut seen = Vec::new();
@@ -520,7 +528,7 @@ mod tests {
     // Case in Cyrillic and Latin, `ё` as `е`; a quote or a percent sign is just text.
     assert_eq!(page("добрый", None, 100), [ids[0], ids[3]]);
     assert_eq!(page("WORLD", None, 100), [ids[2]]);
-    assert_eq!(page("ещё", None, 100), [ids[1], ids[5]]);
+    assert_eq!(page("ещё", None, 100), [ids[1], ids[4]]);
     assert!(page("%", None, 100).is_empty() && page("'", None, 100).is_empty());
   }
 }
