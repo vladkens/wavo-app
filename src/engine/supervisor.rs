@@ -719,8 +719,9 @@ impl Supervisor {
   /// Ends the engine thread: an idle one drops its model before this returns (up to
   /// [`SHUTDOWN_GRACE`]); a busy one when its load or run returns.
   fn stop_worker(&mut self) {
-    let Some(Worker { thread, runs, ended, state, .. }) = self.worker.take() else { return };
+    let Some(Worker { thread, runs, stop, ended, state, .. }) = self.worker.take() else { return };
     drop(runs); // the end of its input
+    stop.store(true, Ordering::Relaxed); // and of its run, after the piece in progress
     if !matches!(state, WorkerState::Idle) {
       debug!(thread, ?state, "engine thread left to end after its load or run");
       return;
@@ -738,6 +739,7 @@ impl Supervisor {
   /// Leaves the engine thread to end on its own, past its deadline.
   fn leave_stuck(&mut self) {
     if let Some(worker) = self.worker.take() {
+      worker.stop.store(true, Ordering::Relaxed); // its run goes no further than its piece
       self.stuck.push(worker.ended);
     }
   }
@@ -871,7 +873,7 @@ mod tests {
   use std::fs;
 
   use super::*;
-  use crate::testing::{FakeModels, Fault, Faults, TempDir};
+  use crate::testing::{FakeModels, Fault, Faults, TempDir, poll};
 
   /// One second of silence: the fake transcribes anything.
   fn pcm() -> Vec<f32> {
@@ -1081,6 +1083,37 @@ mod tests {
     f.live(1); // the stuck run returned for nothing, its model dropped
     assert_eq!(f.engine.status().thread, fresh, "its answer is dropped");
     assert_eq!(f.run().unwrap().text, "text");
+  }
+
+  /// A run left behind, past its deadline or by a dropped engine, stops after its piece in
+  /// progress rather than running the rest of its input.
+  #[test]
+  fn a_run_left_behind_stops_after_its_piece() {
+    let long = || vec![0.0; 25 * SAMPLE_RATE as usize];
+    let models = FakeModels::new("text").max_audio_ms(10_000);
+    let f = Fake::start("engine-left", models.clone(), fast(Duration::from_millis(200)));
+    f.faults.run(Fault::Hang);
+    assert!(matches!(f.engine.transcribe(long(), None).wait(), Err(EngineError::TimedOut(_))));
+    f.faults.release();
+    f.live(0);
+    assert_eq!(models.runs().len(), 1, "past its deadline: the rest never ran");
+
+    let (dir, faults) = (TempDir::new("engine-left-drop"), Faults::new());
+    let model = dir.path().join("model.gguf");
+    fs::write(&model, b"GGUF").unwrap();
+    let models = FakeModels::new("text").max_audio_ms(10_000);
+    let engine = Engine::start(EngineConfig {
+      loader: faults.wrap(models.clone()),
+      ..EngineConfig::new(model)
+    })
+    .unwrap();
+    faults.run(Fault::Hang);
+    let _job = engine.transcribe(long(), None);
+    poll("a hanging run", Duration::from_secs(10), || (faults.hanging() == 1).then_some(()));
+    drop(engine);
+    faults.release();
+    poll("the run's end", Duration::from_secs(10), || (models.live() == 0).then_some(()));
+    assert_eq!(models.runs().len(), 1, "a dropped engine: the rest never ran");
   }
 
   #[test]
