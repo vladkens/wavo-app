@@ -8,10 +8,10 @@ mod cli;
 mod ctl;
 mod engine;
 mod history;
-mod language;
 // The menu bar app: macOS first, Windows and Linux later (docs/plans/20261023-port.md).
 #[cfg(target_os = "macos")]
 mod gui;
+mod language;
 mod session;
 mod settings;
 #[cfg(test)]

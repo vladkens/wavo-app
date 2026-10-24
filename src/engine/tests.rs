@@ -10,11 +10,10 @@ use std::time::Duration;
 
 use super::model::Wavo;
 use super::supervisor::{Engine, EngineConfig, EngineError, Phase, Transcription};
-use crate::audio::SAMPLE_RATE;
 use crate::audio::vad::Clip;
 use crate::testing::{
-  Fault, Faults, Fixture, TempDir, app_exe, fixture, fixture_wav, model_en, model_ru,
-  paragraph_recall, wer,
+  Fault, Faults, Fixture, TempDir, app_exe, fixture, fixture_wav, model_en, model_parakeet,
+  model_ru, paragraph_recall, wer,
 };
 
 const MAX_WER: f64 = 0.15;
@@ -143,8 +142,8 @@ fn warm_start_to_loaded_is_fast() {
   assert!(median <= WARM_LOAD_LIMIT, "median {median:?} > {WARM_LOAD_LIMIT:?}");
 }
 
-/// The long fixture (two paragraphs and a pause) through `model`: the pause is shortened, pieces
-/// stay within the model's window, WER and every paragraph within limits.
+/// The long fixture (two paragraphs and a pause) through `model`: the pause is shortened, the input
+/// is cut into pieces of up to `window`, WER and every paragraph within limits.
 fn check_long(model: PathBuf, window: Duration) {
   let name = model_name(&model);
   let f = fixture("ru-long");
@@ -159,17 +158,19 @@ fn check_long(model: PathBuf, window: Duration) {
 
   let engine = Engine::start(EngineConfig::new(model)).unwrap();
   run(&engine, &fixture("ru-short"), None).unwrap(); // warm-up
+  let seconds = input.seconds();
   let out = engine.transcribe(input.pcm, None).wait().unwrap();
-  let pieces: Vec<f64> = out.pieces.iter().map(|p| p.len() as f64 / SAMPLE_RATE as f64).collect();
   let w = wer(&f.text, &out.text);
   let recall = paragraph_recall(&f.text, &out.text);
   eprintln!(
-    "{name} ru-long: WER {:.1}%, paragraphs {recall:.2?}, pieces {pieces:.2?} s, {:.2?}\n  {}",
+    "{name} ru-long: WER {:.1}%, paragraphs {recall:.2?}, {} pieces, {:.2?}\n  {}",
     w * 100.0,
+    out.pieces,
     out.elapsed,
     out.text
   );
-  assert!(pieces.iter().all(|&p| p <= window.as_secs_f64()), "{name}: pieces {pieces:?}");
+  let least = (seconds / window.as_secs_f64()).ceil() as usize;
+  assert!(out.pieces >= least, "{name}: {} pieces of {seconds:.1} s", out.pieces);
   assert!(w <= MAX_WER, "{name}: WER {:.1}%", w * 100.0);
   assert!(recall.len() == 2 && recall.iter().all(|&r| r >= MIN_PARAGRAPH_RECALL), "{recall:?}");
 }
@@ -184,6 +185,15 @@ fn gigaam_long_recording() {
 #[ignore = "needs models: make test-models"]
 fn whisper_long_recording() {
   check_long(model_en(), Duration::from_secs(30));
+}
+
+/// Parakeet v3 cannot be told a language: it is not, and detects it; long input is cut at wavo's
+/// window for it.
+#[test]
+#[ignore = "needs models: make test-models"]
+fn parakeet_detects_the_language_it_is_given() {
+  check_wer(model_parakeet(), &[("ru-short", Some("ru")), ("en-short", Some("en"))]);
+  check_long(model_parakeet(), Duration::from_secs(60));
 }
 
 #[test]
