@@ -12,7 +12,8 @@
 //! with Download. Every row is one line of name and one of caption in every state (idle,
 //! downloading, preparing, failed, deleting, in use): the list never moves under the pointer.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use isolang::Language;
 use nimbo::{Align, FormRow, FormStyle, Icon, Id, Style, Tile, Ui, Weight, grow, px};
@@ -20,11 +21,11 @@ use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
 use super::downloads::Download;
-use super::{Ask, Found, Prefs, Problem};
+use super::{Ask, Prefs, Problem};
 use crate::engine::supervisor::Phase as EnginePhase;
 use crate::history::fold;
 use crate::language;
-use crate::session::controller::{NoModel, Phase};
+use crate::session::controller::{NoModel, Phase, label};
 use crate::settings::Settings;
 
 /// The search field and the language pop-up above the plates.
@@ -50,7 +51,7 @@ pub struct State {
   /// The models being deleted, by name.
   pub deleting: Vec<&'static str>,
   pub search: String,
-  /// The language filter: an index of [`languages_list`], 0 for all.
+  /// The language filter: an index of [`LANGUAGES`], 0 for all.
   pub lang: usize,
 }
 
@@ -68,18 +69,44 @@ fn done_text(done: u64, total: u64) -> String {
   }
 }
 
-/// What a model choice (wavo's name, a file's path) is called where it shows, also once its file
-/// is gone: wavo's full name (`parakeet-tdt-0.6b-v3`), else the file's name without extension.
-pub fn label(query: &str) -> String {
-  if let Some(m) = super::lookup(query) {
-    return m.full_name.into();
+/// A downloaded model: wavo's, and its file.
+pub type Found = (&'static ModelInfo, PathBuf);
+
+/// Which model transcribes, as the session picks it: the chosen one when it is on disk, else the
+/// first downloaded.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Pick {
+  /// Its index among the downloaded; `None` for a file of its own outside the cache, or none.
+  pub active: Option<usize>,
+  /// The chosen model when it is none of the downloaded: what it is called, and whether its file
+  /// is there (outside the cache) or gone.
+  pub other: Option<(String, bool)>,
+}
+
+impl Pick {
+  /// The pick of `query` (the settings' model) among `found`, the models downloaded into `hub`.
+  pub fn new(hub: &Hub, query: Option<&str>, found: &[Found]) -> Self {
+    let first = (!found.is_empty()).then_some(0);
+    let Some(query) = query else { return Self { active: first, other: None } };
+    match hub.resolve(query) {
+      Ok(path) => match found.iter().position(|f| f.1 == path) {
+        Some(i) => Self { active: Some(i), other: None },
+        None => Self { active: None, other: Some((label(query), true)) },
+      },
+      Err(_) => Self { active: first, other: Some((label(query), false)) },
+    }
   }
 
-  // Not `file_stem`: the dots of `parakeet-tdt-0.6b-v3-Q8_0` are no extension's.
-  let file = Path::new(query).file_name().and_then(|f| f.to_str()).unwrap_or(query);
-  let file = file.strip_suffix(".gguf").unwrap_or(file);
-  let m = hub::MODELS.iter().find(|m| m.file().strip_suffix(".gguf") == Some(file));
-  m.map_or_else(|| file.to_owned(), |m| m.full_name.to_owned())
+  /// The chosen model when it is not on disk: what it is called.
+  pub fn gone(&self) -> Option<&str> {
+    self.other.as_ref().filter(|(_, there)| !there).map(|(name, _)| name.as_str())
+  }
+}
+
+/// `English only` for a model meant for one language.
+pub fn single_language(m: &ModelInfo) -> Option<String> {
+  let [code] = m.langs else { return None };
+  Some(format!("{} only", language::name(code)))
 }
 
 /// Whether model choice `query` names `model`: by its name or its file.
@@ -113,24 +140,40 @@ pub fn delete(hub: &Hub, model: &ModelInfo) -> Result<u64, String> {
   }
 }
 
-/// Whether language `code` is what search word `w` (folded) asks for: its code, its ISO 639-3
-/// code (`rus`), or the start of a word of its name (`russ`).
-fn language_matches(code: &str, w: &str) -> bool {
-  let long = Language::from_639_1(code).map(|l| l.to_639_3());
-  let name = fold(&language::name(code));
-  code.eq_ignore_ascii_case(w)
-    || long == Some(w)
-    || name.split_whitespace().any(|n| n.starts_with(w))
+/// Every language of wavo's models by name, after "All languages": the language filter's
+/// choices, `(label, code)`.
+pub static LANGUAGES: LazyLock<Vec<(String, &'static str)>> = LazyLock::new(|| {
+  let mut codes: Vec<&str> = hub::MODELS.iter().flat_map(|m| m.langs.iter().copied()).collect();
+  codes.sort_unstable();
+  codes.dedup();
+  let mut all: Vec<(String, &str)> = codes.into_iter().map(|c| (language::name(c), c)).collect();
+  all.sort();
+  all.insert(0, ("All languages".to_owned(), ""));
+  all
+});
+
+/// The codes of the languages search word `w` (folded) names: by code, ISO 639-3 code (`rus`) or
+/// the start of a word of the name (`russ`).
+fn languages_named(w: &str) -> Vec<&'static str> {
+  let named = |&(ref name, code): &(String, &str)| {
+    let long = Language::from_639_1(code).map(|l| l.to_639_3());
+    code.eq_ignore_ascii_case(w)
+      || long == Some(w)
+      || fold(name).split_whitespace().any(|n| n.starts_with(w))
+  };
+  LANGUAGES.iter().skip(1).filter(|l| named(l)).map(|l| l.1).collect()
 }
 
-/// What the search field asks for: its words, any case.
+/// What the search field asks for: its words, any case, each with the languages it names.
 pub struct Search {
-  words: Vec<String>,
+  words: Vec<(String, Vec<&'static str>)>,
 }
 
 impl Search {
   pub fn new(text: &str) -> Self {
-    Self { words: fold(text).split_whitespace().map(str::to_owned).collect() }
+    let text = fold(text);
+    let words = text.split_whitespace().map(|w| (w.to_owned(), languages_named(w))).collect();
+    Self { words }
   }
 
   /// Whether it finds model `m`: every word is in its name, starts its family's name, a word of
@@ -139,27 +182,15 @@ impl Search {
     let (name, family, maker, about) =
       (fold(m.full_name), fold(m.family), fold(m.maker), fold(m.languages));
     let starts = |text: &str, w: &str| text.split_whitespace().any(|t| t.starts_with(w));
-    self.words.iter().all(|w| {
+    self.words.iter().all(|(w, langs)| {
       name.contains(w.as_str())
         || m.name.contains(w.as_str())
         || family.starts_with(w.as_str())
         || starts(&maker, w)
         || starts(&about, w)
-        || m.langs.iter().any(|c| language_matches(c, w))
+        || m.langs.iter().any(|c| langs.contains(c))
     })
   }
-}
-
-/// The language filter's choices: every language of wavo's models by name, after "All
-/// languages"; `(label, code)`.
-pub fn languages_list() -> Vec<(String, &'static str)> {
-  let mut codes: Vec<&str> = hub::MODELS.iter().flat_map(|m| m.langs.iter().copied()).collect();
-  codes.sort_unstable();
-  codes.dedup();
-  let mut all: Vec<(String, &str)> = codes.into_iter().map(|c| (language::name(c), c)).collect();
-  all.sort();
-  all.insert(0, ("All languages".to_owned(), ""));
-  all
 }
 
 /// What a row asked for.
@@ -174,8 +205,7 @@ enum Act {
 impl Prefs {
   /// The search field and the language pop-up, above the scrolling plates.
   pub(super) fn models_head(&mut self, ui: &mut Ui, s: Style) {
-    let langs = languages_list();
-    let items: Vec<(usize, &str)> = langs.iter().enumerate().map(|(i, l)| (i, &*l.0)).collect();
+    let items: Vec<(usize, &str)> = LANGUAGES.iter().enumerate().map(|(i, l)| (i, &*l.0)).collect();
     let m = &mut self.models;
     ui.row(s.align(Align::Start, Align::Center), |ui| {
       ui.id(SEARCH).search(&mut m.search, "Search models");
@@ -218,12 +248,11 @@ impl Prefs {
     // The notes above the plates wrap; the rows' captions stay on their line.
     let note = fs.caption;
     let fs = &FormStyle { caption: fs.caption.ellipsis(), ..*fs };
-    let found = self.found.clone();
+    let found = &self.found;
     let active = self.active().map(|f| f.0.name);
     // The chosen model when it is gone from the disk: in its place among the downloaded.
-    let gone = (self.chosen_gone().is_some())
-      .then(|| self.settings.model.as_deref().and_then(super::lookup))
-      .flatten();
+    let gone =
+      self.pick.gone().and_then(|_| self.settings.model.as_deref().and_then(super::lookup));
     let mut act = None;
     if let Some(text) = &self.models.note {
       ui.text(text, note.color(t.danger));
@@ -234,7 +263,7 @@ impl Prefs {
     }
 
     let search = Search::new(&self.models.search);
-    let lang = languages_list().get(self.models.lang).map_or("", |l| l.1);
+    let lang = LANGUAGES.get(self.models.lang).map_or("", |l| l.1);
     let shown = |m: &ModelInfo| search.finds(m) && (lang.is_empty() || m.langs.contains(&lang));
     let in_use = |m: &ModelInfo| active == Some(m.name);
     let is_gone = |m: &ModelInfo| gone.is_some_and(|g| g.name == m.name);
@@ -324,10 +353,7 @@ impl Prefs {
     let t = ui.theme();
     let m = f.0;
     let deleting = self.models.deleting.contains(&m.name);
-    let languages = match m.langs {
-      [code] => format!("{} only", language::name(code)),
-      _ => m.languages.to_owned(),
-    };
+    let languages = single_language(m).unwrap_or_else(|| m.languages.to_owned());
     let (state, error) = match in_use {
       true => self.in_use_state(f),
       false => ("", false),
@@ -341,7 +367,7 @@ impl Prefs {
     let row_fs = if error { &warned } else { fs };
     let next = self.found.iter().find(|o| o.0.name != m.name).map(|o| o.0.full_name);
     let mut act = None;
-    ui.id((ROW, m.name)).form_row(row_fs, model_row(m, &caption), |ui| {
+    ui.id((ROW, m.name)).form_row(row_fs, model_row(m, Some(&caption)), |ui| {
       if in_use {
         ui.row(Style::new().gap(4.0).align(Align::Start, Align::Center), |ui| {
           ui.icon_stroke(Icon::CHECK, 14.0, t.accent, 2.2);
@@ -398,10 +424,7 @@ impl Prefs {
       Some(Download::Preparing) => Some((None, "Preparing for the Neural Engine…".to_owned())),
       Some(Download::Failed(_)) | None => None,
     };
-    let mut row = model_row(m, &caption);
-    if running.is_some() {
-      row = FormRow::new(m.full_name).one_line().tile(Tile::Text(tile(m)));
-    }
+    let row = model_row(m, running.is_none().then_some(caption.as_str()));
 
     let tinted = match &state {
       Some(Download::Failed(_)) => Some(super::caption_in(fs, t.danger)),
@@ -451,9 +474,14 @@ fn tile(m: &ModelInfo) -> &'static str {
   m.family.get(..1).unwrap_or("·")
 }
 
-/// A model's row: its name on one line, `caption` on one line under it.
-fn model_row<'a>(m: &'a ModelInfo, caption: &'a str) -> FormRow<'a> {
-  FormRow::new(m.full_name).one_line().caption(caption).tile(Tile::Text(tile(m)))
+/// A model's row: its name on one line, `caption` on one line under it (else a download's
+/// progress there).
+fn model_row<'a>(m: &'a ModelInfo, caption: Option<&'a str>) -> FormRow<'a> {
+  let row = FormRow::new(m.full_name).one_line().tile(Tile::Text(tile(m)));
+  match caption {
+    Some(c) => row.caption(c),
+    None => row,
+  }
 }
 
 /// A running download in place of its row's caption, as high as that line: the bar (moving
@@ -526,9 +554,6 @@ mod tests {
     assert!(names("whisper-tiny", m) && names(m.full_name, m));
     assert!(names(&format!("/hf/{}", m.file()), m));
     assert!(!names("whisper-base", m));
-    assert_eq!(label(&format!("/x/{}", m.file())), m.full_name);
-    assert_eq!(label("/x/mine.gguf"), "mine");
-    assert_eq!(label("parakeet-tdt-0.6b-v3-Q8_0"), "parakeet-tdt-0.6b-v3", "as entries keep it");
     let mut s = Settings { model: Some("whisper-tiny".into()), ..Settings::default() };
     forget(&mut s, hub::lookup("whisper-base").unwrap());
     assert!(s.model.is_some());

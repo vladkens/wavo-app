@@ -39,6 +39,7 @@ use crate::ui::icons::Icon;
 use crate::ui::menu::{self, Models, Warning};
 use crate::ui::overlay::{self, Overlay, Show};
 use crate::window::downloads::{Download, Downloads};
+use crate::window::models::{Found, Pick};
 use crate::window::{self, Access, Page, Prefs};
 
 /// The app as the system knows it: its menu bar presence, its login item.
@@ -88,8 +89,10 @@ struct App {
   downloads: Downloads,
   /// The models downloaded and the recent dictations (their texts and times), as the menu last
   /// opened.
-  found: Vec<&'static ModelInfo>,
+  found: Vec<Found>,
   recent: Vec<(String, i64)>,
+  /// The history, for «Recent».
+  history: Option<History>,
   accessibility: bool,
   microphone: Access,
   /// The paste may read the clipboard to restore it ([SystemClipboard::readable]).
@@ -173,6 +176,7 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     downloads: Downloads::default(),
     found: Vec::new(),
     recent: Vec::new(),
+    history: None,
     accessibility: false,
     microphone: permissions::microphone(),
     clipboard: SystemClipboard.readable(),
@@ -586,14 +590,11 @@ impl App {
 
   fn unload(&mut self) {
     let handle = self.handle.clone();
-    let unload = move || {
+    spawn("unload", move || {
       if let Some(e) = handle.request(Request::Unload).error {
         warn!("unload the model: {e}");
       }
-    };
-    if let Err(e) = std::thread::Builder::new().name("unload".into()).spawn(unload) {
-      warn!("unload the model: {e}");
-    }
+    });
   }
 
   /// Checks Accessibility; without it the event tap cannot start (chords still work through
@@ -651,16 +652,21 @@ impl App {
 
   /// The models downloaded, for the menu; the session looks too when they changed.
   fn read_models(&mut self) {
-    let found: Vec<&'static ModelInfo> = self.hub.downloaded().into_iter().map(|f| f.0).collect();
+    let found = self.hub.downloaded();
     if found != self.found {
       self.found = found;
       self.handle.check_model();
     }
   }
 
-  /// The latest dictations, for «Recent».
+  /// The latest dictations, for «Recent», from the history opened the first time.
   fn read_recent(&mut self) {
-    let entries = History::open(&self.home).and_then(|h| h.db.get_page("", None, menu::RECENT));
+    if self.history.is_none() {
+      self.history = History::open(&self.home).inspect_err(|e| warn!("the history: {e:#}")).ok();
+    }
+
+    let Some(history) = &self.history else { return };
+    let entries = history.db.get_page("", None, menu::RECENT);
     self.recent = match entries {
       Ok(entries) => entries.into_iter().map(|e| (e.text, e.created_at)).collect(),
       Err(e) => {
@@ -680,7 +686,7 @@ impl App {
 
   /// The menu's model `i` is used from now on.
   fn select_model(&mut self, i: usize) {
-    let Some(m) = self.found.get(i) else { return };
+    let Some((m, _)) = self.found.get(i) else { return };
     info!("model {} chosen in the menu", m.name);
     let name = m.name.to_owned();
     self.handle.edit_settings(move |s| s.model = Some(name));
@@ -689,19 +695,7 @@ impl App {
   /// The model submenu: the models downloaded, the one that transcribes checked.
   fn models(&self) -> Models {
     let query = self.update.as_ref().and_then(|u| u.settings.model.as_deref());
-    let chosen = query.map(|q| self.hub.resolve(q));
-    // The chosen one, else the first downloaded, as the session picks it.
-    let active = match &chosen {
-      Some(Ok(path)) => {
-        self.found.iter().position(|m| self.hub.find(m.name).as_ref() == Some(path))
-      }
-      _ => (!self.found.is_empty()).then_some(0),
-    };
-    let gone = match (query, &chosen) {
-      (Some(q), Some(Err(_))) => Some(window::models::label(q)),
-      _ => None,
-    };
-    Models::new(&self.found, active, gone.as_deref())
+    Models::new(&self.found, &Pick::new(&self.hub, query, &self.found))
   }
 
   /// What needs the person's attention, as the session and the system have it now.

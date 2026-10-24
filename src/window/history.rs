@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 
 use nimbo::{Align, Button, Float, FormRow, FormStyle, Icon, Id, Style, TextStyle, Ui, grow};
 
-use super::{Ask, Prefs, models};
+use super::{Ask, Prefs};
 use crate::audio::playback::Playback;
 use crate::history::db::Entry;
-use crate::history::{History, local_time, now_ms};
+use crate::history::{History, Local, local_time, now_ms, shorten};
+use crate::session::controller::label;
 
 pub const SEARCH: &str = "history-search";
 pub const MORE: &str = "more";
@@ -36,21 +37,6 @@ const START_CHARS: usize = 60;
 
 /// A calendar day: year, month, day.
 type Day = (i32, u32, u32);
-
-const MONTHS: [&str; 12] = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
-];
 
 /// What the page has loaded and is doing.
 pub struct State {
@@ -126,9 +112,10 @@ impl State {
 }
 
 /// A day's plate title: `Today`, `Yesterday, October 17`, `October 3`, `March 3, 2025`.
-pub fn day_title(day: Day, today: Day) -> String {
+fn day_title(day: Day, today: Day) -> String {
   let (year, month, d) = day;
-  let date = format!("{} {d}", MONTHS[(month as usize).clamp(1, 12) - 1]);
+  let local = Local { year, month, day: d, hour: 0, minute: 0 };
+  let date = format!("{} {d}", local.month_name());
   if day == today {
     return "Today".into();
   }
@@ -164,7 +151,7 @@ fn day_of(ms: i64) -> Day {
   local_time(ms).map(|t| t.date()).unwrap_or_default()
 }
 
-pub fn duration_text(ms: i64) -> String {
+fn duration_text(ms: i64) -> String {
   if ms < 60_000 {
     return format!("{:.1} s", ms as f64 / 1000.0);
   }
@@ -178,41 +165,16 @@ fn first_line(text: &str) -> String {
   text.chars().take(ROW_CHARS).map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
-/// The start of a dictation's text for the dialog asking before its delete: its first words up
-/// to [`START_CHARS`] on one line, `…` where it is cut.
-pub fn text_start(text: &str) -> String {
-  let mut start = String::new();
-  for (i, w) in text.split_whitespace().enumerate() {
-    let len = start.chars().count() + usize::from(i > 0) + w.chars().count();
-    if len > START_CHARS {
-      if start.is_empty() {
-        start = w.chars().take(START_CHARS).collect();
-      }
-
-      let start = start.trim_end_matches([',', ';', ':', '.', '—', '-']);
-      return format!("{start}…");
-    }
-
-    if i > 0 {
-      start.push(' ');
-    }
-
-    start.push_str(w);
-  }
-
-  start
-}
-
 /// Under the text: when, how long, why it was not pasted, and in a selected row the model.
 fn details(e: &Entry, selected: bool) -> String {
-  let time = local_time(e.created_at).map(|t| format!("{:02}:{:02}", t.hour, t.minute));
+  let time = local_time(e.created_at).map(Local::hm);
   let mut parts = vec![time.unwrap_or_default(), duration_text(e.duration_ms)];
   if let (false, Some(why)) = (e.pasted, &e.not_pasted) {
     parts.push(format!("Not pasted: {why}"));
   }
 
   if let (true, Some(model)) = (selected, &e.model) {
-    parts.push(models::label(model));
+    parts.push(label(model));
   }
 
   parts.retain(|p| !p.is_empty());
@@ -419,7 +381,8 @@ fn row(ui: &mut Ui, fs: &FormStyle, e: &Entry, st: Row) -> Option<Act> {
     let r = ui.id((DELETE, e.id)).icon_button(Icon::TRASH);
     ui.tooltip(r.id, "Delete…");
     if r.clicked {
-      act = Some(Act::Ask(Ask::Dictation { id: e.id, start: text_start(&e.text), audio }));
+      act =
+        Some(Act::Ask(Ask::Dictation { id: e.id, start: shorten(&e.text, START_CHARS), audio }));
     }
   });
   act.or((r.clicked || on_text).then_some(Act::Select(e.id)))
@@ -445,6 +408,7 @@ mod tests {
 
   #[test]
   fn the_start_of_a_text_for_the_dialog() {
+    let text_start = |t: &str| shorten(t, START_CHARS);
     assert_eq!(text_start("  Short\nnote. "), "Short note.");
     let long = "Remind me to send the invoice to Anna before Friday, and the contract, signed.";
     assert_eq!(text_start(long), "Remind me to send the invoice to Anna before Friday, and the…");

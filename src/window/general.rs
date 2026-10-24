@@ -123,9 +123,12 @@ fn folder_caption(dir: &Path, size: Option<u64>) -> String {
   }
 }
 
-/// Options with owned labels, as a select takes them: `(index, label)`.
-fn borrowed(labels: &[String]) -> Vec<(usize, &str)> {
-  labels.iter().enumerate().map(|(i, l)| (i, l.as_str())).collect()
+/// A pop-up `id` of `labels`, item `at` the current one, with a line after each of `lines`:
+/// the item picked, when it is another.
+fn pick(ui: &mut Ui, id: &str, labels: &[String], at: usize, lines: &[usize]) -> Option<usize> {
+  let items: Vec<(usize, &str)> = labels.iter().enumerate().map(|(i, l)| (i, l.as_str())).collect();
+  let mut cur = at;
+  Select::new(&mut cur, &items).separators(lines).show(ui.id(id)).changed.then_some(cur)
 }
 
 /// `10,000`.
@@ -143,7 +146,7 @@ fn thousands(n: u32) -> String {
   out
 }
 
-pub fn unload_title(minutes: Option<u32>) -> String {
+fn unload_title(minutes: Option<u32>) -> String {
   match minutes {
     None => "Never".into(),
     Some(0) => "Right after each dictation".into(),
@@ -152,7 +155,7 @@ pub fn unload_title(minutes: Option<u32>) -> String {
   }
 }
 
-pub fn retention_title(r: Retention) -> String {
+fn retention_title(r: Retention) -> String {
   match r {
     Retention::Unlimited => "Forever".into(),
     Retention::Count(n) => format!("The last {} dictations", thousands(n)),
@@ -193,21 +196,19 @@ impl Prefs {
   /// index of the current one.
   pub(super) fn model_choices(&self) -> (Vec<String>, usize) {
     let mut items: Vec<String> = self.found.iter().map(|f| f.0.full_name.to_owned()).collect();
-    let chosen = self.chosen();
-    let at = match (&self.settings.model, &chosen) {
-      (None, _) => (!self.found.is_empty()).then_some(0),
-      (Some(_), Some(path)) => self.found.iter().position(|f| f.1 == *path),
-      (Some(_), None) => None,
+    let other = match (&self.pick.other, self.pick.active) {
+      (Some((name, true)), _) => Some(name.clone()),
+      (Some((name, false)), _) => Some(format!("{name} (not on disk)")),
+      (None, None) => Some("No model".to_owned()),
+      (None, Some(_)) => None,
     };
-    let at = at.unwrap_or_else(|| {
-      let label = match (self.settings.model.as_deref(), chosen) {
-        (Some(query), None) => format!("{} (not on disk)", models::label(query)),
-        (Some(query), Some(_)) => models::label(query),
-        (None, _) => "No model".into(),
-      };
-      items.push(label);
-      items.len() - 1
-    });
+    let at = match other {
+      Some(label) => {
+        items.push(label);
+        items.len() - 1
+      }
+      None => self.pick.active.unwrap_or_default(),
+    };
     items.push(MANAGE_MODELS.into());
     (items, at)
   }
@@ -242,17 +243,14 @@ impl Prefs {
     langs.sort();
     let mut items = vec![("Auto-detect".to_owned(), "auto".to_owned())];
     items.extend(langs);
-    let current = self.settings.language.trim();
-    if current.is_empty() || current.eq_ignore_ascii_case("auto") {
-      return (items, 0);
-    }
+    let Some(current) = self.settings.engine_language() else { return (items, 0) };
 
-    if let Some(i) = items.iter().position(|(_, c)| c.eq_ignore_ascii_case(current)) {
+    if let Some(i) = items.iter().position(|(_, c)| c.eq_ignore_ascii_case(&current)) {
       return (items, i);
     }
 
-    let label = format!("{} (not one the model is meant for)", language::name(current));
-    items.push((label, current.into()));
+    let label = format!("{} (not one the model is meant for)", language::name(&current));
+    items.push((label, current));
     let at = items.len() - 1;
     (items, at)
   }
@@ -277,10 +275,8 @@ impl Prefs {
       let (mics, at) = self.microphones();
       let labels: Vec<String> = mics.iter().map(|(l, _)| l.clone()).collect();
       ui.form_row(fs, FormRow::new("Microphone"), |ui| {
-        let mut cur = at;
-        let items = borrowed(&labels);
-        if Select::new(&mut cur, &items).separators(&[0]).show(ui.id(MIC)).changed {
-          let choice = mics[cur].1.clone();
+        if let Some(i) = pick(ui, MIC, &labels, at, &[0]) {
+          let choice = mics[i].1.clone();
           self.edit(move |s| s.microphone = choice.clone());
         }
       });
@@ -299,12 +295,7 @@ impl Prefs {
       let row_fs = if problem.is_some() { &warned } else { fs };
       let mut picked = None;
       ui.with_id(self::row(MODEL)).form_row(row_fs, row, |ui| {
-        let mut cur = at;
-        let items = borrowed(&labels);
-        let line = [labels.len() - 2];
-        if Select::new(&mut cur, &items).separators(&line).show(ui.id(MODEL)).changed {
-          picked = Some(cur);
-        }
+        picked = pick(ui, MODEL, &labels, at, &[labels.len() - 2]);
       });
       if let Some(i) = picked {
         self.model_picked(i, labels.len());
@@ -313,10 +304,8 @@ impl Prefs {
       let (langs, at) = self.languages();
       let labels: Vec<String> = langs.iter().map(|(l, _)| l.clone()).collect();
       ui.form_row(fs, FormRow::new("Language"), |ui| {
-        let mut cur = at;
-        let items = borrowed(&labels);
-        if Select::new(&mut cur, &items).separators(&[0]).show(ui.id(LANG)).changed {
-          let code = langs[cur].1.clone();
+        if let Some(i) = pick(ui, LANG, &labels, at, &[0]) {
+          let code = langs[i].1.clone();
           self.edit(move |s| s.language = code.clone());
         }
       });
@@ -356,10 +345,9 @@ impl Prefs {
       let row = FormRow::new("Unload the model").info(UNLOAD_HELP);
       ui.with_id(self::row(UNLOAD)).form_row(fs, row, |ui| {
         let current = self.settings.unload_after_minutes;
-        let mut at = unloads.iter().position(|&u| u == current).unwrap_or(0);
-        let items = borrowed(&labels);
-        if Select::new(&mut at, &items).separators(&[0]).show(ui.id(UNLOAD)).changed {
-          let minutes = unloads[at];
+        let at = unloads.iter().position(|&u| u == current).unwrap_or(0);
+        if let Some(i) = pick(ui, UNLOAD, &labels, at, &[0]) {
+          let minutes = unloads[i];
           self.edit(move |s| s.unload_after_minutes = minutes);
         }
       });
@@ -371,9 +359,9 @@ impl Prefs {
 
       let labels: Vec<String> = all.iter().map(|&r| retention_title(r)).collect();
       ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
-        let mut at = all.iter().position(|&r| r == self.settings.history_retention).unwrap_or(0);
-        if ui.id(RETENTION).select(&mut at, &borrowed(&labels)).changed {
-          let r = all[at];
+        let at = all.iter().position(|&r| r == self.settings.history_retention).unwrap_or(0);
+        if let Some(i) = pick(ui, RETENTION, &labels, at, &[]) {
+          let r = all[i];
           self.edit(move |s| s.history_retention = r);
         }
       });

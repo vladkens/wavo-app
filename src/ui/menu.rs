@@ -6,21 +6,17 @@
 //! with the others downloaded, Unload Model; History…, Settings… and Quit.
 
 use nimbo::tray::{Item, Menu};
-use wavo::hub::ModelInfo;
 
 use super::icons::Icon;
 use crate::engine::supervisor::Phase as EnginePhase;
-use crate::history::{Local, local_time};
-use crate::language;
+use crate::history::{Local, local_time, shorten};
 use crate::session::controller::{NoModel, Outcome, Phase, Status};
+use crate::window::models::{Found, Pick, single_language, size_text};
 
 /// The most dictations «Recent» lists.
 pub const RECENT: usize = 10;
 /// The longest preview of a dictation in «Recent», in characters.
 const PREVIEW: usize = 48;
-
-const MONTHS: [&str; 12] =
-  ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /// The app and its version, as the menu's header says it.
 pub const TITLE: &str = concat!("Wavo ", env!("CARGO_PKG_VERSION"));
@@ -120,8 +116,8 @@ pub fn icon(status: &Status, warnings: &[Warning]) -> Icon {
 }
 
 /// The model submenu: the models downloaded, each a choice (`model:<i>`, its index in the list
-/// given) with the one in use checked, then the chosen one when it is not on disk; and its
-/// item's title, the model in use.
+/// given) with the one that transcribes checked, then the chosen one when it is none of them;
+/// and its item's title, the model in use.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Models {
   pub items: Vec<(String, bool)>,
@@ -129,29 +125,31 @@ pub struct Models {
 }
 
 impl Models {
-  /// `found`: the models downloaded; `active`: the index of the one that transcribes; `gone`:
-  /// the chosen model when it is not on disk, as it is called.
-  pub fn new(found: &[&ModelInfo], active: Option<usize>, gone: Option<&str>) -> Self {
+  pub fn new(found: &[Found], pick: &Pick) -> Self {
     let mut items: Vec<(String, bool)> = (found.iter().enumerate())
-      .map(|(i, m)| {
+      .map(|(i, (m, _))| {
         // A model meant for one language says so before it is picked.
-        let mut label = format!("{} — {:.0} MB", m.full_name, m.size as f64 / 1e6);
-        if let [code] = m.langs {
-          label += &format!(" · {} only", language::name(code));
+        let mut label = format!("{} — {}", m.full_name, size_text(m.size));
+        if let Some(only) = single_language(m) {
+          label += &format!(" · {only}");
         }
 
-        (label, active == Some(i))
+        (label, pick.active == Some(i) && pick.other.is_none())
       })
       .collect();
-    if let Some(gone) = gone {
-      items.push((format!("{gone} (not on disk)"), false));
-    }
-
-    let title = match (gone, active) {
-      (Some(gone), _) => format!("{gone} (not on disk)"),
-      (None, Some(i)) => found[i].full_name.to_owned(),
+    let other = pick.other.as_ref().map(|(name, there)| match there {
+      true => name.clone(),
+      false => format!("{name} (not on disk)"),
+    });
+    let title = match (&other, pick.active) {
+      (Some(other), _) => other.clone(),
+      (None, Some(i)) => found[i].0.full_name.to_owned(),
       (None, None) => "No Model".to_owned(),
     };
+    if let Some(other) = other {
+      items.push((other, pick.gone().is_none()));
+    }
+
     Self { items, title }
   }
 }
@@ -163,27 +161,15 @@ pub fn recent_title(text: &str, created_at: i64, now: i64) -> String {
     (Some(t), Some(today)) => when(t, today),
     _ => String::new(),
   };
-  let preview = preview(text);
+  let preview = shorten(text, PREVIEW);
   if when.is_empty() { preview } else { format!("{when} · {preview}") }
 }
 
 fn when(t: Local, today: Local) -> String {
   match t.date() == today.date() {
-    true => format!("{:02}:{:02}", t.hour, t.minute),
-    false => format!("{} {}", MONTHS[(t.month as usize).clamp(1, 12) - 1], t.day),
+    true => t.hm(),
+    false => format!("{} {}", &t.month_name()[..3], t.day),
   }
-}
-
-/// `text` on one line, its whitespace collapsed, cut at a word to [`PREVIEW`] characters.
-fn preview(text: &str) -> String {
-  let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-  if line.chars().count() <= PREVIEW {
-    return line;
-  }
-
-  let cut: String = line.chars().take(PREVIEW).collect();
-  let at_word = cut.rfind(' ').filter(|&i| i > PREVIEW / 2).map_or(cut.as_str(), |i| &cut[..i]);
-  format!("{}…", at_word.trim_end_matches([',', '.', ';', ':']))
 }
 
 /// The menu: the header, the warnings, Copy Last Dictation, Recent ▸ (`recent:<i>`), the model ▸,
@@ -286,7 +272,7 @@ mod tests {
   #[test]
   fn the_header_says_the_state_only_when_not_idle() {
     let header = |s: &Status| {
-      menu(Some("⌥Space"), s, &[], &[], &Models::new(&[], None, None)).items[0].label.clone()
+      menu(Some("⌥Space"), s, &[], &[], &Models::new(&[], &Pick::default())).items[0].label.clone()
     };
     let mut s = status(Phase::Idle);
     assert_eq!(header(&s), format!("{TITLE} · ⌥Space"));
@@ -296,7 +282,7 @@ mod tests {
     assert_eq!(header(&s), format!("{TITLE} · ⌥Space · Loading the model…"));
     (s.state, s.engine.phase, s.error) = (Phase::Idle, EnginePhase::Stopped, Some("x".into()));
     assert_eq!(
-      menu(None, &s, &[], &[], &Models::new(&[], None, None)).items[0].label,
+      menu(None, &s, &[], &[], &Models::new(&[], &Pick::default())).items[0].label,
       format!("{TITLE} · Error")
     );
   }
@@ -305,7 +291,7 @@ mod tests {
   fn copy_and_unload_only_when_there_is_something() {
     let mut s = status(Phase::Idle);
     let item = |label: &str, on| (label.to_owned(), on);
-    let idle = labels(&menu(None, &s, &[], &[], &Models::new(&[], None, None)));
+    let idle = labels(&menu(None, &s, &[], &[], &Models::new(&[], &Pick::default())));
     assert_eq!(
       idle[1..],
       [
@@ -330,7 +316,8 @@ mod tests {
       not_pasted: None,
       seconds: 1.0,
     });
-    let ready = labels(&menu(None, &s, &[], &["09:05 · Hi".into()], &Models::new(&[], None, None)));
+    let ready =
+      labels(&menu(None, &s, &[], &["09:05 · Hi".into()], &Models::new(&[], &Pick::default())));
     assert_eq!(
       ready[1..5],
       [
@@ -343,22 +330,24 @@ mod tests {
 
     s.state = Phase::Recording;
     assert!(
-      !labels(&menu(None, &s, &[], &[], &Models::new(&[], None, None)))[4].1,
+      !labels(&menu(None, &s, &[], &[], &Models::new(&[], &Pick::default())))[4].1,
       "no unload while it works"
     );
   }
 
   #[test]
   fn the_model_submenu_checks_the_one_in_use() {
-    let lookup = |n| wavo::hub::lookup(n).unwrap();
-    let found = [lookup("parakeet-v3"), lookup("parakeet-v2")];
-    let models = Models::new(&found, Some(1), None);
+    let found = ["parakeet-v3", "parakeet-v2"].map(|n| (wavo::hub::lookup(n).unwrap(), n.into()));
+    let pick = Pick { active: Some(1), other: None };
+    let models = Models::new(&found, &pick);
     assert_eq!(models.title, "parakeet-tdt-0.6b-v2");
     assert!(!models.items[0].1 && models.items[1].1);
-    assert!(models.items[1].0.ends_with(" · English only"), "{:?}", models.items[1]);
-    let gone = Models::new(&found, Some(0), Some("whisper-turbo"));
+    assert_eq!(models.items[1].0, "parakeet-tdt-0.6b-v2 — 730 MB · English only");
+    let pick = Pick { active: Some(0), other: Some(("whisper-turbo".into(), false)) };
+    let gone = Models::new(&found, &pick);
     assert_eq!(gone.title, "whisper-turbo (not on disk)");
     assert_eq!(gone.items.len(), 3);
+    assert!(gone.items.iter().all(|i| !i.1), "none is the choice");
 
     let s = status(Phase::Idle);
     let menu = menu(None, &s, &[], &[], &models);
@@ -373,6 +362,7 @@ mod tests {
     let local = |day, hour, minute| Local { year: 2026, month: 10, day, hour, minute };
     assert_eq!(when(local(15, 9, 5), local(15, 18, 0)), "09:05");
     assert_eq!(when(local(14, 23, 59), local(15, 0, 1)), "Oct 14");
+    let preview = |t: &str| shorten(t, PREVIEW);
     assert_eq!(preview("  Hello\n\tthere  "), "Hello there");
     let long = "This is a long dictation, which goes on and on about the weather today";
     assert_eq!(preview(long), "This is a long dictation, which goes on and on…");
@@ -423,7 +413,7 @@ mod tests {
     s.state = Phase::Recording;
     assert_eq!(icon(&s, &list), Icon::Recording, "the phase first");
 
-    let items = menu(None, &s, &list, &[], &Models::new(&[], None, None)).items;
+    let items = menu(None, &s, &list, &[], &Models::new(&[], &Pick::default())).items;
     assert_eq!(items[1].label, format!("⚠︎ {}", list[0].text));
     assert!(items[1].enabled && !items[2].enabled);
     assert_eq!(capitalized("dictation x: y"), "Dictation x: y");
