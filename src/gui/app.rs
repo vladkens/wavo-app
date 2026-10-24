@@ -329,7 +329,11 @@ fn open_window(main: &mut Main, page: Option<Page>) {
     return;
   };
 
-  let settings = update.as_ref().map(|u| u.settings.clone()).unwrap_or_default();
+  // Before the session's first update (the window at launch), the saved settings.
+  let settings = match &update {
+    Some(u) => u.settings.clone(),
+    None => Settings::load(&home.join(settings::FILE)).0,
+  };
   let mut prefs = Prefs::new(Box::new(shell), settings, hub, &home);
   if let Some(u) = &update {
     prefs.update(&u.settings, &u.status, u.history);
@@ -430,15 +434,17 @@ impl window::Shell for MacShell {
   /// so the session's) and the window's.
   fn download(&self, model: &'static ModelInfo) {
     self.downloads.pull(self.hub.clone(), model, |ended| {
-      if ended {
-        proxy().post(|_| _ = with_app(App::read_models));
+      if !ended {
+        // Progress only redraws: not retried while the window is busy, where it piles up.
+        return proxy().post(|_| {
+          if let Some(w) = with_app(|app| app.window.clone()).flatten() {
+            w.with(|_| ());
+          }
+        });
       }
 
-      with_window(move |prefs| {
-        if ended {
-          prefs.models_changed();
-        }
-      });
+      proxy().post(|_| _ = with_app(App::read_models));
+      with_window(Prefs::models_changed);
     });
   }
 
@@ -538,8 +544,12 @@ impl window::Shell for MacShell {
 
 impl App {
   fn on_update(&mut self, main: &mut Main, update: Update) {
-    if let Some(w) = &self.window {
-      w.with(|prefs| prefs.update(&update.settings, &update.status, update.history));
+    // Retried while the window is busy (a pop-up's menu): an update dropped would leave it behind
+    // until the session's next one.
+    if self.window.is_some() {
+      let (settings, status, history) =
+        (update.settings.clone(), update.status.clone(), update.history);
+      with_window(move |prefs| prefs.update(&settings, &status, history));
     }
 
     let status = &update.status;
@@ -725,7 +735,7 @@ impl App {
 
   /// The models downloaded, for the menu; the session looks too when they changed.
   fn read_models(&mut self) {
-    let found = self.hub.downloaded();
+    let found = window::models::ready(self.hub.downloaded(), |name| self.downloads.get(name));
     if found != self.found {
       self.found = found;
       self.handle.check_model();

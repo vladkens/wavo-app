@@ -72,6 +72,14 @@ fn done_text(done: u64, total: u64) -> String {
 /// A downloaded model: wavo's, and its file.
 pub type Found = (&'static ModelInfo, PathBuf);
 
+/// The models `found` on disk that are ready: not those still downloading or being prepared for
+/// the Neural Engine (its file is there already), which `state` tells.
+pub fn ready(mut found: Vec<Found>, state: impl Fn(&str) -> Option<Download>) -> Vec<Found> {
+  found
+    .retain(|f| !matches!(state(f.0.name), Some(Download::Running { .. } | Download::Preparing)));
+  found
+}
+
 /// Which model transcribes, as the session picks it: the chosen one when it is on disk, else the
 /// first downloaded.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -517,6 +525,20 @@ fn count(n: usize, what: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// A model being downloaded or prepared is not ready, though its file is there.
+  #[test]
+  fn only_finished_models_are_ready() {
+    let names = ["parakeet-v3", "parakeet-v2", "whisper-tiny"];
+    let found: Vec<Found> = names.map(|n| (hub::lookup(n).unwrap(), n.into())).into();
+    let state = |name: &str| match name {
+      "parakeet-v3" => Some(Download::Preparing),
+      "parakeet-v2" => Some(Download::Failed("x".into())),
+      _ => None,
+    };
+    let ready: Vec<&str> = ready(found, state).iter().map(|f| f.0.name).collect();
+    assert_eq!(ready, ["parakeet-v2", "whisper-tiny"]);
+  }
 
   /// The names of wavo's models `query` finds.
   fn found(query: &str) -> Vec<&'static str> {

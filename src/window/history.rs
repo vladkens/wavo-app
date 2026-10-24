@@ -85,6 +85,11 @@ impl State {
     }
 
     self.loaded = Some(key.clone());
+    // Not made here before the session made it: `wavo-app settings --shot` changes nothing.
+    if self.db.is_none() && !self.home.join(crate::history::DB_FILE).is_file() {
+      return;
+    }
+
     if self.db.is_none() {
       match History::open(&self.home) {
         Ok(db) => self.db = Some(db),

@@ -322,7 +322,7 @@ impl Prefs {
   /// Models came or went (a download ended, one was deleted), or may have: the window looks
   /// again, and the session too when they did.
   pub fn models_changed(&mut self) {
-    let found = self.hub.downloaded();
+    let found = models::ready(self.hub.downloaded(), |name| self.shell.download_state(name));
     if found != self.found {
       self.found = found;
       self.shell.check_model();
