@@ -96,7 +96,7 @@ impl State {
     }
 
     let Some(h) = &self.db else { return };
-    match h.db.get_page(&key.0, None, self.limit + 1) {
+    match h.db.get_page(&key.0, self.limit + 1) {
       Ok(mut entries) => {
         self.more = entries.len() > self.limit;
         entries.truncate(self.limit);

@@ -135,10 +135,13 @@ where
   let stream = device.build_output_stream(
     config,
     move |out: &mut [T], _: &cpal::OutputCallbackInfo| fill(&state, out, channels),
+    // But a glitch, a refused real-time priority or a route cpal followed, it plays no more (the
+    // device went, the stream must be rebuilt, the backend failed): it is the end.
     move |e: cpal::Error| {
       tracing::debug!("output: {e}");
-      // The device went: nothing plays any more, so it is the end.
-      if matches!(e.kind(), ErrorKind::DeviceNotAvailable | ErrorKind::HostUnavailable) {
+      let goes_on =
+        matches!(e.kind(), ErrorKind::Xrun | ErrorKind::RealtimeDenied | ErrorKind::DeviceChanged);
+      if !goes_on {
         gone.ended.store(true, Ordering::Release);
       }
     },
@@ -157,6 +160,7 @@ fn fill<T: SizedSample + FromSample<f32>>(state: &State, out: &mut [T], channels
     frame.iter_mut().for_each(|s| *s = T::from_sample(sample));
     at = (at + 1).min(end);
   }
+
   state.played.store(at, Ordering::Relaxed);
   if at >= end {
     state.ended.store(true, Ordering::Release);

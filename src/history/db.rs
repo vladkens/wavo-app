@@ -200,27 +200,18 @@ impl Db {
     Ok(item)
   }
 
-  /// Up to `limit` entries with text, newest first by recording time, whose text holds `search`
-  /// in any case ([`fold`]; empty: all); after `after`, the `(created_at, id)` of the last entry
-  /// of the page before.
-  pub fn get_page(
-    &self,
-    search: &str,
-    after: Option<(i64, i64)>,
-    limit: usize,
-  ) -> Result<Vec<Entry>> {
+  /// The newest `limit` entries with text, newest first by recording time, whose text holds
+  /// `search` in any case ([`fold`]; empty: all).
+  pub fn get_page(&self, search: &str, limit: usize) -> Result<Vec<Entry>> {
     let qs = "
     SELECT * FROM entries
     WHERE text != '' AND (?1 = '' OR instr(wavo_fold(text), ?1) > 0)
-      AND (?2 IS NULL OR (created_at, id) < (?2, ?3))
-    ORDER BY created_at DESC, id DESC LIMIT ?4;
+    ORDER BY created_at DESC, id DESC LIMIT ?2;
     ";
 
-    let (at, id) = after.unzip();
-    let args = params![fold(search), at, id, limit as i64];
     let mut stmt = self.db.prepare_cached(qs)?;
-    let items = stmt.query_map(args, entry_from_row)?.collect::<rusqlite::Result<_>>()?;
-    Ok(items)
+    let items = stmt.query_map(params![fold(search), limit as i64], entry_from_row)?;
+    Ok(items.collect::<rusqlite::Result<_>>()?)
   }
 
   /// The recordings entries name.
@@ -500,27 +491,16 @@ mod tests {
       })
       .collect();
 
-    let page = |search: &str, after: Option<(i64, i64)>, limit| -> Vec<i64> {
-      db.get_page(search, after, limit).unwrap().iter().map(|e| e.id).collect()
+    let page = |search: &str, limit| -> Vec<i64> {
+      db.get_page(search, limit).unwrap().iter().map(|e| e.id).collect()
     };
     let all = [ids[0], ids[1], ids[2], ids[3], ids[5]];
-    assert_eq!(page("", None, 100), all, "the one without text is left out");
-
-    // Pages of 2 cover everything once, in order.
-    let mut seen = Vec::new();
-    let mut after = None;
-    loop {
-      let next = db.get_page("", after, 2).unwrap();
-      let Some(last) = next.last() else { break };
-      after = Some((last.created_at, last.id));
-      seen.extend(next.iter().map(|e| e.id));
-    }
-
-    assert_eq!(seen, all);
+    assert_eq!(page("", 100), all, "the one without text is left out");
+    assert_eq!(page("", 2), all[..2]);
     // Case in Cyrillic and Latin, `ё` as `е`; a quote or a percent sign is just text.
-    assert_eq!(page("добрый", None, 100), [ids[0], ids[3]]);
-    assert_eq!(page("WORLD", None, 100), [ids[2]]);
-    assert_eq!(page("ещё", None, 100), [ids[1], ids[5]]);
-    assert!(page("%", None, 100).is_empty() && page("'", None, 100).is_empty());
+    assert_eq!(page("добрый", 100), [ids[0], ids[3]]);
+    assert_eq!(page("WORLD", 100), [ids[2]]);
+    assert_eq!(page("ещё", 100), [ids[1], ids[5]]);
+    assert!(page("%", 100).is_empty() && page("'", 100).is_empty());
   }
 }
