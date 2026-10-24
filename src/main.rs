@@ -8,8 +8,9 @@ mod cli;
 mod ctl;
 mod engine;
 mod history;
+// The menu bar app: macOS first, Windows and Linux later (docs/plans/20261023-port.md).
 #[cfg(target_os = "macos")]
-mod macos;
+mod gui;
 mod session;
 mod settings;
 #[cfg(test)]
@@ -78,14 +79,14 @@ fn main() -> Result<()> {
   init_tracing();
   let Some(command) = cli.command else {
     #[cfg(target_os = "macos")]
-    return macos::run();
+    return gui::run();
     #[cfg(not(target_os = "macos"))]
     unreachable!("clap asks for a command");
   };
 
   match command {
     #[cfg(target_os = "macos")]
-    Command::Gui => macos::run(),
+    Command::Gui => gui::run(),
     Command::Transcribe { wav, model, language } => {
       cli::transcribe(&wav, model.as_deref(), language.as_deref())
     }

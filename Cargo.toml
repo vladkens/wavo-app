@@ -39,12 +39,3 @@ inherits = "release"
 lto = false
 incremental = true
 codegen-units = 256
-
-[target.'cfg(target_os = "macos")'.dependencies]
-block2 = { version = "0.6.2", default-features = false, features = ["std"] }
-objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSPanel", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSRunningApplication", "NSWindow", "NSWorkspace", "libc"] }
-objc2-application-services = { version = "0.3.2", default-features = false, features = ["std", "AXError", "AXUIElement", "HIServices", "libc"] }
-objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSObject", "NSString"] }
