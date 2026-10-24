@@ -445,7 +445,8 @@ impl window::Shell for MacShell {
     spawn("model-delete", move || {
       let result = window::models::delete(&hub, model);
       if result.is_ok() {
-        handle.edit_settings(move |s| window::models::forget(s, model));
+        let root = hub.clone();
+        handle.edit_settings(move |s| window::models::forget(s, &root, model));
         handle.check_model();
       }
 
@@ -471,6 +472,7 @@ impl window::Shell for MacShell {
     spawn("history-delete", move || {
       if let Some(e) = handle.request(Request::Delete { id }).error {
         warn!("delete history entry {id}: {e}");
+        with_window(move |prefs| prefs.entry_not_deleted(&e));
       }
     });
   }

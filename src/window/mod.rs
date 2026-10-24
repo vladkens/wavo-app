@@ -152,7 +152,8 @@ pub trait Shell {
   fn check_model(&self);
   /// Transcribes a history entry's recording again (the session does, off the main thread).
   fn retranscribe(&self, id: i64);
-  /// Deletes a history entry and its recording (the session does, off the main thread).
+  /// Deletes a history entry and its recording (the session does, off the main thread); a
+  /// failure goes to [`Prefs::entry_not_deleted`] on the main thread.
   fn delete_entry(&self, id: i64);
   /// Launch at login as the system has it; `Err` with the reason when unavailable.
   fn autostart(&self) -> Result<Autostart, String>;
@@ -256,6 +257,8 @@ pub struct Prefs {
   recordings: general::Folder,
   /// The shortcut recorder records: the hotkey is paused.
   recording: bool,
+  /// The window had the keys at the last frame.
+  focused: bool,
   /// The delete being asked about.
   pub ask: Option<Ask>,
   models: models::State,
@@ -281,6 +284,7 @@ impl Prefs {
       access: Access::default(),
       recordings: general::Folder::new(home.join(crate::history::recordings::DIR)),
       recording: false,
+      focused: false,
       ask: None,
       models: models::State::default(),
       history: history::State::new(home),
@@ -335,7 +339,7 @@ impl Prefs {
     self.models.deleting.retain(|n| *n != model.name);
     match result {
       Ok(_) => {
-        models::forget(&mut self.settings, model);
+        models::forget(&mut self.settings, &self.hub, model);
         self.models.note = None;
       }
       Err(e) => self.models.note = Some(format!("Couldn't delete {}: {e}", model.full_name)),
@@ -449,11 +453,21 @@ impl App for Prefs {
       });
     });
     self.confirm(ui);
-    // The recorder lost its focus with the page (or the window): the hotkey comes back.
-    if self.recording && !ui.focused(nimbo::Id::of(general::HOTKEY)) {
+    // The recorder lost its focus with the page, or the window lost the keys: the hotkey comes
+    // back.
+    if self.recording && !general::records(ui) {
       self.recording = false;
       self.shell.pause_hotkey(false);
     }
+
+    // Back from another app (System Settings, where a permission was given): what the system
+    // allows is looked at again.
+    let focused = ui.window_focused();
+    if focused && !self.focused {
+      self.access = self.shell.access();
+    }
+
+    self.focused = focused;
   }
 }
 

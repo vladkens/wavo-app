@@ -333,6 +333,13 @@ impl Prefs {
     h.note = None;
     self.shell.delete_entry(id);
   }
+
+  /// [`super::Shell::delete_entry`] failed: the entry comes back, and why it stays is said.
+  pub fn entry_not_deleted(&mut self, error: &str) {
+    let h = &mut self.history;
+    h.note = Some(format!("Couldn't delete: {error}"));
+    h.loaded = None;
+  }
 }
 
 /// A dictation's row: its line (the whole text in a tooltip over it) and details, then Play,
@@ -383,7 +390,8 @@ fn row(ui: &mut Ui, fs: &FormStyle, e: &Entry, st: Row) -> Option<Act> {
       act = Some(Act::Retranscribe(e.id));
     }
 
-    let r = ui.id((DELETE, e.id)).icon_button(Icon::TRASH);
+    // Not while it is transcribed again: the session refuses then.
+    let r = ui.disabled(st.retranscribing).id((DELETE, e.id)).icon_button(Icon::TRASH);
     ui.tooltip(r.id, "Delete…");
     if r.clicked {
       act =

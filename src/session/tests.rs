@@ -541,7 +541,7 @@ fn a_check_of_the_models_lets_a_deleted_one_go_and_finds_a_new_one() {
   let first = dictate(&s, 1);
   assert_eq!(first.engine.model.as_deref(), Some("parakeet-tdt-0.6b-v3-Q8_0"));
 
-  s.hub.remove("parakeet-v3").unwrap();
+  fs::remove_file(s.hub.find("parakeet-v3").unwrap()).unwrap();
   s.handle.check_model();
   let none = Some(NoModel::NoneDownloaded);
   let gone = s.update_where("none left", |u| u.status.no_model == none);
@@ -550,6 +550,18 @@ fn a_check_of_the_models_lets_a_deleted_one_go_and_finds_a_new_one() {
   download(&s.hub, "whisper-tiny");
   s.handle.check_model();
   s.update_where("a model again", |u| u.status.no_model.is_none());
+  let tiny = dictate(&s, 2);
+  assert_eq!(tiny.engine.model.as_deref(), Some("whisper-tiny-Q8_0"));
+
+  // Without a choice the first of wavo's models downloaded transcribes: a new one before it
+  // takes over at once.
+  download(&s.hub, "parakeet-v3");
+  s.handle.check_model();
+  poll("the engine gone", Duration::from_secs(10), || {
+    s.status().engine.model.is_none().then_some(())
+  });
+  let next = dictate(&s, 3);
+  assert_eq!(next.engine.model.as_deref(), Some("parakeet-tdt-0.6b-v3-Q8_0"));
 }
 
 /// The chosen model's file deleted while it loads for a recording: that engine cannot serve the

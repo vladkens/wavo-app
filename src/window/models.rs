@@ -109,17 +109,22 @@ pub fn single_language(m: &ModelInfo) -> Option<String> {
   Some(format!("{} only", language::name(code)))
 }
 
-/// Whether model choice `query` names `model`: by its name or its file.
-fn names(query: &str, model: &ModelInfo) -> bool {
+/// Whether model choice `query` names `model` in `hub`: by its name, or by the path of its file
+/// there (a file of the same name elsewhere is another).
+fn names(hub: &Hub, query: &str, model: &ModelInfo) -> bool {
   match super::lookup(query) {
     Some(m) => m.name == model.name,
-    None => Path::new(query).file_name().is_some_and(|f| f == model.file().as_str()),
+    None => {
+      let path = Path::new(query);
+      path.starts_with(hub.root()) && path.file_name().is_some_and(|f| f == model.file().as_str())
+    }
   }
 }
 
-/// `settings` once `model` is deleted: a choice that names it goes back to the first model found.
-pub fn forget(settings: &mut Settings, model: &ModelInfo) {
-  if settings.model.as_deref().is_some_and(|q| names(q, model)) {
+/// `settings` once `model` is deleted from `hub`: a choice that names it goes back to the first
+/// model found.
+pub fn forget(settings: &mut Settings, hub: &Hub, model: &ModelInfo) {
+  if settings.model.as_deref().is_some_and(|q| names(hub, q, model)) {
     settings.model = None;
   }
 }
@@ -550,14 +555,15 @@ mod tests {
 
   #[test]
   fn a_choice_names_its_model_by_name_or_file() {
-    let m = hub::lookup("whisper-tiny").unwrap();
-    assert!(names("whisper-tiny", m) && names(m.full_name, m));
-    assert!(names(&format!("/hf/{}", m.file()), m));
-    assert!(!names("whisper-base", m));
+    let (m, hf) = (hub::lookup("whisper-tiny").unwrap(), Hub::at("/hf"));
+    assert!(names(&hf, "whisper-tiny", m) && names(&hf, m.full_name, m));
+    assert!(names(&hf, &format!("/hf/models--x/snapshots/c1/{}", m.file()), m));
+    assert!(!names(&hf, &format!("/models/{}", m.file()), m), "a file of its own");
+    assert!(!names(&hf, "whisper-base", m));
     let mut s = Settings { model: Some("whisper-tiny".into()), ..Settings::default() };
-    forget(&mut s, hub::lookup("whisper-base").unwrap());
+    forget(&mut s, &hf, hub::lookup("whisper-base").unwrap());
     assert!(s.model.is_some());
-    forget(&mut s, m);
+    forget(&mut s, &hf, m);
     assert_eq!(s.model, None);
     assert_eq!(size_text(1_700_000_000), "1.7 GB");
     assert_eq!(done_text(114_000_000, 272_000_000), "114 of 272 MB");
