@@ -1,6 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Sample rate conversion of capture streams to the engine's 16 kHz ([`To16k`]), with rubato's FFT
+//! Sample rate conversion of capture streams to the engine's 16 kHz ([`To16k`]), and of a whole
+//! clip to any rate ([`convert`]: a recording for the output device), with rubato's FFT
 //! resampler: fixed ratio, full quality, startup delay trimmed.
 
 use anyhow::{Result, anyhow};
@@ -15,6 +16,19 @@ const CHUNK: usize = 1024;
 fn fft(rate: u32) -> Result<Fft<f32>> {
   Fft::<f32>::new(rate as usize, SAMPLE_RATE as usize, CHUNK, 1, FixedSync::Both)
     .map_err(|e| anyhow!("resampler {rate} Hz → {SAMPLE_RATE} Hz: {e}"))
+}
+
+/// A whole mono clip from rate `from` to `to`.
+pub fn convert(mono: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>> {
+  if from == to || mono.is_empty() {
+    return Ok(mono);
+  }
+
+  let mut fft = Fft::<f32>::new(from as usize, to as usize, CHUNK, 1, FixedSync::Both)
+    .map_err(|e| anyhow!("resampler {from} Hz → {to} Hz: {e}"))?;
+  let input = InterleavedSlice::new(&mono, 1, mono.len()).map_err(|e| anyhow!("{e}"))?;
+  let output = fft.process_all(&input, mono.len(), None)?;
+  Ok(output.take_data())
 }
 
 /// Streaming mono resampler to 16 kHz: takes input in any chunk sizes, emits what is ready, and
@@ -132,12 +146,7 @@ mod tests {
 
   /// The whole clip at once, by rubato itself: what streaming must match.
   fn whole(mono: &[f32], rate: u32) -> Vec<f32> {
-    if rate == SAMPLE_RATE || mono.is_empty() {
-      return mono.to_vec();
-    }
-
-    let input = InterleavedSlice::new(mono, 1, mono.len()).unwrap();
-    fft(rate).unwrap().process_all(&input, mono.len(), None).unwrap().take_data()
+    convert(mono.to_vec(), rate, SAMPLE_RATE).unwrap()
   }
 
   /// `input` pushed in chunks of the sizes in `chunks`, repeated.

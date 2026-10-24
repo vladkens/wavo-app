@@ -2,10 +2,12 @@
 
 //! Audio: [`devices`] and [`capture`] (cpal, or a WAV file standing in for the microphone) →
 //! `rtrb` → the [`recorder`]'s processing thread: downmix, [`resample`] to 16 kHz, signal level,
-//! [`vad`] (earshot) and the [`wav`] sink.
+//! [`vad`] (earshot) and the [`wav`] sink; a recording played back on the output device
+//! ([`playback`]).
 
 pub mod capture;
 pub mod devices;
+pub mod playback;
 pub mod recorder;
 pub mod resample;
 pub mod vad;
