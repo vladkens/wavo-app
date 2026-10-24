@@ -17,7 +17,7 @@ use crate::audio::recorder::Recorder;
 use crate::audio::vad::Clip;
 use crate::audio::{SAMPLE_RATE, vad, wav};
 use crate::ctl::{self, Claim, Reply, Request};
-use crate::engine::{Engine, EngineConfig, model};
+use crate::engine::{Engine, EngineConfig};
 use crate::session::output::Stdout;
 use crate::session::{self, Session};
 use crate::settings::{self, Settings};
@@ -37,11 +37,15 @@ pub fn transcribe(wav: &Path, model: Option<&str>, language: Option<&str>) -> Re
   // As the app does, the settings' model gone from the disk gives way to the first one found.
   let hub = Hub::new();
   let model = match (model, settings.model.as_deref()) {
-    (None, Some(chosen)) => model::find(Some(chosen), &hub).or_else(|e| {
-      warn!("the settings' model: {e:#}");
-      model::find(None, &hub)
-    })?,
-    (model, _) => model::find(model, &hub)?,
+    (Some(model), _) => hub.resolve(model)?,
+    (None, Some(chosen)) => match hub.resolve(chosen) {
+      Ok(path) => path,
+      Err(e) => {
+        warn!("the settings' model: {e}");
+        first_model(&hub)?
+      }
+    },
+    (None, None) => first_model(&hub)?,
   };
 
   let language = language.map_or_else(|| settings.engine_language(), settings::engine_language);
@@ -68,6 +72,17 @@ pub fn transcribe(wav: &Path, model: Option<&str>, language: Option<&str>) -> Re
   );
   println!("{}", result.text);
   Ok(())
+}
+
+/// The first of wavo's models downloaded to `hub`.
+fn first_model(hub: &Hub) -> Result<PathBuf> {
+  let first = hub.downloaded().into_iter().next();
+  let (info, path) = first.with_context(|| {
+    format!("no speech models in {}: download one with `wavo pull <name>`", hub.root().display())
+  })?;
+
+  info!("using {}, the first model found", info.name);
+  Ok(path)
 }
 
 /// `wavo-app record`: `seconds` of the microphone (or `WAVO_FAKE_MIC`) into `out`, then a summary

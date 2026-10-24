@@ -38,7 +38,7 @@ use crossbeam_channel::{Receiver, Sender, after, bounded, never, select, unbound
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
-use wavo::hub::{self, Hub};
+use wavo::hub::{self, Hub, ModelInfo};
 
 use super::machine::{Command, Effect, Input, Machine, State, Take};
 use super::output::TextOutput;
@@ -47,7 +47,7 @@ use crate::audio::recorder::{Meter, Recorder};
 use crate::audio::vad::Clip;
 use crate::audio::{SAMPLE_RATE, wav};
 use crate::ctl::{Reply, Request};
-use crate::engine::model::{self, Loader, Wavo};
+use crate::engine::model::{Loader, Wavo};
 use crate::engine::supervisor::{
   Deadlines, EngineError, JobId, Phase as EnginePhase, Transcription,
 };
@@ -363,6 +363,8 @@ impl Handle {
 struct Loaded {
   /// The model file's name without extension.
   name: String,
+  /// What it is called where it shows: wavo's full name, else `name`.
+  label: String,
   path: PathBuf,
   engine: Engine,
 }
@@ -689,29 +691,34 @@ impl<O: TextOutput> Controller<O> {
   /// Whether a model can transcribe now, without loading one: the files on disk against the
   /// choice. A chosen model that is not on disk gives way to the first one found, with a warning
   /// (kept for the status); the choice stays. With none found the choice is the reason. The
-  /// model's path, or why there is none (kept for the status).
-  fn check_model(&mut self) -> Result<PathBuf, NoModel> {
+  /// model's path and wavo's info on it, or why there is none (kept for the status).
+  fn check_model(&mut self) -> Result<(PathBuf, Option<&'static ModelInfo>), NoModel> {
     let hub = &self.config.hub;
-    let query = self.settings.model.clone();
-    let error = match (model::find(query.as_deref(), hub), query) {
-      (Ok(path), _) => {
-        (self.model_error, self.model_fallback) = (None, None);
-        return Ok(path);
-      }
-      (Err(_), Some(query)) => match model::find(None, hub) {
-        Ok(path) => {
-          let fallback = label(&path.to_string_lossy());
-          let note = format!("{} is not on disk: {fallback} transcribes instead", label(&query));
-          if self.model_fallback.as_ref() != Some(&note) {
-            warn!("model {note}");
-          }
+    let chosen = self.settings.model.clone();
+    if let Some(chosen) = &chosen
+      && let Ok(path) = hub.resolve(chosen)
+    {
+      (self.model_error, self.model_fallback) = (None, None);
+      return Ok((path, hub::lookup(chosen).ok()));
+    }
 
-          (self.model_error, self.model_fallback) = (None, Some(note));
-          return Ok(path);
+    let error = match (hub.downloaded().into_iter().next(), chosen) {
+      (Some((info, path)), None) => {
+        (self.model_error, self.model_fallback) = (None, None);
+        return Ok((path, Some(info)));
+      }
+      (Some((info, path)), Some(chosen)) => {
+        let note =
+          format!("{} is not on disk: {} transcribes instead", label(&chosen), info.full_name);
+        if self.model_fallback.as_ref() != Some(&note) {
+          warn!("model {note}");
         }
-        Err(_) => NoModel::Gone { model: label(&query) },
-      },
-      (Err(_), None) => NoModel::NoneDownloaded,
+
+        (self.model_error, self.model_fallback) = (None, Some(note));
+        return Ok((path, Some(info)));
+      }
+      (None, Some(chosen)) => NoModel::Gone { model: label(&chosen) },
+      (None, None) => NoModel::NoneDownloaded,
     };
 
     if self.model_error.as_ref() != Some(&error) {
@@ -758,7 +765,7 @@ impl<O: TextOutput> Controller<O> {
 
     // A stand-in for the chosen model, which is back (a few file lookups, of that model alone).
     if let (Some(loaded), Some(chosen)) = (&self.engine, &self.settings.model)
-      && model::find(Some(chosen), &self.config.hub).is_ok_and(|p| p != loaded.path)
+      && self.config.hub.resolve(chosen).is_ok_and(|p| p != loaded.path)
     {
       info!("model {}: the chosen model is back", loaded.name);
       self.engine_stale = true;
@@ -766,7 +773,7 @@ impl<O: TextOutput> Controller<O> {
 
     self.retire_stale_engine();
     if self.engine.is_none() {
-      let path = self.check_model()?;
+      let (path, info) = self.check_model()?;
       let name = file_stem(&path);
       info!("model {name} ({})", path.display());
       let config = EngineConfig {
@@ -778,9 +785,10 @@ impl<O: TextOutput> Controller<O> {
       };
 
       // Without its thread the model cannot load: the recording waits, as for a load that fails.
+      let label = info.map_or_else(|| name.clone(), |m| m.full_name.to_owned());
       let engine = Engine::start(config)
-        .map_err(|e| NoModel::LoadFailed { model: label(&name), error: e.to_string() })?;
-      self.engine = Some(Loaded { name, path, engine });
+        .map_err(|e| NoModel::LoadFailed { model: label.clone(), error: e.to_string() })?;
+      self.engine = Some(Loaded { name, label, path, engine });
     }
 
     Ok(self.engine.as_ref().unwrap())
@@ -1099,7 +1107,7 @@ impl<O: TextOutput> Controller<O> {
       }
       Err(EngineError::Cancelled) => (Outcome::Cancelled, String::new(), None),
       Err(EngineError::Load(error)) => {
-        let model = self.engine.as_ref().map_or_else(|| "the model".into(), |l| label(&l.name));
+        let model = self.engine.as_ref().map_or_else(|| "the model".into(), |l| l.label.clone());
         (Outcome::NoModel, String::new(), Some(NoModel::LoadFailed { model, error }.to_string()))
       }
       Err(e) => (Outcome::Failed, String::new(), Some(e.to_string())),
@@ -1308,7 +1316,7 @@ impl<O: TextOutput> Controller<O> {
 
     let load_failed = engine.as_ref().and_then(|(l, s)| {
       let error = s.load_error.clone()?;
-      Some(NoModel::LoadFailed { model: label(&l.name), error })
+      Some(NoModel::LoadFailed { model: l.label.clone(), error })
     });
 
     Status {
@@ -1386,18 +1394,11 @@ fn file_stem(path: &Path) -> String {
   path.file_stem().map_or_else(|| path.display().to_string(), |s| s.to_string_lossy().into())
 }
 
-/// What a model choice (wavo's name, a file's path or name) is called where it shows, also once
-/// its file is gone: wavo's full name (`parakeet-tdt-0.6b-v3`), else the file's name without
+/// What a model choice (wavo's name, or a file's path) is called where it shows, also once its
+/// file is gone: wavo's full name (`parakeet-tdt-0.6b-v3`), else the file's name without
 /// extension.
-pub fn label(model: &str) -> String {
-  if let Ok(info) = hub::lookup(model) {
-    return info.full_name.into();
-  }
-
-  let file = Path::new(model).file_name().and_then(|f| f.to_str()).unwrap_or(model);
-  let file = file.strip_suffix(".gguf").unwrap_or(file);
-  let info = hub::MODELS.iter().find(|m| m.file().strip_suffix(".gguf") == Some(file));
-  info.map_or_else(|| file.to_owned(), |m| m.full_name.to_owned())
+pub fn label(choice: &str) -> String {
+  hub::lookup(choice).map_or_else(|_| file_stem(Path::new(choice)), |m| m.full_name.into())
 }
 
 #[cfg(test)]
@@ -1420,11 +1421,11 @@ mod tests {
 
   #[test]
   fn models_are_labelled_by_wavos_full_name_else_the_file() {
-    for name in ["parakeet-v3", "parakeet-tdt-0.6b-v3", "/x/parakeet-tdt-0.6b-v3-Q8_0.gguf"] {
+    for name in ["parakeet-v3", "parakeet-tdt-0.6b-v3"] {
       assert_eq!(label(name), "parakeet-tdt-0.6b-v3", "{name}");
     }
 
-    assert_eq!(label("gigaam-v3-e2e-rnnt-Q8_0"), "gigaam-v3-e2e-rnnt", "an entry's model");
+    assert_eq!(label("/models/parakeet-tdt-0.6b-v3-Q8_0.gguf"), "parakeet-tdt-0.6b-v3-Q8_0");
     assert_eq!(label("/models/broken.gguf"), "broken");
   }
 }
