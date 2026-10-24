@@ -8,6 +8,7 @@
 //! A dictation that fails leaves no entry; its recording is kept as the last failed one, in
 //! `recordings/last-failed/`, to transcribe again: one recording, the newest failure's.
 
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::{fs, mem};
@@ -33,6 +34,12 @@ impl Recordings {
   /// Where a new recording started at `created_at` (Unix ms) goes, in its day folder (created
   /// here): its name as an entry keeps it and its full path. Never an existing file.
   pub fn new_file(&self, created_at: i64) -> (String, PathBuf) {
+    self.new_file_besides(created_at, &HashSet::new())
+  }
+
+  /// [`new_file`](Self::new_file), not named `taken` either: names entries hold before their
+  /// files are there (an import).
+  pub fn new_file_besides(&self, created_at: i64, taken: &HashSet<String>) -> (String, PathBuf) {
     let day = day_of(created_at);
     if let Some(day) = &day {
       // A failure shows when the recording is created.
@@ -44,7 +51,7 @@ impl Recordings {
       let file = if n == 0 { format!("{created_at}.wav") } else { format!("{created_at}-{n}.wav") };
       let name = day.as_ref().map_or_else(|| file.clone(), |day| format!("{day}/{file}"));
       let path = self.dir.join(&name);
-      if !path.exists() {
+      if !taken.contains(&name) && !path.exists() {
         return (name, path);
       }
 
@@ -55,12 +62,7 @@ impl Recordings {
   /// Recording `name`'s path. Anything but a plain file name, in a day folder or not, is refused,
   /// so a damaged row cannot point outside.
   pub fn path(&self, name: &str) -> Option<PathBuf> {
-    let plain = |name: &str| Path::new(name).file_name().is_some_and(|n| n == name);
-    let inside = match name.split_once('/') {
-      Some((day, file)) => is_day(day) && plain(file),
-      None => plain(name),
-    };
-    inside.then(|| self.dir.join(name))
+    is_name(name).then(|| self.dir.join(name))
   }
 
   /// Deletes recording `name` (one gone already is no error) and returns where it was, leaving its
@@ -174,6 +176,20 @@ impl Recordings {
   }
 }
 
+/// Whether `name` is a recording's name, in a day folder or not: nothing that could point outside
+/// the recordings directory.
+pub fn is_name(name: &str) -> bool {
+  match name.split_once('/') {
+    Some((day, file)) => is_day(day) && is_plain(file),
+    None => is_plain(name),
+  }
+}
+
+/// Whether `name` is a plain file name: no folder, no `..`.
+pub fn is_plain(name: &str) -> bool {
+  Path::new(name).file_name().is_some_and(|n| n == name)
+}
+
 /// Start time (Unix ms) in recording `name`: `[YYYY-MM-DD/]<unix ms>[-<n>].wav`.
 pub fn started_at(name: &str) -> Option<i64> {
   let file = name.rsplit('/').next()?;
@@ -182,7 +198,7 @@ pub fn started_at(name: &str) -> Option<i64> {
 
 /// The day folder of a recording started at `ms` (Unix ms): its local date (the C runtime's time
 /// zone), `YYYY-MM-DD`.
-fn day_of(ms: i64) -> Option<String> {
+pub fn day_of(ms: i64) -> Option<String> {
   let time = ms.div_euclid(1000) as libc::time_t;
   // SAFETY: `tm` is plain data, and `localtime_r` writes only to it.
   let mut tm: libc::tm = unsafe { mem::zeroed() };
@@ -248,6 +264,8 @@ mod tests {
     assert_eq!(r.path(&name), Some(path.clone()));
     fs::write(&path, b"").unwrap();
     assert_eq!(r.new_file(NOW).0, format!("{day}/{NOW}-1.wav"));
+    let taken = HashSet::from([format!("{day}/{NOW}-1.wav")]);
+    assert_eq!(r.new_file_besides(NOW, &taken).0, format!("{day}/{NOW}-2.wav"));
     assert_eq!(r.list().unwrap(), [name]);
   }
 

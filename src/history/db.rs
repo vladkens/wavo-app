@@ -2,12 +2,15 @@
 
 //! `history.db`: the entries, one per dictation transcribed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
+
+/// How long a query waits for another connection's write.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 // MARK: Migrations
 
@@ -37,10 +40,14 @@ fn migrate_v1(db: &Connection) -> Result<()> {
   Ok(())
 }
 
+fn migrations() -> Vec<fn(&Connection) -> Result<()>> {
+  vec![migrate_v1]
+}
+
 /// Runs the migrations the database has not had, each in its own transaction. A database from a
 /// newer version is refused rather than written in a layout this version does not know.
 fn migrate(db: &Connection) -> Result<()> {
-  let migrations: Vec<fn(&Connection) -> Result<()>> = vec![migrate_v1];
+  let migrations = migrations();
   let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
   let known = migrations.len() as i64;
   if version > known {
@@ -118,6 +125,16 @@ fn entry_audio_from_row(row: &Row<'_>) -> rusqlite::Result<EntryAudio> {
 
 // MARK: Db
 
+/// Opens the SQLite file at `path` read-only, any app's: it takes a shared lock and writes nothing,
+/// not even a journal (but for a database in WAL mode: its shared-memory file).
+pub fn read_only(path: &Path) -> Result<Connection> {
+  let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+  let db =
+    Connection::open_with_flags(path, flags).with_context(|| format!("open {}", path.display()))?;
+  db.busy_timeout(BUSY_TIMEOUT)?;
+  Ok(db)
+}
+
 pub struct Db {
   db: Connection,
 }
@@ -126,10 +143,23 @@ impl Db {
   /// Opens (creating, migrating) the database at `path`.
   pub fn open(path: &Path) -> Result<Self> {
     let db = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
-    db.busy_timeout(Duration::from_secs(2))?;
+    db.busy_timeout(BUSY_TIMEOUT)?;
     db.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     migrate(&db).with_context(|| format!("migrate {}", path.display()))?;
+    Ok(Self { db })
+  }
+
+  /// Opens the database at `path` read-only ([`read_only`]), as it is: one in a layout other than
+  /// this version's is refused, not migrated.
+  pub fn open_read_only(path: &Path) -> Result<Self> {
+    let db = read_only(path)?;
+    let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let known = migrations().len() as i64;
+    if version != known {
+      bail!("{} has schema {version}, this Wavo reads {known}", path.display());
+    }
+
     Ok(Self { db })
   }
 
@@ -173,6 +203,23 @@ impl Db {
     Ok(items)
   }
 
+  /// Every entry, oldest first.
+  pub fn get_entries(&self) -> Result<Vec<Entry>> {
+    let qs = "SELECT * FROM entries ORDER BY created_at, id;";
+    let mut stmt = self.db.prepare(qs)?;
+    let items = stmt.query_map([], entry_from_row)?.collect::<rusqlite::Result<_>>()?;
+    Ok(items)
+  }
+
+  /// Every entry's start time (Unix ms) with its recording: what an import matches entries by.
+  pub fn get_starts(&self) -> Result<HashMap<i64, Option<String>>> {
+    let qs = "SELECT created_at, audio_path FROM entries;";
+    let mut stmt = self.db.prepare(qs)?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let items = rows.collect::<rusqlite::Result<_>>()?;
+    Ok(items)
+  }
+
   // MARK: Inserters
 
   pub fn insert_entry(&self, entry: &NewEntry<'_>) -> Result<i64> {
@@ -193,7 +240,54 @@ impl Db {
     Ok(self.db.last_insert_rowid())
   }
 
+  /// Adds entries from another history, as they were, in one transaction; their ids are new.
+  pub fn insert_imported(&self, entries: &[Entry]) -> Result<()> {
+    let qs = "
+    INSERT INTO entries (
+      created_at, duration_ms, audio_path, model, language, text, pasted, not_pasted
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);
+    ";
+
+    let tx = self.db.unchecked_transaction()?;
+    {
+      let mut stmt = tx.prepare_cached(qs)?;
+      for e in entries {
+        stmt.execute(params![
+          e.created_at,
+          e.duration_ms,
+          e.audio_path,
+          e.model,
+          e.language,
+          e.text,
+          e.pasted,
+          e.not_pasted,
+        ])?;
+      }
+    }
+
+    tx.commit()?;
+    Ok(())
+  }
+
   // MARK: Updater
+
+  /// The entries naming one of `names` name no recording, in one transaction.
+  pub fn update_without_audio<'a>(
+    &self,
+    names: impl IntoIterator<Item = &'a String>,
+  ) -> Result<()> {
+    let qs = "UPDATE entries SET audio_path = NULL WHERE audio_path = ?1;";
+    let tx = self.db.unchecked_transaction()?;
+    {
+      let mut stmt = tx.prepare_cached(qs)?;
+      for name in names {
+        stmt.execute([name])?;
+      }
+    }
+
+    tx.commit()?;
+    Ok(())
+  }
 
   /// The text of a new transcription, with the model and language it was made with; false if
   /// there is no such entry.
@@ -338,5 +432,38 @@ mod tests {
     assert!(entry.pasted && entry.not_pasted.is_none());
     assert_eq!(db.get_entry(id + 1).unwrap(), None);
     assert!(!db.update_text(id + 1, "x", "whisper", None).unwrap(), "no such entry");
+  }
+
+  #[test]
+  fn imported_entries_are_found_by_their_start() {
+    let dir = TempDir::new("db-imported");
+    let db = open(&dir);
+    let entry = Entry {
+      id: 0,
+      created_at: 1_000,
+      duration_ms: 2_500,
+      audio_path: Some("1000.wav".into()),
+      model: Some("handy".into()),
+      language: Some("en".into()),
+      text: "hello".into(),
+      pasted: true,
+      not_pasted: None,
+    };
+    let other = Entry { created_at: 2_000, audio_path: None, ..entry.clone() };
+    db.insert_imported(&[other, entry.clone()]).unwrap();
+    assert_eq!(db.get_entry(2).unwrap(), Some(Entry { id: 2, ..entry.clone() }));
+    let starts = db.get_starts().unwrap();
+    assert_eq!(starts, HashMap::from([(1_000, Some("1000.wav".into())), (2_000, None)]));
+    assert_eq!(db.get_entries().unwrap()[0], Entry { id: 2, ..entry });
+    let names = ["1000.wav".to_owned()];
+    db.update_without_audio(&names).unwrap();
+    assert!(db.get_audio_paths().unwrap().is_empty());
+
+    // Read-only, as it is.
+    let ro = Db::open_read_only(&dir.path().join("history.db")).unwrap();
+    assert_eq!(ro.get_entries().unwrap().len(), 2);
+    assert!(ro.update_without_audio(&names).is_err());
+    db.db.pragma_update(None, "user_version", 0).unwrap();
+    assert!(Db::open_read_only(&dir.path().join("history.db")).is_err(), "another layout");
   }
 }
