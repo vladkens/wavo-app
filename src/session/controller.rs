@@ -18,7 +18,8 @@
 //!   saying so; the choice stays (downloading it again brings it back).
 //! - The text goes to the history first, then it is pasted (`pasted` says whether it was). The
 //!   history keeps transcriptions only: a dictation that fails (no model can transcribe it, the
-//!   engine fails, nothing is recognized in its speech) ends with its error in the status, and its
+//!   engine fails, nothing is recognized in its speech, with the one language the model is meant
+//!   for if it is for one: `… understands English only`) ends with its error in the status, and its
 //!   recording is kept as the last failed one, to transcribe again (`ctl retranscribe-last`); the
 //!   next failure takes its place.
 //! - Every dictation ends with the history retention.
@@ -41,7 +42,7 @@ use crossbeam_channel::{Receiver, Sender, after, bounded, never, select, unbound
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
-use wavo::hub::{self, Hub};
+use wavo::hub::{self, Hub, ModelInfo};
 
 use super::machine::{Command, Effect, Input, Machine, State, Take};
 use super::output::TextOutput;
@@ -50,13 +51,14 @@ use crate::audio::recorder::{Meter, Recorder};
 use crate::audio::vad::Clip;
 use crate::audio::{SAMPLE_RATE, wav};
 use crate::ctl::{Reply, Request};
-use crate::engine::model::{self, Loader, Wavo};
+use crate::engine::model::{Loader, Wavo};
 use crate::engine::supervisor::{
   Deadlines, EngineError, JobId, Phase as EnginePhase, Transcription,
 };
 use crate::engine::{Engine, EngineConfig};
 use crate::history::db::NewEntry;
 use crate::history::{History, Retention, now_ms, recordings};
+use crate::language;
 use crate::settings::{self, Activation, Settings};
 
 /// How long a request waits for the session thread; less than `wavo-app ctl` waits for the reply,
@@ -356,6 +358,8 @@ impl Handle {
 struct Loaded {
   /// The model file's name without extension.
   name: String,
+  /// wavo's, unless the model is a file of the person's own.
+  info: Option<&'static ModelInfo>,
   path: PathBuf,
   engine: Engine,
 }
@@ -705,29 +709,34 @@ impl<O: TextOutput> Controller<O> {
   /// Whether a model can transcribe now, without loading one: the files on disk against the
   /// choice. A chosen model that is not on disk gives way to the first one found, with a warning
   /// (kept for the status); the choice stays. With none found the choice is the reason. The
-  /// model's path, or why there is none (kept for the status).
-  fn check_model(&mut self) -> Result<PathBuf, NoModel> {
+  /// model's path and wavo's info on it, or why there is none (kept for the status).
+  fn check_model(&mut self) -> Result<(PathBuf, Option<&'static ModelInfo>), NoModel> {
     let hub = &self.config.hub;
-    let query = self.settings.model.clone();
-    let error = match (model::find(query.as_deref(), hub), query) {
-      (Ok(path), _) => {
-        (self.model_error, self.model_fallback) = (None, None);
-        return Ok(path);
-      }
-      (Err(_), Some(query)) => match model::find(None, hub) {
-        Ok(path) => {
-          let fallback = label(&path.to_string_lossy());
-          let note = format!("{} is not on disk: {fallback} transcribes instead", label(&query));
-          if self.model_fallback.as_ref() != Some(&note) {
-            warn!("model {note}");
-          }
+    let chosen = self.settings.model.clone();
+    if let Some(chosen) = &chosen
+      && let Ok(path) = hub.resolve(chosen)
+    {
+      (self.model_error, self.model_fallback) = (None, None);
+      return Ok((path, hub::lookup(chosen).ok()));
+    }
 
-          (self.model_error, self.model_fallback) = (None, Some(note));
-          return Ok(path);
+    let error = match (hub.downloaded().into_iter().next(), chosen) {
+      (Some((info, path)), None) => {
+        (self.model_error, self.model_fallback) = (None, None);
+        return Ok((path, Some(info)));
+      }
+      (Some((info, path)), Some(chosen)) => {
+        let note =
+          format!("{} is not on disk: {} transcribes instead", label(&chosen), info.full_name);
+        if self.model_fallback.as_ref() != Some(&note) {
+          warn!("model {note}");
         }
-        Err(_) => NoModel::Gone { model: label(&query) },
-      },
-      (Err(_), None) => NoModel::NoneDownloaded,
+
+        (self.model_error, self.model_fallback) = (None, Some(note));
+        return Ok((path, Some(info)));
+      }
+      (None, Some(chosen)) => NoModel::Gone { model: label(&chosen) },
+      (None, None) => NoModel::NoneDownloaded,
     };
 
     if self.model_error.as_ref() != Some(&error) {
@@ -774,7 +783,7 @@ impl<O: TextOutput> Controller<O> {
 
     // A stand-in for the chosen model, which is back (a few file lookups, of that model alone).
     if let (Some(loaded), Some(chosen)) = (&self.engine, &self.settings.model)
-      && model::find(Some(chosen), &self.config.hub).is_ok_and(|p| p != loaded.path)
+      && self.config.hub.resolve(chosen).is_ok_and(|p| p != loaded.path)
     {
       info!("model {}: the chosen model is back", loaded.name);
       self.engine_stale = true;
@@ -782,7 +791,7 @@ impl<O: TextOutput> Controller<O> {
 
     self.retire_stale_engine();
     if self.engine.is_none() {
-      let path = self.check_model()?;
+      let (path, info) = self.check_model()?;
       let name = file_stem(&path);
       info!("model {name} ({})", path.display());
       let config = EngineConfig {
@@ -794,9 +803,11 @@ impl<O: TextOutput> Controller<O> {
       };
 
       // Without its thread the model cannot load: the recording waits, as for a load that fails.
-      let engine = Engine::start(config)
-        .map_err(|e| NoModel::LoadFailed { model: label(&name), error: e.to_string() })?;
-      self.engine = Some(Loaded { name, path, engine });
+      let engine = Engine::start(config).map_err(|e| NoModel::LoadFailed {
+        model: loaded_label(info, &name),
+        error: e.to_string(),
+      })?;
+      self.engine = Some(Loaded { name, info, path, engine });
     }
 
     Ok(self.engine.as_ref().unwrap())
@@ -1079,9 +1090,15 @@ impl<O: TextOutput> Controller<O> {
   ) -> (Outcome, String, Option<String>) {
     match result {
       Ok(t) => {
-        debug!("{:.2?} on {} in {} piece(s)", t.elapsed, t.device, t.pieces.len());
+        debug!("{:.2?} on {} in {} piece(s)", t.elapsed, t.device, t.pieces);
         match t.text.trim() {
-          "" => (Outcome::NoText, String::new(), Some("nothing recognized".into())),
+          // Most likely speech in a language the model does not know.
+          "" => {
+            let note = self.engine.as_ref().and_then(|l| l.info).and_then(understands_only);
+            let error = note
+              .map_or_else(|| "nothing recognized".into(), |n| format!("nothing recognized: {n}"));
+            (Outcome::NoText, String::new(), Some(error))
+          }
           _ => (Outcome::Done, t.text, None),
         }
       }
@@ -1089,7 +1106,10 @@ impl<O: TextOutput> Controller<O> {
         (Outcome::Cancelled, String::new(), Some("the transcription was cancelled".into()))
       }
       Err(EngineError::Load(error)) => {
-        let model = self.engine.as_ref().map_or_else(|| "the model".into(), |l| label(&l.name));
+        let model = self
+          .engine
+          .as_ref()
+          .map_or_else(|| "the model".into(), |l| loaded_label(l.info, &l.name));
         (Outcome::NoModel, String::new(), Some(NoModel::LoadFailed { model, error }.to_string()))
       }
       Err(e) => (Outcome::Failed, String::new(), Some(e.to_string())),
@@ -1371,7 +1391,7 @@ impl<O: TextOutput> Controller<O> {
 
     let load_failed = engine.as_ref().and_then(|(l, s)| {
       let error = s.load_error.clone()?;
-      Some(NoModel::LoadFailed { model: label(&l.name), error })
+      Some(NoModel::LoadFailed { model: loaded_label(l.info, &l.name), error })
     });
 
     Status {
@@ -1453,18 +1473,23 @@ fn file_stem(path: &Path) -> String {
   path.file_stem().map_or_else(|| path.display().to_string(), |s| s.to_string_lossy().into())
 }
 
-/// What a model choice (wavo's name, a file's path or name) is called where it shows, also once
-/// its file is gone: wavo's full name (`parakeet-tdt-0.6b-v3`), else the file's name without
+/// What a model choice (wavo's name, or a file's path) is called where it shows, also once its
+/// file is gone: wavo's full name (`parakeet-tdt-0.6b-v3`), else the file's name without
 /// extension.
-fn label(model: &str) -> String {
-  if let Ok(info) = hub::lookup(model) {
-    return info.full_name.into();
-  }
+fn label(choice: &str) -> String {
+  hub::lookup(choice).map_or_else(|_| file_stem(Path::new(choice)), |m| m.full_name.into())
+}
 
-  let file = Path::new(model).file_name().and_then(|f| f.to_str()).unwrap_or(model);
-  let file = file.strip_suffix(".gguf").unwrap_or(file);
-  let info = hub::MODELS.iter().find(|m| m.file().strip_suffix(".gguf") == Some(file));
-  info.map_or_else(|| file.to_owned(), |m| m.full_name.to_owned())
+/// What a loaded model is called where it shows: wavo's full name, else its file's `name`.
+fn loaded_label(info: Option<&ModelInfo>, name: &str) -> String {
+  info.map_or_else(|| name.to_owned(), |m| m.full_name.to_owned())
+}
+
+/// The note on nothing recognized by a model meant for one language (wavo's
+/// [`langs`](ModelInfo::langs)): `parakeet-tdt-0.6b-v2 understands English only`.
+fn understands_only(info: &ModelInfo) -> Option<String> {
+  let [code] = info.langs else { return None };
+  Some(format!("{} understands {} only", info.full_name, language::name(code)))
 }
 
 #[cfg(test)]
@@ -1487,11 +1512,25 @@ mod tests {
 
   #[test]
   fn models_are_labelled_by_wavos_full_name_else_the_file() {
-    for name in ["parakeet-v3", "parakeet-tdt-0.6b-v3", "/x/parakeet-tdt-0.6b-v3-Q8_0.gguf"] {
+    for name in ["parakeet-v3", "parakeet-tdt-0.6b-v3"] {
       assert_eq!(label(name), "parakeet-tdt-0.6b-v3", "{name}");
     }
 
-    assert_eq!(label("gigaam-v3-e2e-rnnt-Q8_0"), "gigaam-v3-e2e-rnnt", "an entry's model");
+    assert_eq!(label("/models/parakeet-tdt-0.6b-v3-Q8_0.gguf"), "parakeet-tdt-0.6b-v3-Q8_0");
     assert_eq!(label("/models/broken.gguf"), "broken");
+  }
+
+  /// Only a model meant for one language says which, also one that takes more (a fine-tune).
+  #[test]
+  fn nothing_recognized_names_the_one_language_a_model_is_for() {
+    let note = |name| understands_only(hub::lookup(name).unwrap());
+    let v2 = "parakeet-tdt-0.6b-v2 understands English only";
+    assert_eq!(note("parakeet-v2").as_deref(), Some(v2));
+    let he = "ivrit-whisper-large-v3-turbo understands Hebrew only";
+    assert_eq!(note("whisper-turbo-he").as_deref(), Some(he));
+    assert_eq!(
+      (note("parakeet-v3"), note("whisper-turbo"), note("breeze-asr-25")),
+      (None, None, None)
+    );
   }
 }

@@ -441,8 +441,9 @@ fn another_model_replaces_the_engine_once_it_is_idle() {
 }
 
 /// Speech of which the model makes nothing is no success: the dictation ends as nothing
-/// recognized, nothing pasted nor copied, no entry; its recording is the last failed one, and
-/// transcribing it again keeps it so while the model still makes nothing of it.
+/// recognized, with the one language the model is for, nothing pasted nor copied, no entry; its
+/// recording is the last failed one, and transcribing it again keeps it so while the model still
+/// makes nothing of it.
 #[test]
 fn speech_without_text_is_nothing_recognized_and_no_entry() {
   let models = Models("  ", &["parakeet-v2"]);
@@ -450,6 +451,8 @@ fn speech_without_text_is_nothing_recognized_and_no_entry() {
   let status = dictate(&s, 1);
   let last = status.last.clone().unwrap();
   assert_eq!((last.outcome, last.text.as_str(), last.pasted), (Outcome::NoText, "", false));
+  let note = "parakeet-tdt-0.6b-v2 understands English only";
+  assert_eq!(last.error, Some(format!("nothing recognized: {note}")));
   let log = s.output.log();
   assert!(log.pasted.is_empty() && log.copied.is_empty(), "nothing pasted nor copied");
   drop(log);
@@ -463,7 +466,7 @@ fn speech_without_text_is_nothing_recognized_and_no_entry() {
   });
   assert_eq!(status.failed_recording, kept);
   let error = status.error.unwrap_or_default();
-  assert!(error.contains("nothing recognized"), "{error}");
+  assert!(error.ends_with(&format!("nothing recognized: {note}")), "{error}");
   assert!(s.entries().is_empty());
 }
 

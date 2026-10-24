@@ -8,6 +8,7 @@ mod cli;
 mod ctl;
 mod engine;
 mod history;
+mod language;
 #[cfg(target_os = "macos")]
 mod macos;
 mod session;
