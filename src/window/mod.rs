@@ -21,6 +21,7 @@
 //! History's Re-transcribe).
 
 mod about;
+pub mod data;
 pub mod downloads;
 mod general;
 pub mod history;
@@ -186,6 +187,19 @@ pub trait Shell {
   fn open_url(&self, url: &str);
   /// Shows `dir` in the system's file manager.
   fn reveal(&self, dir: &Path);
+  /// Handy's history on this computer, if any ([`crate::transfer::handy::found`], which takes a
+  /// while), handed to `done` on a thread of its own.
+  fn handy(&self, done: Box<dyn FnOnce(Option<crate::transfer::handy::Summary>) + Send>);
+  /// Imports Handy's history in `dir` into the app's on a thread of its own; `tell` hears how it
+  /// goes.
+  fn import_handy(&self, dir: PathBuf, tell: Box<dyn Fn(data::Import) + Send>);
+  /// Writes the history into the archive `file` on a thread of its own and shows it in the file
+  /// manager; `done` hears how it went.
+  fn export(
+    &self,
+    file: PathBuf,
+    done: Box<dyn FnOnce(Result<crate::transfer::archive::Exported, String>) + Send>,
+  );
 }
 
 /// `fs` with the descriptions under the labels in `color`: a row's warning or error.
@@ -266,6 +280,7 @@ pub struct Prefs {
   pub ask: Option<Ask>,
   models: models::State,
   history: history::State,
+  data: data::State,
 }
 
 impl Prefs {
@@ -290,6 +305,7 @@ impl Prefs {
       ask: None,
       models: models::State::default(),
       history: history::State::new(home),
+      data: data::State::default(),
     };
     prefs.refresh();
     prefs
@@ -314,6 +330,7 @@ impl Prefs {
     self.access_changed();
     self.login.state = self.shell.autostart();
     self.recordings.asked = false;
+    self.data.asked = false;
   }
 
   /// What the system allows may have changed: a prompt was answered, the person is back from
