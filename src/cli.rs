@@ -60,7 +60,7 @@ pub fn transcribe(wav: &Path, model: Option<&str>, language: Option<&str>) -> Re
     "{:.1} s of audio ({seconds:.1} s to the engine in {} piece(s)) in {:.2?} on {} (engine thread \
      {}, start to loaded {:.2?})",
     clip.seconds(),
-    result.pieces.len(),
+    result.pieces,
     result.elapsed,
     result.device,
     status.thread.map_or("-".into(), |n| n.to_string()),

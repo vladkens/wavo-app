@@ -65,8 +65,8 @@ $(FIXTURES): scripts/gen-fixtures.sh $(wildcard scripts/fixtures/*.txt)
 	touch $@
 
 # The ignored tests that need real models from the Hugging Face cache or the fixtures, by module
-# (not those that need a microphone); WAVO_TEST_MODEL_RU and WAVO_TEST_MODEL_EN pick the models by
-# path. The daemon's tests run target/release/wavo-app.
+# (not those that need a microphone); WAVO_TEST_MODEL_RU, WAVO_TEST_MODEL_EN and
+# WAVO_TEST_MODEL_PARAKEET pick the models by path. The daemon's tests run target/release/wavo-app.
 MODEL_TESTS := engine::tests:: session::tests:: audio::vad::tests::fixtures
 
 test-models: fixtures # the ignored tests on real models
