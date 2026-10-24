@@ -546,6 +546,7 @@ mod tests {
       error: error.map(str::to_owned),
       warnings: Vec::new(),
       no_model: None,
+      failed_recording: None,
     }
   }
 
