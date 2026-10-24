@@ -21,6 +21,8 @@ pub fn name(code: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+  use wavo::hub::MODELS;
+
   use super::*;
 
   #[test]
@@ -29,6 +31,14 @@ mod tests {
     assert_eq!(name("EN"), "English");
     assert_eq!(name("haw"), "Hawaiian");
     assert_eq!(name("jw"), "Javanese");
+    assert_eq!(name("yue"), "Yue Chinese");
     assert_eq!(name("xx"), "xx");
+  }
+
+  #[test]
+  fn every_language_of_wavos_models_has_a_name() {
+    for code in MODELS.iter().flat_map(|m| m.langs) {
+      assert_ne!(name(code), *code, "{code} has no name");
+    }
   }
 }
