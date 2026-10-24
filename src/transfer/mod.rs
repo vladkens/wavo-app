@@ -13,7 +13,19 @@
 //!   short leaves entries whose recording is not there yet: the next one finds them by their start
 //!   and copies what is missing, to the names they hold.
 //! - It holds the app's single-instance lock ([`ctl::claim`]): it refuses while Wavo runs, and Wavo
-//!   does not start while it imports. A dry run reads the history read-only and takes no lock.
+//!   does not start while it imports. A dry run reads the history read-only and takes no lock; the
+//!   running app, which holds the lock, imports as it is ([`Lock::Held`]).
+
+/// How an import goes with the single-instance lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lock {
+  /// A dry run: no lock, nothing written.
+  DryRun,
+  /// It takes the lock (the command line), refused while Wavo runs.
+  Take,
+  /// The caller holds it: the running app.
+  Held,
+}
 
 pub mod archive;
 pub mod handy;
@@ -132,8 +144,8 @@ struct Target {
 }
 
 impl Target {
-  fn open(home: &Path, dry_run: bool) -> Result<Self> {
-    if dry_run {
+  fn open(home: &Path, lock: Lock) -> Result<Self> {
+    if lock == Lock::DryRun {
       let db = home.join(DB_FILE);
       let starts = match db.is_file() {
         true => Db::open_read_only(&db)?.get_starts()?,
@@ -147,14 +159,18 @@ impl Target {
     }
 
     fs::create_dir_all(home).with_context(|| format!("create {}", home.display()))?;
-    let Claim::Server(lock) = ctl::claim(home)? else {
-      bail!("Wavo is running for {}: quit it first", home.display())
+    let lock = match lock {
+      Lock::Held => None,
+      _ => match ctl::claim(home)? {
+        Claim::Server(lock) => Some(lock),
+        Claim::Running => bail!("Wavo is running for {}: quit it first", home.display()),
+      },
     };
 
     let history = History::open(home)?;
     let starts = history.db.get_starts()?;
     let on_disk = history.recordings.list()?.into_iter().collect();
-    Ok(Self { history: Some(history), starts, on_disk, _lock: Some(lock) })
+    Ok(Self { history: Some(history), starts, on_disk, _lock: lock })
   }
 
   fn plan<S: Eq + Hash + Clone>(&self, items: Vec<Item<S>>) -> Plan<S> {

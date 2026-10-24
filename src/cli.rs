@@ -288,6 +288,14 @@ impl Shell for Headless {
   fn open_pane(&self, _: nimbo::permissions::Pane) {}
   fn open_url(&self, _: &str) {}
   fn reveal(&self, _: &Path) {}
+
+  fn handy(&self, done: Box<dyn FnOnce(Option<handy::Summary>) + Send>) {
+    done(handy::found());
+  }
+
+  fn import_handy(&self, _: PathBuf, _: Box<dyn Fn(window::data::Import) + Send>) {}
+
+  fn export(&self, _: PathBuf, _: Box<dyn FnOnce(Result<archive::Exported, String>) + Send>) {}
 }
 
 /// `wavo-app export`: the data home into the archive `file`, a summary on stdout.

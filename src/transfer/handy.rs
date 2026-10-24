@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use tracing::warn;
 
-use super::{Item, Progress, Report, Target};
+use super::{Item, Lock, Progress, Report, Target};
 use crate::history::db::{self, Entry};
 use crate::history::recordings;
 
@@ -77,7 +77,6 @@ impl Summary {
 
 /// Handy's history on this computer ([`dir`]), if it has one with text. It reads Handy's database
 /// and lists its recordings (a second or two for a big one): call it off the UI thread.
-#[expect(dead_code, reason = "the settings window's Import from Handy (step 8)")]
 pub fn found() -> Option<Summary> {
   let dir = dir();
   if !dir.join(DB_FILE).is_file() {
@@ -91,23 +90,53 @@ pub fn found() -> Option<Summary> {
 /// Imports Handy's history in `dir` into the history in `home` (see the [module](super) docs); a
 /// dry run says what it would do and writes nothing. Returns what Handy has, and what was done.
 pub fn import(home: &Path, dir: &Path, dry_run: bool) -> Result<(Summary, Report)> {
+  let lock = if dry_run { Lock::DryRun } else { Lock::Take };
+  let mut progress = None;
+  let result = run(home, dir, lock, &mut |done, total| {
+    let progress = progress.get_or_insert_with(|| Progress::new("copying recordings", total));
+    if done > 0 {
+      progress.tick();
+    }
+  });
+  if let Some(progress) = progress {
+    progress.finish();
+  }
+
+  result
+}
+
+/// [`import`] in the running app, which holds the single-instance lock: `copied` hears how many
+/// of the recordings are copied, from 0.
+pub fn import_held(
+  home: &Path,
+  dir: &Path,
+  copied: &mut dyn FnMut(usize, usize),
+) -> Result<(Summary, Report)> {
+  run(home, dir, Lock::Held, copied)
+}
+
+fn run(
+  home: &Path,
+  dir: &Path,
+  lock: Lock,
+  copied: &mut dyn FnMut(usize, usize),
+) -> Result<(Summary, Report)> {
   let read = read(dir)?;
   let summary = Summary::new(dir, &read);
-  let target = Target::open(home, dry_run)?;
+  let target = Target::open(home, lock)?;
   let plan = target.plan(read.items);
-  let mut report = plan.report(dry_run);
-  if dry_run {
+  let mut report = plan.report(lock == Lock::DryRun);
+  if lock == Lock::DryRun {
     return Ok((summary, report));
   }
 
   let copies = target.add(plan)?;
-  let mut progress = Progress::new("copying recordings", copies.len());
-  for (src, dst) in &copies {
+  copied(0, copies.len());
+  for (i, (src, dst)) in copies.iter().enumerate() {
     report.count(super::copy_recording(dst, src), dst);
-    progress.tick();
+    copied(i + 1, copies.len());
   }
 
-  progress.finish();
   Ok((summary, report))
 }
 
@@ -378,6 +407,14 @@ mod tests {
     let err = import(home.path(), src.path(), false).unwrap_err().to_string();
     assert!(err.contains("running"), "{err}");
     assert!(import(home.path(), src.path(), true).is_ok(), "a dry run takes no lock");
+
+    // The running app, which holds the lock, imports, telling how the copies go.
+    let mut told = Vec::new();
+    let (_, report) =
+      import_held(home.path(), src.path(), &mut |n, of| told.push((n, of))).unwrap();
+    assert_eq!(report.added, 3);
+    assert_eq!(told.first(), Some(&(0, report.copied + report.failed)));
+    assert_eq!(told.last().map(|t| t.0), Some(report.copied + report.failed));
   }
 
   #[test]
