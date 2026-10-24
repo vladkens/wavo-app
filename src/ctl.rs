@@ -65,6 +65,8 @@ pub enum Request {
   Unload,
   /// Open the settings window
   OpenSettings,
+  /// Open the settings window on the history
+  OpenHistory,
   /// Launch at login
   Autostart {
     #[arg(value_enum)]
@@ -378,6 +380,7 @@ mod tests {
       Request::Delete { id: 7 },
       Request::Unload,
       Request::OpenSettings,
+      Request::OpenHistory,
       Request::Autostart { state: Autostart::On },
     ];
     for r in &requests {
