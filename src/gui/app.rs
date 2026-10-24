@@ -40,7 +40,7 @@ use crate::ui::menu::{self, Models, Warning};
 use crate::ui::overlay::{self, Overlay, Show};
 use crate::window::downloads::{Download, Downloads};
 use crate::window::models::{Found, Pick};
-use crate::window::{self, Access, Page, Prefs};
+use crate::window::{self, Page, Prefs};
 
 /// The app as the system knows it: its menu bar presence, its login item.
 const INFO: AppInfo =
@@ -471,13 +471,13 @@ impl window::Shell for MacShell {
     });
   }
 
-  fn access(&self) -> Access {
-    let microphone = match microphone::access() {
-      Microphone::Authorized => Some(true),
-      Microphone::Denied | Microphone::Restricted => Some(false),
-      Microphone::NotDetermined => None,
+  fn access(&self) -> window::Access {
+    let microphone = match permissions::microphone() {
+      Access::Granted => Some(true),
+      Access::Denied | Access::Restricted => Some(false),
+      Access::NotDetermined => None,
     };
-    Access { accessibility: permissions::accessibility(false), microphone }
+    window::Access { accessibility: permissions::accessibility(false), microphone }
   }
 
   fn folder_size(&self, dir: PathBuf, done: Box<dyn FnOnce(u64) + Send>) {
