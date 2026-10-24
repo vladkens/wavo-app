@@ -15,17 +15,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use nimbo::hotkey::{Hotkeys, Listener};
-use nimbo::permissions::{self, Pane};
+use nimbo::permissions::{self, Access, Pane};
 use nimbo::tray::{Menu, Tray};
 use nimbo::{AppInfo, Clipboard, Main, Presence, Proxy, SystemClipboard, Window, autostart};
-use objc2::MainThreadMarker;
-use objc2_app_kit::{NSAlert, NSApplication};
-use objc2_foundation::NSString;
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
-use super::microphone::{self, Access as Microphone};
-use super::output::MacOutput;
+use super::output::GuiOutput;
 use super::paste;
 use crate::audio::devices;
 use crate::ctl::{self, Autostart, Claim, Reply, Request, Serving};
@@ -44,9 +40,6 @@ const INFO: AppInfo =
 const ACCESS_POLL: Duration = Duration::from_secs(2);
 /// How long `wavo-app ctl status` waits for the main thread for the shell's part.
 const STATUS_WAIT: Duration = Duration::from_secs(1);
-/// Paste from Other Apps (macOS 15.4+), where the app may read the clipboard to restore it.
-const PASTEBOARD_PANE: &str =
-  "x-apple.systempreferences:com.apple.preference.security?Privacy_Pasteboard";
 
 thread_local! {
   static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -81,8 +74,8 @@ struct App {
   /// The session's last; none before its first.
   update: Option<Update>,
   accessibility: bool,
-  microphone: Microphone,
-  /// The paste may read the clipboard to restore it ([paste::readable]).
+  microphone: Access,
+  /// The paste may read the clipboard to restore it ([SystemClipboard::readable]).
   clipboard: bool,
   asked_microphone: bool,
   fake_mic: bool,
@@ -117,22 +110,12 @@ pub fn run() -> Result<()> {
     // Also on a quit the system asks for (logout), after which `nimbo::app` does not return.
     main.on_quit(|_| shutdown());
     if let Err(e) = start(main, config, server) {
-      alert("Wavo could not start", &format!("{e:#}"));
+      main.alert("Wavo could not start", &format!("{e:#}"));
       started = Err(e);
       main.quit();
     }
   });
   started
-}
-
-/// A modal alert with one button: a failed start shows even without a terminal.
-fn alert(title: &str, text: &str) {
-  let mtm = MainThreadMarker::new().expect("the main thread");
-  let alert = NSAlert::new(mtm);
-  alert.setMessageText(&NSString::from_str(title));
-  alert.setInformativeText(&NSString::from_str(text));
-  NSApplication::sharedApplication(mtm).activate();
-  alert.runModal();
 }
 
 fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Result<()> {
@@ -141,7 +124,7 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   let observer = Box::new(|update: Update| {
     proxy().post(move |main| _ = with_app(|app| app.on_update(main, update)))
   });
-  let session = Session::start_observed(config, MacOutput, observer)?;
+  let session = Session::start_observed(config, GuiOutput, observer)?;
   let handle = session.handle();
   let hotkeys = {
     let handle = handle.clone();
@@ -166,8 +149,8 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     handle,
     update: None,
     accessibility: false,
-    microphone: microphone::access(),
-    clipboard: paste::readable(),
+    microphone: permissions::microphone(),
+    clipboard: SystemClipboard.readable(),
     asked_microphone: false,
     fake_mic,
     session,
@@ -255,7 +238,7 @@ fn chosen(main: &mut Main, id: &str) {
     // The system's dialog adds the app to the Accessibility list, which the pane alone does not.
     "warn:accessibility" => _ = permissions::accessibility(true),
     "warn:microphone" => opened(permissions::open_pane(Pane::Microphone)),
-    "warn:clipboard" => opened(nimbo::open::url(PASTEBOARD_PANE)),
+    "warn:clipboard" => opened(permissions::open_pane(Pane::Pasteboard)),
     _ => {}
   }
 }
@@ -387,17 +370,20 @@ impl App {
 
   /// A recording starts: the system's prompt, the first time it was never answered.
   fn ask_microphone(&mut self) {
-    self.microphone = microphone::access();
-    if !self.fake_mic && self.microphone == Microphone::NotDetermined && !self.asked_microphone {
+    self.microphone = permissions::microphone();
+    if !self.fake_mic && self.microphone == Access::NotDetermined && !self.asked_microphone {
       self.asked_microphone = true;
-      microphone::request();
+      info!("asking for microphone access");
+      permissions::request_microphone(|granted| {
+        info!("microphone access {}", if granted { "granted" } else { "denied" });
+      });
     }
   }
 
   /// The menu opens: what the system does not tell the app is looked at again.
   fn menu_opening(&mut self) {
-    self.microphone = microphone::access();
-    self.clipboard = paste::readable();
+    self.microphone = permissions::microphone();
+    self.clipboard = SystemClipboard.readable();
     self.refresh();
   }
 
@@ -411,7 +397,7 @@ impl App {
       tap_failed: hotkeys.listener == Listener::Failed,
       hotkey_error: hotkeys.error,
       fallback_error: hotkeys.fallback_error,
-      microphone_denied: matches!(self.microphone, Microphone::Denied | Microphone::Restricted),
+      microphone_denied: matches!(self.microphone, Access::Denied | Access::Restricted),
       clipboard_unread: restores && !self.clipboard,
       secure_input: hotkeys.secure_input,
     };
@@ -446,9 +432,19 @@ impl App {
       "hotkey": hotkeys.hotkey.map(|h| h.label()),
       "tap": format!("{:?}", hotkeys.listener).to_lowercase(),
       "accessibility": self.accessibility,
-      "microphone": self.microphone,
+      "microphone": access(self.microphone),
       "hud": self.hud.0.with(|o| json!({ "mode": o.mode(), "text": o.text() })),
       "warnings": warnings.iter().map(|w| &w.text).collect::<Vec<_>>(),
     })
+  }
+}
+
+/// The microphone's access as `wavo-app ctl status` shows it.
+fn access(access: Access) -> &'static str {
+  match access {
+    Access::Granted => "authorized",
+    Access::Denied => "denied",
+    Access::Restricted => "restricted",
+    Access::NotDetermined => "not_determined",
   }
 }
