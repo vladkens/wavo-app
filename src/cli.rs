@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Command-line tools that run without the GUI: `wavo-app transcribe`, `devices`, `record`, the
-//! headless `daemon` and its `ctl` client.
+//! Command-line tools that run without the GUI: `wavo-app transcribe`, `devices`, `record`,
+//! `export`, `import`, the headless `daemon` and its `ctl` client.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -21,6 +21,7 @@ use crate::engine::{Engine, EngineConfig, model};
 use crate::session::output::Stdout;
 use crate::session::{self, Session};
 use crate::settings::{self, Settings};
+use crate::transfer::{self, Report, archive, handy};
 
 /// `wavo-app transcribe`: the dictation pipeline on a file, without capture and paste. The text
 /// goes to stdout, timings and warnings to stderr. Without speech nothing is printed and the engine
@@ -197,6 +198,68 @@ pub fn ctl(request: Request) -> Result<()> {
   }
 
   Ok(())
+}
+
+/// `wavo-app export`: the data home into the archive `file`, a summary on stdout.
+pub fn export(file: &Path) -> Result<()> {
+  let done = archive::export(&crate::home(), file)?;
+  println!(
+    "{}: {} entries, {} recordings, {}",
+    file.display(),
+    done.entries,
+    done.recordings,
+    transfer::size(done.bytes)
+  );
+  Ok(())
+}
+
+/// `wavo-app import`: an archive of `wavo-app export`, or `handy`; a summary on stdout.
+pub fn import(source: &Path, take_settings: bool, dry_run: bool) -> Result<()> {
+  let home = crate::home();
+  let would = if dry_run { "would be " } else { "" };
+  if source == Path::new("handy") {
+    if take_settings {
+      bail!("Handy's settings are not imported: leave out --settings");
+    }
+
+    let (found, report) = handy::import(&home, &handy::dir(), dry_run)?;
+    let days =
+      |at: Option<i64>| at.and_then(crate::history::recordings::day_of).unwrap_or_default();
+    println!(
+      "Handy in {}: {} entries with text from {} to {}, {} recordings ({})",
+      found.dir.display(),
+      found.entries,
+      days(found.first),
+      days(found.last),
+      found.recordings,
+      transfer::size(found.bytes)
+    );
+    print_report(&report, would);
+    return Ok(());
+  }
+
+  let done = archive::import(&home, source, take_settings, dry_run)?;
+  print_report(&done.report, would);
+  match (done.settings, take_settings) {
+    (true, _) => println!("settings {would}replaced with the archive's"),
+    (false, true) => println!("no settings in the archive: these stay"),
+    (false, false) => {}
+  }
+
+  Ok(())
+}
+
+fn print_report(r: &Report, would: &str) {
+  println!(
+    "{} entries with text: {} {would}added, {} there already; {} recordings {would}copied",
+    r.entries,
+    r.added,
+    r.entries - r.added,
+    r.copied
+  );
+  if r.failed > 0 {
+    println!("{} recordings could not be copied: their entries are without one", r.failed);
+  }
 }
 
 /// `wavo-app devices`: input devices, the system default marked with `*`.
