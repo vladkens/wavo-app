@@ -2,7 +2,8 @@
 
 //! The menu bar menu and icon, from the session's status and what the system says ([System]):
 //! a header with the app, the hotkey and the state; the warnings that need the person, some
-//! opening where to fix them; Copy Last Dictation and the recent dictations; the model in use
+//! opening where to fix them; Copy Last Dictation, Retry Last Failed Dictation and the recent
+//! dictations; the model in use
 //! with the others downloaded, Unload Model; History…, Settings… and Quit.
 
 use nimbo::tray::{Item, Menu};
@@ -190,6 +191,7 @@ pub fn menu(
   }
 
   let last = status.last.as_ref().is_some_and(|l| !l.text.is_empty());
+  let retry = status.failed_recording.is_some() && status.state == Phase::Idle;
   let loaded = status.engine.phase != EnginePhase::Stopped && status.state == Phase::Idle;
   let recent: Vec<Item> = (recent.iter().enumerate())
     .map(|(i, title)| Item::new(&format!("recent:{i}"), title))
@@ -204,6 +206,7 @@ pub fn menu(
   items.extend([
     Item::separator(),
     Item::new("copy-last", "Copy Last Dictation").enabled(last),
+    Item::new("retry-failed", "Retry Last Failed Dictation").enabled(retry),
     Item::new("recent", "Recent").enabled(!recent.is_empty()).submenu(Menu::new(recent)),
     Item::separator(),
     Item::new("model", &models.title).submenu(Menu::new(choices)),
@@ -297,6 +300,7 @@ mod tests {
       idle[1..],
       [
         item("Copy Last Dictation", false),
+        item("Retry Last Failed Dictation", false),
         item("Recent", false),
         item("No Model", true),
         item("Unload Model", false),
@@ -320,9 +324,10 @@ mod tests {
     let ready =
       labels(&menu(None, &s, &[], &["09:05 · Hi".into()], &Models::new(&[], &Pick::default())));
     assert_eq!(
-      ready[1..5],
+      ready[1..6],
       [
         item("Copy Last Dictation", true),
+        item("Retry Last Failed Dictation", false),
         item("Recent", true),
         item("No Model", true),
         item("Unload Model", true),
@@ -331,7 +336,7 @@ mod tests {
 
     s.state = Phase::Recording;
     assert!(
-      !labels(&menu(None, &s, &[], &[], &Models::new(&[], &Pick::default())))[4].1,
+      !labels(&menu(None, &s, &[], &[], &Models::new(&[], &Pick::default())))[5].1,
       "no unload while it works"
     );
   }

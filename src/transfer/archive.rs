@@ -148,7 +148,8 @@ pub fn export(home: &Path, file: &Path) -> Result<Exported> {
 /// Imports the archive `file` into `home` (see the [module](super) docs); `take_settings` replaces
 /// the settings with the archive's. A dry run says what it would do and writes nothing.
 pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> Result<Imported> {
-  let target = Target::open(home, dry_run)?;
+  let lock = if dry_run { super::Lock::DryRun } else { super::Lock::Take };
+  let target = Target::open(home, lock)?;
   let scratch = Scratch::new()?;
   let reader = File::open(file).with_context(|| format!("open {}", file.display()))?;
   let mut archive = tar::Archive::new(BufReader::new(reader));

@@ -532,6 +532,8 @@ impl Prefs {
     if let Some(dir) = reveal {
       self.shell.reveal(dir);
     }
+
+    self.data(ui, fs);
   }
 
   /// A permission's state and a button to its pane in System Settings.

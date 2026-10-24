@@ -106,6 +106,11 @@ impl State {
     }
   }
 
+  /// Loads the entries again on the next frame: another connection wrote them (an import).
+  pub fn reload(&mut self) {
+    self.loaded = None;
+  }
+
   fn audio(&self, e: &Entry) -> Option<PathBuf> {
     self.db.as_ref()?.audio_file(e)
   }

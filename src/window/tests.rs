@@ -37,6 +37,9 @@ use crate::history::{History, now_ms};
 use crate::session::controller::{EngineStatus, Phase};
 use crate::settings::Activation;
 use crate::testing::TempDir;
+use crate::transfer::Report;
+use crate::transfer::archive::Exported;
+use crate::transfer::handy::Summary;
 
 #[derive(Default)]
 struct Log {
@@ -62,6 +65,11 @@ struct Log {
   autostarts: Vec<bool>,
   /// The recordings' size, added up unless set.
   recordings_size: Option<u64>,
+  /// Handy's history as the shell finds it; the import asked for, with what tells it how it goes;
+  /// the archives exported.
+  handy: Option<Summary>,
+  import: Option<Box<dyn Fn(data::Import) + Send>>,
+  exports: Vec<PathBuf>,
 }
 
 #[derive(Clone, Default)]
@@ -165,6 +173,21 @@ impl Shell for Fake {
 
   fn reveal(&self, dir: &Path) {
     self.log().folders.push(dir.to_owned());
+  }
+
+  fn handy(&self, done: Box<dyn FnOnce(Option<Summary>) + Send>) {
+    let found = self.log().handy.clone();
+    done(found);
+  }
+
+  fn import_handy(&self, _: PathBuf, tell: Box<dyn Fn(data::Import) + Send>) {
+    self.log().import = Some(tell);
+  }
+
+  /// Done at once, written nowhere.
+  fn export(&self, file: PathBuf, done: Box<dyn FnOnce(Result<Exported, String>) + Send>) {
+    self.log().exports.push(file);
+    done(Ok(Exported { entries: 3, recordings: 2, bytes: 1_200_000 }));
   }
 }
 
@@ -1117,6 +1140,11 @@ fn every_page_renders_in_both_looks() {
     for (page, _, name) in PAGES {
       let fake = Fake::default();
       fake.log().recordings_size = Some(184_300_000);
+      let (first, last) = (Some(now_ms() - 400 * 86_400_000), Some(now_ms() - 86_400_000));
+      let dir = home.path().join("handy");
+      let handy =
+        Summary { dir, entries: 1204, recordings: 1180, bytes: 2_100_000_000, first, last };
+      fake.log().handy = Some(handy);
       let running = Download::Running { done: 114_000_000, total: 272_000_000, rate: Some(3.2e6) };
       fake.log().states.insert("gigaam-v3-e2e-ctc", running);
       let mut h = harness(&fake, Settings::default(), &home);
@@ -1159,4 +1187,53 @@ fn every_page_renders_in_both_looks() {
       }
     }
   }
+}
+
+/// Advanced's Data section: Import from Handy only when Handy's history is here, saying what it
+/// would bring, its copies' progress in place of that while it runs, then how it went; Export
+/// writes an archive into Downloads and says so.
+#[test]
+fn handys_history_is_imported_and_the_history_exported() {
+  let home = Home::new("window-data", &TWO);
+  let fake = Fake::default();
+  let mut h = harness(&fake, Settings::default(), &home);
+  tab(&mut h, Page::Advanced);
+  assert!(h.rect(Id::of(data::IMPORT)).is_none(), "no Handy here");
+
+  fake.log().handy = Some(Summary {
+    dir: home.path().join("handy"),
+    entries: 1204,
+    recordings: 1180,
+    bytes: 2_100_000_000,
+    first: None,
+    last: None,
+  });
+  tab(&mut h, Page::General);
+  h.app_mut().refresh();
+  tab(&mut h, Page::Advanced);
+  let caption = |h: &Harness<Prefs>, id| h.text(row(id).key("caption")).map(str::to_owned);
+  let found = caption(&h, data::IMPORT).expect("Handy found");
+  assert_eq!(found, "1204 dictations, 1180 recordings · 2.1 GB");
+  let height = |h: &Harness<Prefs>| h.rect(Id::of(data::IMPORT)).unwrap().y;
+  let at = height(&h);
+  click(&mut h, Id::of(data::IMPORT));
+  let tell = fake.log().import.take().expect("the import asked for");
+  tell(data::Import::Copying(120, 900));
+  h.rt.waker().wake();
+  h.frame();
+  assert_eq!(height(&h), at, "the button stays in place");
+  assert_eq!(caption(&h, data::IMPORT), None, "the progress in its place");
+  assert_eq!(hover(&mut h, Id::of(data::IMPORT)), (Cursor::Arrow, 0), "disabled while it runs");
+  tell(data::Import::Done(Ok(Report { entries: 1204, added: 1200, copied: 1180, failed: 0 })));
+  h.rt.waker().wake();
+  h.frame();
+  h.frame();
+  let done = "Imported 1200 dictations (4 were here already), 1180 recordings.";
+  assert_eq!(caption(&h, data::IMPORT).as_deref(), Some(done));
+
+  click(&mut h, Id::of(data::EXPORT));
+  let file = fake.log().exports.pop().expect("exported");
+  assert!(file.parent().is_some_and(|d| d.ends_with("Downloads")), "{file:?}");
+  let exported = caption(&h, data::EXPORT).unwrap_or_default();
+  assert!(exported.ends_with(" · 3 dictations · 1.2 MB"), "{exported}");
 }
