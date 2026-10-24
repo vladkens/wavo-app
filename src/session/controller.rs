@@ -216,7 +216,6 @@ pub struct Update {
   pub meter: Option<Meter>,
   /// Moves on every change of the history (an entry added, finished, deleted, cleaned up): a
   /// history window reloads then.
-  #[cfg_attr(not(test), expect(dead_code, reason = "the History page (step 8) is its first user"))]
   pub history: u64,
 }
 
@@ -249,6 +248,7 @@ enum Msg {
   },
   /// The background thread removed entries.
   Cleaned,
+  CheckModel,
   Quit,
 }
 
@@ -339,6 +339,12 @@ impl Handle {
   /// engine is stopped in the background.
   pub fn edit_settings(&self, edit: impl FnOnce(&mut Settings) + Send + 'static) {
     let _ = self.0.send(Msg::Edit(Box::new(edit)));
+  }
+
+  /// The models on disk changed (a download ended, a model was deleted): whether one can
+  /// transcribe is looked at again, and an engine whose file is gone lets go of it.
+  pub fn check_model(&self) {
+    let _ = self.0.send(Msg::CheckModel);
   }
 
   /// Handles a control request; `quit` is refused, the app answers it.
@@ -541,6 +547,16 @@ impl<O: TextOutput> Controller<O> {
       Msg::Transcribed { take, result } => self.on_transcribed(take, result),
       Msg::Retranscribed { entry, result } => self.on_retranscribed(entry, result),
       Msg::Cleaned => {} // the history's changes show it
+      Msg::CheckModel => {
+        if let Some(loaded) = &self.engine
+          && !loaded.path.is_file()
+        {
+          info!("model {}: its file is gone, its engine stops", loaded.name);
+          self.retire_engine();
+        }
+
+        let _ = self.check_model();
+      }
       Msg::Quit => unreachable!("handled by the loop"),
     }
   }
@@ -566,7 +582,7 @@ impl<O: TextOutput> Controller<O> {
         let state = if self.engine.is_some() { "unloading" } else { "unloaded" };
         return Ok(json!({ "state": state }));
       }
-      Request::OpenSettings | Request::Autostart { .. } | Request::Quit => {
+      Request::OpenSettings | Request::OpenHistory | Request::Autostart { .. } | Request::Quit => {
         bail!("{request:?} is not handled by the session")
       }
     };

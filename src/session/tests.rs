@@ -509,6 +509,26 @@ fn a_chosen_model_gone_behind_the_apps_back_gives_way_to_the_next() {
   assert!(!third.warnings.iter().any(|w| w == note), "{:?}", third.warnings);
 }
 
+/// The models on disk changed (the settings window deleted or downloaded one): the session looks
+/// again at once, and an engine whose file is gone lets go of it without waiting for a recording.
+#[test]
+fn a_check_of_the_models_lets_a_deleted_one_go_and_finds_a_new_one() {
+  let s =
+    InProcess::start("session-check-model", &Settings::default(), Some(&tone(10.0)), ONE_MODEL);
+  let first = dictate(&s, 1);
+  assert_eq!(first.engine.model.as_deref(), Some("parakeet-tdt-0.6b-v3-Q8_0"));
+
+  s.hub.remove("parakeet-v3").unwrap();
+  s.handle.check_model();
+  let none = Some(NoModel::NoneDownloaded);
+  let gone = s.update_where("none left", |u| u.status.no_model == none);
+  assert_eq!(gone.status.engine.model, None, "its engine went");
+
+  download(&s.hub, "whisper-tiny");
+  s.handle.check_model();
+  s.update_where("a model again", |u| u.status.no_model.is_none());
+}
+
 /// The chosen model's file deleted while it loads for a recording: that engine cannot serve the
 /// recording, so the first model left transcribes it instead.
 #[test]
