@@ -7,6 +7,7 @@ mod cli;
 mod ctl;
 mod engine;
 mod history;
+mod language;
 mod session;
 mod settings;
 #[cfg(test)]

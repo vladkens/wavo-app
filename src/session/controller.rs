@@ -20,7 +20,8 @@
 //!   saying so; the choice stays (downloading it again brings it back).
 //! - The result goes to the history first, then it is pasted (`pasted` says whether it was). Speech
 //!   of which the engine made no text (a model that does not know the language) is no success: the
-//!   entry and its recording stay as `no_text`, to transcribe again with another model.
+//!   entry and its recording stay as `no_text`, to transcribe again with another model, its error
+//!   the one language the model is meant for if it is for one (`… understands English only`).
 //! - Every dictation ends with the history retention.
 //! - On start, what a crash left is recovered on the session thread, before any recording; the
 //!   first retention runs on a thread of its own: it may have a lot to delete.
@@ -54,6 +55,7 @@ use crate::engine::supervisor::{
 use crate::engine::{Engine, EngineConfig};
 use crate::history::db::{Entry, NewEntry, Status as EntryStatus};
 use crate::history::{History, Retention, now_ms};
+use crate::language;
 use crate::settings::{self, Activation, Settings};
 
 /// How long a request waits for the session thread; less than `wavo-app ctl` waits for the reply,
@@ -364,6 +366,8 @@ struct Loaded {
   name: String,
   /// What it is called where it shows: wavo's full name, else `name`.
   label: String,
+  /// wavo's, unless the model is a file of the person's own.
+  info: Option<&'static ModelInfo>,
   path: PathBuf,
   engine: Engine,
 }
@@ -767,7 +771,7 @@ impl<O: TextOutput> Controller<O> {
       let label = info.map_or_else(|| name.clone(), |m| m.full_name.to_owned());
       let engine = Engine::start(config)
         .map_err(|e| NoModel::LoadFailed { model: label.clone(), error: e.to_string() })?;
-      self.engine = Some(Loaded { name, label, path, engine });
+      self.engine = Some(Loaded { name, label, info, path, engine });
     }
 
     Ok(self.engine.as_ref().unwrap())
@@ -1080,7 +1084,11 @@ impl<O: TextOutput> Controller<O> {
       Ok(t) => {
         debug!("{:.2?} on {} in {} piece(s)", t.elapsed, t.device, t.pieces);
         match t.text.trim() {
-          "" => (Outcome::NoText, String::new(), None),
+          // Most likely speech in a language the model does not know.
+          "" => {
+            let note = self.engine.as_ref().and_then(|l| l.info).and_then(understands_only);
+            (Outcome::NoText, String::new(), note)
+          }
           _ => (Outcome::Done, t.text, None),
         }
       }
@@ -1351,7 +1359,8 @@ fn log_history(result: Result<()>) {
 fn result_summary(outcome: Outcome, error: Option<&str>) -> Option<String> {
   match (outcome, error) {
     (Outcome::Done, _) => None,
-    (Outcome::NoText, _) => Some("nothing recognized".into()),
+    (Outcome::NoText, None) => Some("nothing recognized".into()),
+    (Outcome::NoText, Some(note)) => Some(format!("nothing recognized: {note}")),
     (outcome, Some(e)) => Some(format!("{outcome:?}: {e}")),
     (outcome, None) => Some(format!("{outcome:?}")),
   }
@@ -1380,6 +1389,13 @@ fn label(choice: &str) -> String {
   hub::lookup(choice).map_or_else(|_| file_stem(Path::new(choice)), |m| m.full_name.into())
 }
 
+/// The note on nothing recognized by a model meant for one language (wavo's
+/// [`langs`](ModelInfo::langs)): `parakeet-tdt-0.6b-v2 understands English only`.
+fn understands_only(info: &ModelInfo) -> Option<String> {
+  let [code] = info.langs else { return None };
+  Some(format!("{} understands {} only", info.full_name, language::name(code)))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1406,5 +1422,19 @@ mod tests {
 
     assert_eq!(label("/models/parakeet-tdt-0.6b-v3-Q8_0.gguf"), "parakeet-tdt-0.6b-v3-Q8_0");
     assert_eq!(label("/models/broken.gguf"), "broken");
+  }
+
+  /// Only a model meant for one language says which, also one that takes more (a fine-tune).
+  #[test]
+  fn nothing_recognized_names_the_one_language_a_model_is_for() {
+    let note = |name| understands_only(hub::lookup(name).unwrap());
+    let v2 = "parakeet-tdt-0.6b-v2 understands English only";
+    assert_eq!(note("parakeet-v2").as_deref(), Some(v2));
+    let he = "ivrit-whisper-large-v3-turbo understands Hebrew only";
+    assert_eq!(note("whisper-turbo-he").as_deref(), Some(he));
+    assert_eq!(
+      (note("parakeet-v3"), note("whisper-turbo"), note("breeze-asr-25")),
+      (None, None, None)
+    );
   }
 }
