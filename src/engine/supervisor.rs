@@ -591,6 +591,7 @@ impl Supervisor {
           WorkerState::Running { stop, .. } => stop,
           _ => Stop::No,
         };
+
         worker.state = WorkerState::Idle;
         self.idle_since = Instant::now();
         if stop == Stop::Cancel {

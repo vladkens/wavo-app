@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Result;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Loads model files; called on an engine thread, once per thread.
 pub trait Loader: Send + Sync {
@@ -73,12 +73,11 @@ impl SpeechModel for wavo::Model {
     on_piece: &mut dyn FnMut(Piece) -> ControlFlow<()>,
   ) -> Result<String> {
     let mut options = wavo::Options::default();
-    match language {
-      Some(code) if self.takes_language() && self.languages().iter().any(|l| l == code) => {
-        options.language = Some(code.to_owned());
-      }
-      Some(code) => debug!("language {code} not sent: the model cannot be told it"),
-      None => {}
+    let listed = language.and_then(|c| self.languages().iter().find(|l| l.eq_ignore_ascii_case(c)));
+    match (language, listed) {
+      (_, Some(code)) if self.takes_language() => options.language = Some(code.clone()),
+      (Some(code), _) => warn!("language {code} not sent: the model cannot be told it"),
+      (None, _) => {}
     }
 
     let started = Instant::now();
