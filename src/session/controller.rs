@@ -364,8 +364,6 @@ impl Handle {
 struct Loaded {
   /// The model file's name without extension.
   name: String,
-  /// What it is called where it shows: wavo's full name, else `name`.
-  label: String,
   /// wavo's, unless the model is a file of the person's own.
   info: Option<&'static ModelInfo>,
   path: PathBuf,
@@ -768,10 +766,11 @@ impl<O: TextOutput> Controller<O> {
       };
 
       // Without its thread the model cannot load: the recording waits, as for a load that fails.
-      let label = info.map_or_else(|| name.clone(), |m| m.full_name.to_owned());
-      let engine = Engine::start(config)
-        .map_err(|e| NoModel::LoadFailed { model: label.clone(), error: e.to_string() })?;
-      self.engine = Some(Loaded { name, label, info, path, engine });
+      let engine = Engine::start(config).map_err(|e| NoModel::LoadFailed {
+        model: loaded_label(info, &name),
+        error: e.to_string(),
+      })?;
+      self.engine = Some(Loaded { name, info, path, engine });
     }
 
     Ok(self.engine.as_ref().unwrap())
@@ -1094,7 +1093,10 @@ impl<O: TextOutput> Controller<O> {
       }
       Err(EngineError::Cancelled) => (Outcome::Cancelled, String::new(), None),
       Err(EngineError::Load(error)) => {
-        let model = self.engine.as_ref().map_or_else(|| "the model".into(), |l| l.label.clone());
+        let model = self
+          .engine
+          .as_ref()
+          .map_or_else(|| "the model".into(), |l| loaded_label(l.info, &l.name));
         (Outcome::NoModel, String::new(), Some(NoModel::LoadFailed { model, error }.to_string()))
       }
       Err(e) => (Outcome::Failed, String::new(), Some(e.to_string())),
@@ -1303,7 +1305,7 @@ impl<O: TextOutput> Controller<O> {
 
     let load_failed = engine.as_ref().and_then(|(l, s)| {
       let error = s.load_error.clone()?;
-      Some(NoModel::LoadFailed { model: l.label.clone(), error })
+      Some(NoModel::LoadFailed { model: loaded_label(l.info, &l.name), error })
     });
 
     Status {
@@ -1387,6 +1389,11 @@ fn file_stem(path: &Path) -> String {
 /// extension.
 fn label(choice: &str) -> String {
   hub::lookup(choice).map_or_else(|_| file_stem(Path::new(choice)), |m| m.full_name.into())
+}
+
+/// What a loaded model is called where it shows: wavo's full name, else its file's `name`.
+fn loaded_label(info: Option<&ModelInfo>, name: &str) -> String {
+  info.map_or_else(|| name.to_owned(), |m| m.full_name.to_owned())
 }
 
 /// The note on nothing recognized by a model meant for one language (wavo's
