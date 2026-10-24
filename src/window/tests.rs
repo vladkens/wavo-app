@@ -115,13 +115,16 @@ impl Shell for Fake {
     self.log().states.get(name).cloned()
   }
 
-  /// What the shells do on their thread, here at once.
+  /// What the shells do on their thread, here at once; the file goes, not through
+  /// `Hub::remove` ([page::delete]), which also looks at the Neural Engine's cache in the
+  /// person's home.
   fn delete_model(&self, model: &'static ModelInfo) {
     let mut log = self.log();
     let hub = log.hub.clone().expect("a cache to delete from");
-    let result = page::delete(&hub, model);
+    let file = hub.find(model.name).expect("downloaded");
+    let result = std::fs::remove_file(&file).map(|()| model.size).map_err(|e| e.to_string());
     if result.is_ok() {
-      page::forget(&mut log.settings, model);
+      page::forget(&mut log.settings, &hub, model);
     }
 
     log.deleted_models.push((model, result));
@@ -828,10 +831,8 @@ fn a_downloaded_model_is_deleted_after_asking() {
   h.frame();
   assert!(h.rect(Id::of((DOWNLOAD, tiny.name))).is_some());
 
-  // A model that is gone already says so.
-  let again = page::delete(&home.hub, model);
-  assert!(again.is_err(), "{again:?}");
-  h.app_mut().model_deleted(model, again);
+  // A delete that failed says so.
+  h.app_mut().model_deleted(model, Err("it is not downloaded".into()));
   let note = h.app().models.note.clone().unwrap_or_default();
   assert!(note.starts_with("Couldn't delete whisper-tiny: "), "{note}");
 }
@@ -892,7 +893,7 @@ fn a_model_gone_behind_the_windows_back_shows_not_on_disk() {
   let height = h.rect(row_id).unwrap().h;
   let checks = fake.log().checks;
 
-  home.hub.remove("parakeet-v3").unwrap();
+  std::fs::remove_file(home.hub.find("parakeet-v3").unwrap()).unwrap();
   h.move_to(10.0, 300.0);
   h.frame();
   h.frame();
@@ -1093,6 +1094,19 @@ fn a_dictation_is_transcribed_again() {
   h.rt.waker().wake();
   h.frame();
   assert_eq!(hover(&mut h, Id::of((RETRANSCRIBE, id))), (Cursor::Arrow, 0));
+  assert_eq!(hover(&mut h, Id::of((DELETE, id))), (Cursor::Arrow, 0), "nor deleted meanwhile");
+
+  // A delete the session refused: the entry is back, and why is said.
+  h.app_mut().update(&settings, &status(Phase::Idle), 3);
+  h.app_mut().delete_entry(id);
+  h.app_mut().entry_not_deleted("entry 1 is being transcribed");
+  h.rt.waker().wake();
+  h.frame();
+  assert!(h.rect(Id::of((COPY, id))).is_some(), "back");
+  assert_eq!(
+    h.app().history.note.as_deref(),
+    Some("Couldn't delete: entry 1 is being transcribed")
+  );
 }
 
 /// Every page in both looks, as people see them: two models downloaded and one downloading, a

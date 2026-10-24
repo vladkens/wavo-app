@@ -342,7 +342,7 @@ impl Handle {
   }
 
   /// The models on disk changed (a download ended, a model was deleted): whether one can
-  /// transcribe is looked at again, and an engine whose file is gone lets go of it.
+  /// transcribe is looked at again, and an engine of another model than that lets go of it.
   pub fn check_model(&self) {
     let _ = self.0.send(Msg::CheckModel);
   }
@@ -547,15 +547,16 @@ impl<O: TextOutput> Controller<O> {
       Msg::Transcribed { take, result } => self.on_transcribed(take, result),
       Msg::Retranscribed { entry, result } => self.on_retranscribed(entry, result),
       Msg::Cleaned => {} // the history's changes show it
+      // An engine of another model than the one to use now (its file gone, the first one
+      // downloaded another) stops.
       Msg::CheckModel => {
+        let path = self.check_model().ok();
         if let Some(loaded) = &self.engine
-          && !loaded.path.is_file()
+          && path.as_ref() != Some(&loaded.path)
         {
-          info!("model {}: its file is gone, its engine stops", loaded.name);
+          info!("model {}: another is to transcribe, its engine stops", loaded.name);
           self.retire_engine();
         }
-
-        let _ = self.check_model();
       }
       Msg::Quit => unreachable!("handled by the loop"),
     }

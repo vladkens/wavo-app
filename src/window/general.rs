@@ -38,6 +38,11 @@ pub const OPEN_MICROPHONE: &str = "open-microphone";
 pub const MODEL_FOLDER: &str = "model-folder";
 pub const RECORDINGS_FOLDER: &str = "recordings-folder";
 
+/// The shortcut recorder records: it has the focus in a window that has the keys.
+pub fn records(ui: &Ui) -> bool {
+  ui.focused(Id::of(HOTKEY)) && ui.window_focused()
+}
+
 /// The row of a control: its ⓘ is `row(name).key("info")`, its caption `row(name).key("caption")`.
 pub fn row(name: &str) -> Id {
   Id::of(("row", name))
@@ -387,7 +392,7 @@ impl Prefs {
       self.edit(move |s| s.hotkey = hotkey.clone());
     }
 
-    let recording = ui.focused(Id::of(HOTKEY));
+    let recording = records(ui);
     if recording != self.recording {
       self.recording = recording;
       self.shell.pause_hotkey(recording);
