@@ -115,18 +115,19 @@ pub fn icon(status: &Status, warnings: &[Warning]) -> Icon {
   }
 }
 
-/// The model submenu: the models downloaded, each a choice (`model:<i>`, its index in the list
-/// given) with the one that transcribes checked, then the chosen one when it is none of them;
-/// and its item's title, the model in use.
+/// The model submenu: the models downloaded, each a choice (`model:<name>`, wavo's name) with the
+/// one that transcribes checked, then the chosen one when it is none of them; and its item's title,
+/// the model in use.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Models {
-  pub items: Vec<(String, bool)>,
+  /// `(id, label, checked)`.
+  pub items: Vec<(String, String, bool)>,
   pub title: String,
 }
 
 impl Models {
   pub fn new(found: &[Found], pick: &Pick) -> Self {
-    let mut items: Vec<(String, bool)> = (found.iter().enumerate())
+    let mut items: Vec<(String, String, bool)> = (found.iter().enumerate())
       .map(|(i, (m, _))| {
         // A model meant for one language says so before it is picked.
         let mut label = format!("{} — {}", m.full_name, size_text(m.size));
@@ -134,7 +135,7 @@ impl Models {
           label += &format!(" · {only}");
         }
 
-        (label, pick.active == Some(i) && pick.other.is_none())
+        (format!("model:{}", m.name), label, pick.active == Some(i) && pick.other.is_none())
       })
       .collect();
     let other = pick.other.as_ref().map(|(name, there)| match there {
@@ -147,7 +148,7 @@ impl Models {
       (None, None) => "No Model".to_owned(),
     };
     if let Some(other) = other {
-      items.push((other, pick.gone().is_none()));
+      items.push(("model-chosen".into(), other, pick.gone().is_none()));
     }
 
     Self { items, title }
@@ -193,9 +194,8 @@ pub fn menu(
   let recent: Vec<Item> = (recent.iter().enumerate())
     .map(|(i, title)| Item::new(&format!("recent:{i}"), title))
     .collect();
-  let mut choices: Vec<Item> = (models.items.iter().enumerate())
-    .map(|(i, (label, on))| Item::new(&format!("model:{i}"), label).checked(*on))
-    .collect();
+  let mut choices: Vec<Item> =
+    (models.items.iter()).map(|(id, label, on)| Item::new(id, label).checked(*on)).collect();
   if choices.is_empty() {
     choices.push(Item::new("model-none", "No Models Downloaded").enabled(false));
   }
@@ -341,20 +341,20 @@ mod tests {
     let pick = Pick { active: Some(1), other: None };
     let models = Models::new(&found, &pick);
     assert_eq!(models.title, "parakeet-tdt-0.6b-v2");
-    assert!(!models.items[0].1 && models.items[1].1);
-    assert_eq!(models.items[1].0, "parakeet-tdt-0.6b-v2 — 730 MB · English only");
+    assert!(!models.items[0].2 && models.items[1].2);
+    assert_eq!(models.items[1].1, "parakeet-tdt-0.6b-v2 — 730 MB · English only");
     let pick = Pick { active: Some(0), other: Some(("whisper-turbo".into(), false)) };
     let gone = Models::new(&found, &pick);
     assert_eq!(gone.title, "whisper-turbo (not on disk)");
     assert_eq!(gone.items.len(), 3);
-    assert!(gone.items.iter().all(|i| !i.1), "none is the choice");
+    assert!(gone.items.iter().all(|i| !i.2), "none is the choice");
 
     let s = status(Phase::Idle);
     let menu = menu(None, &s, &[], &[], &models);
     let model = menu.items.iter().find(|i| i.id == "model").unwrap();
     let ids: Vec<&str> =
       model.submenu.as_ref().unwrap().items.iter().map(|i| i.id.as_str()).collect();
-    assert_eq!(ids, ["model:0", "model:1", "", "models"]);
+    assert_eq!(ids, ["model:parakeet-v3", "model:parakeet-v2", "", "models"]);
   }
 
   #[test]

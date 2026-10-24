@@ -90,6 +90,8 @@ struct App {
   /// The models downloaded and the recent dictations (their texts and times), as the menu last
   /// opened.
   found: Vec<Found>,
+  /// Which of them transcribes, for the menu's check.
+  pick: Pick,
   recent: Vec<(String, i64)>,
   /// The history, for «Recent».
   history: Option<History>,
@@ -175,6 +177,7 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     window: None,
     downloads: Downloads::default(),
     found: Vec::new(),
+    pick: Pick::default(),
     recent: Vec::new(),
     history: None,
     accessibility: false,
@@ -279,8 +282,8 @@ fn chosen(main: &mut Main, id: &str) {
     return;
   }
 
-  if let Some(i) = index("model:") {
-    with_app(|app| app.select_model(i));
+  if let Some(name) = id.strip_prefix("model:") {
+    with_app(|app| app.select_model(name));
     return;
   }
 
@@ -351,12 +354,16 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
   }
 }
 
-/// Runs `f` on the settings window on the main thread, if it is open.
+/// Runs `f` on the settings window on the main thread, if it is open; while the window is busy
+/// further up the stack (a pop-up's menu runs its own loop), again a moment later: `f` brings a
+/// result the window waits for.
 fn with_window(f: impl FnOnce(&mut Prefs) + Send + 'static) {
   proxy().post(|_| {
-    let window = with_app(|app| app.window.clone()).flatten();
-    if let Some(w) = window {
-      w.with(f);
+    let Some(w) = with_app(|app| app.window.clone()).flatten() else { return };
+    let mut f = Some(f);
+    w.with(|prefs| f.take().map(|f| f(prefs)));
+    if let Some(f) = f.filter(|_| w.is_open()) {
+      proxy().after(Duration::from_millis(50), |_| with_window(f));
     }
   });
 }
@@ -550,7 +557,13 @@ impl App {
 
   /// Keeps `update` as the last and shows it in the icon and the menu.
   fn keep(&mut self, update: Update) {
+    let model = |u: &Option<Update>| u.as_ref().map(|u| u.settings.model.clone());
+    let chosen = model(&self.update);
     self.update = Some(update);
+    if model(&self.update) != chosen {
+      self.repick();
+    }
+
     self.refresh();
   }
 
@@ -657,6 +670,8 @@ impl App {
       self.found = found;
       self.handle.check_model();
     }
+
+    self.repick();
   }
 
   /// The latest dictations, for «Recent», from the history opened the first time.
@@ -666,7 +681,7 @@ impl App {
     }
 
     let Some(history) = &self.history else { return };
-    let entries = history.db.get_page("", None, menu::RECENT);
+    let entries = history.db.get_page("", menu::RECENT);
     self.recent = match entries {
       Ok(entries) => entries.into_iter().map(|e| (e.text, e.created_at)).collect(),
       Err(e) => {
@@ -685,17 +700,16 @@ impl App {
   }
 
   /// The menu's model `i` is used from now on.
-  fn select_model(&mut self, i: usize) {
-    let Some((m, _)) = self.found.get(i) else { return };
-    info!("model {} chosen in the menu", m.name);
-    let name = m.name.to_owned();
+  fn select_model(&mut self, name: &str) {
+    info!("model {name} chosen in the menu");
+    let name = name.to_owned();
     self.handle.edit_settings(move |s| s.model = Some(name));
   }
 
-  /// The model submenu: the models downloaded, the one that transcribes checked.
-  fn models(&self) -> Models {
+  /// Which model transcribes, after the models on disk or the choice changed.
+  fn repick(&mut self) {
     let query = self.update.as_ref().and_then(|u| u.settings.model.as_deref());
-    Models::new(&self.found, &Pick::new(&self.hub, query, &self.found))
+    self.pick = Pick::new(&self.hub, query, &self.found);
   }
 
   /// What needs the person's attention, as the session and the system have it now.
@@ -730,7 +744,13 @@ impl App {
     let now = history::now_ms();
     let recent: Vec<String> =
       self.recent.iter().map(|(text, at)| menu::recent_title(text, *at, now)).collect();
-    let menu = menu::menu(hotkey.as_deref(), &update.status, &warnings, &recent, &self.models());
+    let menu = menu::menu(
+      hotkey.as_deref(),
+      &update.status,
+      &warnings,
+      &recent,
+      &Models::new(&self.found, &self.pick),
+    );
     if menu != self.menu {
       self.tray.set_menu(&menu);
       self.menu = menu;
