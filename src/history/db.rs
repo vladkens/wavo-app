@@ -7,7 +7,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension, Row, params};
+
+use super::fold;
 
 /// The error of an entry left `transcribing` by a crash ([`Db::mark_interrupted`]).
 pub const STOPPED_TRANSCRIBING: &str = "Wavo stopped during the transcription";
@@ -176,6 +179,9 @@ impl Db {
     db.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     migrate(&db).with_context(|| format!("migrate {}", path.display()))?;
+    // What a search compares the text by.
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    db.create_scalar_function("wavo_fold", 1, flags, |ctx| Ok(fold(&ctx.get::<String>(0)?)))?;
     Ok(Self { db })
   }
 
@@ -192,6 +198,29 @@ impl Db {
     let qs = "SELECT * FROM entries WHERE id = ?1;";
     let item = self.db.prepare_cached(qs)?.query_row([id], entry_from_row).optional()?;
     Ok(item)
+  }
+
+  /// Up to `limit` entries with text, newest first by recording time, whose text holds `search`
+  /// in any case ([`fold`]; empty: all); after `after`, the `(created_at, id)` of the last entry
+  /// of the page before.
+  pub fn get_page(
+    &self,
+    search: &str,
+    after: Option<(i64, i64)>,
+    limit: usize,
+  ) -> Result<Vec<Entry>> {
+    let qs = "
+    SELECT * FROM entries
+    WHERE text != '' AND (?1 = '' OR instr(wavo_fold(text), ?1) > 0)
+      AND (?2 IS NULL OR (created_at, id) < (?2, ?3))
+    ORDER BY created_at DESC, id DESC LIMIT ?4;
+    ";
+
+    let (at, id) = after.unzip();
+    let args = params![fold(search), at, id, limit as i64];
+    let mut stmt = self.db.prepare_cached(qs)?;
+    let items = stmt.query_map(args, entry_from_row)?.collect::<rusqlite::Result<_>>()?;
+    Ok(items)
   }
 
   /// The recordings entries name.
@@ -455,5 +484,43 @@ mod tests {
       (Status::Failed, Some(STOPPED_TRANSCRIBING))
     );
     assert_eq!(db.mark_interrupted().unwrap(), 0);
+  }
+
+  #[test]
+  fn pages_are_newest_first_with_text_and_searched_in_any_case() {
+    let dir = TempDir::new("db-page");
+    let db = open(&dir);
+    let texts = ["Добрый день.", "Ещё раз", "hello World", "ДОБРЫЙ вечер", "", "еще одно"];
+    let ids: Vec<i64> = (texts.iter().enumerate())
+      .map(|(i, text)| {
+        let entry = NewEntry { created_at: 10_000 - i as i64 * 1_000, ..NewEntry::default() };
+        let id = db.insert_entry(&entry).unwrap();
+        db.update_outcome(id, Status::Done, Some(text), None).unwrap();
+        id
+      })
+      .collect();
+
+    let page = |search: &str, after: Option<(i64, i64)>, limit| -> Vec<i64> {
+      db.get_page(search, after, limit).unwrap().iter().map(|e| e.id).collect()
+    };
+    let all = [ids[0], ids[1], ids[2], ids[3], ids[5]];
+    assert_eq!(page("", None, 100), all, "the one without text is left out");
+
+    // Pages of 2 cover everything once, in order.
+    let mut seen = Vec::new();
+    let mut after = None;
+    loop {
+      let next = db.get_page("", after, 2).unwrap();
+      let Some(last) = next.last() else { break };
+      after = Some((last.created_at, last.id));
+      seen.extend(next.iter().map(|e| e.id));
+    }
+
+    assert_eq!(seen, all);
+    // Case in Cyrillic and Latin, `ё` as `е`; a quote or a percent sign is just text.
+    assert_eq!(page("добрый", None, 100), [ids[0], ids[3]]);
+    assert_eq!(page("WORLD", None, 100), [ids[2]]);
+    assert_eq!(page("ещё", None, 100), [ids[1], ids[5]]);
+    assert!(page("%", None, 100).is_empty() && page("'", None, 100).is_empty());
   }
 }

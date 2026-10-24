@@ -18,6 +18,7 @@ pub mod db;
 pub mod recordings;
 
 use std::collections::HashSet;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -37,6 +38,54 @@ pub const STOPPED_RECORDING: &str =
 /// Now as the history keeps time: Unix ms.
 pub fn now_ms() -> i64 {
   SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// A moment in local time (the C runtime's time zone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Local {
+  pub year: i32,
+  pub month: u32,
+  pub day: u32,
+  pub hour: u32,
+  pub minute: u32,
+}
+
+impl Local {
+  /// The calendar day: year, month, day.
+  pub fn date(self) -> (i32, u32, u32) {
+    (self.year, self.month, self.day)
+  }
+}
+
+/// Unix ms `ms` in local time; `None` outside the years 1970 to 9999.
+pub fn local_time(ms: i64) -> Option<Local> {
+  let time = ms.div_euclid(1000) as libc::time_t;
+  // SAFETY: `tm` is plain data, and `localtime_r` writes only to it.
+  let mut tm: libc::tm = unsafe { mem::zeroed() };
+  #[cfg(unix)]
+  if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
+    return None;
+  }
+
+  // SAFETY: as above, Windows' C runtime's version.
+  #[cfg(windows)]
+  if unsafe { libc::localtime_s(&mut tm, &time) } != 0 {
+    return None;
+  }
+
+  let year = tm.tm_year + 1900;
+  (1970..=9999).contains(&year).then(|| Local {
+    year,
+    month: (tm.tm_mon + 1) as u32,
+    day: tm.tm_mday as u32,
+    hour: tm.tm_hour as u32,
+    minute: tm.tm_min as u32,
+  })
+}
+
+/// What a search of the history compares: lower case in every script, `ё` as `е`.
+pub fn fold(text: &str) -> String {
+  text.to_lowercase().replace('ё', "е")
 }
 
 /// How long history is kept.
