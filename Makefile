@@ -1,12 +1,18 @@
 .PHONY: prepare check test build update clean
 
+# macOS 14 is the least nimbo runs on; the bundle's Info.plist says the same (scripts/bundle.sh).
+export MACOSX_DEPLOYMENT_TARGET := 14.0
+# Linux does not build the macOS shell, the only user of parts of the session: dead code is
+# checked on macOS.
+LINTS := -D warnings $(if $(filter Linux,$(shell uname -s)),-A dead_code)
+
 prepare:
 	cargo +nightly fmt
 	cargo clippy --release --all-targets --fix --allow-dirty --allow-staged
 
 check:
 	cargo +nightly fmt --check
-	cargo clippy --release --all-targets -- -D warnings
+	cargo clippy --release --all-targets -- $(LINTS)
 
 test:
 	cargo test --release
@@ -22,7 +28,28 @@ update:
 clean:
 	cargo clean
 
-.PHONY: fixtures test-models unload-memory
+.PHONY: bundle run install fixtures test-models unload-memory
+
+ICON := target/Wavo.icns
+APP := target/Wavo.app
+PROFILE := release
+
+$(ICON): assets/icon.png scripts/icns.sh
+	scripts/icns.sh assets/icon.png $@
+
+# target/Wavo.app (scripts/bundle.sh), signed with the identity $$WAVO_SIGN_IDENTITY when the
+# keychain has it, ad hoc otherwise. Built, never opened.
+bundle: $(ICON) # target/Wavo.app from the release profile, or PROFILE
+	cargo build --profile $(PROFILE)
+	scripts/bundle.sh target/$(PROFILE)/wavo-app $(ICON) $(APP)
+
+run: # quit the running Wavo, start target/Wavo.app built with the quick fast profile
+	$(MAKE) bundle PROFILE=fast
+	scripts/run.sh $(APP)
+
+install: # the same, installed into /Applications
+	$(MAKE) bundle PROFILE=fast
+	scripts/run.sh $(APP) /Applications/Wavo.app
 
 # WAV fixtures and reference transcripts in target/fixtures/ (scripts/gen-fixtures.sh, macOS
 # voices and ffmpeg); regenerated when the script or a text changes.
