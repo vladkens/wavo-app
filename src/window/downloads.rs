@@ -53,21 +53,26 @@ impl Downloads {
     self.0.lock().unwrap().get(name).map(|j| j.state.clone())
   }
 
-  /// The download of `name` goes on as `state`, unless it is gone.
-  fn set(&self, name: &str, state: Download) {
-    if let Some(job) = self.0.lock().unwrap().get_mut(name) {
-      job.state = state;
+  /// The download of `name` whose cancel is `cancel` goes on as `state`, unless it is gone (a
+  /// cancel forgot it, another started); `None` ends it.
+  fn set(&self, name: &str, cancel: &Arc<AtomicBool>, state: Option<Download>) {
+    let mut jobs = self.0.lock().unwrap();
+    if !jobs.get(name).is_some_and(|j| Arc::ptr_eq(&j.cancel, cancel)) {
+      return;
+    }
+
+    match state {
+      Some(state) => jobs.get_mut(name).expect("there").state = state,
+      None => _ = jobs.remove(name),
     }
   }
 
-  /// Stops the download of `name` before its next chunk (or the next step of preparing), or
-  /// forgets its failure.
+  /// Forgets the download of `name` at once, or its failure: its thread stops before its next
+  /// chunk (or the next step of preparing), however long that takes, and another may start
+  /// meanwhile.
   pub fn cancel(&self, name: &str) {
-    let mut jobs = self.0.lock().unwrap();
-    match jobs.get(name) {
-      Some(Job { state: Download::Failed(_), .. }) => _ = jobs.remove(name),
-      Some(job) => job.cancel.store(true, Ordering::Relaxed),
-      None => {}
+    if let Some(job) = self.0.lock().unwrap().remove(name) {
+      job.cancel.store(true, Ordering::Relaxed);
     }
   }
 
@@ -106,8 +111,9 @@ impl Downloads {
       jobs.insert(model.name, Job { state, cancel: cancel.clone() });
     }
 
-    let downloads = self.clone();
+    let (downloads, ours) = (self.clone(), cancel.clone());
     let work = move || {
+      let cancel = ours;
       let (started, mut told) = (Instant::now(), None::<Instant>);
       let mut from = None;
       let mut step = |s: Step| {
@@ -122,7 +128,7 @@ impl Downloads {
           }
         };
         let tell = state == Download::Preparing || told.is_none_or(|t| t.elapsed() >= TELL);
-        downloads.set(model.name, state);
+        downloads.set(model.name, &cancel, Some(state));
         if tell {
           told = Some(Instant::now());
           changed(false);
@@ -137,9 +143,9 @@ impl Downloads {
       match pull(&mut step) {
         Err(e) if !cancel.load(Ordering::Relaxed) => {
           warn!("download {}: {e}", model.name);
-          downloads.set(model.name, Download::Failed(e));
+          downloads.set(model.name, &cancel, Some(Download::Failed(e)));
         }
-        _ => _ = downloads.0.lock().unwrap().remove(model.name),
+        _ => downloads.set(model.name, &cancel, None),
       }
 
       changed(true);
@@ -147,7 +153,7 @@ impl Downloads {
 
     let spawned = std::thread::Builder::new().name("download".into()).spawn(work);
     if let Err(e) = spawned {
-      self.set(model.name, Download::Failed(format!("could not start: {e}")));
+      self.set(model.name, &cancel, Some(Download::Failed(format!("could not start: {e}"))));
     }
   }
 }
@@ -210,9 +216,17 @@ mod tests {
     let tell = move |end: bool| _ = end.then(|| ended_tx.send(()));
     downloads.start(model, fake(rx), tell.clone());
     downloads.cancel(model.name);
+    assert_eq!(downloads.get(model.name), None, "cancelled at once");
+    // Another starts while the first waits for its next chunk; the first ends without a trace.
+    let (tx2, rx2) = mpsc::channel();
+    downloads.start(model, fake(rx2), tell.clone());
     tx.send(Ok(Step::Bytes { done: 10, total: 100 })).unwrap();
     ended.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert_eq!(downloads.get(model.name), None, "cancelled");
+    let starting = Download::Running { done: 0, total: model.size, rate: None };
+    assert_eq!(downloads.get(model.name), Some(starting), "the second's");
+    tx2.send(Err(Ok(()))).unwrap();
+    ended.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(downloads.get(model.name), None);
 
     let (tx, rx) = mpsc::channel();
     downloads.start(model, fake(rx), tell);
