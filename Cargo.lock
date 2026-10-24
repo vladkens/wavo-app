@@ -977,6 +977,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-core-ml"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "201b055e6acfa0f9f15568255d3f03ce2b54bc86d1814442dc69138e36813e18"
+dependencies = [
+ "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "objc2-core-text"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1861,10 +1871,13 @@ dependencies = [
 [[package]]
 name = "wavo"
 version = "0.3.1"
-source = "git+https://github.com/vladkens/wavo?branch=main#f985154d80136f1932bd754266ca0e1ee7b72355"
+source = "git+https://github.com/vladkens/wavo?branch=main#a3b5c3b2a20903aeeeffd28128ea219d503cbc74"
 dependencies = [
  "bytemuck",
  "half",
+ "objc2",
+ "objc2-core-ml",
+ "objc2-foundation",
  "pollster",
  "thiserror 2.0.21",
  "ureq",
