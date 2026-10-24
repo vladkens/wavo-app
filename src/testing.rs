@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::f32::consts::TAU;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -17,7 +18,7 @@ use rusqlite::Connection;
 use crate::audio::vad::Clip;
 use crate::audio::wav::WavSink;
 use crate::audio::{SAMPLE_RATE, wav};
-use crate::engine::model::{Loader, SpeechModel};
+use crate::engine::model::{Loader, Piece, SpeechModel};
 use crate::history::DB_FILE;
 
 /// A fresh directory under the system temp dir, removed on drop.
@@ -135,6 +136,12 @@ pub fn model_en() -> PathBuf {
   test_model("WAVO_TEST_MODEL_EN", "whisper-turbo")
 }
 
+/// Parakeet v3, which detects its languages itself: `$WAVO_TEST_MODEL_PARAKEET`, else parakeet-v3
+/// from the Hugging Face cache.
+pub fn model_parakeet() -> PathBuf {
+  test_model("WAVO_TEST_MODEL_PARAKEET", "parakeet-v3")
+}
+
 fn test_model(var: &str, name: &str) -> PathBuf {
   if let Some(path) = env::var_os(var) {
     return path.into();
@@ -168,21 +175,21 @@ pub fn app_exe() -> PathBuf {
 }
 
 /// A stand-in for wavo, in the process as wavo is: it loads any file (on device `fake`) unless the
-/// file is gone or starts with `BROKEN` (a load that fails, as wavo's does), and answers every
-/// piece with its text, trimmed. Clones count the loads, the models in memory and the runs
-/// together.
+/// file is gone or starts with `BROKEN` (a load that fails, as wavo's does), cuts long audio with
+/// [`wavo::split`] as wavo does, and answers every piece with its text, trimmed. Clones count the
+/// loads, the models in memory and the runs of pieces together.
 #[derive(Clone)]
 pub struct FakeModels {
   text: String,
   max_audio_ms: Option<u32>,
   loads: Arc<AtomicUsize>,
   live: Arc<AtomicUsize>,
-  /// The samples of each run, in order.
+  /// The samples of each piece run, in order.
   runs: Arc<Mutex<Vec<usize>>>,
 }
 
 impl FakeModels {
-  /// Models that take any length in one run.
+  /// Models that take any length in one piece.
   pub fn new(text: &str) -> Self {
     Self {
       text: text.trim().to_owned(),
@@ -208,7 +215,7 @@ impl FakeModels {
     self.live.load(Ordering::SeqCst)
   }
 
-  /// How many samples each run so far had, in order.
+  /// How many samples each piece run so far had, in order.
   pub fn runs(&self) -> Vec<usize> {
     self.runs.lock().unwrap().clone()
   }
@@ -239,9 +246,24 @@ impl SpeechModel for FakeModel {
     self.models.max_audio_ms
   }
 
-  fn transcribe(&self, pcm: &[f32], _language: Option<&str>) -> anyhow::Result<String> {
-    self.models.runs.lock().unwrap().push(pcm.len());
-    Ok(self.models.text.clone())
+  fn transcribe(
+    &self,
+    pcm: &[f32],
+    _language: Option<&str>,
+    on_piece: &mut dyn FnMut(Piece) -> ControlFlow<()>,
+  ) -> anyhow::Result<String> {
+    let pieces = wavo::split(pcm, self.models.max_audio_ms.unwrap_or(u32::MAX));
+    let count = pieces.len();
+    for (index, range) in pieces.into_iter().enumerate() {
+      self.models.runs.lock().unwrap().push(range.len());
+      let start_ms = (range.start * 1000 / SAMPLE_RATE as usize) as u32;
+      if on_piece(Piece { index, count, start_ms }).is_break() {
+        return Err(wavo::Error::Cancelled.into());
+      }
+    }
+
+    let texts = vec![self.models.text.as_str(); count];
+    Ok(texts.join(" ").trim().to_owned())
   }
 }
 
@@ -263,10 +285,12 @@ pub enum Fault {
   /// Blocks until [`Faults::release`], then does its work: a wedged GPU, or a run held while the
   /// test looks.
   Hang,
+  /// Does its work: the fault for a later piece goes after it.
+  Pass,
 }
 
-/// Faults for the loads and runs of the [`Loader`] that [`Faults::wrap`] wraps, taken in order.
-/// Clones share them.
+/// Faults for the loads and the runs of pieces of the [`Loader`] that [`Faults::wrap`] wraps,
+/// taken in order. Clones share them.
 #[derive(Clone)]
 pub struct Faults(Arc<FaultState>);
 
@@ -294,7 +318,7 @@ impl Faults {
     self.0.loads.lock().unwrap().push_back(fault);
   }
 
-  /// The next run does `fault`.
+  /// The next run of a piece does `fault`.
   pub fn run(&self, fault: Fault) {
     self.0.runs.lock().unwrap().push_back(fault);
   }
@@ -304,7 +328,7 @@ impl Faults {
     *self.0.gate.lock().unwrap_or_else(PoisonError::into_inner) = bounded(0);
   }
 
-  /// Loads and runs held in a [`Fault::Hang`] now.
+  /// Loads and runs of pieces held in a [`Fault::Hang`] now.
   pub fn hanging(&self) -> usize {
     self.0.hanging.load(Ordering::SeqCst)
   }
@@ -325,7 +349,7 @@ impl Faults {
         let _ = gate.recv();
         self.0.hanging.fetch_sub(1, Ordering::SeqCst);
       }
-      None => {}
+      Some(Fault::Pass) | None => {}
     }
 
     Ok(())
@@ -359,9 +383,33 @@ impl SpeechModel for FaultyModel {
     self.inner.max_audio_ms()
   }
 
-  fn transcribe(&self, pcm: &[f32], language: Option<&str>) -> anyhow::Result<String> {
-    self.faults.take(&self.faults.0.runs, "a run")?;
-    self.inner.transcribe(pcm, language)
+  /// Each piece's fault is taken before it runs: the first's before the run, the next one's after
+  /// the piece before it.
+  fn transcribe(
+    &self,
+    pcm: &[f32],
+    language: Option<&str>,
+    on_piece: &mut dyn FnMut(Piece) -> ControlFlow<()>,
+  ) -> anyhow::Result<String> {
+    let runs = &self.faults.0.runs;
+    self.faults.take(runs, "a run")?;
+    let mut failed = None;
+    let result = self.inner.transcribe(pcm, language, &mut |piece| {
+      if on_piece(piece).is_break() {
+        return ControlFlow::Break(());
+      }
+
+      if piece.index + 1 < piece.count
+        && let Err(e) = self.faults.take(runs, "a run")
+      {
+        failed = Some(e);
+        return ControlFlow::Break(());
+      }
+
+      ControlFlow::Continue(())
+    });
+
+    failed.map_or(result, Err)
   }
 }
 

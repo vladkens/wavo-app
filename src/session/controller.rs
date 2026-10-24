@@ -1070,7 +1070,7 @@ impl<O: TextOutput> Controller<O> {
   ) -> (Outcome, String, Option<String>) {
     match result {
       Ok(t) => {
-        debug!("{:.2?} on {} in {} piece(s)", t.elapsed, t.device, t.pieces.len());
+        debug!("{:.2?} on {} in {} piece(s)", t.elapsed, t.device, t.pieces);
         match t.text.trim() {
           "" => (Outcome::NoText, String::new(), None),
           _ => (Outcome::Done, t.text, None),
