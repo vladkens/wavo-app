@@ -18,6 +18,7 @@ use crate::audio::vad::Clip;
 use crate::audio::{SAMPLE_RATE, vad, wav};
 use crate::ctl::{self, Claim, Reply, Request};
 use crate::engine::{Engine, EngineConfig, model};
+use crate::history::Retention;
 use crate::session::output::Stdout;
 use crate::session::{self, Session};
 use crate::settings::{self, Settings};
@@ -234,12 +235,12 @@ pub fn import(source: &Path, take_settings: bool, dry_run: bool) -> Result<()> {
       found.recordings,
       transfer::size(found.bytes)
     );
-    print_report(&report, would);
+    print_report(&home, &report, would);
     return Ok(());
   }
 
   let done = archive::import(&home, source, take_settings, dry_run)?;
-  print_report(&done.report, would);
+  print_report(&home, &done.report, would);
   match (done.settings, take_settings) {
     (true, _) => println!("settings {would}replaced with the archive's"),
     (false, true) => println!("no settings in the archive: these stay"),
@@ -249,7 +250,7 @@ pub fn import(source: &Path, take_settings: bool, dry_run: bool) -> Result<()> {
   Ok(())
 }
 
-fn print_report(r: &Report, would: &str) {
+fn print_report(home: &Path, r: &Report, would: &str) {
   println!(
     "{} entries with text: {} {would}added, {} there already; {} recordings {would}copied",
     r.entries,
@@ -258,7 +259,17 @@ fn print_report(r: &Report, would: &str) {
     r.copied
   );
   if r.failed > 0 {
-    println!("{} recordings could not be copied: their entries are without one", r.failed);
+    println!(
+      "{} recordings could not be copied: their entries name a missing file until an import \
+       copies it",
+      r.failed
+    );
+  }
+
+  // The cleanup applies it to imported entries as to any.
+  let retention = Settings::load(&home.join(settings::FILE)).0.history_retention;
+  if r.added > 0 && retention != Retention::Unlimited {
+    println!("the history keeps {retention:?}: older entries go at the next cleanup");
   }
 }
 

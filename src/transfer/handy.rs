@@ -12,6 +12,8 @@
 //!   post_processed_text, post_process_prompt, post_process_requested)`; `timestamp` is Unix
 //!   seconds, `post_processed_text` the text after Handy's optional LLM pass (what it pasted).
 //! - `file_name` is `handy-<unix seconds>.wav` in `recordings/`: 16 kHz mono 16-bit, as Wavo's.
+//! - The database keeps SQLite's rollback journal (Handy sets no WAL): opened read-only, nothing is
+//!   written beside it.
 //!
 //! Handy keeps no model or duration per entry: an imported entry's model is `handy`, its duration
 //! is its recording's.
@@ -92,7 +94,7 @@ pub fn import(home: &Path, dir: &Path, dry_run: bool) -> Result<(Summary, Report
   let read = read(dir)?;
   let summary = Summary::new(dir, &read);
   let target = Target::open(home, dry_run)?;
-  let plan = target.plan(read.items)?;
+  let plan = target.plan(read.items);
   let mut report = plan.report(dry_run);
   if dry_run {
     return Ok((summary, report));
@@ -121,18 +123,22 @@ fn read(dir: &Path) -> Result<Read> {
     bail!("no Handy history in {}", dir.display());
   }
 
-  let db = db::open_read_only(&path)?;
+  let db = db::read_only(&path)?;
   let qs = "
-  SELECT file_name, timestamp, transcription_text, post_processed_text
+  SELECT id, file_name, timestamp, transcription_text, post_processed_text
   FROM transcription_history ORDER BY timestamp, id;
   ";
 
   let mut stmt = db.prepare(qs).with_context(|| format!("read {}", path.display()))?;
   let rows = stmt.query_map([], |row| {
-    let file: String = row.get(0)?;
-    let at: i64 = row.get(1)?;
-    let text: String = row.get(2)?;
-    let processed: Option<String> = row.get(3)?;
+    let id: i64 = row.get(0)?;
+    let file: String = row.get(1)?;
+    let at: i64 = row.get(2)?;
+    let text: String = row.get(3)?;
+    let processed: Option<String> = row.get(4)?;
+    // Seconds to ms, the id as the ms: two dictations of one second start apart, the same each
+    // time it is imported.
+    let at = at.saturating_mul(1000).saturating_add(id.rem_euclid(1000));
     Ok((file, at, processed.filter(|t| !t.trim().is_empty()).unwrap_or(text)))
   })?;
 
@@ -162,7 +168,7 @@ fn read(dir: &Path) -> Result<Read> {
     read.bytes += size.copied().unwrap_or(0);
     let entry = Entry {
       id: 0,
-      created_at: at.saturating_mul(1000),
+      created_at: at,
       duration_ms: size.map_or(0, |len| (len.saturating_sub(WAV_HEADER) / WAV_BYTES_PER_MS) as i64),
       audio_path: None,
       model: Some(MODEL.into()),
@@ -273,7 +279,8 @@ mod tests {
     assert_eq!(dry, Report { entries: 3, added: 3, copied: 2, failed: 0 });
     assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
     assert_eq!((summary.dir.as_path(), summary.entries, summary.recordings), (src.path(), 3, 2));
-    assert_eq!((summary.first, summary.last), (Some((NOW - 300) * 1000), Some(NOW * 1000)));
+    // Ms from the row ids.
+    assert_eq!((summary.first, summary.last), (Some((NOW - 300) * 1000 + 1), Some(NOW * 1000 + 4)));
     assert!(summary.bytes > 2 * 16_000 * 2, "{}", summary.bytes);
 
     let report = import(home.path(), src.path(), false).unwrap().1;
@@ -285,7 +292,7 @@ mod tests {
     let texts: Vec<_> = entries.iter().map(|e| e.text.as_str()).collect();
     assert_eq!(texts, ["first one", "Processed text.", "no recording left"]);
     let first = &entries[0];
-    assert_eq!((first.created_at, first.duration_ms), ((NOW - 300) * 1000, 1_500));
+    assert_eq!((first.created_at, first.duration_ms), ((NOW - 300) * 1000 + 1, 1_500));
     assert_eq!(first.model.as_deref(), Some(MODEL));
     let wav = h.audio_file(first).unwrap();
     assert_eq!(
@@ -320,6 +327,37 @@ mod tests {
     assert_eq!(report, Report { entries: 3, added: 0, copied: 2, failed: 0 });
     assert!(a.is_file() && b.is_file() && !super::super::part_of(&b).exists());
     assert_eq!(entry_ids(home.path()).len(), 3);
+
+    // Or before any of a day's recordings, and Wavo pruned the empty day folder since.
+    fs::remove_dir_all(a.parent().unwrap()).unwrap();
+    h.recover().unwrap();
+    let report = import(home.path(), src.path(), false).unwrap().1;
+    assert_eq!((report.copied, report.failed), (2, 0));
+    assert!(a.is_file() && b.is_file());
+  }
+
+  /// Handy names a recording by its second: of two dictations in one, the file is the last one's.
+  #[test]
+  fn two_dictations_of_one_second_are_two_entries() {
+    let (src, home) = (TempDir::new("handy-second-src"), TempDir::new("handy-second-home"));
+    handy(src.path(), &[(NOW, "one", None, Some(0.5)), (NOW, "two", None, None)]);
+    let report = import(home.path(), src.path(), false).unwrap().1;
+    assert_eq!(report, Report { entries: 2, added: 2, copied: 1, failed: 0 });
+    let report = import(home.path(), src.path(), false).unwrap().1;
+    assert_eq!(report, Report { entries: 2, ..Report::default() });
+  }
+
+  /// An entry transcribed again in Wavo is still the one imported.
+  #[test]
+  fn an_entry_transcribed_again_is_not_imported_again() {
+    let (src, home) = (TempDir::new("handy-again-src"), TempDir::new("handy-again-home"));
+    handy(src.path(), &rows());
+    import(home.path(), src.path(), false).unwrap();
+    let h = History::open(home.path()).unwrap();
+    let id = h.db.get_entries().unwrap()[0].id;
+    h.db.update_text(id, "another text", "parakeet", None).unwrap();
+    let report = import(home.path(), src.path(), false).unwrap().1;
+    assert_eq!(report, Report { entries: 3, ..Report::default() });
   }
 
   #[test]

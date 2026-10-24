@@ -5,20 +5,22 @@
 //!
 //! An import is the same whatever the source:
 //!
-//! - Only entries with text come over; one is in the history already when an entry there has the
-//!   same start time (Unix ms) and text, so importing twice adds nothing.
+//! - Only entries with text come over; one is in the history already when an entry there started at
+//!   the same time (Unix ms: one dictation's, whatever its text became when transcribed again), so
+//!   importing twice adds nothing.
 //! - The new entries go in first, in one transaction, each naming the recording it will have; their
 //!   recordings are copied after, each through a `.part` file renamed into place. An import cut
-//!   short leaves entries whose recording is not there yet: the next one finds them by their time
-//!   and text and copies what is missing, to the names they hold.
+//!   short leaves entries whose recording is not there yet: the next one finds them by their start
+//!   and copies what is missing, to the names they hold.
 //! - It holds the app's single-instance lock ([`ctl::claim`]): it refuses while Wavo runs, and Wavo
-//!   does not start while it imports. A dry run writes nothing and takes no lock.
+//!   does not start while it imports. A dry run reads the history read-only and takes no lock.
 
 pub mod archive;
 pub mod handy;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
+use std::hash::Hash;
 use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -28,7 +30,8 @@ use anyhow::{Context, Result, bail};
 use tracing::warn;
 
 use crate::ctl::{self, Claim};
-use crate::history::db::Entry;
+use crate::history::db::{Db, Entry};
+use crate::history::recordings::{self, Recordings};
 use crate::history::{DB_FILE, History};
 
 /// An entry of another history, and where its recording is there.
@@ -65,7 +68,7 @@ impl Report {
   }
 }
 
-/// What [`Target::plan`] makes of a source's items against the history.
+/// What [`plan`] makes of a source's items against the history.
 struct Plan<S> {
   entries: usize,
   /// Not in the history yet.
@@ -88,29 +91,25 @@ impl<S> Plan<S> {
 }
 
 /// Splits `items` into the new ones and the recordings missing for those already in the history,
-/// whose entries are `keys` ([`Db::get_keys`](crate::history::db::Db::get_keys)), its
-/// recordings on disk `on_disk`. An item without text, or one the source has twice, is left out.
-fn plan<S>(
-  keys: &HashMap<(i64, String), Option<String>>,
+/// whose entries are `starts` ([`Db::get_starts`]), its recordings on disk `on_disk`. An item
+/// without text, or one starting when one before it did, is left out; a recording two items name
+/// goes with the first.
+fn plan<S: Eq + Hash + Clone>(
+  starts: &HashMap<i64, Option<String>>,
   items: Vec<Item<S>>,
   on_disk: &HashSet<String>,
 ) -> Plan<S> {
-  let mut seen = HashSet::new();
+  let (mut seen, mut audio_seen) = (HashSet::new(), HashSet::new());
   let mut plan = Plan { entries: 0, new: Vec::new(), missing: Vec::new() };
-  for item in items {
-    if item.entry.text.trim().is_empty() {
-      continue;
-    }
-
-    let key = (item.entry.created_at, item.entry.text.clone());
-    let there = keys.get(&key);
-    if !seen.insert(key) {
+  for Item { entry, audio } in items {
+    if entry.text.trim().is_empty() || !seen.insert(entry.created_at) {
       continue;
     }
 
     plan.entries += 1;
-    match (there, item.audio) {
-      (None, audio) => plan.new.push(Item { audio, ..item }),
+    let audio = audio.filter(|a| audio_seen.insert(a.clone()));
+    match (starts.get(&entry.created_at), audio) {
+      (None, audio) => plan.new.push(Item { entry, audio }),
       (Some(Some(name)), Some(audio)) if !on_disk.contains(name) => {
         plan.missing.push((audio, name.clone()))
       }
@@ -122,17 +121,29 @@ fn plan<S>(
 }
 
 /// The history an import goes into, under the app's single-instance lock (see the module docs);
-/// a dry run reads it if there is one, without the lock.
+/// a dry run only reads it, if there is one, without the lock.
 struct Target {
+  /// `None` in a dry run.
   history: Option<History>,
+  /// What [`plan`] needs of it.
+  starts: HashMap<i64, Option<String>>,
+  on_disk: HashSet<String>,
   _lock: Option<ctl::Server>,
 }
 
 impl Target {
   fn open(home: &Path, dry_run: bool) -> Result<Self> {
     if dry_run {
-      let history = home.join(DB_FILE).is_file().then(|| History::open(home)).transpose()?;
-      return Ok(Self { history, _lock: None });
+      let db = home.join(DB_FILE);
+      let starts = match db.is_file() {
+        true => Db::open_read_only(&db)?.get_starts()?,
+        false => HashMap::new(),
+      };
+      let on_disk = match home.join(recordings::DIR).is_dir() {
+        true => Recordings::open(home)?.list()?.into_iter().collect(),
+        false => HashSet::new(),
+      };
+      return Ok(Self { history: None, starts, on_disk, _lock: None });
     }
 
     fs::create_dir_all(home).with_context(|| format!("create {}", home.display()))?;
@@ -140,20 +151,18 @@ impl Target {
       bail!("Wavo is running for {}: quit it first", home.display())
     };
 
-    Ok(Self { history: Some(History::open(home)?), _lock: Some(lock) })
+    let history = History::open(home)?;
+    let starts = history.db.get_starts()?;
+    let on_disk = history.recordings.list()?.into_iter().collect();
+    Ok(Self { history: Some(history), starts, on_disk, _lock: Some(lock) })
   }
 
-  fn plan<S>(&self, items: Vec<Item<S>>) -> Result<Plan<S>> {
-    let Some(history) = &self.history else {
-      return Ok(plan(&HashMap::new(), items, &HashSet::new()));
-    };
-
-    let on_disk = history.recordings.list()?.into_iter().collect();
-    Ok(plan(&history.db.get_keys()?, items, &on_disk))
+  fn plan<S: Eq + Hash + Clone>(&self, items: Vec<Item<S>>) -> Plan<S> {
+    plan(&self.starts, items, &self.on_disk)
   }
 
   /// Adds the planned entries in one transaction and returns the recordings to copy, each with the
-  /// path it goes to.
+  /// path it goes to (its day folder made).
   fn add<S>(&self, plan: Plan<S>) -> Result<Vec<(S, PathBuf)>> {
     let history = self.history.as_ref().context("a dry run adds nothing")?;
     let mut taken = history.db.get_audio_paths()?;
@@ -175,10 +184,14 @@ impl Target {
     history.db.insert_imported(&entries)?;
     progress.finish();
 
+    // Their day folders may have gone empty since (a start of Wavo prunes them).
     for (audio, name) in plan.missing {
-      if let Some(path) = history.recordings.path(&name) {
-        copies.push((audio, path));
+      let Some(path) = history.recordings.path(&name) else { continue };
+      if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
       }
+
+      copies.push((audio, path));
     }
 
     Ok(copies)
@@ -305,24 +318,23 @@ mod tests {
 
   #[test]
   fn a_plan_takes_new_entries_and_missing_recordings() {
-    let keys = HashMap::from([
-      ((1, "a".to_owned()), Some("1.wav".to_owned())),
-      ((2, "b".to_owned()), Some("2.wav".to_owned())),
-      ((3, "c".to_owned()), None),
-    ]);
+    let starts =
+      HashMap::from([(1, Some("1.wav".to_owned())), (2, Some("2.wav".to_owned())), (3, None)]);
     let items = vec![
       item(1, "a", Some("src-1")),  // there, its recording too
       item(2, "b", Some("src-2")),  // there, its recording missing
       item(3, "c", Some("src-3")),  // there without a recording: left so
-      item(1, "a2", Some("src-4")), // the same time, another text: new
+      item(1, "a2", Some("src-4")), // the same start, another text: the same dictation
       item(4, "d", None),           // new, no recording
       item(4, "d", None),           // the source's twice
       item(5, "  ", Some("src-5")), // no text
+      item(6, "e", Some("src-6")),  // new
+      item(7, "f", Some("src-6")),  // new, naming a recording another one did
     ];
-    let plan = plan(&keys, items, &HashSet::from(["1.wav".to_owned()]));
-    assert_eq!(plan.entries, 5);
+    let plan = plan(&starts, items, &HashSet::from(["1.wav".to_owned()]));
+    assert_eq!(plan.entries, 6);
     let new: Vec<_> = plan.new.iter().map(|x| (x.entry.created_at, x.audio)).collect();
-    assert_eq!(new, [(1, Some("src-4")), (4, None)]);
+    assert_eq!(new, [(4, None), (6, Some("src-6")), (7, None)]);
     assert_eq!(plan.missing, [("src-2", "2.wav".to_owned())]);
     assert_eq!(plan.copies(), 2);
   }

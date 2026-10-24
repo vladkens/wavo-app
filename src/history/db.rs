@@ -40,10 +40,14 @@ fn migrate_v1(db: &Connection) -> Result<()> {
   Ok(())
 }
 
+fn migrations() -> Vec<fn(&Connection) -> Result<()>> {
+  vec![migrate_v1]
+}
+
 /// Runs the migrations the database has not had, each in its own transaction. A database from a
 /// newer version is refused rather than written in a layout this version does not know.
 fn migrate(db: &Connection) -> Result<()> {
-  let migrations: Vec<fn(&Connection) -> Result<()>> = vec![migrate_v1];
+  let migrations = migrations();
   let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
   let known = migrations.len() as i64;
   if version > known {
@@ -122,8 +126,8 @@ fn entry_audio_from_row(row: &Row<'_>) -> rusqlite::Result<EntryAudio> {
 // MARK: Db
 
 /// Opens the SQLite file at `path` read-only, any app's: it takes a shared lock and writes nothing,
-/// not even a journal.
-pub fn open_read_only(path: &Path) -> Result<Connection> {
+/// not even a journal (but for a database in WAL mode: its shared-memory file).
+pub fn read_only(path: &Path) -> Result<Connection> {
   let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
   let db =
     Connection::open_with_flags(path, flags).with_context(|| format!("open {}", path.display()))?;
@@ -143,6 +147,19 @@ impl Db {
     db.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     migrate(&db).with_context(|| format!("migrate {}", path.display()))?;
+    Ok(Self { db })
+  }
+
+  /// Opens the database at `path` read-only ([`read_only`]), as it is: one in a layout other than
+  /// this version's is refused, not migrated.
+  pub fn open_read_only(path: &Path) -> Result<Self> {
+    let db = read_only(path)?;
+    let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let known = migrations().len() as i64;
+    if version != known {
+      bail!("{} has schema {version}, this Wavo reads {known}", path.display());
+    }
+
     Ok(Self { db })
   }
 
@@ -194,12 +211,11 @@ impl Db {
     Ok(items)
   }
 
-  /// Every entry by when it was recorded and its text, with its recording: what an import matches
-  /// entries by.
-  pub fn get_keys(&self) -> Result<HashMap<(i64, String), Option<String>>> {
-    let qs = "SELECT created_at, text, audio_path FROM entries;";
+  /// Every entry's start time (Unix ms) with its recording: what an import matches entries by.
+  pub fn get_starts(&self) -> Result<HashMap<i64, Option<String>>> {
+    let qs = "SELECT created_at, audio_path FROM entries;";
     let mut stmt = self.db.prepare(qs)?;
-    let rows = stmt.query_map([], |row| Ok(((row.get(0)?, row.get(1)?), row.get(2)?)))?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
     let items = rows.collect::<rusqlite::Result<_>>()?;
     Ok(items)
   }
@@ -419,7 +435,7 @@ mod tests {
   }
 
   #[test]
-  fn imported_entries_are_found_by_time_and_text() {
+  fn imported_entries_are_found_by_their_start() {
     let dir = TempDir::new("db-imported");
     let db = open(&dir);
     let entry = Entry {
@@ -436,12 +452,18 @@ mod tests {
     let other = Entry { created_at: 2_000, audio_path: None, ..entry.clone() };
     db.insert_imported(&[other, entry.clone()]).unwrap();
     assert_eq!(db.get_entry(2).unwrap(), Some(Entry { id: 2, ..entry.clone() }));
-    let keys = db.get_keys().unwrap();
-    assert_eq!(keys.len(), 2);
-    assert_eq!(keys[&(1_000, "hello".into())].as_deref(), Some("1000.wav"));
-    assert_eq!(keys[&(2_000, "hello".into())], None);
+    let starts = db.get_starts().unwrap();
+    assert_eq!(starts, HashMap::from([(1_000, Some("1000.wav".into())), (2_000, None)]));
     assert_eq!(db.get_entries().unwrap()[0], Entry { id: 2, ..entry });
-    db.update_without_audio(&["1000.wav".to_owned()]).unwrap();
+    let names = ["1000.wav".to_owned()];
+    db.update_without_audio(&names).unwrap();
     assert!(db.get_audio_paths().unwrap().is_empty());
+
+    // Read-only, as it is.
+    let ro = Db::open_read_only(&dir.path().join("history.db")).unwrap();
+    assert_eq!(ro.get_entries().unwrap().len(), 2);
+    assert!(ro.update_without_audio(&names).is_err());
+    db.db.pragma_update(None, "user_version", 0).unwrap();
+    assert!(Db::open_read_only(&dir.path().join("history.db")).is_err(), "another layout");
   }
 }

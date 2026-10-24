@@ -76,7 +76,7 @@ pub fn export(home: &Path, file: &Path) -> Result<Exported> {
   // A copy as of now while the app may be writing; the app's database is only read.
   let scratch = Scratch::new()?;
   let snapshot = scratch.0.join(DB_FILE);
-  let conn = db::open_read_only(&db)?;
+  let conn = db::read_only(&db)?;
   let target = snapshot.to_str().context("the temp dir's path is not UTF-8")?;
   conn.execute("VACUUM INTO ?1", [target]).with_context(|| format!("copy {}", db.display()))?;
   drop(conn);
@@ -103,6 +103,7 @@ pub fn export(home: &Path, file: &Path) -> Result<Exported> {
   };
 
   let dir = home.join(recordings::DIR);
+  let mut written = 0;
   super::via_part(file, |part| -> Result<()> {
     let out = File::create(part).with_context(|| format!("create {}", part.display()))?;
     let mut tar = tar::Builder::new(BufWriter::new(out));
@@ -122,9 +123,12 @@ pub fn export(home: &Path, file: &Path) -> Result<Exported> {
 
     let mut progress = Progress::new("writing recordings", names.len());
     for name in &names {
-      // One deleted since the listing is left out.
+      // One deleted since the listing is left out (an import counts it as not copied).
       match File::open(dir.join(name)) {
-        Ok(mut wav) => tar.append_file(format!("{}/{name}", recordings::DIR), &mut wav)?,
+        Ok(mut wav) => {
+          tar.append_file(format!("{}/{name}", recordings::DIR), &mut wav)?;
+          written += 1;
+        }
         Err(e) => warn!("{name}: {e}; left out"),
       }
 
@@ -138,7 +142,7 @@ pub fn export(home: &Path, file: &Path) -> Result<Exported> {
   })?;
 
   let bytes = fs::metadata(file)?.len();
-  Ok(Exported { entries: manifest.entries, recordings: manifest.recordings, bytes })
+  Ok(Exported { entries: manifest.entries, recordings: written, bytes })
 }
 
 /// Imports the archive `file` into `home` (see the [module](super) docs); `take_settings` replaces
@@ -175,12 +179,18 @@ pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> R
       settings::FILE => {
         let path = scratch.0.join(settings::FILE);
         io::copy(&mut entry, &mut File::create(&path)?)?;
-        settings = Some(path);
+        let (taken, warning) = Settings::load(&path);
+        // Before anything is written: settings this Wavo cannot use do not replace these.
+        if let Some(w) = warning.filter(|_| take_settings) {
+          bail!("the archive's settings: {w}; import without --settings");
+        }
+
+        settings = Some(taken);
       }
       DB_FILE => {
         let path = scratch.0.join(DB_FILE);
         io::copy(&mut entry, &mut File::create(&path)?)?;
-        let plan = target.plan(read_entries(&path)?)?;
+        let plan = target.plan(read_entries(&path)?);
         report = plan.report(dry_run);
         if dry_run {
           copies = Some(HashMap::new());
@@ -214,12 +224,7 @@ pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> R
   // Recordings the entries name that are not in the archive.
   report.failed += left.len();
 
-  if let Some(path) = settings.as_ref().filter(|_| take_settings && !dry_run) {
-    let (settings, warning) = Settings::load(path);
-    if let Some(w) = warning {
-      warn!("the archive's settings: {w}");
-    }
-
+  if let Some(settings) = settings.as_ref().filter(|_| take_settings && !dry_run) {
     settings.save(&home.join(settings::FILE))?;
   }
 
@@ -329,6 +334,28 @@ mod tests {
       Imported { report: Report { entries: 4, ..Report::default() }, settings: true }
     );
     assert_eq!((entry_ids(to.path()).len(), hotkey(to.path())), (5, "ctrl+x".into()));
+  }
+
+  /// Settings this Wavo cannot use do not replace the person's, and nothing is imported.
+  #[test]
+  fn bad_settings_in_an_archive_are_not_taken() {
+    let (from, to, out) = (
+      TempDir::new("archive-bad-from"),
+      TempDir::new("archive-bad-to"),
+      TempDir::new("archive-bad"),
+    );
+    let h = History::open(from.path()).unwrap();
+    add(&h, NOW, "hello", Some(0.1));
+    fs::write(from.path().join(settings::FILE), b"{not json").unwrap();
+    let file = out.path().join("wavo.tar");
+    export(from.path(), &file).unwrap();
+
+    save_hotkey(to.path(), "cmd+y");
+    let err = format!("{:#}", import(to.path(), &file, true, false).unwrap_err());
+    assert!(err.contains("without --settings"), "{err}");
+    assert_eq!((hotkey(to.path()), entry_ids(to.path()).len()), ("cmd+y".into(), 0));
+    assert_eq!(import(to.path(), &file, false, false).unwrap().report.added, 1);
+    assert_eq!(hotkey(to.path()), "cmd+y");
   }
 
   #[test]
