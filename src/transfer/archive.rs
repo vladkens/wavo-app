@@ -198,8 +198,10 @@ pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> R
         let path = scratch.0.join(settings::FILE);
         io::copy(&mut entry, &mut File::create(&path)?)?;
         let (taken, warning) = Settings::load(&path);
-        // Before anything is written: settings this Wavo cannot use do not replace these.
-        if let Some(w) = warning.filter(|_| take_settings) {
+        // Before anything is written: a file this Wavo cannot read does not replace these. Values
+        // it does not understand (a newer Wavo's) come along as they are (`Settings::unread`).
+        let readable = serde_json::from_slice::<serde_json::Map<_, _>>(&fs::read(&path)?).is_ok();
+        if let Some(w) = warning.filter(|_| take_settings && !readable) {
           bail!("the archive's settings: {w}; import without --settings");
         }
 
@@ -396,7 +398,7 @@ mod tests {
     assert!(h.audio_file(&entries[1]).is_some());
   }
 
-  /// Settings this Wavo cannot use do not replace the person's, and nothing is imported.
+  /// Settings this Wavo cannot read do not replace the person's, and nothing is imported.
   #[test]
   fn bad_settings_in_an_archive_are_not_taken() {
     let (from, to, out) = (
@@ -416,6 +418,31 @@ mod tests {
     assert_eq!((hotkey(to.path()), entry_ids(to.path()).len()), ("cmd+y".into(), 0));
     assert_eq!(import(to.path(), &file, false, false).unwrap().report.added, 1);
     assert_eq!(hotkey(to.path()), "cmd+y");
+  }
+
+  /// Settings of a newer Wavo are taken as they are: its schema and the values this one does not
+  /// understand stay in the file.
+  #[test]
+  fn newer_settings_in_an_archive_are_taken_as_they_are() {
+    let (from, to, out) = (
+      TempDir::new("archive-newer-from"),
+      TempDir::new("archive-newer-to"),
+      TempDir::new("archive-newer"),
+    );
+    let h = History::open(from.path()).unwrap();
+    add(&h, NOW, "hello", Some(0.1));
+    let text = r#"{"schema_version": 7, "hotkey": "cmd+u", "hud_position": "middle"}"#;
+    fs::write(from.path().join(settings::FILE), text).unwrap();
+    let file = out.path().join("wavo.tar");
+    export(from.path(), &file).unwrap();
+
+    save_hotkey(to.path(), "cmd+y");
+    import(to.path(), &file, true, false).unwrap();
+    let saved = fs::read(to.path().join(settings::FILE)).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    let kept = (&saved["schema_version"], &saved["hud_position"]);
+    assert_eq!(kept, (&7.into(), &"middle".into()));
+    assert_eq!(hotkey(to.path()), "cmd+u");
   }
 
   #[test]

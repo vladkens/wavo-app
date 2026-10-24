@@ -15,6 +15,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -598,11 +599,18 @@ impl window::Shell for MacShell {
 impl App {
   fn on_update(&mut self, main: &mut Main, update: Update) {
     // Retried while the window is busy (a pop-up's menu): an update dropped would leave it behind
-    // until the session's next one.
+    // until the session's next one. A retry a newer update overtook is dropped: it would put the
+    // window back to an older state.
+    static LATEST: AtomicU64 = AtomicU64::new(0);
     if self.window.is_some() {
       let (settings, status, history) =
         (update.settings.clone(), update.status.clone(), update.history);
-      with_window(move |prefs| prefs.update(&settings, &status, history));
+      let at = LATEST.fetch_add(1, Ordering::Relaxed) + 1;
+      with_window(move |prefs| {
+        if LATEST.load(Ordering::Relaxed) == at {
+          prefs.update(&settings, &status, history);
+        }
+      });
     }
 
     let status = &update.status;
