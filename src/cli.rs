@@ -264,13 +264,11 @@ impl Shell for Headless {
     Access { accessibility, ..Access::default() }
   }
 
-  fn request_microphone(&self) {}
-
   fn folder_size(&self, dir: PathBuf, done: Box<dyn FnOnce(u64) + Send>) {
     done(window::folder_size(&dir));
   }
 
-  fn open_pane(&self, _: nimbo::permissions::Pane) {}
+  fn allow(&self, _: nimbo::permissions::Pane) {}
   fn open_url(&self, _: &str) {}
   fn reveal(&self, _: &Path) {}
 }

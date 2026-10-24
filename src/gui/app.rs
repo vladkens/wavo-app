@@ -275,7 +275,6 @@ fn shutdown() {
 
 /// A menu item was chosen, after the menu closed.
 fn chosen(main: &mut Main, id: &str) {
-  let opened = |done: Result<(), String>| done.unwrap_or_else(|e| warn!("{id}: {e}"));
   let index = |prefix: &str| id.strip_prefix(prefix).and_then(|i| i.parse::<usize>().ok());
   if let Some(i) = index("recent:") {
     with_app(|app| app.copy_recent(i));
@@ -294,13 +293,9 @@ fn chosen(main: &mut Main, id: &str) {
     "history" => open_window(main, Some(Page::History)),
     "settings" => open_window(main, None),
     "quit" => main.quit(),
-    // The system's dialog adds the app to the Accessibility list, which the pane alone does not.
-    "warn:accessibility" => _ = permissions::accessibility(true),
-    "warn:microphone" if permissions::microphone() == Access::NotDetermined => {
-      request_microphone(|| {})
-    }
-    "warn:microphone" => opened(permissions::open_pane(Pane::Microphone)),
-    "warn:clipboard" => opened(permissions::open_pane(Pane::Pasteboard)),
+    "warn:accessibility" => allow(Pane::Accessibility),
+    "warn:microphone" => allow(Pane::Microphone),
+    "warn:clipboard" => allow(Pane::Pasteboard),
     // General explains it under the shortcut.
     "warn:secure-input" => open_window(main, Some(Page::General)),
     "warn:model" => open_window(main, Some(Page::Models)),
@@ -351,6 +346,26 @@ fn open_window(main: &mut Main, page: Option<Page>) {
   });
   w.front();
   with_app(|app| app.window = Some(w));
+}
+
+/// Allow… for `pane`: the system's prompt while it can still ask (Accessibility not given, whose
+/// dialog adds the app to the list, which the pane alone does not; the microphone never asked),
+/// else the pane in System Settings.
+fn allow(pane: Pane) {
+  match pane {
+    Pane::Accessibility if !permissions::accessibility(false) => {
+      info!("no Accessibility access: asking for it");
+      permissions::accessibility(true);
+    }
+    Pane::Microphone if permissions::microphone() == Access::NotDetermined => {
+      request_microphone(|| {})
+    }
+    _ => {
+      if let Err(e) = permissions::open_pane(pane) {
+        warn!("open {pane:?}: {e}");
+      }
+    }
+  }
 }
 
 /// Shows the system's microphone prompt; once it is answered the app and the window look again,
@@ -492,39 +507,20 @@ impl window::Shell for MacShell {
   }
 
   fn access(&self) -> window::Access {
-    let microphone = match permissions::microphone() {
-      Access::Granted => Some(true),
-      Access::Denied | Access::Restricted => Some(false),
-      Access::NotDetermined => None,
-    };
     window::Access {
       accessibility: permissions::accessibility(false),
-      microphone,
+      microphone: permissions::microphone(),
       secure_input: permissions::secure_input(),
       clipboard_unread: !SystemClipboard.readable(),
     }
-  }
-
-  fn request_microphone(&self) {
-    request_microphone(|| {});
   }
 
   fn folder_size(&self, dir: PathBuf, done: Box<dyn FnOnce(u64) + Send>) {
     spawn("folder-size", move || done(window::folder_size(&dir)));
   }
 
-  /// The system's dialog adds the app to the Accessibility list, which opening the pane alone
-  /// does not; the person asked for it with the button.
-  fn open_pane(&self, pane: Pane) {
-    if pane == Pane::Accessibility && !permissions::accessibility(false) {
-      info!("no Accessibility access: asking for it");
-      permissions::accessibility(true);
-      return;
-    }
-
-    if let Err(e) = permissions::open_pane(pane) {
-      warn!("open {pane:?}: {e}");
-    }
+  fn allow(&self, pane: Pane) {
+    allow(pane);
   }
 
   fn open_url(&self, url: &str) {
@@ -556,7 +552,7 @@ impl App {
       Phase::Recording => {
         let recording = self.update.as_ref().is_some_and(|u| u.status.state == Phase::Recording);
         if !recording {
-          self.ask_microphone(|| {});
+          self.ask_microphone();
         }
 
         let r = status.recording.as_ref();
@@ -676,31 +672,39 @@ impl App {
   /// Accessibility's (its dialog adds the app to the list); whether anything was.
   fn ask_missing(&mut self) -> bool {
     let accessibility = self.accessibility;
-    let ask_accessibility = move || {
+    let then = move || {
       if !accessibility {
-        info!("no Accessibility access: asking for it");
-        permissions::accessibility(true);
+        allow(Pane::Accessibility);
       }
     };
-    let missing = !accessibility || (!self.fake_mic && self.microphone != Access::Granted);
-    if !self.ask_microphone(ask_accessibility) {
-      ask_accessibility();
+    match self.may_ask_microphone() {
+      true => {
+        self.asked_microphone = true;
+        request_microphone(then);
+      }
+      false => then(),
     }
 
-    missing
+    !accessibility || self.no_microphone()
   }
 
-  /// The system's microphone prompt, the first time in this run it was never answered, then
-  /// `then`; whether it asked. At launch, and when a recording starts.
-  fn ask_microphone(&mut self, then: impl FnOnce() + Send + 'static) -> bool {
+  /// A recording starts: the system's prompt, the first time in this run it was never answered.
+  fn ask_microphone(&mut self) {
     self.microphone = permissions::microphone();
-    let ask = !self.fake_mic && self.microphone == Access::NotDetermined && !self.asked_microphone;
-    if ask {
+    if self.may_ask_microphone() {
       self.asked_microphone = true;
-      request_microphone(then);
+      request_microphone(|| {});
     }
+  }
 
-    ask
+  /// The microphone was never asked for in this run, nor answered.
+  fn may_ask_microphone(&self) -> bool {
+    !self.fake_mic && self.microphone == Access::NotDetermined && !self.asked_microphone
+  }
+
+  /// Dictation can't record: the microphone is not allowed (or not yet).
+  fn no_microphone(&self) -> bool {
+    !self.fake_mic && self.microphone != Access::Granted
   }
 
   /// The microphone's prompt was answered.
@@ -772,14 +776,13 @@ impl App {
   fn warnings(&self, update: &Update) -> Vec<Warning> {
     let hotkeys = self.hotkeys.status();
     let settings = &update.settings;
-    let restores = settings.auto_paste && !settings.keep_in_clipboard;
     let system = menu::System {
       accessibility: self.accessibility,
       tap_failed: hotkeys.listener == Listener::Failed,
       hotkey_error: hotkeys.error,
       fallback_error: hotkeys.fallback_error,
-      no_microphone: !self.fake_mic && self.microphone != Access::Granted,
-      clipboard_unread: restores && !self.clipboard,
+      no_microphone: self.no_microphone(),
+      clipboard_unread: settings.restores_clipboard() && !self.clipboard,
       secure_input: hotkeys.secure_input,
     };
     menu::warnings(&system, &settings.hotkey, &update.status)

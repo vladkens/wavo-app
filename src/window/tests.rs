@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
+use nimbo::permissions::Access as Grant;
 use nimbo::{
   Appearance, Code, Cursor, Event, Harness, Hotkey, Id, Modifiers, NamedKey, Point, Rect, Size,
 };
@@ -65,9 +66,8 @@ struct Log {
   recordings_size: Option<u64>,
   /// What the system allows, as the test sets it: Accessibility only missing unless set.
   access: Option<Access>,
-  /// The panes opened and the microphone prompts shown.
-  panes: Vec<Pane>,
-  microphone_asked: usize,
+  /// The permissions Allow or Open Settings was clicked for.
+  allowed: Vec<Pane>,
 }
 
 #[derive(Clone, Default)]
@@ -157,12 +157,8 @@ impl Shell for Fake {
   }
 
   fn access(&self) -> Access {
-    let missing = Access { microphone: Some(true), ..Access::default() };
+    let missing = Access { microphone: Grant::Granted, ..Access::default() };
     self.log().access.unwrap_or(missing)
-  }
-
-  fn request_microphone(&self) {
-    self.log().microphone_asked += 1;
   }
 
   /// At once, on the window's thread.
@@ -171,8 +167,8 @@ impl Shell for Fake {
     done(size.unwrap_or_else(|| folder_size(&dir)));
   }
 
-  fn open_pane(&self, pane: Pane) {
-    self.log().panes.push(pane);
+  fn allow(&self, pane: Pane) {
+    self.log().allowed.push(pane);
   }
 
   fn open_url(&self, url: &str) {
@@ -1124,9 +1120,8 @@ fn a_dictation_is_transcribed_again() {
   );
 }
 
-/// The first launch: General shows what is missing, each with a button that asks the system for
-/// it, and with no model a button to the Models page in place of the model pop-up. A permission
-/// given shows so and its button opens System Settings; a denied microphone is not asked again.
+/// The first launch: General shows what is missing, each with Allow, and with no model a button to
+/// the Models page in place of the model pop-up. A permission answered gets Open Settings.
 #[test]
 fn general_guides_the_first_launch() {
   let home = Home::new("window-first-run", &[]);
@@ -1137,19 +1132,23 @@ fn general_guides_the_first_launch() {
   let caption = h.text(row(MODEL).key("caption"));
   assert_eq!(caption, Some("Dictation needs a speech model: download one to start."));
 
+  // The buttons' labels by their widths: Allow is the shorter.
+  let widths = |h: &Harness<Prefs>| {
+    [OPEN_ACCESSIBILITY, OPEN_MICROPHONE].map(|b| h.rect(Id::of(b)).unwrap().w)
+  };
+  let allow = widths(&h);
   click(&mut h, Id::of(OPEN_ACCESSIBILITY));
   click(&mut h, Id::of(OPEN_MICROPHONE));
-  assert_eq!(fake.log().panes, [Pane::Accessibility]);
-  assert_eq!(fake.log().microphone_asked, 1);
+  assert_eq!(fake.log().allowed, [Pane::Accessibility, Pane::Microphone]);
 
-  // Allowed, back in the window: Open Settings, the microphone's pane.
-  let given = Access { accessibility: true, microphone: Some(false), ..Access::default() };
+  // Answered, back in the window: a denied microphone is not asked again, only System Settings
+  // changes it.
+  let given = Access { accessibility: true, microphone: Grant::Denied, ..Access::default() };
   fake.log().access = Some(given);
   h.app_mut().access_changed();
   h.frame();
-  click(&mut h, Id::of(OPEN_MICROPHONE));
-  assert_eq!(fake.log().panes, [Pane::Accessibility, Pane::Microphone]);
-  assert_eq!(fake.log().microphone_asked, 1, "denied: only System Settings changes it");
+  let open = widths(&h);
+  assert!(open[0] > allow[0] && open[1] > allow[1], "Open Settings: {allow:?} {open:?}");
 
   click(&mut h, Id::of(DOWNLOAD_MODEL));
   assert_eq!(h.app().page, Page::Models);

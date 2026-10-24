@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nimbo::autostart::State as Autostart;
-use nimbo::permissions::Pane;
+use nimbo::permissions::{Access as Grant, Pane};
 use nimbo::{Button, FormRow, FormStyle, Hotkey, Icon, Id, Select, Tile, Tone, Ui, open, paths};
 use tracing::{info, warn};
 
@@ -272,14 +272,16 @@ impl Prefs {
     self.permissions(ui, fs);
     ui.form_section(fs, "Dictation", |ui| {
       self.model(ui, fs);
-      let notes = [
-        (self.settings.hotkey == "fn").then_some(FN_NOTE),
-        self.access.secure_input.then_some(SECURE_INPUT_NOTE),
-      ];
-      let note = notes.into_iter().flatten().collect::<Vec<_>>().join(" ");
+      // Secure Input, while it is on, before the fn key's standing note.
+      let fn_key = self.settings.hotkey == "fn";
+      let note = match (self.access.secure_input, fn_key) {
+        (true, _) => Some(SECURE_INPUT_NOTE),
+        (false, true) => Some(FN_NOTE),
+        (false, false) => None,
+      };
       let mut row = FormRow::new("Shortcut");
-      if !note.is_empty() {
-        row = row.caption(&note);
+      if let Some(note) = note {
+        row = row.caption(note);
       }
 
       ui.form_row(fs, row, |ui| self.shortcut(ui));
@@ -313,8 +315,7 @@ impl Prefs {
       // Without pasting the text only goes to the clipboard, and stays there.
       let settings = &self.settings;
       let mut row = FormRow::new("Keep the text on the clipboard").disabled(!settings.auto_paste);
-      let restores = settings.auto_paste && !settings.keep_in_clipboard;
-      if restores && self.access.clipboard_unread {
+      if settings.restores_clipboard() && self.access.clipboard_unread {
         row = row.caption(CLIPBOARD_NOTE);
       }
 
@@ -524,41 +525,35 @@ impl Prefs {
         .caption("Lets the shortcut work in every app and pastes the text.")
         .tile(Tile::Icon(Icon::ACCESSIBILITY));
       ui.form_row(fs, row, |ui| {
-        let allowed = Some(access.accessibility);
-        self.permission(ui, allowed, OPEN_ACCESSIBILITY, Pane::Accessibility)
+        let (grant, ask) = match access.accessibility {
+          true => (Grant::Granted, false),
+          false => (Grant::Denied, true),
+        };
+        self.permission(ui, grant, ask, OPEN_ACCESSIBILITY, Pane::Accessibility)
       });
       let row = FormRow::new("Microphone")
         .caption("Records your voice while you dictate.")
         .tile(Tile::Icon(Icon::MIC));
+      // A denied microphone is not asked again: only System Settings changes it.
       ui.form_row(fs, row, |ui| {
-        self.permission(ui, access.microphone, OPEN_MICROPHONE, Pane::Microphone)
+        let ask = access.microphone == Grant::NotDetermined;
+        self.permission(ui, access.microphone, ask, OPEN_MICROPHONE, Pane::Microphone)
       });
     });
   }
 
-  /// A permission's state and its button: Allow asks the system (its dialog adds the app to the
-  /// Accessibility list, [`super::Shell::open_pane`]); once answered, Open Settings opens its pane
-  /// in System Settings.
-  fn permission(&mut self, ui: &mut Ui, allowed: Option<bool>, id: &str, pane: Pane) {
-    match allowed {
-      Some(true) => ui.badge("Allowed", Tone::Success),
-      Some(false) => ui.badge("Not allowed", Tone::Warning),
-      None => ui.badge("Not asked yet", Tone::Neutral),
+  /// A permission's state and its button, [`super::Shell::allow`]: Allow while the system can
+  /// still ask, else Open Settings.
+  fn permission(&mut self, ui: &mut Ui, grant: Grant, ask: bool, id: &str, pane: Pane) {
+    match grant {
+      Grant::Granted => ui.badge("Allowed", Tone::Success),
+      Grant::Denied | Grant::Restricted => ui.badge("Not allowed", Tone::Warning),
+      Grant::NotDetermined => ui.badge("Not asked yet", Tone::Neutral),
     };
 
-    // A denied microphone is not asked again: only System Settings changes it.
-    let ask = match pane {
-      Pane::Microphone => allowed.is_none(),
-      _ => allowed != Some(true),
-    };
     let button = if ask { Button::new("Allow").primary() } else { Button::new("Open Settings") };
-    if !button.show(ui.id(id)).clicked {
-      return;
-    }
-
-    match pane {
-      Pane::Microphone if ask => self.shell.request_microphone(),
-      _ => self.shell.open_pane(pane),
+    if button.show(ui.id(id)).clicked {
+      self.shell.allow(pane);
     }
   }
 
@@ -577,18 +572,14 @@ impl Prefs {
 
     let warned = super::caption_in(fs, ui.theme().warning);
     let row_fs = if problem.is_some() { &warned } else { fs };
-    let (mut picked, mut download) = (None, false);
-    ui.with_id(self::row(MODEL)).form_row(row_fs, row, |ui| match none {
-      true => {
-        let button = Button::new("Download a Model…").primary();
-        download = button.show(ui.id(DOWNLOAD_MODEL)).clicked;
+    let mut picked = None;
+    ui.with_id(self::row(MODEL)).form_row(row_fs, row, |ui| {
+      if !none {
+        picked = pick(ui, MODEL, &labels, at, &[labels.len() - 2]);
+      } else if Button::new("Download a Model…").primary().show(ui.id(DOWNLOAD_MODEL)).clicked {
+        self.page = Page::Models;
       }
-      false => picked = pick(ui, MODEL, &labels, at, &[labels.len() - 2]),
     });
-    if download {
-      self.page = Page::Models;
-    }
-
     if let Some(i) = picked {
       self.model_picked(i, labels.len());
     }

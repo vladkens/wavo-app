@@ -192,6 +192,11 @@ impl Settings {
     Ok(())
   }
 
+  /// The paste puts the clipboard back afterwards, which needs reading it.
+  pub fn restores_clipboard(&self) -> bool {
+    self.auto_paste && !self.keep_in_clipboard
+  }
+
   /// `language` for the engine: see [`engine_language`].
   pub fn engine_language(&self) -> Option<String> {
     engine_language(&self.language)

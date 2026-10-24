@@ -31,7 +31,7 @@ mod tests;
 use std::path::{Path, PathBuf};
 
 use nimbo::autostart::State as Autostart;
-use nimbo::permissions::Pane;
+use nimbo::permissions::{Access as Grant, Pane};
 use nimbo::{Answer, App, Color, Config, Dialog, FormStyle, Icon, Style, Ui, grow};
 use wavo::hub::{self, Hub, ModelInfo};
 
@@ -87,16 +87,23 @@ pub fn config(page: Page) -> Config {
 }
 
 /// What the system allows the app, as the General page shows it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Access {
   /// Accessibility: the event tap and the paste.
   pub accessibility: bool,
-  /// `None`: not asked yet; then whether it was allowed.
-  pub microphone: Option<bool>,
+  pub microphone: Grant,
   /// Another app holds Secure Input: the hotkey goes through its backup path.
   pub secure_input: bool,
   /// The paste can't read the clipboard to put it back (Paste from Other Apps).
   pub clipboard_unread: bool,
+}
+
+impl Default for Access {
+  /// Nothing allowed, nothing asked.
+  fn default() -> Self {
+    let microphone = Grant::NotDetermined;
+    Self { accessibility: false, microphone, secure_input: false, clipboard_unread: false }
+  }
 }
 
 /// A delete the dialog asks about ([`CONFIRM`]).
@@ -166,13 +173,13 @@ pub trait Shell {
   /// why not, to [`Prefs::autostart_set`] on the main thread.
   fn set_autostart(&self, on: bool);
   fn access(&self) -> Access;
-  /// Shows the system's microphone prompt; the answer goes to [`Prefs::access_changed`].
-  fn request_microphone(&self);
   /// Adds up the sizes of the files in `dir` off the main thread (a long history has many) and
   /// hands the bytes to `done`, on that thread.
   fn folder_size(&self, dir: PathBuf, done: Box<dyn FnOnce(u64) + Send>);
-  /// These open their target without waiting for it (the system may start an app for it).
-  fn open_pane(&self, pane: Pane);
+  /// Allow… for `pane`: the system's prompt while it can still ask (its answer goes to
+  /// [`Prefs::access_changed`]), else its pane in System Settings. This and `open_url` open their
+  /// target without waiting for it (the system may start an app for it).
+  fn allow(&self, pane: Pane);
   fn open_url(&self, url: &str);
   /// Shows `dir` in the system's file manager.
   fn reveal(&self, dir: &Path);
