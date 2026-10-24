@@ -4,14 +4,21 @@
 //! recording without VAD trimming), in a folder per local date of the recording's start: one flat
 //! folder of a year's dictations is more than Finder copes with. A day folder goes with its last
 //! recording.
+//!
+//! A recording is deleted by a move into `recordings/trash/` first, then from there: one that
+//! cannot be deleted stays in the trash, which is emptied on start, and never comes back as a
+//! recording without an entry (the start would make it one).
 
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use tracing::warn;
 
 pub const DIR: &str = "recordings";
+/// Recordings being deleted: not a day folder, so never listed.
+const TRASH: &str = "trash";
 
 pub struct Recordings {
   dir: PathBuf,
@@ -58,14 +65,40 @@ impl Recordings {
     inside.then(|| self.dir.join(name))
   }
 
-  /// Deletes recording `name` (one gone already is no error) and returns where it was, leaving its
-  /// day folder to [`prune`](Self::prune). `None` if the name is refused.
+  /// Deletes recording `name` (one gone already is no error) through the trash and returns where
+  /// it was, leaving its day folder to [`prune`](Self::prune). An error if it could not be moved
+  /// there; one left in the trash is a warning. `None` if the name is refused.
   pub fn remove(&self, name: &str) -> Option<Result<PathBuf>> {
     let path = self.path(name)?;
-    match fs::remove_file(&path) {
-      Ok(()) => Some(Ok(path)),
-      Err(e) if e.kind() == ErrorKind::NotFound => Some(Ok(path)),
-      Err(e) => Some(Err(e).with_context(|| format!("delete {}", path.display()))),
+    if fs::symlink_metadata(&path).is_err_and(|e| e.kind() == ErrorKind::NotFound) {
+      return Some(Ok(path));
+    }
+
+    // Made once, removed only by `empty_trash` on start: two threads delete at once.
+    let trash = self.dir.join(TRASH);
+    let trashed = trash.join(path.file_name()?);
+    let moved = fs::create_dir_all(&trash).and_then(|()| fs::rename(&path, &trashed));
+    match moved {
+      Ok(()) => {
+        if let Err(e) = fs::remove_file(&trashed) {
+          warn!("delete {}: {e}; it goes on the next start", trashed.display());
+        }
+      }
+      Err(e) if e.kind() == ErrorKind::NotFound && !path.exists() => {}
+      Err(e) => return Some(Err(e).with_context(|| format!("delete {}", path.display()))),
+    }
+
+    Some(Ok(path))
+  }
+
+  /// Deletes what an earlier [`remove`](Self::remove) left in the trash.
+  pub fn empty_trash(&self) -> Result<()> {
+    let trash = self.dir.join(TRASH);
+    match fs::remove_dir_all(&trash) {
+      Err(e) if e.kind() != ErrorKind::NotFound => {
+        Err(e).with_context(|| format!("delete {}", trash.display()))
+      }
+      _ => Ok(()),
     }
   }
 
@@ -124,14 +157,6 @@ impl Recordings {
     }
 
     Ok(found)
-  }
-
-  /// How long recording `name` is by its header, 0 if it cannot be read.
-  pub fn duration_ms(&self, name: &str) -> i64 {
-    let Some(path) = self.path(name) else { return 0 };
-    hound::WavReader::open(path)
-      .map(|r| i64::from(r.duration()) * 1000 / i64::from(r.spec().sample_rate.max(1)))
-      .unwrap_or(0)
   }
 }
 
@@ -254,6 +279,7 @@ mod tests {
     r.discard(&name).unwrap();
     assert!(!path.exists() && !path.parent().unwrap().exists(), "Finder's file does not keep it");
     r.discard(&name).unwrap(); // gone already
+    assert!(!r.dir.join(TRASH).join(path.file_name().unwrap()).exists(), "nor in the trash");
     assert!(r.discard("../history.db").is_err());
 
     // A recording that was never made does not keep the folder made for it either; an empty one
@@ -265,7 +291,27 @@ mod tests {
     assert!(r.list().unwrap().is_empty());
     assert!(path.parent().unwrap().exists(), "a listing deletes nothing");
     fs::create_dir(r.dir.join("notes")).unwrap();
+    r.empty_trash().unwrap();
     r.prune_all().unwrap();
     assert_eq!(fs::read_dir(&r.dir).unwrap().count(), 1, "only the day folder goes");
+  }
+
+  /// A recording that could not be deleted waits in the trash, never listed, until the start
+  /// empties it.
+  #[test]
+  fn the_trash_is_not_a_recording_and_empties() {
+    let dir = TempDir::new("recordings-trash");
+    let r = Recordings::open(dir.path()).unwrap();
+    let (name, path) = r.new_file(NOW);
+    fs::write(&path, b"RIFF").unwrap();
+    let stuck = r.dir.join(TRASH).join("1.wav");
+    fs::create_dir_all(stuck.parent().unwrap()).unwrap();
+    fs::write(&stuck, b"RIFF").unwrap();
+    assert_eq!(r.list().unwrap(), std::slice::from_ref(&name));
+    r.discard(&name).unwrap();
+    assert!(r.list().unwrap().is_empty() && stuck.exists());
+    r.empty_trash().unwrap();
+    assert!(!r.dir.join(TRASH).exists());
+    r.empty_trash().unwrap(); // nothing there
   }
 }

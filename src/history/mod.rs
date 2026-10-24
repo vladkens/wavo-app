@@ -3,16 +3,17 @@
 //! Dictation history in the data home: the entries in [`db`] (`history.db`, SQLite) and the
 //! [`recordings`] they point to. [`History`] does what touches both.
 //!
-//! - It keeps what was transcribed (`done`, `partial`), what failed (`failed`: the audio is the
-//!   only copy of the dictation, and it can still be transcribed) and speech no text came of
-//!   (`no_text`, `no_model`: to try again). A cancelled dictation and one without speech leave
-//!   nothing: no entry, no recording ([`Recordings::discard`]).
+//! - An entry is a recording with speech, its text possibly empty: the text can always be made
+//!   again from the audio. A dictation that is cancelled, has no speech or whose recording is not
+//!   readable leaves nothing: no entry, no recording ([`Recordings::discard`]).
 //! - [`History::cleanup`] applies the retention: entries and their audio files go together, the
 //!   file first, so a crash in between leaves a row whose file is already gone, never a file
-//!   nothing points to. Entries still being transcribed are never removed.
-//! - [`History::recover`] runs on start: entries left `transcribing` by a crash become `failed`,
-//!   recordings without an entry (the app died while recording) get a `failed` entry, so their
-//!   audio can be transcribed again and the retention covers them, and empty day folders go.
+//!   nothing points to. Entries being transcribed are never removed.
+//! - [`History::recover`] runs on start: the trash is emptied, entries left being transcribed by a
+//!   crash are not any more (their text is empty or the one before), entries without text whose
+//!   recording is gone go, recordings without an entry (the app died while recording or
+//!   transcribing) become entries without text if they are readable and have speech, else they go,
+//!   and empty day folders go. Nothing is transcribed then.
 
 pub mod db;
 pub mod recordings;
@@ -26,14 +27,12 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use self::db::{Db, Entry, EntryAudio, NewEntry, Status};
+use self::db::{Db, Entry, EntryAudio, NewEntry, Spare};
 use self::recordings::Recordings;
+use crate::audio::vad::Clip;
+use crate::audio::wav;
 
 pub const DB_FILE: &str = "history.db";
-
-/// The error of an entry [`History::recover`] made for a recording without one.
-pub const STOPPED_RECORDING: &str =
-  "Wavo stopped during the recording; the audio up to then is kept";
 
 /// Now as the history keeps time: Unix ms.
 pub fn now_ms() -> i64 {
@@ -171,10 +170,14 @@ impl Retention {
 /// What [`History::recover`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Recovered {
-  /// Entries left `transcribing`, now `failed`.
-  pub failed: usize,
-  /// Recordings without an entry, now `failed` entries.
+  /// Entries left being transcribed.
+  pub interrupted: usize,
+  /// Entries without text whose recording is gone, deleted.
+  pub dropped: usize,
+  /// Recordings without an entry, now entries without text.
   pub adopted: usize,
+  /// Recordings without an entry that are not readable or have no speech, deleted.
+  pub discarded: usize,
 }
 
 pub struct History {
@@ -192,8 +195,11 @@ impl History {
 
   /// The entry's recording, if it has one that is still on disk.
   pub fn audio_file(&self, entry: &Entry) -> Option<PathBuf> {
-    let path = entry.audio_path.as_deref().and_then(|name| self.recordings.path(name));
-    path.filter(|p| p.is_file())
+    self.audio_path(entry.audio_path.as_deref())
+  }
+
+  fn audio_path(&self, name: Option<&str>) -> Option<PathBuf> {
+    name.and_then(|name| self.recordings.path(name)).filter(|p| p.is_file())
   }
 
   /// Deletes entry `id` and its recording, the file first: if it cannot be deleted, the entry
@@ -210,14 +216,15 @@ impl History {
     Ok(true)
   }
 
-  /// Applies `retention` at `now` (Unix ms): removes older entries with their audio. An entry
-  /// whose file cannot be deleted stays, to be tried again next time. Returns how many entries
-  /// were removed.
-  pub fn cleanup(&self, retention: Retention, now: i64) -> Result<usize> {
+  /// Applies `retention` at `now` (Unix ms): removes older entries with their audio. Entries
+  /// without text that `spare` spares stay, and do not count: their audio is all there is of them,
+  /// and a model may still make text of it. An entry whose file cannot be deleted stays, to be
+  /// tried again next time. Returns how many entries were removed.
+  pub fn cleanup(&self, retention: Retention, now: i64, spare: &Spare) -> Result<usize> {
     let doomed: Vec<EntryAudio> = match (retention, retention.max_age()) {
       (Retention::Unlimited, _) => return Ok(0),
-      (Retention::Count(n), _) => self.db.get_beyond_newest(n.max(1))?,
-      (_, Some(age)) => self.db.get_created_before(now - age.as_millis() as i64)?,
+      (Retention::Count(n), _) => self.db.get_beyond_newest(n.max(1), spare)?,
+      (_, Some(age)) => self.db.get_created_before(now - age.as_millis() as i64, spare)?,
       (_, None) => unreachable!("every other retention has an age"),
     };
 
@@ -253,34 +260,50 @@ impl History {
   /// Fixes up what a crash left behind (see the module docs); `now` stamps recordings whose start
   /// time is unknown.
   pub fn recover(&self, now: i64) -> Result<Recovered> {
-    let failed = self.db.mark_interrupted()?;
-    if let Err(e) = self.recordings.prune_all() {
+    if let Err(e) = self.recordings.empty_trash() {
       warn!("{e:#}");
     }
+
+    let interrupted = self.db.mark_interrupted()?;
+    let gone: Vec<i64> = (self.db.get_untranscribed()?.into_iter())
+      .filter(|(_, audio)| self.audio_path(audio.as_deref()).is_none())
+      .map(|(id, _)| id)
+      .collect();
+    self.db.delete_entries(&gone)?;
 
     let known = self.db.get_audio_paths()?;
     let mut orphans: Vec<String> =
       self.recordings.list()?.into_iter().filter(|name| !known.contains(name)).collect();
     orphans.sort();
 
+    let mut recovered = Recovered { interrupted, dropped: gone.len(), ..Recovered::default() };
     for name in &orphans {
+      let clip =
+        self.recordings.path(name).and_then(|path| wav::read(&path).ok()).map(Clip::analyze);
+      let Some(clip) = clip.filter(Clip::has_speech) else {
+        if let Err(e) = self.recordings.discard(name) {
+          warn!("{e:#}");
+        }
+
+        recovered.discarded += 1;
+        continue;
+      };
+
       self.db.insert_entry(&NewEntry {
         created_at: recordings::started_at(name).unwrap_or(now),
-        duration_ms: self.recordings.duration_ms(name),
+        duration_ms: clip.duration_ms(),
         audio_path: Some(name),
-        status: Some(Status::Failed),
-        error: Some(STOPPED_RECORDING),
         ..NewEntry::default()
       })?;
+      recovered.adopted += 1;
     }
 
-    let recovered = Recovered { failed, adopted: orphans.len() };
+    if let Err(e) = self.recordings.prune_all() {
+      warn!("{e:#}");
+    }
+
     if recovered != Recovered::default() {
-      info!(
-        "history: {failed} interrupted transcription(s) marked failed, {} recording(s) without an \
-         entry adopted",
-        recovered.adopted
-      );
+      info!("history recovered: {recovered:?}");
     }
 
     Ok(recovered)
@@ -293,29 +316,28 @@ mod tests {
 
   use super::*;
   use crate::audio::wav::WavSink;
-  use crate::history::db::STOPPED_TRANSCRIBING;
-  use crate::testing::{TempDir, entry_ids, wav_count, write_wav};
+  use crate::testing::{TempDir, entry_ids, tone, wav_count, write_wav};
 
   const DAY: i64 = 24 * 60 * 60 * 1000;
   /// A fixed "now" for the fake clock: 2026-10-09 00:00 UTC.
   const NOW: i64 = 1_791_504_000_000;
 
-  /// An entry with a real WAV file, `age` ms before [`NOW`].
-  fn add(h: &History, age: i64, status: Status) -> (i64, PathBuf) {
+  /// An entry with `text` and a real WAV file, `age` ms before [`NOW`].
+  fn add(h: &History, age: i64, text: &str) -> (i64, PathBuf) {
+    add_with(h, age, NewEntry { text, ..NewEntry::default() })
+  }
+
+  /// [`add`] with the fields of `entry` but its time and recording.
+  fn add_with(h: &History, age: i64, entry: NewEntry<'_>) -> (i64, PathBuf) {
     let (name, path) = h.recordings.new_file(NOW - age);
     write_wav(&path, &[0.1; 1_600]);
+    let entry =
+      NewEntry { created_at: NOW - age, duration_ms: 100, audio_path: Some(&name), ..entry };
+    (h.db.insert_entry(&entry).unwrap(), path)
+  }
 
-    let id = h
-      .db
-      .insert_entry(&NewEntry {
-        created_at: NOW - age,
-        duration_ms: 100,
-        audio_path: Some(&name),
-        status: Some(status),
-        ..NewEntry::default()
-      })
-      .unwrap();
-    (id, path)
+  fn busy(h: &History, age: i64) -> (i64, PathBuf) {
+    add_with(h, age, NewEntry { busy: true, ..NewEntry::default() })
   }
 
   /// The files and folders at the top of the recordings directory in `home`, and how many `.wav`
@@ -328,44 +350,14 @@ mod tests {
     (names, wav_count(&dir))
   }
 
-  /// Speech nothing was recognized in stays, with its recording, through a restart's recovery.
-  #[test]
-  fn nothing_recognized_is_kept_with_its_recording() {
-    let dir = TempDir::new("history-no-text");
-    let h = History::open(dir.path()).unwrap();
-    let (id, wav) = add(&h, 0, Status::Transcribing);
-    let note = "parakeet-tdt-0.6b-v2 understands English only";
-    h.db.update_outcome(id, Status::NoText, None, Some(note)).unwrap();
-    assert_eq!(h.recover(NOW).unwrap(), Recovered::default());
-
-    let entry = h.db.get_entry(id).unwrap().unwrap();
-    assert_eq!((entry.status, entry.text.as_str()), (Status::NoText, ""));
-    assert_eq!((entry.error.as_deref(), h.audio_file(&entry)), (Some(note), Some(wav)));
-  }
-
-  /// Speech recorded without a model stays, with its recording, through a restart's recovery.
-  #[test]
-  fn no_model_is_kept_with_its_recording() {
-    let dir = TempDir::new("history-no-model");
-    let h = History::open(dir.path()).unwrap();
-    let (id, wav) = add(&h, 0, Status::NoModel);
-    let why = "parakeet-tdt-0.6b-v3 is not on disk";
-    h.db.update_outcome(id, Status::NoModel, None, Some(why)).unwrap();
-    assert_eq!(h.recover(NOW).unwrap(), Recovered::default());
-
-    let entry = h.db.get_entry(id).unwrap().unwrap();
-    assert_eq!((entry.status, entry.error.as_deref()), (Status::NoModel, Some(why)));
-    assert_eq!(h.audio_file(&entry), Some(wav));
-  }
-
   #[test]
   fn a_day_folder_goes_with_its_last_recording() {
     let dir = TempDir::new("history-prune");
     let h = History::open(dir.path()).unwrap();
     // 7 minutes past a quarter hour: the same day in every time zone.
     let at = 7 * 60_000;
-    let (a, a_wav) = add(&h, -at, Status::Done);
-    let (b, b_wav) = add(&h, -at - 1, Status::Done);
+    let (a, a_wav) = add(&h, -at, "a");
+    let (b, b_wav) = add(&h, -at - 1, "b");
     let day = a_wav.parent().unwrap().to_owned();
     assert_eq!(b_wav.parent(), Some(day.as_path()));
     fs::write(day.join(".DS_Store"), b"Finder").unwrap();
@@ -384,16 +376,16 @@ mod tests {
 
     // Retention too; the recordings directory itself stays.
     for i in 0..3 {
-      add(&h, 10 * DAY + i, Status::Done);
+      add(&h, 10 * DAY + i, "old");
     }
 
-    let (_, kept) = add(&h, 0, Status::Done);
-    assert_eq!(h.cleanup(Retention::Days3, NOW).unwrap(), 3);
+    let (_, kept) = add(&h, 0, "new");
+    assert_eq!(h.cleanup(Retention::Days3, NOW, &Spare::Nothing).unwrap(), 3);
     let kept_day = kept.parent().unwrap().file_name().unwrap().to_str().unwrap().to_owned();
-    assert_eq!(top(dir.path()), (vec![kept_day], 1));
+    assert_eq!(top(dir.path()), (vec![kept_day, "trash".into()], 1));
     fs::remove_file(&kept).unwrap();
 
-    // An empty day folder left by a crash goes on start.
+    // An empty day folder left by a crash goes on start, as does the trash.
     assert_eq!(h.recover(NOW).unwrap(), Recovered::default());
     assert_eq!(top(dir.path()), (vec![], 0));
   }
@@ -402,12 +394,11 @@ mod tests {
   fn retention_by_count_keeps_the_newest() {
     let dir = TempDir::new("history-count");
     let h = History::open(dir.path()).unwrap();
-    let entries: Vec<(i64, PathBuf)> =
-      (0..5).map(|i| add(&h, (5 - i) * 1_000, Status::Done)).collect();
-    // One still being transcribed is neither removed nor counted.
-    let (busy, _) = add(&h, 10 * DAY, Status::Transcribing);
-    assert_eq!(h.cleanup(Retention::Unlimited, NOW).unwrap(), 0);
-    assert_eq!(h.cleanup(Retention::Count(2), NOW).unwrap(), 3);
+    let entries: Vec<(i64, PathBuf)> = (0..5).map(|i| add(&h, (5 - i) * 1_000, "")).collect();
+    // One being transcribed is neither removed nor counted.
+    let (busy, _) = busy(&h, 10 * DAY);
+    assert_eq!(h.cleanup(Retention::Unlimited, NOW, &Spare::Nothing).unwrap(), 0);
+    assert_eq!(h.cleanup(Retention::Count(2), NOW, &Spare::Nothing).unwrap(), 3);
 
     assert_eq!(entry_ids(dir.path()), [entries[3].0, entries[4].0, busy]);
     for (i, (_, path)) in entries.iter().enumerate() {
@@ -415,9 +406,9 @@ mod tests {
     }
 
     assert_eq!(top(dir.path()).1, 3);
-    assert_eq!(h.cleanup(Retention::Count(2), NOW).unwrap(), 0, "idempotent");
+    assert_eq!(h.cleanup(Retention::Count(2), NOW, &Spare::Nothing).unwrap(), 0, "idempotent");
     // Zero keeps one: the retention never empties the history entirely.
-    assert_eq!(h.cleanup(Retention::Count(0), NOW).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Count(0), NOW, &Spare::Nothing).unwrap(), 1);
   }
 
   #[test]
@@ -425,62 +416,92 @@ mod tests {
     let dir = TempDir::new("history-age");
     let h = History::open(dir.path()).unwrap();
     let ages = [DAY, 3 * DAY - 1, 3 * DAY + 1, 13 * DAY, 15 * DAY, 89 * DAY, 91 * DAY];
-    let entries: Vec<(i64, PathBuf)> = ages.iter().map(|&a| add(&h, a, Status::Done)).collect();
-    let (busy, busy_wav) = add(&h, 400 * DAY, Status::Transcribing);
+    let entries: Vec<(i64, PathBuf)> = ages.iter().map(|&a| add(&h, a, "text")).collect();
+    let (busy, busy_wav) = busy(&h, 400 * DAY);
     let left = || entry_ids(dir.path()).len() - 1;
 
-    assert_eq!(h.cleanup(Retention::Months3, NOW).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Months3, NOW, &Spare::Nothing).unwrap(), 1);
     assert_eq!(left(), 6);
     assert!(!entries[6].1.exists());
-    assert_eq!(h.cleanup(Retention::Weeks2, NOW).unwrap(), 2);
+    assert_eq!(h.cleanup(Retention::Weeks2, NOW, &Spare::Nothing).unwrap(), 2);
     assert_eq!(left(), 4);
-    assert_eq!(h.cleanup(Retention::Days3, NOW).unwrap(), 2);
+    assert_eq!(h.cleanup(Retention::Days3, NOW, &Spare::Nothing).unwrap(), 2);
     assert_eq!(entry_ids(dir.path()), [entries[0].0, entries[1].0, busy]);
     assert_eq!(top(dir.path()).1, 3);
     assert!(entries[1].1.exists() && !entries[2].1.exists() && busy_wav.exists());
 
     // Time passes: a day later the 3-day-old entry goes too.
-    assert_eq!(h.cleanup(Retention::Days3, NOW + DAY).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Days3, NOW + DAY, &Spare::Nothing).unwrap(), 1);
     assert_eq!(entry_ids(dir.path()), [entries[0].0, busy]);
+  }
+
+  /// While no model can transcribe, entries without text outlive the retention: their audio is all
+  /// there is of them.
+  #[test]
+  fn retention_spares_entries_without_text_while_there_is_no_model() {
+    let dir = TempDir::new("history-spare");
+    let h = History::open(dir.path()).unwrap();
+    let (text, _) = add(&h, 10 * DAY, "text");
+    let (untranscribed, wav) = add(&h, 10 * DAY, "");
+    assert_eq!(h.cleanup(Retention::Days3, NOW, &Spare::All).unwrap(), 1);
+    assert_eq!(entry_ids(dir.path()), [untranscribed]);
+    assert!(wav.exists() && text > 0);
+    assert_eq!(h.cleanup(Retention::Count(1), NOW, &Spare::All).unwrap(), 0);
+    let untried = Spare::UntriedBy("whisper".into());
+    assert_eq!(h.cleanup(Retention::Days3, NOW, &untried).unwrap(), 0, "to be transcribed");
+    assert_eq!(h.cleanup(Retention::Days3, NOW, &Spare::Nothing).unwrap(), 1);
+    assert!(entry_ids(dir.path()).is_empty());
   }
 
   #[test]
   fn an_entry_whose_audio_is_already_gone_is_removed() {
     let dir = TempDir::new("history-gone");
     let h = History::open(dir.path()).unwrap();
-    let (_, path) = add(&h, 10 * DAY, Status::Done);
+    let (_, path) = add(&h, 10 * DAY, "text");
     fs::remove_file(&path).unwrap();
-    assert_eq!(h.cleanup(Retention::Days3, NOW).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Days3, NOW, &Spare::Nothing).unwrap(), 1);
     assert!(entry_ids(dir.path()).is_empty());
   }
 
+  /// What a crash leaves: an entry being transcribed, recordings without an entry (with speech,
+  /// without, unreadable), a file in the trash; and entries whose recording is gone.
   #[test]
-  fn recovers_interrupted_transcriptions_and_orphan_recordings() {
+  fn recovers_what_a_crash_left() {
     let dir = TempDir::new("history-recover");
     let h = History::open(dir.path()).unwrap();
-    let (done, _) = add(&h, DAY, Status::Done);
-    let (stuck, _) = add(&h, 0, Status::Transcribing);
+    let (text, _) = add(&h, DAY, "text");
+    let (stuck, _) = busy(&h, 0);
+    let (gone, gone_wav) = add(&h, 2 * DAY, "");
+    let (text_gone, text_gone_wav) = add(&h, 3 * DAY, "text");
+    fs::remove_file(gone_wav).unwrap();
+    fs::remove_file(text_gone_wav).unwrap();
 
     // A recording the app was killed during: 1.5 s written, no entry. A killed app leaves the
     // header at the last whole second; a drop fixes it up to 1.5 s.
     let (name, path) = h.recordings.new_file(NOW + 5);
     let mut sink = WavSink::create(&path).unwrap();
-    sink.write(&[0.2; 24_000]).unwrap();
+    sink.write(&tone(1.5, 0.5)).unwrap();
     drop(sink);
-    assert_eq!(h.recover(NOW + 10).unwrap(), Recovered { failed: 1, adopted: 1 });
+    let (_, silent) = h.recordings.new_file(NOW + 6);
+    write_wav(&silent, &[0.0; 16_000]);
+    let (_, broken) = h.recordings.new_file(NOW + 7);
+    fs::write(&broken, b"RIFF....WAVE").unwrap();
+    let trashed = dir.path().join(recordings::DIR).join("trash/1.wav");
+    fs::create_dir_all(trashed.parent().unwrap()).unwrap();
+    fs::write(&trashed, b"RIFF").unwrap();
 
-    assert_eq!(h.db.get_entry(done).unwrap().unwrap().status, Status::Done);
-    let stuck = h.db.get_entry(stuck).unwrap().unwrap();
-    assert_eq!(
-      (stuck.status, stuck.error.as_deref()),
-      (Status::Failed, Some(STOPPED_TRANSCRIBING))
-    );
-
+    let recovered = Recovered { interrupted: 1, dropped: 1, adopted: 1, discarded: 2 };
+    assert_eq!(h.recover(NOW + 10).unwrap(), recovered);
+    assert!(!h.db.get_entry(stuck).unwrap().unwrap().busy);
+    assert_eq!(h.db.get_entry(gone).unwrap(), None, "no text, no recording");
+    assert_eq!(h.db.get_entry(text_gone).unwrap().unwrap().text, "text", "its text stays");
     let adopted = h.db.get_entry(*entry_ids(dir.path()).last().unwrap()).unwrap().unwrap();
     assert_eq!(adopted.audio_path.as_deref(), Some(name.as_str()));
-    assert_eq!((adopted.created_at, adopted.status), (NOW + 5, Status::Failed));
-    assert_eq!(adopted.error.as_deref(), Some(STOPPED_RECORDING));
+    assert_eq!((adopted.created_at, adopted.text.as_str()), (NOW + 5, ""));
+    assert_eq!((adopted.tried_model, adopted.busy), (None, false));
     assert!((1_000..=1_500).contains(&adopted.duration_ms), "{}", adopted.duration_ms);
+    assert!(!silent.exists() && !broken.exists() && !trashed.exists());
+    assert_eq!(entry_ids(dir.path()), [text, stuck, text_gone, adopted.id]);
     assert_eq!(h.recover(NOW + 20).unwrap(), Recovered::default(), "nothing left to fix");
   }
 
@@ -488,8 +509,8 @@ mod tests {
   fn delete_takes_the_recording() {
     let dir = TempDir::new("history-delete");
     let h = History::open(dir.path()).unwrap();
-    let (id, path) = add(&h, 0, Status::Done);
-    let (other, other_path) = add(&h, 1_000, Status::Done);
+    let (id, path) = add(&h, 0, "text");
+    let (other, other_path) = add(&h, 1_000, "");
     assert!(h.delete(id).unwrap());
     assert!(!path.exists() && other_path.exists());
     assert_eq!(h.db.get_entry(id).unwrap(), None);

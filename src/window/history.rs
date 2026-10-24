@@ -2,10 +2,11 @@
 
 //! The History page: the dictations, newest first, in a plate per day, a page at a time with Show
 //! More, found by a search above them. A row is one line of the text (the whole text in a tooltip
-//! over it), then the time, length and whether it was not pasted. Its icon buttons: Play / Stop
-//! (the recording), Copy, Re-transcribe and Delete, which asks first in the window's dialog with
-//! the start of the text ([`super::Ask::Dictation`]). A click selects a row: it shows the model
-//! too. Reloaded when the session's history moves.
+//! over it), then the time, length and whether it was not pasted; an entry without text says so
+//! and which model tried it ([`no_text`]). Its icon buttons: Undo (after a transcription that
+//! replaced a text), Play / Stop (the recording), Copy, Transcribe Again and Delete, which asks
+//! first in the window's dialog with the start of the text ([`super::Ask::Dictation`]). A click
+//! selects a row: it shows the model too. Reloaded when the session's history moves.
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,7 @@ pub const TEXT: &str = "text";
 pub const COPY: &str = "copy";
 pub const PLAY: &str = "play";
 pub const RETRANSCRIBE: &str = "retranscribe";
+pub const UNDO: &str = "undo";
 pub const DELETE: &str = "delete";
 
 /// Entries a page adds.
@@ -165,9 +167,22 @@ fn duration_text(ms: i64) -> String {
   format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// A row's line: the text on one line.
-fn first_line(text: &str) -> String {
-  text.chars().take(ROW_CHARS).map(|c| if c.is_control() { ' ' } else { c }).collect()
+/// A row's line: the text on one line, else [`no_text`].
+fn first_line(e: &Entry) -> String {
+  if e.text.is_empty() {
+    return no_text(e.tried_model.as_deref());
+  }
+
+  e.text.chars().take(ROW_CHARS).map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+/// What an entry without text shows, here and in the menu's Recent: `no text · whisper-tiny`, the
+/// model that tried it last.
+pub fn no_text(tried_model: Option<&str>) -> String {
+  match tried_model {
+    Some(model) => format!("no text · {}", label(model)),
+    None => "no text".into(),
+  }
 }
 
 /// Under the text: when, how long, why it was not pasted, and in a selected row the model.
@@ -201,6 +216,7 @@ enum Act {
   Play(i64),
   Stop,
   Retranscribe(i64),
+  Undo(i64),
   Ask(Ask),
 }
 
@@ -312,6 +328,10 @@ impl Prefs {
         h.note = None;
         self.shell.retranscribe(id);
       }
+      Some(Act::Undo(id)) => {
+        h.note = None;
+        self.shell.undo_transcribe(id);
+      }
       Some(Act::Ask(ask)) => {
         h.note = None;
         self.ask = Some(ask);
@@ -342,10 +362,10 @@ impl Prefs {
   }
 }
 
-/// A dictation's row: its line (the whole text in a tooltip over it) and details, then Play,
-/// Copy, Re-transcribe and Delete.
+/// A dictation's row: its line (the whole text in a tooltip over it) and details, then Undo,
+/// Play, Copy, Transcribe Again and Delete.
 fn row(ui: &mut Ui, fs: &FormStyle, e: &Entry, st: Row) -> Option<Act> {
-  let line = first_line(&e.text);
+  let line = first_line(e);
   let caption = details(e, st.selected);
   // A click anywhere in the row selects it; a selected row is tinted but keeps its one line.
   let mut fs = *fs;
@@ -360,11 +380,21 @@ fn row(ui: &mut Ui, fs: &FormStyle, e: &Entry, st: Row) -> Option<Act> {
   let cover = |ui: &mut Ui| {
     let at = Float::parent().clip();
     on_text = ui.with_id(text).float(at).el(Style::new().w(grow()).h(grow())).clicked;
-    ui.tooltip(text, &e.text);
+    ui.tooltip(text, if e.text.is_empty() { &line } else { &e.text });
   };
   let audio = e.audio_path.is_some();
   let row = FormRow::new(&line).caption(&caption).one_line();
   let r = ui.id((ROW, e.id)).form_row_with(&fs, row, cover, |ui| {
+    // The text a transcription replaced: one undo, which a second one takes back. First, so the
+    // other buttons keep their places.
+    if e.prev_text.is_some() {
+      let r = ui.disabled(st.retranscribing).id((UNDO, e.id)).icon_button(Icon::HISTORY);
+      ui.tooltip(r.id, "Undo the transcription");
+      if r.clicked {
+        act = Some(Act::Undo(e.id));
+      }
+    }
+
     let r = ui.disabled(!audio).id((PLAY, e.id));
     let r = r.icon_button(if st.playing { Icon::STOP } else { Icon::PLAY });
     ui.tooltip(r.id, if st.playing { "Stop" } else { "Play the recording" });
@@ -372,7 +402,7 @@ fn row(ui: &mut Ui, fs: &FormStyle, e: &Entry, st: Row) -> Option<Act> {
       act = Some(if st.playing { Act::Stop } else { Act::Play(e.id) });
     }
 
-    let r = ui.id((COPY, e.id)).icon_button(Icon::COPY);
+    let r = ui.disabled(e.text.is_empty()).id((COPY, e.id)).icon_button(Icon::COPY);
     ui.tooltip(r.id, "Copy");
     if r.clicked {
       act = Some(Act::Copy(e.text.clone()));
@@ -394,8 +424,7 @@ fn row(ui: &mut Ui, fs: &FormStyle, e: &Entry, st: Row) -> Option<Act> {
     let r = ui.disabled(st.retranscribing).id((DELETE, e.id)).icon_button(Icon::TRASH);
     ui.tooltip(r.id, "Delete…");
     if r.clicked {
-      act =
-        Some(Act::Ask(Ask::Dictation { id: e.id, start: shorten(&e.text, START_CHARS), audio }));
+      act = Some(Act::Ask(Ask::Dictation { id: e.id, start: shorten(&line, START_CHARS), audio }));
     }
   });
   act.or((r.clicked || on_text).then_some(Act::Select(e.id)))
@@ -417,6 +446,13 @@ mod tests {
     assert_eq!(day_title((2026, 10, 17), today), "Yesterday, October 17");
     assert_eq!(day_title((2026, 3, 3), today), "March 3");
     assert_eq!(day_title((2025, 3, 3), today), "March 3, 2025");
+  }
+
+  #[test]
+  fn an_entry_without_text_names_the_model_that_tried() {
+    assert_eq!(no_text(Some("parakeet-v2")), "no text · parakeet-tdt-0.6b-v2");
+    assert_eq!(no_text(Some("whisper-tiny-Q8_0")), "no text · whisper-tiny-Q8_0");
+    assert_eq!(no_text(None), "no text");
   }
 
   #[test]

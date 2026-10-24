@@ -57,8 +57,10 @@ pub enum Request {
   Cancel,
   /// Print the app's state as JSON
   Status,
-  /// Transcribe a history entry's recording again
+  /// Transcribe a history entry's recording again; new text replaces the text
   Retranscribe { id: i64 },
+  /// Put back the text a history entry's last transcription replaced
+  UndoTranscribe { id: i64 },
   /// Delete a history entry and its recording
   Delete { id: i64 },
   /// Free the model's memory now; the next dictation loads it again
@@ -377,6 +379,7 @@ mod tests {
     let requests = [
       Request::Toggle,
       Request::Retranscribe { id: 42 },
+      Request::UndoTranscribe { id: 42 },
       Request::Delete { id: 7 },
       Request::Unload,
       Request::OpenSettings,
@@ -391,6 +394,8 @@ mod tests {
     assert_eq!(*seen.lock().unwrap(), requests);
     let json = serde_json::to_string(&Request::Delete { id: 7 }).unwrap();
     assert_eq!(json, r#"{"cmd":"delete","id":7}"#);
+    let json = serde_json::to_string(&Request::UndoTranscribe { id: 7 }).unwrap();
+    assert_eq!(json, r#"{"cmd":"undo-transcribe","id":7}"#);
     let json = serde_json::to_string(&Request::Autostart { state: Autostart::Status }).unwrap();
     assert_eq!(json, r#"{"cmd":"autostart","state":"status"}"#);
 

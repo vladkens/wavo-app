@@ -266,6 +266,7 @@ impl Shell for Headless {
   fn delete_model(&self, _: &'static wavo::hub::ModelInfo) {}
   fn check_model(&self) {}
   fn retranscribe(&self, _: i64) {}
+  fn undo_transcribe(&self, _: i64) {}
   fn delete_entry(&self, _: i64) {}
 
   fn autostart(&self) -> Result<nimbo::autostart::State, String> {

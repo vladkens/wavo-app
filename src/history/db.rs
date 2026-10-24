@@ -1,6 +1,9 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! `history.db`: the entries, one per dictation kept.
+//! `history.db`: the entries, one per recording with speech. An entry's text may be empty (no
+//! model yet, nothing recognized, an engine error, a crash during the transcription): its
+//! recording can be transcribed again. No statuses nor errors are kept: those are the session's,
+//! shown once.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -11,9 +14,6 @@ use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::fold;
-
-/// The error of an entry left `transcribing` by a crash ([`Db::mark_interrupted`]).
-pub const STOPPED_TRANSCRIBING: &str = "Wavo stopped during the transcription";
 
 // MARK: Migrations
 
@@ -29,13 +29,17 @@ fn migrate_v1(db: &Connection) -> Result<()> {
       model TEXT,
       language TEXT,
       text TEXT NOT NULL DEFAULT '',
-      status TEXT NOT NULL,
-      error TEXT,
       pasted INTEGER NOT NULL DEFAULT 0,
-      not_pasted TEXT
+      not_pasted TEXT,
+      tried_model TEXT,
+      busy INTEGER NOT NULL DEFAULT 0,
+      prev_text TEXT,
+      prev_model TEXT,
+      prev_language TEXT
     );",
     "CREATE INDEX entries_created_at ON entries (created_at);",
     "CREATE INDEX entries_audio_path ON entries (audio_path);",
+    "CREATE INDEX entries_untranscribed ON entries (created_at) WHERE text = '';",
   ];
 
   for qs in queries {
@@ -70,43 +74,6 @@ fn migrate(db: &Connection) -> Result<()> {
 
 // MARK: Models
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
-  Transcribing,
-  Done,
-  /// Text that the engine could only get in part (aborted, truncated or repeating decode).
-  Partial,
-  Failed,
-  /// Speech (the VAD said so) of which the engine made no text: a model that does not know the
-  /// language, most likely. Kept with its recording, to transcribe again with another model; the
-  /// error says what is known (`parakeet-tdt-0.6b-v2 understands English only`).
-  NoText,
-  /// Speech recorded while no model could transcribe it (none downloaded, the chosen one gone
-  /// from the disk, one that does not load). Kept with its recording, to transcribe once there is
-  /// one; the error says why (`parakeet-tdt-0.6b-v3 is not on disk`).
-  NoModel,
-}
-
-impl Status {
-  const ALL: [Self; 6] =
-    [Self::Transcribing, Self::Done, Self::Partial, Self::Failed, Self::NoText, Self::NoModel];
-
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Status::Transcribing => "transcribing",
-      Status::Done => "done",
-      Status::Partial => "partial",
-      Status::Failed => "failed",
-      Status::NoText => "no_text",
-      Status::NoModel => "no_model",
-    }
-  }
-
-  fn parse(s: &str) -> Option<Self> {
-    Self::ALL.into_iter().find(|status| status.as_str() == s)
-  }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
   pub id: i64,
@@ -115,13 +82,22 @@ pub struct Entry {
   pub duration_ms: i64,
   /// The recording, as [`Recordings`](super::recordings::Recordings) names it.
   pub audio_path: Option<String>,
-  /// Model file name without extension.
-  pub model: Option<String>,
-  /// Language asked for; `None` is detected by the model.
-  pub language: Option<String>,
+  /// Empty until a transcription makes some: "no text".
   pub text: String,
-  pub status: Status,
-  pub error: Option<String>,
+  /// The model the text came from: model file name without extension.
+  pub model: Option<String>,
+  /// The language the text was asked in; `None` is detected by the model.
+  pub language: Option<String>,
+  /// The model that last transcribed the recording, whatever came of it ("no text ·
+  /// <tried_model>"): an entry without text is transcribed again by itself only by another one.
+  pub tried_model: Option<String>,
+  /// Being transcribed: the retention leaves it alone. Cleared on start (a crash left it).
+  pub busy: bool,
+  /// The text a transcription replaced, with its model and language, for one undo
+  /// ([`Db::update_undo`]).
+  pub prev_text: Option<String>,
+  pub prev_model: Option<String>,
+  pub prev_language: Option<String>,
   pub pasted: bool,
   /// Why a paste was refused (the focus moved, a password field…); `None` also without
   /// auto-paste.
@@ -134,28 +110,52 @@ pub struct NewEntry<'a> {
   pub created_at: i64,
   pub duration_ms: i64,
   pub audio_path: Option<&'a str>,
+  pub text: &'a str,
   pub model: Option<&'a str>,
   pub language: Option<&'a str>,
-  /// `None` is [`Status::Transcribing`].
-  pub status: Option<Status>,
-  pub error: Option<&'a str>,
+  pub tried_model: Option<&'a str>,
+  pub busy: bool,
 }
 
 fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<Entry> {
-  let status: String = row.get("status")?;
   Ok(Entry {
     id: row.get("id")?,
     created_at: row.get("created_at")?,
     duration_ms: row.get("duration_ms")?,
     audio_path: row.get("audio_path")?,
+    text: row.get("text")?,
     model: row.get("model")?,
     language: row.get("language")?,
-    text: row.get("text")?,
-    status: Status::parse(&status).unwrap_or(Status::Failed),
-    error: row.get("error")?,
+    tried_model: row.get("tried_model")?,
+    busy: row.get("busy")?,
+    prev_text: row.get("prev_text")?,
+    prev_model: row.get("prev_model")?,
+    prev_language: row.get("prev_language")?,
     pasted: row.get("pasted")?,
     not_pasted: row.get("not_pasted")?,
   })
+}
+
+/// The entries without text the retention leaves alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Spare {
+  Nothing,
+  /// All of them: no model can transcribe them.
+  All,
+  /// Those this model has not tried: the session is transcribing them by itself.
+  UntriedBy(String),
+}
+
+impl Spare {
+  /// `?2` and `?3` of the retention's queries: an entry without text goes only if neither is
+  /// spared nor untried by `?3`.
+  fn params(&self) -> (bool, Option<&str>) {
+    match self {
+      Spare::Nothing => (false, None),
+      Spare::All => (true, None),
+      Spare::UntriedBy(model) => (false, Some(model)),
+    }
+  }
 }
 
 /// An entry's id and its recording.
@@ -200,12 +200,12 @@ impl Db {
     Ok(item)
   }
 
-  /// The newest `limit` entries with text, newest first by recording time, whose text holds
-  /// `search` in any case ([`fold`]; empty: all).
+  /// The newest `limit` entries, newest first by recording time, whose text holds `search` in any
+  /// case ([`fold`]; empty: all, also those without text).
   pub fn get_page(&self, search: &str, limit: usize) -> Result<Vec<Entry>> {
     let qs = "
     SELECT * FROM entries
-    WHERE text != '' AND (?1 = '' OR instr(wavo_fold(text), ?1) > 0)
+    WHERE ?1 = '' OR instr(wavo_fold(text), ?1) > 0
     ORDER BY created_at DESC, id DESC LIMIT ?2;
     ";
 
@@ -222,47 +222,75 @@ impl Db {
     Ok(items)
   }
 
-  /// The entries after the newest `keep`; entries still being transcribed are neither returned
-  /// nor counted.
-  pub fn get_beyond_newest(&self, keep: u32) -> Result<Vec<EntryAudio>> {
-    let qs = "
-    SELECT id, audio_path FROM entries WHERE status != 'transcribing'
-    ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?1;
-    ";
-
-    let mut stmt = self.db.prepare_cached(qs)?;
-    let items = stmt.query_map([keep], entry_audio_from_row)?.collect::<rusqlite::Result<_>>()?;
+  /// The entries without text.
+  pub fn get_untranscribed(&self) -> Result<Vec<EntryAudio>> {
+    let qs = "SELECT id, audio_path FROM entries WHERE text = '';";
+    let mut stmt = self.db.prepare(qs)?;
+    let items = stmt.query_map([], entry_audio_from_row)?.collect::<rusqlite::Result<_>>()?;
     Ok(items)
   }
 
-  /// The entries recorded before `at` (Unix ms), but those still being transcribed.
-  pub fn get_created_before(&self, at: i64) -> Result<Vec<EntryAudio>> {
+  /// The newest entry without text that `model` has not tried and nothing transcribes now.
+  pub fn get_untried(&self, model: &str) -> Result<Option<Entry>> {
     let qs = "
-    SELECT id, audio_path FROM entries WHERE status != 'transcribing' AND created_at < ?1;
+    SELECT * FROM entries
+    WHERE text = '' AND busy = 0 AND audio_path IS NOT NULL
+      AND (tried_model IS NULL OR tried_model != ?1)
+    ORDER BY created_at DESC, id DESC LIMIT 1;
     ";
 
+    let item = self.db.prepare_cached(qs)?.query_row([model], entry_from_row).optional()?;
+    Ok(item)
+  }
+
+  /// The entries after the newest `keep`. Entries being transcribed, and those `spare` spares, are
+  /// neither returned nor counted.
+  pub fn get_beyond_newest(&self, keep: u32, spare: &Spare) -> Result<Vec<EntryAudio>> {
+    let qs = "
+    SELECT id, audio_path FROM entries
+    WHERE busy = 0 AND (text != '' OR (?2 = 0 AND (?3 IS NULL OR tried_model IS ?3)))
+    ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?1;
+    ";
+
+    let (all, untried_by) = spare.params();
     let mut stmt = self.db.prepare_cached(qs)?;
-    let items = stmt.query_map([at], entry_audio_from_row)?.collect::<rusqlite::Result<_>>()?;
-    Ok(items)
+    let rows = stmt.query_map(params![keep, all, untried_by], entry_audio_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+  }
+
+  /// The entries recorded before `at` (Unix ms), but those being transcribed and those `spare`
+  /// spares.
+  pub fn get_created_before(&self, at: i64, spare: &Spare) -> Result<Vec<EntryAudio>> {
+    let qs = "
+    SELECT id, audio_path FROM entries
+    WHERE busy = 0 AND (text != '' OR (?2 = 0 AND (?3 IS NULL OR tried_model IS ?3)))
+      AND created_at < ?1;
+    ";
+
+    let (all, untried_by) = spare.params();
+    let mut stmt = self.db.prepare_cached(qs)?;
+    let rows = stmt.query_map(params![at, all, untried_by], entry_audio_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
   }
 
   // MARK: Inserters
 
   pub fn insert_entry(&self, entry: &NewEntry<'_>) -> Result<i64> {
     let qs = "
-    INSERT INTO entries (created_at, duration_ms, audio_path, model, language, status, error)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);
+    INSERT INTO entries
+      (created_at, duration_ms, audio_path, text, model, language, tried_model, busy)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);
     ";
 
-    let status = entry.status.unwrap_or(Status::Transcribing);
     self.db.prepare_cached(qs)?.execute(params![
       entry.created_at,
       entry.duration_ms,
       entry.audio_path,
+      entry.text,
       entry.model,
       entry.language,
-      status.as_str(),
-      entry.error,
+      entry.tried_model,
+      entry.busy,
     ])?;
 
     Ok(self.db.last_insert_rowid())
@@ -270,39 +298,62 @@ impl Db {
 
   // MARK: Updater
 
-  /// Sets the outcome; `text` `None` keeps the text the entry has.
-  pub fn update_outcome(
-    &self,
-    id: i64,
-    status: Status,
-    text: Option<&str>,
-    error: Option<&str>,
-  ) -> Result<()> {
-    let qs = "UPDATE entries SET status = ?2, text = COALESCE(?3, text), error = ?4 WHERE id = ?1;";
-    self.db.prepare_cached(qs)?.execute(params![id, status.as_str(), text, error])?;
+  /// Marks entry `id` as being transcribed by `model`.
+  pub fn mark_busy(&self, id: i64, model: &str) -> Result<()> {
+    let qs = "UPDATE entries SET busy = 1, tried_model = ?2 WHERE id = ?1;";
+    self.db.prepare_cached(qs)?.execute(params![id, model])?;
     Ok(())
   }
 
-  /// Marks an entry as being transcribed again, with `model` and `language`. Its text stays until
-  /// the new result replaces it.
-  pub fn mark_retranscribing(&self, id: i64, model: &str, language: Option<&str>) -> Result<()> {
+  /// The transcription of entry `id` ended without text: it keeps what it had.
+  pub fn mark_idle(&self, id: i64) -> Result<()> {
+    let qs = "UPDATE entries SET busy = 0 WHERE id = ?1;";
+    self.db.prepare_cached(qs)?.execute([id])?;
+    Ok(())
+  }
+
+  /// The model of entry `id`'s transcription did not load: it did not try the entry, which keeps
+  /// `tried_model` from before.
+  pub fn update_untried(&self, id: i64, tried_model: Option<&str>) -> Result<()> {
+    let qs = "UPDATE entries SET busy = 0, tried_model = ?2 WHERE id = ?1;";
+    self.db.prepare_cached(qs)?.execute(params![id, tried_model])?;
+    Ok(())
+  }
+
+  /// Entry `id`'s transcription made `text` (not empty) with `model` in `language`: it replaces the
+  /// text, which is kept for one undo if there was any.
+  pub fn update_text(
+    &self,
+    id: i64,
+    text: &str,
+    model: &str,
+    language: Option<&str>,
+  ) -> Result<()> {
     let qs = "
-    UPDATE entries SET status = 'transcribing', error = NULL, model = ?2, language = ?3
+    UPDATE entries SET
+      prev_text = CASE WHEN text = '' THEN prev_text ELSE text END,
+      prev_model = CASE WHEN text = '' THEN prev_model ELSE model END,
+      prev_language = CASE WHEN text = '' THEN prev_language ELSE language END,
+      text = ?2, model = ?3, language = ?4, busy = 0
     WHERE id = ?1;
     ";
 
-    self.db.prepare_cached(qs)?.execute(params![id, model, language])?;
+    self.db.prepare_cached(qs)?.execute(params![id, text, model, language])?;
     Ok(())
   }
 
-  /// Puts back `entry`'s status, model, language and error, as they were before
-  /// [`mark_retranscribing`](Self::mark_retranscribing): the text it kept is the one they go with.
-  pub fn update_as_before(&self, entry: &Entry) -> Result<()> {
-    let qs = "UPDATE entries SET status = ?2, model = ?3, language = ?4, error = ?5 WHERE id = ?1;";
-    let status = entry.status.as_str();
-    let args = params![entry.id, status, entry.model, entry.language, entry.error];
-    self.db.prepare_cached(qs)?.execute(args)?;
-    Ok(())
+  /// Puts back the text the last transcription of entry `id` replaced, with its model and
+  /// language; the replacing one takes their place, so a second undo brings it back. Returns false
+  /// if there is none.
+  pub fn update_undo(&self, id: i64) -> Result<bool> {
+    let qs = "
+    UPDATE entries SET
+      text = prev_text, model = prev_model, language = prev_language,
+      prev_text = text, prev_model = model, prev_language = language
+    WHERE id = ?1 AND prev_text IS NOT NULL;
+    ";
+
+    Ok(self.db.prepare_cached(qs)?.execute([id])? > 0)
   }
 
   /// Whether the text was pasted, and if a paste was refused, why.
@@ -312,10 +363,10 @@ impl Db {
     Ok(())
   }
 
-  /// Entries left `transcribing` by a crash become `failed`; returns how many.
+  /// Entries left being transcribed by a crash are not any more; returns how many.
   pub fn mark_interrupted(&self) -> Result<usize> {
-    let qs = "UPDATE entries SET status = 'failed', error = ?1 WHERE status = 'transcribing';";
-    Ok(self.db.execute(qs, [STOPPED_TRANSCRIBING])?)
+    let qs = "UPDATE entries SET busy = 0 WHERE busy = 1;";
+    Ok(self.db.execute(qs, [])?)
   }
 
   pub fn delete_entry(&self, id: i64) -> Result<()> {
@@ -349,8 +400,9 @@ mod tests {
     Db::open(&dir.path().join("history.db")).unwrap()
   }
 
-  fn insert(db: &Db, status: Status) -> i64 {
-    db.insert_entry(&NewEntry { status: Some(status), ..NewEntry::default() }).unwrap()
+  fn insert(db: &Db, text: &str) -> i64 {
+    let audio = Some("2026-10-09/1000.wav");
+    db.insert_entry(&NewEntry { text, audio_path: audio, ..NewEntry::default() }).unwrap()
   }
 
   #[test]
@@ -359,12 +411,12 @@ mod tests {
     let db = open(&dir);
     let version: i64 = db.db.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
     assert_eq!(version, 1);
-    let id = insert(&db, Status::Done);
+    let id = insert(&db, "text");
     drop(db);
 
     // Reopening keeps the data and runs no migration again.
     let db = open(&dir);
-    assert_eq!(db.get_entry(id).unwrap().map(|e| e.status), Some(Status::Done));
+    assert_eq!(db.get_entry(id).unwrap().map(|e| e.text), Some("text".into()));
   }
 
   #[test]
@@ -372,11 +424,11 @@ mod tests {
     let dir = TempDir::new("db-changes");
     let db = open(&dir);
     let start = db.changes();
-    let id = insert(&db, Status::Transcribing);
-    db.update_outcome(id, Status::Done, Some("text"), None).unwrap();
+    let id = insert(&db, "");
+    db.update_text(id, "text", "parakeet", None).unwrap();
     db.get_entry(id).unwrap();
     assert_eq!(db.changes(), start + 2, "reads change nothing");
-    insert(&open(&dir), Status::Done);
+    insert(&open(&dir), "");
     assert_ne!(db.changes(), start + 2, "another connection's write");
   }
 
@@ -392,24 +444,11 @@ mod tests {
   fn ids_are_never_used_again() {
     let dir = TempDir::new("db-ids");
     let db = open(&dir);
-    let first = insert(&db, Status::Done);
-    let newest = insert(&db, Status::Done);
+    let first = insert(&db, "a");
+    let newest = insert(&db, "b");
     db.delete_entry(newest).unwrap();
-    let next = insert(&db, Status::Done);
+    let next = insert(&db, "c");
     assert_eq!((first, newest, next), (1, 2, 3), "the deleted newest id is not used again");
-  }
-
-  #[test]
-  fn statuses_read_back_and_an_unknown_one_is_failed() {
-    for status in Status::ALL {
-      assert_eq!(Status::parse(status.as_str()), Some(status));
-    }
-
-    let dir = TempDir::new("db-status");
-    let db = open(&dir);
-    let id = insert(&db, Status::Done);
-    db.db.execute("UPDATE entries SET status = 'cancelled' WHERE id = ?1", [id]).unwrap();
-    assert_eq!(db.get_entry(id).unwrap().unwrap().status, Status::Failed);
   }
 
   #[test]
@@ -421,82 +460,137 @@ mod tests {
         created_at: 1_000,
         duration_ms: 4_200,
         audio_path: Some("2026-10-09/1000.wav"),
-        model: Some("gigaam-v3-e2e-rnnt-Q8_0"),
+        tried_model: Some("gigaam-v3-e2e-rnnt-Q8_0"),
+        busy: true,
         ..NewEntry::default()
       })
       .unwrap();
     let entry = db.get_entry(id).unwrap().unwrap();
-    assert_eq!(
-      (entry.status, entry.text.as_str(), entry.pasted),
-      (Status::Transcribing, "", false)
-    );
+    assert_eq!((entry.text.as_str(), entry.busy, entry.pasted), ("", true, false));
     assert_eq!((entry.created_at, entry.duration_ms), (1_000, 4_200));
     assert_eq!(entry.audio_path.as_deref(), Some("2026-10-09/1000.wav"));
 
-    db.update_outcome(id, Status::Done, Some("Привет"), None).unwrap();
+    // The first text: nothing to undo.
+    db.update_text(id, "Привет", "gigaam-v3-e2e-rnnt-Q8_0", Some("ru")).unwrap();
+    let entry = db.get_entry(id).unwrap().unwrap();
+    assert_eq!((entry.text.as_str(), entry.busy, entry.prev_text), ("Привет", false, None));
+    assert!(!db.update_undo(id).unwrap());
     db.mark_pasted(id, false, Some("the focus moved")).unwrap();
     assert_eq!(db.get_entry(id).unwrap().unwrap().not_pasted.as_deref(), Some("the focus moved"));
     db.mark_pasted(id, true, None).unwrap();
 
-    // Again with another model: the text stays until the new result; a failure keeps it.
-    db.mark_retranscribing(id, "whisper", Some("ru")).unwrap();
+    // Again with another model: a run without text keeps the text, and says who tried.
+    db.mark_busy(id, "whisper").unwrap();
+    db.mark_idle(id).unwrap();
+    db.mark_busy(id, "broken").unwrap();
+    db.update_untried(id, Some("whisper")).unwrap();
     let entry = db.get_entry(id).unwrap().unwrap();
-    assert_eq!((entry.status, entry.text.as_str()), (Status::Transcribing, "Привет"));
-    assert_eq!((entry.model.as_deref(), entry.language.as_deref()), (Some("whisper"), Some("ru")));
-    db.update_outcome(id, Status::Failed, None, Some("the engine crashed")).unwrap();
-    let entry = db.get_entry(id).unwrap().unwrap();
-    assert_eq!(entry.status, Status::Failed);
     assert_eq!(
-      (entry.text.as_str(), entry.error.as_deref()),
-      ("Привет", Some("the engine crashed"))
+      (entry.text.as_str(), entry.model.as_deref()),
+      ("Привет", Some("gigaam-v3-e2e-rnnt-Q8_0"))
     );
-    assert!(entry.pasted && entry.not_pasted.is_none());
+    assert_eq!((entry.tried_model.as_deref(), entry.busy), (Some("whisper"), false));
+
+    // New text replaces it, which an undo brings back, and a second undo the new one again.
+    db.mark_busy(id, "whisper").unwrap();
+    db.update_text(id, "Pree-vet", "whisper", None).unwrap();
+    let replaced = db.get_entry(id).unwrap().unwrap();
+    assert_eq!(
+      (replaced.text.as_str(), replaced.prev_text.as_deref()),
+      ("Pree-vet", Some("Привет"))
+    );
+    assert!(db.update_undo(id).unwrap());
+    let undone = db.get_entry(id).unwrap().unwrap();
+    assert_eq!(
+      (undone.text.as_str(), undone.model.as_deref()),
+      ("Привет", Some("gigaam-v3-e2e-rnnt-Q8_0"))
+    );
+    assert_eq!(
+      (undone.language.as_deref(), undone.prev_text.as_deref()),
+      (Some("ru"), Some("Pree-vet"))
+    );
+    assert!(undone.pasted && undone.not_pasted.is_none());
+    assert!(db.update_undo(id).unwrap());
+    assert_eq!(db.get_entry(id).unwrap().unwrap(), replaced);
     assert_eq!(db.get_entry(id + 1).unwrap(), None);
-
-    // Or the entry is put back as it was before.
-    db.update_outcome(id, Status::Done, None, None).unwrap();
-    let before = db.get_entry(id).unwrap().unwrap();
-    db.mark_retranscribing(id, "parakeet", None).unwrap();
-    db.update_as_before(&before).unwrap();
-    assert_eq!(db.get_entry(id).unwrap().unwrap(), before);
   }
 
+  /// Entries without text another model has not tried, newest first, none being transcribed.
   #[test]
-  fn interrupted_transcriptions_are_marked_failed() {
-    let dir = TempDir::new("db-interrupted");
+  fn untried_entries_for_a_model() {
+    let dir = TempDir::new("db-untried");
     let db = open(&dir);
-    let done = insert(&db, Status::Done);
-    let stuck = insert(&db, Status::Transcribing);
+    let entry = |created_at, text, tried_model| {
+      let audio = Some("1.wav");
+      let new =
+        NewEntry { created_at, text, tried_model, audio_path: audio, ..NewEntry::default() };
+      db.insert_entry(&new).unwrap()
+    };
+
+    let old = entry(1, "", None);
+    let tried = entry(2, "", Some("parakeet"));
+    entry(3, "text", None);
+    let newest = entry(4, "", Some("whisper"));
+    let untried = |model| db.get_untried(model).unwrap().map(|e| e.id);
+    assert_eq!(untried("parakeet"), Some(newest));
+    assert_eq!(untried("whisper"), Some(tried));
+    db.mark_busy(tried, "gigaam").unwrap();
+    assert_eq!(untried("whisper"), Some(old), "not one being transcribed");
     assert_eq!(db.mark_interrupted().unwrap(), 1);
-    assert_eq!(db.get_entry(done).unwrap().unwrap().status, Status::Done);
-    let stuck = db.get_entry(stuck).unwrap().unwrap();
-    assert_eq!(
-      (stuck.status, stuck.error.as_deref()),
-      (Status::Failed, Some(STOPPED_TRANSCRIBING))
-    );
-    assert_eq!(db.mark_interrupted().unwrap(), 0);
+    assert_eq!(untried("whisper"), Some(tried), "a crash left it");
+    assert_eq!(db.get_untranscribed().unwrap().len(), 3);
+  }
+
+  /// The retention's picks: never an entry being transcribed, and entries without text only when
+  /// they are not spared.
+  #[test]
+  fn retention_picks_spare_busy_and_untranscribed_entries() {
+    let dir = TempDir::new("db-retention");
+    let db = open(&dir);
+    let new = |created_at, text, tried_model, busy| NewEntry {
+      created_at,
+      text,
+      tried_model,
+      busy,
+      ..NewEntry::default()
+    };
+    let ids: Vec<i64> = [
+      new(1, "a", None, false),
+      new(2, "", None, false),
+      new(3, "", Some("whisper"), false),
+      new(4, "b", None, true),
+      new(5, "c", None, false),
+    ]
+    .iter()
+    .map(|e| db.insert_entry(e).unwrap())
+    .collect();
+    let picked = |items: Vec<EntryAudio>| items.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    let before = |spare| picked(db.get_created_before(5, &spare).unwrap());
+    assert_eq!(before(Spare::Nothing), [ids[0], ids[1], ids[2]]);
+    assert_eq!(before(Spare::All), [ids[0]]);
+    assert_eq!(before(Spare::UntriedBy("whisper".into())), [ids[0], ids[2]]);
+    let beyond = |spare| picked(db.get_beyond_newest(1, &spare).unwrap());
+    assert_eq!(beyond(Spare::Nothing), [ids[2], ids[1], ids[0]]);
+    assert_eq!(beyond(Spare::All), [ids[0]]);
   }
 
   #[test]
-  fn pages_are_newest_first_with_text_and_searched_in_any_case() {
+  fn pages_are_newest_first_and_searched_in_any_case() {
     let dir = TempDir::new("db-page");
     let db = open(&dir);
     let texts = ["Добрый день.", "Ещё раз", "hello World", "ДОБРЫЙ вечер", "", "еще одно"];
     let ids: Vec<i64> = (texts.iter().enumerate())
       .map(|(i, text)| {
-        let entry = NewEntry { created_at: 10_000 - i as i64 * 1_000, ..NewEntry::default() };
-        let id = db.insert_entry(&entry).unwrap();
-        db.update_outcome(id, Status::Done, Some(text), None).unwrap();
-        id
+        let entry = NewEntry { created_at: 10_000 - i as i64 * 1_000, text, ..NewEntry::default() };
+        db.insert_entry(&entry).unwrap()
       })
       .collect();
 
     let page = |search: &str, limit| -> Vec<i64> {
       db.get_page(search, limit).unwrap().iter().map(|e| e.id).collect()
     };
-    let all = [ids[0], ids[1], ids[2], ids[3], ids[5]];
-    assert_eq!(page("", 100), all, "the one without text is left out");
-    assert_eq!(page("", 2), all[..2]);
+    assert_eq!(page("", 100), ids, "the one without text too");
+    assert_eq!(page("", 2), ids[..2]);
     // Case in Cyrillic and Latin, `ё` as `е`; a quote or a percent sign is just text.
     assert_eq!(page("добрый", 100), [ids[0], ids[3]]);
     assert_eq!(page("WORLD", 100), [ids[2]]);
