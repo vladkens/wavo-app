@@ -16,6 +16,7 @@ mod session;
 mod settings;
 #[cfg(test)]
 mod testing;
+mod transfer;
 // The macOS shell's; elsewhere built for its tests.
 #[cfg(any(test, target_os = "macos"))]
 mod ui;
@@ -74,6 +75,21 @@ enum Command {
     #[command(subcommand)]
     request: Request,
   },
+  /// Write the settings, the history and its recordings into one archive (a tar), to import on
+  /// another computer
+  Export { file: PathBuf },
+  /// Add to the history what it does not have of an archive of `wavo-app export`, or of Handy's
+  /// history on this computer (`handy`); Wavo must not be running
+  Import {
+    /// The archive, or `handy` (its data directory, or `HANDY_DIR`)
+    source: PathBuf,
+    /// Also replace the settings with the archive's
+    #[arg(long)]
+    settings: bool,
+    /// Say what would be imported, and write nothing
+    #[arg(long)]
+    dry_run: bool,
+  },
   /// List audio input devices
   Devices,
   /// Record from the microphone (or the WAV file `WAVO_FAKE_MIC` names) into a 16 kHz mono WAV
@@ -106,6 +122,8 @@ fn main() -> Result<()> {
     Command::Settings { page, harness } => cli::settings(page, &harness),
     Command::Daemon => cli::daemon(),
     Command::Ctl { request } => cli::ctl(request),
+    Command::Export { file } => cli::export(&file),
+    Command::Import { source, settings, dry_run } => cli::import(&source, settings, dry_run),
     Command::Devices => cli::devices(),
     Command::Record { seconds, device, out } => cli::record(seconds, device.as_deref(), &out),
   }

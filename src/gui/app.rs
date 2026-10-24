@@ -15,6 +15,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -35,10 +36,13 @@ use crate::history::{self, History};
 use crate::session::controller::{Handle, Phase, Update};
 use crate::session::{self, Session};
 use crate::settings::{self, HudPosition, Settings};
+use crate::transfer::archive::{self, Exported};
+use crate::transfer::handy;
 use crate::ui::hud::{self, Mode};
 use crate::ui::icons::Icon;
 use crate::ui::menu::{self, Models, Warning};
 use crate::ui::overlay::{self, Overlay, Show};
+use crate::window::data::Import;
 use crate::window::downloads::{Download, Downloads};
 use crate::window::history::no_text;
 use crate::window::models::{Found, Pick};
@@ -325,6 +329,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
 
   let Some((shell, update, hub, home)) = with_app(|app| {
     let shell = MacShell {
+      home: app.home.clone(),
       handle: app.handle.clone(),
       hub: app.hub.clone(),
       downloads: app.downloads.clone(),
@@ -417,6 +422,7 @@ fn with_window(f: impl FnOnce(&mut Prefs) + Send + 'static) {
 /// times). What may wait (the system's login items, a folder's size, a deletion) runs on a
 /// thread of its own: the window keeps drawing.
 struct MacShell {
+  home: PathBuf,
   handle: Handle,
   hub: Hub,
   downloads: Downloads,
@@ -554,16 +560,57 @@ impl window::Shell for MacShell {
       warn!("show {}: {e}", dir.display());
     }
   }
+
+  fn handy(&self, done: Box<dyn FnOnce(Option<handy::Summary>) + Send>) {
+    spawn("handy", move || done(handy::found()));
+  }
+
+  /// In the app, which holds the single-instance lock, beside the session's own connection to the
+  /// history; the session is told when it is done.
+  fn import_handy(&self, dir: PathBuf, tell: Box<dyn Fn(Import) + Send>) {
+    let home = self.home.clone();
+    let handle = self.handle.clone();
+    spawn("import", move || {
+      let mut copied = |done, total| tell(Import::Copying(done, total));
+      let result = handy::import_held(&home, &dir, &mut copied);
+      match &result {
+        Ok(_) => handle.history_imported(),
+        Err(e) => warn!("import from Handy: {e:#}"),
+      }
+
+      tell(Import::Done(result.map(|r| r.1).map_err(|e| format!("{e:#}"))));
+    });
+  }
+
+  fn export(&self, file: PathBuf, done: Box<dyn FnOnce(Result<Exported, String>) + Send>) {
+    let home = self.home.clone();
+    spawn("export", move || {
+      let result = archive::export(&home, &file);
+      match &result {
+        Ok(_) => _ = nimbo::open::reveal(&file).inspect_err(|e| warn!("show the archive: {e}")),
+        Err(e) => warn!("export to {}: {e:#}", file.display()),
+      }
+
+      done(result.map_err(|e| format!("{e:#}")));
+    });
+  }
 }
 
 impl App {
   fn on_update(&mut self, main: &mut Main, update: Update) {
     // Retried while the window is busy (a pop-up's menu): an update dropped would leave it behind
-    // until the session's next one.
+    // until the session's next one. A retry a newer update overtook is dropped: it would put the
+    // window back to an older state.
+    static LATEST: AtomicU64 = AtomicU64::new(0);
     if self.window.is_some() {
       let (settings, status, history) =
         (update.settings.clone(), update.status.clone(), update.history);
-      with_window(move |prefs| prefs.update(&settings, &status, history));
+      let at = LATEST.fetch_add(1, Ordering::Relaxed) + 1;
+      with_window(move |prefs| {
+        if LATEST.load(Ordering::Relaxed) == at {
+          prefs.update(&settings, &status, history);
+        }
+      });
     }
 
     let status = &update.status;

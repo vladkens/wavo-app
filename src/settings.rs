@@ -4,13 +4,14 @@
 //!
 //! - A missing file, or a missing field, is the default.
 //! - Each field is read on its own: one this version does not understand (a value of a newer
-//!   Wavo's, a typo) is the default, with a warning. A file that is not a JSON object is all
-//!   defaults. Either way the file is copied to `settings.json.bad` first: the next save would
-//!   otherwise overwrite what the person wrote.
+//!   Wavo's, a typo) is the default, with a warning, and its value is written back as it was until
+//!   the setting is changed here ([`Settings::unread`]). A file that is not a JSON object is all
+//!   defaults, the file copied to `settings.json.bad` first: the next save overwrites it.
 //! - Keys this version does not know are kept through a save ([`Settings::unknown`]).
 //! - Writes are atomic: a temporary file next to it, `fsync`, then `rename`.
 //! - `schema_version` says which layout a file has. Migrations go into [`Settings::load`]; a file
-//!   from a newer version loads what this version knows, with a warning.
+//!   from a newer version loads what this version knows, with a warning, and keeps its number
+//!   through a save: the newer version's keys stay in its layout.
 
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
@@ -59,6 +60,11 @@ pub struct Settings {
   /// Keys this version does not know (a newer Wavo's), written back as they were.
   #[serde(flatten)]
   pub unknown: Map<String, Value>,
+  /// Values of known keys this version could not read (a newer Wavo's), their fields the defaults
+  /// meanwhile: written back as they were until the setting is changed
+  /// ([`Settings::changed_from`]).
+  #[serde(skip)]
+  pub unread: Map<String, Value>,
 }
 
 /// How the hotkey starts and stops a dictation.
@@ -101,6 +107,7 @@ impl Default for Settings {
       hud_position: HudPosition::Bottom,
       start_in_tray: false,
       unknown: Map::new(),
+      unread: Map::new(),
     }
   }
 }
@@ -128,7 +135,7 @@ impl Settings {
       }
     };
 
-    let (settings, invalid) = Self::parse(file);
+    let settings = Self::parse(file);
     let mut warnings = Vec::new();
     if settings.schema_version > SCHEMA_VERSION {
       warnings.push(format!(
@@ -139,26 +146,42 @@ impl Settings {
       ));
     }
 
-    if !invalid.is_empty() {
-      let kept = keep_aside(path, &bytes);
-      let keys = invalid.join(", ");
-      warnings.push(format!("{}: {keys} not understood, using defaults; {kept}", path.display()));
+    if !settings.unread.is_empty() {
+      let keys = settings.unread.keys().map(String::as_str).collect::<Vec<_>>().join(", ");
+      warnings.push(format!(
+        "{}: {keys} not understood, using defaults; kept in the file until changed",
+        path.display()
+      ));
     }
 
     let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
-    (Self { schema_version: SCHEMA_VERSION, ..settings }, warning)
+    let schema_version = settings.schema_version.max(SCHEMA_VERSION);
+    (Self { schema_version, ..settings }, warning)
   }
 
   /// The settings of a file's keys, each one on its own: a value that does not parse is left out
-  /// (its field is the default) and named in the second half.
-  fn parse(file: Map<String, Value>) -> (Self, Vec<String>) {
+  /// (its field is the default) and kept in [`Settings::unread`].
+  fn parse(file: Map<String, Value>) -> Self {
     let parses = |key: &String, value: &Value| {
       let one = Map::from_iter([(key.clone(), value.clone())]);
       serde_json::from_value::<Self>(Value::Object(one)).is_ok()
     };
-    let (good, invalid): (Map<_, _>, Map<_, _>) = file.into_iter().partition(|(k, v)| parses(k, v));
-    let settings = serde_json::from_value(Value::Object(good)).unwrap_or_default();
-    (settings, invalid.into_iter().map(|(key, _)| key).collect())
+    let (good, unread): (Map<_, _>, Map<_, _>) = file.into_iter().partition(|(k, v)| parses(k, v));
+    let settings: Self = serde_json::from_value(Value::Object(good)).unwrap_or_default();
+    Self { unread, ..settings }
+  }
+
+  /// `self` as the edit of `old`: the settings it changes no longer keep the values this version
+  /// could not read.
+  pub fn changed_from(mut self, old: &Settings) -> Self {
+    if !self.unread.is_empty()
+      && let (Ok(Value::Object(old)), Ok(Value::Object(new))) =
+        (serde_json::to_value(old), serde_json::to_value(&self))
+    {
+      self.unread.retain(|key, _| old.get(key) == new.get(key));
+    }
+
+    self
   }
 
   /// Writes the settings to `path` atomically, creating its directory.
@@ -166,7 +189,17 @@ impl Settings {
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
 
-    let mut json = serde_json::to_vec_pretty(self)?;
+    // Straight from the struct while it can: a `Value` writes the keys sorted, not in field order.
+    let mut json = if self.unread.is_empty() {
+      serde_json::to_vec_pretty(self)?
+    } else {
+      let mut file = serde_json::to_value(self)?;
+      if let Value::Object(file) = &mut file {
+        file.extend(self.unread.clone());
+      }
+
+      serde_json::to_vec_pretty(&file)?
+    };
     json.push(b'\n');
 
     // Its own temporary file per save: two saves at once must not write into one.
@@ -207,7 +240,7 @@ impl Settings {
   }
 }
 
-/// Copies the file that could not all be used to `settings.json.bad`; what the warning says of it.
+/// Copies the file that could not be used to `settings.json.bad`; what the warning says of it.
 fn keep_aside(path: &Path, bytes: &[u8]) -> String {
   let bad = path.with_extension("json.bad");
   match fs::write(&bad, bytes) {
@@ -306,9 +339,10 @@ mod tests {
     assert_eq!(saved.unknown.get("later_feature"), Some(&serde_json::json!({"on": true})));
   }
 
-  /// A value this version does not understand (a newer Wavo's) costs only its own field.
+  /// A value this version does not understand (a newer Wavo's) costs only its own field, and is
+  /// written back as it was until that setting is changed.
   #[test]
-  fn a_value_not_understood_is_the_default_and_the_rest_stays() {
+  fn a_value_not_understood_is_the_default_and_kept_until_changed() {
     let dir = TempDir::new("settings-bad-value");
     let path = dir.path().join(FILE);
     let text =
@@ -316,13 +350,32 @@ mod tests {
     fs::write(&path, text).unwrap();
 
     let (settings, warning) = Settings::load(&path);
+    let Value::Object(unread) = serde_json::json!({"activation": "sometimes", "hud_position": 3})
+    else {
+      unreachable!()
+    };
     let expected = Settings { language: "ru".into(), autostart: true, ..Settings::default() };
-    assert_eq!(settings, expected);
+    assert_eq!(settings, Settings { unread, ..expected });
 
     let warning = warning.unwrap();
     assert!(warning.contains("activation, hud_position not understood"), "{warning}");
-    assert!(warning.contains("settings.json.bad"), "{warning}");
-    assert_eq!(fs::read_to_string(dir.path().join("settings.json.bad")).unwrap(), text);
+    assert!(!dir.path().join("settings.json.bad").exists(), "nothing lost, nothing set aside");
+
+    // Another setting changed: both values stay in the file.
+    let edited = Settings { language: "en".into(), ..settings.clone() }.changed_from(&settings);
+    edited.save(&path).unwrap();
+    let file: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!((&file["activation"], &file["hud_position"]), (&"sometimes".into(), &3.into()));
+    let (loaded, _) = Settings::load(&path);
+    assert_eq!((loaded.language.as_str(), loaded.unread.len()), ("en", 2));
+
+    // The setting changed here: its value replaces the one not understood.
+    let toggle =
+      Settings { activation: Activation::Toggle, ..loaded.clone() }.changed_from(&loaded);
+    toggle.save(&path).unwrap();
+    let (loaded, warning) = Settings::load(&path);
+    assert_eq!(loaded.activation, Activation::Toggle);
+    assert!(warning.unwrap().contains(": hud_position not understood"));
   }
 
   #[test]
@@ -381,8 +434,13 @@ mod tests {
       .unwrap();
     let (settings, warning) = Settings::load(&path);
     assert_eq!(settings.language, "en");
-    assert_eq!(settings.schema_version, SCHEMA_VERSION);
+    assert_eq!(settings.schema_version, 7);
     let warning = warning.unwrap();
     assert!(warning.contains("newer") && warning.contains("activation"), "{warning}");
+
+    // Saved, it stays the newer layout: its number and its value.
+    Settings { language: "ru".into(), ..settings }.save(&path).unwrap();
+    let file: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!((&file["schema_version"], &file["activation"]), (&7.into(), &"double_tap".into()));
   }
 }
