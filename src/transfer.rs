@@ -164,15 +164,22 @@ pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> R
     }
   };
 
-  let history = match dry_run && !home.join(DB_FILE).is_file() {
-    true => None,
-    false => Some(History::open(home)?),
+  // A dry run reads the history and lists the recordings, but creates and migrates nothing.
+  let history = if dry_run { None } else { Some(History::open(home)?) };
+  let ours = match &history {
+    Some(h) => h.db.get_entries()?,
+    None if home.join(DB_FILE).is_file() => {
+      Db::open_read_only(&home.join(DB_FILE))?.get_entries()?
+    }
+    None => Vec::new(),
   };
-
-  let ours = history.as_ref().map(|h| h.db.get_entries()).transpose()?.unwrap_or_default();
   let starts: HashMap<i64, Option<String>> =
     ours.into_iter().map(|e| (e.created_at, e.audio_path)).collect();
-  let on_disk = history.as_ref().map(|h| h.recordings.list()).transpose()?.unwrap_or_default();
+  let on_disk = match &history {
+    Some(h) => h.recordings.list()?,
+    None if home.join(RECORDINGS_DIR).is_dir() => Recordings::open(home)?.list()?,
+    None => Vec::new(),
+  };
   let on_disk: HashSet<String> = on_disk.into_iter().collect();
 
   let reader = File::open(file).with_context(|| format!("open {}", file.display()))?;

@@ -29,7 +29,7 @@ use crate::settings::{Activation, HudPosition, Settings, language_name};
 
 // MARK: Window
 
-pub const WIDTH: f32 = 680.0;
+pub const WIDTH: f32 = 560.0;
 /// The height of the pages that scroll.
 pub const SCROLLING: f32 = 600.0;
 
@@ -71,6 +71,8 @@ pub struct Access {
   pub microphone: Grant,
   /// Another app holds Secure Input: the hotkey goes through its backup path.
   pub secure_input: bool,
+  /// Paste from Other Apps is not allowed: the clipboard can't be put back after a paste.
+  pub clipboard_unread: bool,
 }
 
 /// What the window asks of the app. What takes a while runs off the main thread and comes back
@@ -99,11 +101,6 @@ pub trait Shell {
   fn reveal(&self, _dir: &Path) {}
   /// This Mac has a Neural Engine wavo can use.
   fn has_neural_engine(&self) -> bool {
-    false
-  }
-
-  /// A model is being prepared for the Neural Engine.
-  fn preparing(&self) -> bool {
     false
   }
 }
@@ -296,6 +293,10 @@ impl App for Prefs {
           Page::About => self.about(ui, &fs),
         });
       });
+
+      if self.page == Page::History {
+        self.history_foot(ui, &fs);
+      }
     });
     self.confirm(ui);
 
@@ -323,6 +324,10 @@ const SECURE_INPUT_NOTE: &str = "Secure Input is on (a password field, or a term
   Keyboard Entry): the shortcut works through a backup path, and Esc may not cancel.";
 const ACTIVATION_HELP: &str = "How the hotkey records: while you hold it, from one press to the \
   next, or both (a short tap latches the recording on).";
+const KEEP_HELP: &str = "Off: after the paste the clipboard gets back what it held. On: the \
+  dictated text stays on it.";
+const CLIPBOARD_NOTE: &str = "Wavo can’t put the clipboard back after a paste: allow it in System \
+  Settings › Privacy & Security › Paste from Other Apps.";
 const MICROPHONE_WHY: &str = "Wavo records your voice through it while you hold the shortcut; \
   the recording stays on this Mac.";
 const ACCESSIBILITY_WHY: &str = "Wavo hears the shortcut in every app and pastes the text where \
@@ -379,7 +384,12 @@ impl Prefs {
       });
 
       // Without pasting the text only goes to the clipboard, and stays there.
-      let row = FormRow::new("Keep the text on the clipboard").disabled(!self.settings.auto_paste);
+      let help = match self.access.clipboard_unread && self.settings.restores_clipboard() {
+        true => format!("{KEEP_HELP}\n\n{CLIPBOARD_NOTE}"),
+        false => KEEP_HELP.to_owned(),
+      };
+      let row = FormRow::new("Keep the text on the clipboard").info(&help);
+      let row = row.disabled(!self.settings.auto_paste);
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.keep_in_clipboard;
         if ui.id("keep").toggle(&mut on, "").changed {
@@ -541,8 +551,9 @@ const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle thi
 const ANE_HELP: &str = "Parakeet and GigaAM run on the Neural Engine: as fast as on the GPU at a \
   fraction of the energy. Each new version of Wavo prepares the model once, in the background \
   (10–30 s); meanwhile it runs on the GPU. Whisper always runs on the GPU.";
-const EXPORT_NOTE: &str =
-  "Into Downloads as a .tar archive; to bring one back, run wavo-app import <file>.";
+const NO_ANE: &str = "Needs Apple silicon and macOS 15 or later.";
+const EXPORT_HELP: &str = "The history, its recordings and the settings, into Downloads as a .tar \
+  archive. To bring one back on another Mac, quit Wavo and run: wavo-app import <file>";
 
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
@@ -568,20 +579,6 @@ const RETENTIONS: [(Retention, &str); 7] = [
 ];
 
 impl Prefs {
-  /// Where the model runs, or why not on the Neural Engine.
-  fn neural_engine_note(&self, has: bool) -> String {
-    let device = self.status.engine.device.as_deref();
-    match device {
-      _ if !has => "Needs Apple silicon and macOS 15 or later".into(),
-      _ if self.settings.neural_engine && self.shell.preparing() => {
-        "Preparing the model for the Neural Engine…".into()
-      }
-      Some(device) => format!("Now on {device}"),
-      None if self.settings.neural_engine => "Parakeet and GigaAM models".into(),
-      None => "Every model runs on the GPU".into(),
-    }
-  }
-
   fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
     ui.form_section(fs, "App", |ui| {
       self.login(ui, fs);
@@ -600,9 +597,8 @@ impl Prefs {
       });
 
       let has = self.shell.has_neural_engine();
-      let caption = self.neural_engine_note(has);
-      let row =
-        FormRow::new("Use the Neural Engine").info(ANE_HELP).caption(&caption).disabled(!has);
+      let help = if has { ANE_HELP.to_owned() } else { format!("{NO_ANE}\n\n{ANE_HELP}") };
+      let row = FormRow::new("Use the Neural Engine").info(&help).disabled(!has);
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.neural_engine && has;
         if ui.id("ane").toggle(&mut on, "").changed {
@@ -619,31 +615,29 @@ impl Prefs {
     });
 
     let models = self.hub.root().to_owned();
-    let size: u64 = self.found.iter().map(|f| f.0.size).sum();
-    let models_caption = match size {
-      0 => paths::display(&models),
-      n => format!("{} · {}", paths::display(&models), size_text(n)),
-    };
     let recordings = self.home.join(RECORDINGS_DIR);
-    let recordings_caption = paths::display(&recordings);
     let folders = [
       (
         "Model folder",
         &models,
-        models_caption,
-        "The Hugging Face cache, which other apps may share",
+        "The downloaded models, in the Hugging Face cache, which other apps \
+        that use Hugging Face models share. Deleting a model on Models frees its space.",
       ),
-      ("Recordings", &recordings, recordings_caption, "The history’s recordings, a folder a day"),
+      (
+        "Recordings",
+        &recordings,
+        "The audio of every dictation in the history, a folder a day. \
+        A dictation deleted from the history takes its recording with it.",
+      ),
     ];
     let show = format!("Show in {}", open::file_manager());
-    // A path stays on one line, ending in "…": a long one has no space to wrap at.
-    let paths_fs = &FormStyle { caption: fs.caption.ellipsis(), ..*fs };
-    ui.form_section(paths_fs, "Files", |ui| {
-      for (name, dir, caption, tip) in folders {
-        let row = FormRow::new(name).caption(&caption).tile(Tile::Icon(Icon::FOLDER));
-        ui.form_row(paths_fs, row, |ui| {
+    ui.form_section(fs, "Files", |ui| {
+      for (name, dir, what) in folders {
+        let help = format!("{what}\n\n{}", paths::display(dir));
+        let row = FormRow::new(name).info(&help).tile(Tile::Icon(Icon::FOLDER));
+        ui.form_row(fs, row, |ui| {
           let r = ui.disabled(!dir.is_dir()).id(("reveal", name)).button(&show);
-          ui.tooltip(r.id, tip);
+          ui.tooltip(r.id, &paths::display(dir));
           if r.clicked {
             self.shell.reveal(dir);
           }
@@ -652,7 +646,7 @@ impl Prefs {
     });
 
     ui.form_section(fs, "Data", |ui| {
-      let row = FormRow::new("Export the history").caption(EXPORT_NOTE).tile(Tile::Icon(Icon::DOC));
+      let row = FormRow::new("Export the history").info(EXPORT_HELP).tile(Tile::Icon(Icon::DOC));
       ui.form_row(fs, row, |ui| {
         if ui.id("export").button("Export").clicked {
           self.shell.export();
@@ -1118,6 +1112,8 @@ struct HistoryPage {
   /// What the entries were loaded for: the search, the pages and the revision.
   loaded: Option<(String, usize, u64)>,
   playing: Option<(i64, Playback)>,
+  /// The entry the panel under the list shows.
+  selected: Option<i64>,
   /// What the search row says: an error, "Copied".
   note: Option<String>,
 }
@@ -1223,12 +1219,16 @@ fn day_note(entries: &[&Entry]) -> String {
 }
 
 enum Act {
+  Select(i64),
   Copy(String),
   Play(i64),
   Stop,
   Request(Request),
   Delete { id: i64, start: String, audio: bool },
 }
+
+/// The panel under the list, with the selected dictation's whole text and its actions.
+const FOOT_H: f32 = 150.0;
 
 impl Prefs {
   fn history_head(&mut self, ui: &mut Ui, s: Style) {
@@ -1247,9 +1247,6 @@ impl Prefs {
 
   /// The dictations, newest first, in a plate a day, a page at a time.
   fn history(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    // Nothing to transcribe with: Transcribe Again waits.
-    let transcribes = self.transcribes();
-    let retranscribing = self.status.retranscribing.clone();
     let h = &mut self.history;
     if let Some((_, p)) = h.playing.take_if(|(_, p)| !p.playing())
       && let Some(e) = p.error()
@@ -1258,6 +1255,11 @@ impl Prefs {
     }
 
     h.load(&self.home);
+    // Deleted, or out of the search.
+    if h.selected.is_some_and(|id| !h.entries.iter().any(|e| e.id == id)) {
+      h.selected = None;
+    }
+
     if h.entries.is_empty() {
       let empty = match h.search.trim().is_empty() {
         true => "No dictations yet: hold the shortcut and speak.",
@@ -1276,7 +1278,7 @@ impl Prefs {
     }
 
     let (now, mut act) = (now_ms(), None);
-    let fs = &FormStyle { caption: fs.caption.ellipsis(), ..*fs };
+    let fs = &FormStyle { caption: fs.caption.ellipsis(), pad_y: fs.pad_y + 4.0, ..*fs };
     for (day, entries) in &days {
       let note = day_note(entries);
       ui.form_section_with(
@@ -1285,9 +1287,9 @@ impl Prefs {
         |ui| ui.text(&note, fs.note),
         |ui| {
           for e in entries {
+            let selected = h.selected == Some(e.id);
             let playing = h.playing.as_ref().is_some_and(|(id, _)| *id == e.id);
-            let busy = retranscribing.contains(&e.id);
-            if let Some(a) = entry_row(ui, fs, e, playing, busy, transcribes) {
+            if let Some(a) = entry_row(ui, fs, e, selected, playing) {
               act = Some(a);
             }
           }
@@ -1299,7 +1301,61 @@ impl Prefs {
       h.pages += 1;
     }
 
+    self.history_act(ui, act);
+  }
+
+  /// Under the list, where it stays: the selected dictation's whole text, Transcribe Again,
+  /// Restore the Previous Text and Delete.
+  fn history_foot(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    let t = ui.theme();
+    let transcribes = self.transcribes();
+    let h = &self.history;
+    let e = h.selected.and_then(|id| h.entries.iter().find(|e| e.id == id));
+    let mut act = None;
+    ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
+    let s = Style::new().w(grow()).h(px(FOOT_H)).pads([12.0, 20.0, 16.0, 20.0]).gap(10.0);
+    ui.col(s, |ui| {
+      let Some(e) = e else {
+        let muted = t.label().color(t.muted);
+        ui.text("Select a dictation to see all of its text.", muted);
+        return;
+      };
+
+      let text = if e.text.is_empty() { no_text(e.tried_model.as_deref()) } else { e.text.clone() };
+      let area = Style::new().w(grow()).h(grow());
+      ui.id("history-text").scroll_area(area, |ui| {
+        ui.col(Style::new().w(grow()), |ui| ui.text(&text, t.body()));
+      });
+      let busy = self.status.retranscribing.contains(&e.id);
+      let audio = e.audio_path.is_some();
+      ui.row(Style::new().w(grow()).gap(8.0), |ui| {
+        let off = busy || !transcribes || !audio;
+        if ui.disabled(off).id(("retranscribe", e.id)).button("Transcribe Again").clicked {
+          act = Some(Act::Request(Request::Retranscribe(e.id)));
+        }
+
+        if self.status.restorable.contains(&e.id)
+          && ui.disabled(busy).id(("restore", e.id)).button("Restore the Previous Text").clicked
+        {
+          act = Some(Act::Request(Request::Restore(e.id)));
+        }
+
+        ui.el(Style::new().w(grow()));
+        // Not while it is transcribed again: the session refuses then.
+        if ui.disabled(busy).id(("delete", e.id)).button("Delete…").clicked {
+          let start = crate::history::shorten(&first_line(e), 60);
+          act = Some(Act::Delete { id: e.id, start, audio });
+        }
+      });
+    });
+
+    self.history_act(ui, act);
+  }
+
+  fn history_act(&mut self, ui: &mut Ui, act: Option<Act>) {
+    let h = &mut self.history;
     match act {
+      Some(Act::Select(id)) => h.selected = Some(id),
       Some(Act::Copy(text)) => {
         ui.clipboard().write(&text);
         h.note = Some("Copied to the clipboard".into());
@@ -1333,64 +1389,48 @@ impl Prefs {
   }
 }
 
-/// A dictation's row: its line (the whole text in a tooltip over it) and details, then Undo,
-/// Play, Copy, Transcribe Again and Delete.
-fn entry_row(
-  ui: &mut Ui,
-  fs: &FormStyle,
-  e: &Entry,
-  playing: bool,
-  busy: bool,
-  transcribes: bool,
-) -> Option<Act> {
+/// A dictation's row, all of one height: its text on a line and the details under it, Play and
+/// Copy centred at its right. A click on it selects it (tinted), for the panel under the list.
+fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, selected: bool, playing: bool) -> Option<Act> {
   let line = first_line(e);
   let caption = details(e);
+  let mut fs = *fs;
+  fs.row = fs.row.hit();
+  if selected {
+    fs.row = fs.row.bg(ui.theme().ghost).radius(fs.group.radii[0]);
+  }
+
+  // A row's controls go on its first line: they are centred in the whole row instead, the line,
+  // the details and nimbo's 2 points between them.
+  let row_h = 2.0 * fs.pad_y + fs.label.line_h + 2.0 + fs.caption.line_h;
   let text = Id::of(("text", e.id));
+  let (mut act, mut on_text) = (None, false);
   let cover = |ui: &mut Ui| {
-    ui.with_id(text).float(Float::parent().clip()).el(Style::new().w(grow()).h(grow()));
-    ui.tooltip(text, if e.text.is_empty() { &line } else { &e.text });
+    let at = Float::parent().clip();
+    on_text = ui.with_id(text).float(at).el(Style::new().w(grow()).h(grow())).clicked;
   };
-  let audio = e.audio_path.is_some();
-  let mut act = None;
-  ui.form_row_with(fs, FormRow::new(&line).caption(&caption).one_line(), cover, |ui| {
-    // The text a transcription replaced; first, so the other buttons keep their places.
-    if e.prev_text.is_some() {
-      let r = ui.disabled(busy).id(("undo", e.id)).icon_button(Icon::HISTORY);
-      ui.tooltip(r.id, "Undo the transcription");
+
+  let row = FormRow::new(&line).caption(&caption).one_line();
+  let r = ui.form_row_with(&fs, row, cover, |ui| {
+    ui.row(Style::new().h(px(row_h)).gap(fs.gap).align(Align::End, Align::Center), |ui| {
+      let audio = e.audio_path.is_some();
+      let r = ui.disabled(!audio).id(("play", e.id));
+      let r = Button::icon(if playing { Icon::STOP } else { Icon::PLAY }).large().show(r);
+      ui.tooltip(r.id, if playing { "Stop" } else { "Play the recording" });
       if r.clicked {
-        act = Some(Act::Request(Request::UndoTranscribe(e.id)));
+        act = Some(if playing { Act::Stop } else { Act::Play(e.id) });
       }
-    }
 
-    let r = ui.disabled(!audio).id(("play", e.id));
-    let r = r.icon_button(if playing { Icon::STOP } else { Icon::PLAY });
-    ui.tooltip(r.id, if playing { "Stop" } else { "Play the recording" });
-    if r.clicked {
-      act = Some(if playing { Act::Stop } else { Act::Play(e.id) });
-    }
-
-    let r = ui.disabled(e.text.is_empty()).id(("copy", e.id)).icon_button(Icon::COPY);
-    ui.tooltip(r.id, "Copy");
-    if r.clicked {
-      act = Some(Act::Copy(e.text.clone()));
-    }
-
-    let off = busy || !transcribes || !audio;
-    let r = ui.disabled(off).id(("retranscribe", e.id)).icon_button(Icon::RESET);
-    ui.tooltip(r.id, "Transcribe again");
-    if r.clicked {
-      act = Some(Act::Request(Request::Retranscribe(e.id)));
-    }
-
-    // Not while it is transcribed again: the session refuses then.
-    let r = ui.disabled(busy).id(("delete", e.id)).icon_button(Icon::TRASH);
-    ui.tooltip(r.id, "Delete…");
-    if r.clicked {
-      let start = crate::history::shorten(&line, 60);
-      act = Some(Act::Delete { id: e.id, start, audio });
-    }
+      let r = ui.disabled(e.text.is_empty()).id(("copy", e.id));
+      let r = Button::icon(Icon::COPY).large().show(r);
+      ui.tooltip(r.id, "Copy");
+      if r.clicked {
+        act = Some(Act::Copy(e.text.clone()));
+      }
+    });
   });
-  act
+
+  act.or((r.clicked || on_text).then_some(Act::Select(e.id)))
 }
 
 // MARK: About
@@ -1449,14 +1489,19 @@ impl Prefs {
     });
 
     let fs = &FormStyle { caption: fs.caption.ellipsis(), ..*fs };
+    // A row's controls go on its name's line: the ↗ is centred in the whole row instead, the
+    // name, its line and nimbo's 2 points between them.
+    let row_h = 2.0 * fs.pad_y + fs.label.line_h + 2.0 + fs.caption.line_h;
     ui.form_section(fs, "Acknowledgements", |ui| {
       for (name, what, url) in ACKS {
         ui.form_row(fs, FormRow::new(name).caption(what), |ui| {
-          let r = ui.id(("link", name)).icon_button(Icon::EXTERNAL);
-          ui.tooltip(r.id, url.trim_start_matches("https://"));
-          if r.clicked {
-            self.shell.open_url(url);
-          }
+          ui.col(Style::new().h(px(row_h)).align(Align::Center, Align::Center), |ui| {
+            let r = Button::icon(Icon::EXTERNAL).large().show(ui.id(("link", name)));
+            ui.tooltip(r.id, url.trim_start_matches("https://"));
+            if r.clicked {
+              self.shell.open_url(url);
+            }
+          });
         });
       }
     });
@@ -1468,7 +1513,7 @@ mod tests {
   use std::cell::{RefCell, RefMut};
   use std::rc::Rc;
 
-  use nimbo::{Appearance, Event, Harness, Modifiers, Size};
+  use nimbo::{Appearance, Event, Harness, Modifiers, Phase, Point, Size};
 
   use super::*;
   use crate::testing::TempDir;
@@ -1520,7 +1565,12 @@ mod tests {
     }
 
     fn access(&self) -> Access {
-      let all = Access { accessibility: true, microphone: Grant::Granted, secure_input: false };
+      let all = Access {
+        accessibility: true,
+        microphone: Grant::Granted,
+        secure_input: false,
+        clipboard_unread: false,
+      };
       self.log().access.unwrap_or(all)
     }
 
@@ -1663,8 +1713,13 @@ mod tests {
       ("Отдельно я хотел бы чтобы ты импортировал эту штуку отдельным экшеном", 1),
     ]);
     let history = History::open(home.dir.path()).unwrap();
-    let again = "Отдельно я хотел бы, чтобы ты импортировал эту штуку отдельным экшеном.";
-    history.db.update_text(ids[6], again, "whisper-large-v3-turbo-Q8_0", None).unwrap();
+    let again = "Отдельно я хотел бы, чтобы ты импортировал эту штуку отдельным экшеном. Сначала \
+      архив с историей, потом настройки, и чтобы можно было посмотреть, что придёт, до того как \
+      что-то запишется. Если записи уже есть, они пропускаются, а аудио копируется только то, \
+      которого нет. И ещё: прогресс копирования, потому что архивы бывают на десятки гигабайт, \
+      и окно не должно при этом зависать. В конце короткая сводка: сколько добавлено, сколько \
+      было, сколько не скопировалось и почему.";
+    history.db.update_text(ids[6], again, Some("whisper-large-v3-turbo-Q8_0"), None).unwrap();
     let first_run = Home::new("window-shots-first-run", &[]);
     let dir = std::env::var_os("WAVO_SHOTS").map(PathBuf::from);
     let shot = |h: &mut Harness<Prefs>, name: &str| {
@@ -1700,14 +1755,32 @@ mod tests {
         assert_eq!(ground[0] < 100, appearance.dark, "{name} {look}: {ground:?}");
       }
 
+      tab(&mut h, Page::History);
+      click(&mut h, Id::of(("text", ids[6])));
+      shot(&mut h, &format!("history-selected-{look}"));
+      // The panel's long text scrolls under the wheel.
+      let panel = Id::of("history-text");
+      let sc = h.rt.ui.scroll(panel).expect("the panel's scroll area");
+      assert!(sc.content.h > sc.viewport.h, "{look}: the text overflows: {sc:?}");
+      let v = sc.viewport;
+      let (pos, delta) = (Point::new(v.x + v.w / 2.0, v.y + v.h / 2.0), Point::new(0.0, -40.0));
+      let (phase, momentum, mods) = (Phase::None, Phase::None, Modifiers::default());
+      h.event(Event::Scroll { pos, delta, precise: true, phase, momentum, mods });
+      h.frame();
+      assert!(h.rt.ui.scroll(panel).unwrap().offset.y > 0.0, "{look}: it scrolled");
+
       tab(&mut h, Page::Models);
       click(&mut h, Id::of(("delete", "whisper-turbo")));
       assert!(h.rect(Id::of(CONFIRM).key("card")).is_some(), "{look}: the dialog");
       shot(&mut h, &format!("models-delete-{look}"));
 
       let fake = Fake::default();
-      let none =
-        Access { accessibility: false, microphone: Grant::NotDetermined, secure_input: false };
+      let none = Access {
+        accessibility: false,
+        microphone: Grant::NotDetermined,
+        secure_input: false,
+        clipboard_unread: false,
+      };
       fake.log().access = Some(none);
       let mut h = first_run.harness(&fake, Settings::default());
       h.event(Event::Appearance(appearance));
@@ -1823,22 +1896,27 @@ mod tests {
     click(&mut h, Id::of(("copy", ids[1])));
     assert_eq!(h.rt.clipboard().read().as_deref(), Some("Send the invoice to Anna."));
 
-    // Transcribed again: its new text came, and Undo puts back the one before.
+    // Nothing selected: the panel under the list has no actions; a click on a row selects it.
+    assert!(h.rect(Id::of(("retranscribe", ids[0]))).is_none());
+    click(&mut h, Id::of(("text", ids[0])));
+    assert_eq!(h.app().history.selected, Some(ids[0]));
+
+    // Transcribed again from the panel: its new text came, and the one before comes back.
     click(&mut h, Id::of(("retranscribe", ids[0])));
     let history = History::open(home.dir.path()).unwrap();
-    history.db.update_text(ids[0], "Move the design review.", "whisper-tiny-Q8_0", None).unwrap();
+    let again = "Move the design review.";
+    history.db.update_text(ids[0], again, Some("whisper-tiny-Q8_0"), None).unwrap();
     let settings = h.app().settings.clone();
-    h.app_mut().update(&settings, &Status::default(), 2);
+    let status = Status { restorable: vec![ids[0]], ..Status::default() };
+    h.app_mut().update(&settings, &status, 2);
     h.rt.waker().wake();
     h.frame();
-    click(&mut h, Id::of(("undo", ids[0])));
-
+    click(&mut h, Id::of(("restore", ids[0])));
     click(&mut h, Id::of(("delete", ids[0])));
     let want = "“Move the design review.” and its recording are removed from the history.";
     assert_eq!(h.app().ask.as_ref().map(|a| a.message.as_str()), Some(want));
     confirm(&mut h);
-    let want =
-      [Request::Retranscribe(ids[0]), Request::UndoTranscribe(ids[0]), Request::Delete(ids[0])];
+    let want = [Request::Retranscribe(ids[0]), Request::Restore(ids[0]), Request::Delete(ids[0])];
     assert_eq!(fake.log().requests, want);
 
     // The search finds by text, in any case.
@@ -1857,8 +1935,12 @@ mod tests {
   fn general_guides_the_first_launch() {
     let home = Home::new("window-first-run", &[]);
     let fake = Fake::default();
-    let none =
-      Access { accessibility: false, microphone: Grant::NotDetermined, secure_input: false };
+    let none = Access {
+      accessibility: false,
+      microphone: Grant::NotDetermined,
+      secure_input: false,
+      clipboard_unread: false,
+    };
     fake.log().access = Some(none);
     let mut h = home.harness(&fake, Settings::default());
     assert!(h.rect(Id::of("model")).is_none());

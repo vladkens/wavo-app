@@ -87,7 +87,13 @@ impl Settings {
     let bytes = match fs::read(path) {
       Ok(bytes) => bytes,
       Err(e) if e.kind() == ErrorKind::NotFound => return (Self::default(), None),
-      Err(e) => return (Self::default(), Some(format!("{}: {e}; using defaults", path.display()))),
+      // Moved aside, as one that does not parse: the next save must not write over it.
+      Err(e) => {
+        let bad = path.with_extension("json.bad");
+        let kept = fs::rename(path, &bad)
+          .map_or_else(|_| String::new(), |_| format!(", kept as {}", bad.display()));
+        return (Self::default(), Some(format!("{}: {e}; using defaults{kept}", path.display())));
+      }
     };
 
     match serde_json::from_slice(&bytes) {

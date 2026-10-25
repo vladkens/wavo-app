@@ -11,6 +11,7 @@
 //!   time, behind dictations, each by a model that has not tried it yet (`tried_model`).
 //! - A chosen model not on disk gives way to the first one found, with a warning; the choice stays.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -279,6 +280,8 @@ pub struct Status {
   pub last: Option<Last>,
   /// Entries being transcribed again.
   pub retranscribing: Vec<i64>,
+  /// Entries transcribed again in this run, whose first text a restore puts back.
+  pub restorable: Vec<i64>,
   /// The last problem that is no entry's: the microphone did not open, a failed retranscription…
   pub error: Option<String>,
   /// Settings problems, the model fallback, and the current or last dictation's.
@@ -379,8 +382,8 @@ pub struct Handle(Sender<Msg>);
 pub enum Request {
   /// Transcribe an entry's recording again; new text replaces the text.
   Retranscribe(i64),
-  /// Put back the text an entry's last transcription replaced.
-  UndoTranscribe(i64),
+  /// Put back the text an entry had before it was transcribed again in this run.
+  Restore(i64),
   Delete(i64),
   /// Free the model's memory, after the job in progress.
   Unload,
@@ -425,6 +428,7 @@ impl Session {
       last: None,
       last_warnings: Vec::new(),
       retranscribing: Vec::new(),
+      originals: BTreeMap::new(),
       untried: false,
       model_path: None,
       model_error: None,
@@ -495,6 +499,15 @@ struct Job {
   id: u64,
   model: String,
   language: Option<String>,
+  /// The one it runs on, which a model change may have replaced since.
+  engine: Engine,
+}
+
+/// An entry's text before it was transcribed again.
+struct Original {
+  text: String,
+  model: Option<String>,
+  language: Option<String>,
 }
 
 struct Retranscription {
@@ -538,6 +551,7 @@ struct Controller<O: TextOutput> {
   last: Option<Last>,
   last_warnings: Vec<String>,
   retranscribing: Vec<Retranscription>,
+  originals: BTreeMap<i64, Original>,
   /// Entries without text may wait for the model now found.
   untried: bool,
   /// The model [`Controller::check_model`] last found.
@@ -586,6 +600,12 @@ impl<O: TextOutput> Controller<O> {
       self.transcribe_untried();
       self.publish();
     }
+
+    // Quit in the middle of a transcription: the entry is not tried, the next start takes it.
+    let dictation = self.dictation.as_ref().filter(|d| d.job.is_some()).and_then(|d| d.last.entry);
+    for id in dictation.into_iter().chain(self.retranscribing.iter().map(|r| r.entry)) {
+      log_history(self.history.db.mark_untried(id));
+    }
   }
 
   fn publish(&mut self) {
@@ -610,8 +630,8 @@ impl<O: TextOutput> Controller<O> {
     match msg {
       Msg::Input(input) => {
         // A press is a new attempt: the last one's error goes.
-        if matches!(input, Input::KeyDown { repeat: false, .. }) {
-          self.error = None;
+        if matches!(input, Input::KeyDown { repeat: false, .. }) && self.error.take().is_some() {
+          self.publish();
         }
 
         self.feed(input);
@@ -654,16 +674,13 @@ impl<O: TextOutput> Controller<O> {
           self.history.db.get_entry(id)?.ok_or_else(|| anyhow!("no history entry {id}"))?;
         self.retranscribe(entry, false)
       }
-      Request::UndoTranscribe(id) => {
+      Request::Restore(id) => {
         if self.is_busy(id) {
           bail!("entry {id} is being transcribed");
         }
 
-        if !self.history.db.update_undo(id)? {
-          bail!("entry {id} has no text before its last transcription");
-        }
-
-        Ok(())
+        let Some(o) = self.originals.remove(&id) else { bail!("entry {id} has no text before") };
+        self.history.db.update_text(id, &o.text, o.model.as_deref(), o.language.as_deref())
       }
       Request::Delete(id) => self.delete(id),
       Request::Unload => {
@@ -809,7 +826,8 @@ impl<O: TextOutput> Controller<O> {
 
   fn next_job(&mut self, model: String, language: Option<String>) -> Job {
     self.next_job += 1;
-    Job { id: self.next_job, model, language }
+    let engine = self.engine.as_ref().unwrap().engine.clone();
+    Job { id: self.next_job, model, language, engine }
   }
 
   fn on_engine(&mut self, event: engine::Event) {
@@ -949,7 +967,7 @@ impl<O: TextOutput> Controller<O> {
     };
 
     let job = self.next_job(model, language.clone());
-    self.engine.as_ref().unwrap().engine.transcribe(job.id, input.pcm, language, false);
+    job.engine.transcribe(job.id, input.pcm, language, false);
     self.dictation.as_mut().unwrap().job = Some(job);
   }
 
@@ -977,7 +995,7 @@ impl<O: TextOutput> Controller<O> {
     match (outcome, d.last.entry) {
       (Outcome::Done, Some(id)) => {
         let language = job.language.as_deref();
-        log_history(self.history.db.update_text(id, &text, &job.model, language));
+        log_history(self.history.db.update_text(id, &text, Some(&job.model), language));
       }
       // The model did not load: it tried nothing, and takes the entry by itself once it does.
       (Outcome::NoModel, Some(id)) => {
@@ -1050,8 +1068,8 @@ impl<O: TextOutput> Controller<O> {
       let _ = recorder.stop();
     }
 
-    if let (Some(job), Some(loaded)) = (d.job.take(), &self.engine) {
-      loaded.engine.cancel(job.id);
+    if let Some(job) = d.job.take() {
+      job.engine.cancel(job.id);
     }
 
     d.last.outcome = Outcome::Cancelled;
@@ -1124,7 +1142,7 @@ impl<O: TextOutput> Controller<O> {
     self.history.db.mark_busy(id, &model)?;
     info!("entry {id}: transcribing {:.1} s again with {model}", input.seconds());
     let job = self.next_job(model, language.clone());
-    self.engine.as_ref().unwrap().engine.transcribe(job.id, input.pcm, language, true);
+    job.engine.transcribe(job.id, input.pcm, language, true);
     self.retranscribing.push(Retranscription { job, entry: id, auto });
     Ok(())
   }
@@ -1157,8 +1175,17 @@ impl<O: TextOutput> Controller<O> {
     info!("entry {}: transcribed again: {outcome:?}", r.entry);
     match outcome {
       Outcome::Done => {
+        // The text it had first, for a restore while the app runs.
+        if let Ok(Some(e)) = self.history.db.get_entry(r.entry)
+          && !e.text.is_empty()
+        {
+          let original = Original { text: e.text, model: e.model, language: e.language };
+          self.originals.entry(r.entry).or_insert(original);
+        }
+
         let language = r.job.language.as_deref();
-        log_history(self.history.db.update_text(r.entry, &text, &r.job.model, language));
+        let update = self.history.db.update_text(r.entry, &text, Some(&r.job.model), language);
+        log_history(update);
       }
       // Tried again by itself once the model loads (see transcribe_untried).
       Outcome::NoModel if r.auto => log_history(self.history.db.mark_untried(r.entry)),
@@ -1189,6 +1216,7 @@ impl<O: TextOutput> Controller<O> {
     }
 
     info!("entry {id}: deleted with its recording");
+    self.originals.remove(&id);
     if self.last.as_ref().is_some_and(|l| l.entry == Some(id)) {
       self.last = None;
     }
@@ -1199,7 +1227,10 @@ impl<O: TextOutput> Controller<O> {
   /// The retention spares entries without text while no model can transcribe them, or while they
   /// are being transcribed by themselves.
   fn cleanup(&mut self) {
-    let spare = self.no_model().is_some() || self.untried;
+    // Also those waiting for the model found (a start, an unload in the middle of them).
+    let model = self.model_path.as_deref().map(file_stem);
+    let waiting = model.is_some_and(|m| self.history.db.get_untried(&m).ok().flatten().is_some());
+    let spare = self.no_model().is_some() || self.untried || waiting;
     match self.history.cleanup(self.settings.history_retention, now_ms(), spare) {
       Ok(0) => {}
       Ok(n) => info!("history: {n} old entries removed"),
@@ -1231,6 +1262,7 @@ impl<O: TextOutput> Controller<O> {
       engine,
       last: self.last.clone(),
       retranscribing: self.retranscribing.iter().map(|r| r.entry).collect(),
+      restorable: self.originals.keys().copied().collect(),
       error: self.error.clone(),
       warnings,
       no_model: self.no_model(),
@@ -1737,10 +1769,10 @@ mod tests {
     }
   }
 
-  /// A failed retranscription keeps the text and says why; new text replaces it, an undo puts it
-  /// back, a second undo the new one again.
+  /// A failed retranscription keeps the text and says why; new text replaces it, and a restore
+  /// puts back the first text, once.
   #[test]
-  fn a_retranscription_replaces_the_text_only_with_text_and_undoes() {
+  fn a_retranscription_replaces_the_text_only_with_text_and_restores() {
     let s = InProcess::start(
       "session-again",
       &Settings::default(),
@@ -1750,22 +1782,21 @@ mod tests {
     );
     let id = s.add_entry(1_000, "текст", &loud(1.0));
     s.models.panic_next();
-    let entry = s.retranscribed(id);
-    assert_eq!((entry.text.as_str(), entry.prev_text), ("текст", None));
+    assert_eq!(s.retranscribed(id).text, "текст");
     let error = s.update_where("the error", |u| u.status.error.is_some()).status.error.unwrap();
     assert!(
       error.starts_with(&format!("entry {id} could not")) && error.contains("panicked"),
       "{error}"
     );
 
-    let undo = || s.handle.request(Request::UndoTranscribe(id));
-    assert!(undo().unwrap_err().contains("no text before"));
-    let again = s.retranscribed(id);
-    assert_eq!((again.text.as_str(), again.prev_text.as_deref()), ("hello there", Some("текст")));
-    undo().unwrap();
+    let restore = || s.handle.request(Request::Restore(id));
+    assert!(restore().unwrap_err().contains("no text before"));
+    assert_eq!(s.retranscribed(id).text, "hello there");
+    assert_eq!(s.retranscribed(id).text, "hello there", "twice: the first text stays the one");
+    s.update_where("restorable", |u| u.status.restorable == [id]);
+    restore().unwrap();
     assert_eq!(s.entry(id).unwrap().text, "текст");
-    undo().unwrap();
-    assert_eq!(s.entry(id).unwrap(), again);
+    assert!(restore().is_err(), "once");
   }
 
   #[test]
