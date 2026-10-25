@@ -7,7 +7,8 @@
 //!   Wavo's, a typo) is the default, with a warning, and its value is written back as it was until
 //!   the setting is changed here ([`Settings::unread`]). A file that is not a JSON object is all
 //!   defaults, the file copied to `settings.json.bad` first: the next save overwrites it.
-//! - Keys this version does not know are kept through a save ([`Settings::unknown`]).
+//! - Keys this version does not know are kept through a save ([`Settings::unknown`]), but for the
+//!   settings it no longer has, which are dropped (`start_in_tray`).
 //! - Writes are atomic: a temporary file next to it, `fsync`, then `rename`.
 //! - `schema_version` says which layout a file has. Migrations go into [`Settings::load`]; a file
 //!   from a newer version loads what this version knows, with a warning, and keeps its number
@@ -28,6 +29,9 @@ use crate::history::Retention;
 
 pub const FILE: &str = "settings.json";
 pub const SCHEMA_VERSION: u32 = 1;
+/// Settings this version no longer has: read from an older file and dropped, not kept as
+/// [`Settings::unknown`].
+const RETIRED: [&str; 1] = ["start_in_tray"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -55,8 +59,6 @@ pub struct Settings {
   pub autostart: bool,
   /// Where the HUD (the recording panel) shows on the screen.
   pub hud_position: HudPosition,
-  /// Start without the settings window: only the icon in the menu bar (the tray).
-  pub start_in_tray: bool,
   /// Keys this version does not know (a newer Wavo's), written back as they were.
   #[serde(flatten)]
   pub unknown: Map<String, Value>,
@@ -105,7 +107,6 @@ impl Default for Settings {
       history_retention: Retention::Unlimited,
       autostart: false,
       hud_position: HudPosition::Bottom,
-      start_in_tray: false,
       unknown: Map::new(),
       unread: Map::new(),
     }
@@ -161,7 +162,8 @@ impl Settings {
 
   /// The settings of a file's keys, each one on its own: a value that does not parse is left out
   /// (its field is the default) and kept in [`Settings::unread`].
-  fn parse(file: Map<String, Value>) -> Self {
+  fn parse(mut file: Map<String, Value>) -> Self {
+    file.retain(|key, _| !RETIRED.contains(&key.as_str()));
     let parses = |key: &String, value: &Value| {
       let one = Map::from_iter([(key.clone(), value.clone())]);
       serde_json::from_value::<Self>(Value::Object(one)).is_ok()
@@ -269,7 +271,7 @@ mod tests {
     assert_eq!((s.language.as_str(), s.unload_after_minutes), ("auto", Some(5)));
     assert_eq!((s.engine_language(), s.unload_after()), (None, Some(Duration::from_secs(300))));
     assert_eq!(s.history_retention, Retention::Unlimited);
-    assert!(s.auto_paste && !s.keep_in_clipboard && !s.autostart && !s.start_in_tray);
+    assert!(s.auto_paste && !s.keep_in_clipboard && !s.autostart);
   }
 
   #[test]
@@ -337,6 +339,21 @@ mod tests {
     let (saved, _) = Settings::load(&path);
     assert_eq!(saved.language, "ru");
     assert_eq!(saved.unknown.get("later_feature"), Some(&serde_json::json!({"on": true})));
+  }
+
+  /// An older file's setting this version no longer has loads without a warning and is gone
+  /// after a save.
+  #[test]
+  fn a_retired_setting_is_read_and_dropped() {
+    let dir = TempDir::new("settings-retired");
+    let path = dir.path().join(FILE);
+    fs::write(&path, r#"{"hotkey": "fn", "start_in_tray": true}"#).unwrap();
+    let (settings, warning) = Settings::load(&path);
+    assert_eq!((settings.hotkey.as_str(), warning), ("fn", None));
+    assert!(settings.unknown.is_empty() && settings.unread.is_empty(), "{settings:?}");
+
+    settings.save(&path).unwrap();
+    assert!(!fs::read_to_string(&path).unwrap().contains("start_in_tray"));
   }
 
   /// A value this version does not understand (a newer Wavo's) costs only its own field, and is

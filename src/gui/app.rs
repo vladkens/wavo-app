@@ -2,9 +2,9 @@
 
 //! `wavo-app gui`: the menu bar app on nimbo's app platform ([nimbo::app]), an accessory app: the
 //! [Tray] with the [menu], the [Hotkeys] that feed the session's input, the HUD in an [Overlay],
-//! the settings window ([Prefs]) on demand: at launch unless the person starts in the menu bar
-//! only and nothing is missing (a permission: the window opens on Permissions, nothing is asked
-//! until the person says so), from the menu, `wavo-app ctl open-settings` and `open-history`, a
+//! the settings window ([Prefs]) on demand: at launch only when something is missing (a
+//! permission or a model: the window opens on Permissions, nothing is asked until the person says
+//! so), from the menu, `wavo-app ctl open-settings` and `open-history`, a
 //! second launch and the app opened again (Finder, Spotlight).
 //! The session and the control socket are `wavo-app daemon`'s.
 //!
@@ -150,7 +150,6 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   let _ = PROXY.set(main.proxy());
   let fake_mic = config.fake_mic.is_some();
   let (home, hub) = (config.home.clone(), config.hub.clone());
-  let (saved, _) = Settings::load(&home.join(settings::FILE));
   let observer = Box::new(|update: Update| {
     proxy().post(move |main| _ = with_app(|app| app.on_update(main, update)))
   });
@@ -196,17 +195,14 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   };
   app.check_access();
   app.read_models();
-  // Nothing is asked at launch: with a permission missing the window opens on Permissions, the
-  // first launch's guide, whose buttons ask (else it opens unless the person chose the menu bar
-  // only).
-  let missing = app.missing_permission();
+  // Nothing is asked at launch: with a permission or a model missing the window opens on
+  // Permissions, the first launch's guide, whose buttons ask; else the app starts in the menu bar.
+  let missing = app.missing_permission() || app.missing_model();
   APP.with(|cell| *cell.borrow_mut() = Some(app));
   // Opened again while it runs: the settings window, as for a second launch.
   main.on_reopen(|main| open_window(main, None));
   if missing {
     proxy().post(|main| open_window(main, Some(Page::Permissions)));
-  } else if !saved.start_in_tray {
-    proxy().post(|main| open_window(main, None));
   }
 
   Ok(())
@@ -760,6 +756,11 @@ impl App {
   /// Accessibility or the microphone is not allowed (or not yet).
   fn missing_permission(&self) -> bool {
     !self.accessibility || self.no_microphone()
+  }
+
+  /// No model transcribes: none downloaded, and no file of its own chosen.
+  fn missing_model(&self) -> bool {
+    self.pick.active.is_none() && self.pick.other.as_ref().is_none_or(|(_, there)| !there)
   }
 
   /// The microphone is denied: the system won't ask again.

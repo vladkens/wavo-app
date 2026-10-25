@@ -2,10 +2,10 @@
 
 //! The General, Permissions and Advanced pages. General: the model (a quick switch among the
 //! downloaded ones, the way to the Models page, or with none a button to download one) and the
-//! language; then the hotkey and how it records, the microphone, the output, launch at login, the
-//! menu bar start. Permissions guides the first launch through what the app needs: what the system
-//! allows (the microphone, Accessibility: why, their state and a button that asks or opens System
-//! Settings), and with no model the way to download one. Advanced: the model's unload, the
+//! language; then the hotkey and how it records, the microphone, the output, launch at login.
+//! Permissions guides the first launch through what the app needs: what the system allows (the
+//! microphone, Accessibility: why, their state and a button that asks or opens System Settings),
+//! and with no model the way to download one. Advanced: the model's unload, the
 //! history's retention, where the files are (the models, the recordings).
 
 use std::path::{Path, PathBuf};
@@ -37,7 +37,6 @@ pub const UNLOAD: &str = "unload";
 pub const HUD: &str = "hud";
 pub const LOGIN: &str = "login";
 pub const RETENTION: &str = "retention";
-pub const TRAY_ONLY: &str = "tray-only";
 pub const OPEN_ACCESSIBILITY: &str = "open-accessibility";
 pub const OPEN_MICROPHONE: &str = "open-microphone";
 pub const MODEL_FOLDER: &str = "model-folder";
@@ -333,15 +332,7 @@ impl Prefs {
       });
     });
 
-    ui.form_section(fs, "App", |ui| {
-      self.login(ui, fs);
-      ui.form_row(fs, FormRow::new("Start in the menu bar only"), |ui| {
-        let mut on = self.settings.start_in_tray;
-        if ui.id(TRAY_ONLY).toggle(&mut on, "").changed {
-          self.edit(move |s| s.start_in_tray = on);
-        }
-      });
-    });
+    ui.form_section(fs, "App", |ui| self.login(ui, fs));
   }
 
   /// The recorder and its reset button. A cleared value keeps the hotkey: the app needs one.

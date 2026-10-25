@@ -27,8 +27,7 @@ use wavo::hub;
 
 use super::general::{
   ACTIVATION, DOWNLOAD_MODEL, HOTKEY, HUD, KEEP, LANG, LOGIN, MIC, MODEL, MODEL_FOLDER,
-  OPEN_ACCESSIBILITY, OPEN_MICROPHONE, PASTE, RECORDINGS_FOLDER, RESET, RETENTION, TRAY_ONLY,
-  UNLOAD, row,
+  OPEN_ACCESSIBILITY, OPEN_MICROPHONE, PASTE, RECORDINGS_FOLDER, RESET, RETENTION, UNLOAD, row,
 };
 use super::history::{COPY, DELETE, PLAY, RETRANSCRIBE, ROW, SEARCH, TEXT, UNDO};
 use super::models::{self as page, CANCEL, DOWNLOAD, INFO, USE};
@@ -409,7 +408,7 @@ fn pages_fit_or_scroll_and_the_toolbar_switches_them() {
   let mut h = harness(&fake, Settings::default(), &home);
   let general = [HOTKEY, RESET, ACTIVATION, MIC, MODEL, LANG]
     .into_iter()
-    .chain([PASTE, KEEP, HUD, LOGIN, TRAY_ONLY])
+    .chain([PASTE, KEEP, HUD, LOGIN])
     .map(Id::of)
     .collect();
   let controls: [Vec<Id>; 6] = [
@@ -619,8 +618,6 @@ fn selects_and_switches_edit_the_settings() {
   click(&mut h, Id::of(KEEP));
   assert!(fake.log().settings.keep_in_clipboard, "disabled while pasting is off");
 
-  click(&mut h, Id::of(TRAY_ONLY));
-  assert!(fake.log().settings.start_in_tray);
   // Launch at login goes to the system, not through the settings' edits.
   click(&mut h, Id::of(LOGIN));
   assert_eq!(fake.log().autostarts, [true]);
@@ -629,7 +626,7 @@ fn selects_and_switches_edit_the_settings() {
   click(&mut h, Id::of(RETENTION));
   click(&mut h, Id::of(RETENTION).key(("item", 1)));
   assert_eq!(fake.log().settings.history_retention, crate::history::Retention::Count(100));
-  assert_eq!(fake.log().edits, 6);
+  assert_eq!(fake.log().edits, 5);
 }
 
 /// General's Model pop-up: the downloaded models, the one in use checked, then "Manage models…".
