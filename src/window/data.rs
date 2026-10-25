@@ -1,27 +1,40 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! The Advanced page's Data section: Import from Handy, shown when Handy's history is on this
-//! computer ([`crate::transfer::handy::found`], looked at off the main thread), with what it would
-//! bring and the copies' progress in place of its caption while it runs, then how it went; and
-//! Export, which writes the history into the Downloads folder (nimbo has no file picker) and shows
-//! the archive there. Importing an archive is `wavo-app import <file>` for now.
+//! The History page's toolbar, one row above its search: Keep (the history's retention), then
+//! Import from Handy, shown when Handy's history is on this computer
+//! ([`crate::transfer::handy::found`], looked at off the main thread, what it would bring in its
+//! tooltip); Export…, which writes the history into the Downloads folder (nimbo has no file picker)
+//! and shows the archive there; and Show Recordings. How an import or an export goes is said in the
+//! search row ([`Prefs::data_note`]). Importing an archive is `wavo-app import <file>` for now.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use nimbo::{Align, FormRow, FormStyle, Icon, Style, Tile, Ui, grow, paths, px};
+use nimbo::{Align, Select, Style, Ui, grow, paths};
 
 use super::Prefs;
-use super::general::{row as row_id, thousands};
+use super::general::{folder_caption, thousands};
 use super::models::size_text;
 use crate::history::recordings::day_of;
-use crate::history::{local_time, now_ms};
+use crate::history::{Retention, local_time, now_ms};
 use crate::transfer::Report;
 use crate::transfer::archive::Exported;
 use crate::transfer::handy::Summary;
 
+pub const RETENTION: &str = "retention";
 pub const IMPORT: &str = "import-handy";
 pub const EXPORT: &str = "export";
+pub const RECORDINGS: &str = "recordings-folder";
+
+const RETENTIONS: [Retention; 7] = [
+  Retention::Unlimited,
+  Retention::Count(100),
+  Retention::Count(1000),
+  Retention::Count(10_000),
+  Retention::Days3,
+  Retention::Weeks2,
+  Retention::Months3,
+];
 
 /// How an import from Handy goes, as the shell tells it.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,14 +59,27 @@ struct Shared {
   handy: Option<Summary>,
   import: Option<Import>,
   export: Option<Export>,
+  /// The export started after the import: its note is the one shown.
+  export_last: bool,
 }
 
-/// The section's state; the shell's threads fill it and wake the window.
+/// The toolbar's state; the shell's threads fill it and wake the window.
 #[derive(Default)]
 pub struct State {
   shared: Arc<Mutex<Shared>>,
   /// Handy's history is asked for: not again until the window looks again.
   pub asked: bool,
+}
+
+/// After "Keep:": `Forever`, `10,000 dictations`, `2 weeks`.
+fn retention_title(r: Retention) -> String {
+  match r {
+    Retention::Unlimited => "Forever".into(),
+    Retention::Count(n) => format!("{} dictations", thousands(n)),
+    Retention::Days3 => "3 days".into(),
+    Retention::Weeks2 => "2 weeks".into(),
+    Retention::Months3 => "3 months".into(),
+  }
 }
 
 /// `March 3, 2025`.
@@ -118,83 +144,99 @@ impl Prefs {
     self.data.shared.lock().unwrap().handy.clone()
   }
 
-  pub(super) fn data(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    let t = ui.theme();
-    let handy = self.handy(ui);
-    let (import, export) = {
-      let shared = self.data.shared.lock().unwrap();
-      (shared.import.clone(), shared.export.clone())
+  /// How the last import or export goes, for the search row, and whether it failed: `Importing
+  /// from Handy: 420 of 1,180 recordings…`, `Exported 3 dictations · 1 MB to ~/Downloads/…`.
+  pub fn data_note(&self) -> Option<(String, bool)> {
+    let shared = self.data.shared.lock().unwrap();
+    let import = || match shared.import.as_ref()? {
+      Import::Copying(done, total) => Some((
+        format!("Importing from Handy: {} of {} recordings…", thousands(done), thousands(total)),
+        false,
+      )),
+      Import::Done(Ok(r)) => Some((report_text(r), false)),
+      Import::Done(Err(e)) => Some((format!("Couldn't import: {e}"), true)),
     };
-    let (mut import_clicked, mut export_clicked) = (false, false);
-    ui.form_section(fs, "Data", |ui| {
-      if let Some(summary) = &handy {
-        let (caption, color) = match &import {
-          None | Some(Import::Copying(..)) => (summary_text(summary), None),
-          Some(Import::Done(Ok(r))) => (report_text(r), None),
-          Some(Import::Done(Err(e))) => (format!("Couldn't import: {e}"), Some(t.danger)),
-        };
-        let copying = match import {
-          Some(Import::Copying(done, total)) => Some((done, total)),
-          _ => None,
-        };
-        let mut row = FormRow::new("Import from Handy").tile(Tile::Icon(Icon::DOWNLOAD));
-        if copying.is_none() {
-          row = row.caption(&caption);
-        }
+    let export = || match shared.export.as_ref()? {
+      Export::Running => Some(("Exporting…".to_owned(), false)),
+      Export::Done(Ok((file, done))) => {
+        let (n, size) = (thousands(done.entries), size_text(done.bytes));
+        Some((format!("Exported {n} dictations · {size} to {}", paths::display(file)), false))
+      }
+      Export::Done(Err(e)) => Some((format!("Couldn't export: {e}"), true)),
+    };
+    match shared.export_last {
+      true => export().or_else(import),
+      false => import().or_else(export),
+    }
+  }
 
-        let tinted = color.map(|c| super::caption_in(fs, c));
-        let below = |ui: &mut Ui| {
-          if let Some((done, total)) = copying {
-            let line = Style::new().w(grow()).h(px(fs.caption.line_h)).gap(8.0);
-            ui.row(line.align(Align::Start, Align::Center), |ui| {
-              let k = done as f32 / total.max(1) as f32;
-              ui.col(Style::new().w(px(120.0)), |ui| ui.progress(Some(k)));
-              let text = format!("Copying recordings: {} of {}", thousands(done), thousands(total));
-              ui.text(text, fs.caption.nowrap());
-            });
-          }
-        };
-        let row_fs = tinted.as_ref().unwrap_or(fs);
-        ui.with_id(row_id(IMPORT)).form_row_with(row_fs, row, below, |ui| {
-          let busy = copying.is_some();
-          import_clicked = ui.disabled(busy).id(IMPORT).button("Import").clicked;
-        });
+  /// The toolbar: Keep at the left; Import from Handy (when found), Export… and Show Recordings at
+  /// the right, Import first so that its coming changes no other's place.
+  pub(super) fn history_tools(&mut self, ui: &mut Ui, s: Style) {
+    let mut all = RETENTIONS.to_vec();
+    if !all.contains(&self.settings.history_retention) {
+      all.insert(1, self.settings.history_retention);
+    }
+
+    let items: Vec<(usize, String)> =
+      all.iter().enumerate().map(|(i, &r)| (i, retention_title(r))).collect();
+    let items: Vec<(usize, &str)> = items.iter().map(|(i, l)| (*i, l.as_str())).collect();
+    let mut at = all.iter().position(|&r| r == self.settings.history_retention).unwrap_or(0);
+    let handy = self.handy(ui);
+    let (importing, exporting) = {
+      let shared = self.data.shared.lock().unwrap();
+      let importing = matches!(shared.import, Some(Import::Copying(..)));
+      (importing, matches!(shared.export, Some(Export::Running)))
+    };
+    let recordings = self.recordings.dir.clone();
+    let about = folder_caption(&recordings, self.recordings_size(ui));
+    let (mut keep, mut import, mut export, mut reveal) = (false, false, false, false);
+    ui.row(s.align(Align::Start, Align::Center), |ui| {
+      // The pop-up's label close after "Keep:", as one control.
+      ui.row(Style::new().align(Align::Start, Align::Center), |ui| {
+        ui.text("Keep:", ui.theme().label());
+        keep = Select::new(&mut at, &items).show(ui.id(RETENTION)).changed;
+      });
+      ui.el(Style::new().w(grow()));
+      if let Some(summary) = &handy {
+        let r = ui.disabled(importing).id(IMPORT).button("Import from Handy");
+        ui.tooltip(r.id, &summary_text(summary));
+        import = r.clicked;
       }
 
-      let (caption, color) = match &export {
-        None => (
-          "Into Downloads as a .tar archive; to bring one back, run wavo-app import <file>."
-            .to_owned(),
-          None,
-        ),
-        Some(Export::Running) => ("Exporting…".to_owned(), None),
-        Some(Export::Done(Ok((file, done)))) => {
-          let (file, n) = (paths::display(file), thousands(done.entries));
-          (format!("{file} · {n} dictations · {}", size_text(done.bytes)), None)
-        }
-        Some(Export::Done(Err(e))) => (format!("Couldn't export: {e}"), Some(t.danger)),
-      };
-      let tinted = color.map(|c| super::caption_in(fs, c));
-      let row = FormRow::new("Export the history").caption(&caption).tile(Tile::Icon(Icon::DOC));
-      ui.with_id(row_id(EXPORT)).form_row(tinted.as_ref().unwrap_or(fs), row, |ui| {
-        let busy = matches!(export, Some(Export::Running));
-        export_clicked = ui.disabled(busy).id(EXPORT).button("Export").clicked;
-      });
+      let r = ui.disabled(exporting).id(EXPORT).button("Export…");
+      let tip = "Into Downloads as a .tar archive; to bring one back, run wavo-app import <file>";
+      ui.tooltip(r.id, tip);
+      export = r.clicked;
+      let r = ui.disabled(!recordings.is_dir()).id(RECORDINGS).button("Show Recordings");
+      ui.tooltip(r.id, &format!("{about}: the history’s recordings, a folder a day"));
+      reveal = r.clicked;
     });
+    if keep {
+      let r = all[at];
+      self.edit(move |s| s.history_retention = r);
+    }
 
-    if import_clicked && let Some(summary) = handy {
+    if import && let Some(summary) = handy {
       self.import_handy(ui, summary.dir);
     }
 
-    if export_clicked {
+    if export {
       self.export(ui);
+    }
+
+    if reveal {
+      self.shell.reveal(&recordings);
     }
   }
 
   /// The shell imports Handy's history from `dir` and tells how it goes.
   fn import_handy(&mut self, ui: &Ui, dir: PathBuf) {
+    self.history.note = None;
     let (shared, waker) = (self.data.shared.clone(), ui.waker().clone());
-    shared.lock().unwrap().import = Some(Import::Copying(0, 0));
+    let mut s = shared.lock().unwrap();
+    (s.import, s.export_last) = (Some(Import::Copying(0, 0)), false);
+    drop(s);
     self.shell.import_handy(
       dir,
       Box::new(move |import| {
@@ -206,9 +248,12 @@ impl Prefs {
 
   /// The shell writes the archive into the Downloads folder; the window shows it there.
   fn export(&mut self, ui: &Ui) {
+    self.history.note = None;
     let file = export_file();
     let (shared, waker) = (self.data.shared.clone(), ui.waker().clone());
-    shared.lock().unwrap().export = Some(Export::Running);
+    let mut s = shared.lock().unwrap();
+    (s.export, s.export_last) = (Some(Export::Running), true);
+    drop(s);
     let done_file = file.clone();
     self.shell.export(
       file,
@@ -242,5 +287,6 @@ mod tests {
     };
     assert_eq!(summary_text(&s), "2 dictations, 1 recordings · 2 MB");
     assert!(export_file().to_string_lossy().contains("/Downloads/wavo-export-"));
+    assert_eq!(retention_title(Retention::Count(1000)), "1,000 dictations");
   }
 }

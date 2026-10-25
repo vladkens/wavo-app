@@ -25,11 +25,12 @@ use nimbo::{
 };
 use wavo::hub;
 
+use super::data::{EXPORT, IMPORT, RECORDINGS, RETENTION};
 use super::general::{
   ACTIVATION, DOWNLOAD_MODEL, HOTKEY, HUD, KEEP, LANG, LOGIN, MIC, MODEL, OPEN_ACCESSIBILITY,
-  OPEN_MICROPHONE, PASTE, RECORDINGS_FOLDER, RESET, RETENTION, row,
+  OPEN_MICROPHONE, PASTE, RESET, row,
 };
-use super::history::{COPY, DELETE, PLAY, RETRANSCRIBE, ROW, SEARCH, TEXT, UNDO};
+use super::history::{COPY, DELETE, NOTE, PLAY, RETRANSCRIBE, ROW, SEARCH, TEXT, UNDO};
 use super::models::{self as page, CANCEL, DOWNLOAD, FOLDER, INFO, UNLOAD, USE};
 use super::*;
 use crate::audio::devices::Choice;
@@ -408,12 +409,16 @@ fn pages_fit_or_scroll_and_the_toolbar_switches_them() {
   let mut h = harness(&fake, Settings::default(), &home);
   let general =
     [OPEN_ACCESSIBILITY, HOTKEY, RESET, ACTIVATION, MIC, MODEL, LANG, LOGIN].map(Id::of).to_vec();
-  let advanced = [PASTE, KEEP, HUD, RETENTION, RECORDINGS_FOLDER];
+  let advanced = [PASTE, KEEP, HUD];
   let models = [Id::of(page::SEARCH), Id::of(page::LANG), Id::of(UNLOAD), Id::of(FOLDER)];
   let controls: [Vec<Id>; 5] = [
     general,
     [&models[..], &[Id::of((INFO, TWO[0])), Id::of((USE, TWO[1]))]].concat(),
-    vec![Id::of(SEARCH), Id::of((COPY, ids[8])), Id::of((PLAY, ids[8]))],
+    [SEARCH, RETENTION, EXPORT, RECORDINGS]
+      .map(Id::of)
+      .into_iter()
+      .chain([Id::of((COPY, ids[8]))])
+      .collect(),
     advanced.map(Id::of).to_vec(),
     vec![Id::of((about::LINK, "source")), Id::of((about::LINK, "models"))],
   ];
@@ -496,6 +501,8 @@ fn controls_show_hover_and_tooltips() {
 
   tab(&mut h, Page::History);
   hovers_on(&mut h, &[Id::of((COPY, ids[2])), Id::of((DELETE, ids[2]))]);
+  hovers_on(&mut h, &[Id::of(RETENTION), Id::of(EXPORT), Id::of(RECORDINGS)]);
+  click(&mut h, Id::of(RECORDINGS));
   // No recording to play or to transcribe again in this history.
   assert_eq!(hover(&mut h, Id::of((PLAY, ids[2]))), (Cursor::Arrow, 0));
   assert_eq!(hover(&mut h, Id::of((RETRANSCRIBE, ids[2]))), (Cursor::Arrow, 0));
@@ -506,12 +513,10 @@ fn controls_show_hover_and_tooltips() {
   hovers_on(&mut h, &[Id::of(SEARCH).key("clear")]);
 
   tab(&mut h, Page::Advanced);
-  hovers_on(&mut h, &[Id::of(RETENTION), Id::of(RECORDINGS_FOLDER)]);
   hovers_on(&mut h, &[Id::of(PASTE), Id::of(HUD)]);
   // Keeping the clipboard means nothing without pasting.
   click(&mut h, Id::of(PASTE));
   assert_eq!(hover(&mut h, Id::of(KEEP)), (Cursor::Arrow, 0), "the row is disabled");
-  click(&mut h, Id::of(RECORDINGS_FOLDER));
   let recordings = home.path().join(crate::history::recordings::DIR);
   assert_eq!(fake.log().folders, [home.hub.root().to_owned(), recordings]);
 
@@ -621,6 +626,7 @@ fn selects_and_switches_edit_the_settings() {
   click(&mut h, Id::of(KEEP));
   assert!(fake.log().settings.keep_in_clipboard, "disabled while pasting is off");
 
+  tab(&mut h, Page::History);
   click(&mut h, Id::of(RETENTION));
   click(&mut h, Id::of(RETENTION).key(("item", 1)));
   assert_eq!(fake.log().settings.history_retention, crate::history::Retention::Count(100));
@@ -1322,12 +1328,12 @@ fn every_page_renders_in_both_looks() {
           assert!(h.rect(Id::of(CONFIRM).key("card")).is_some(), "{look}: the dialog");
           shot(&mut h, &format!("models-delete-{look}"));
         }
-        Page::Advanced => {
-          click(&mut h, Id::of(data::IMPORT));
+        Page::History => {
+          click(&mut h, Id::of(IMPORT));
           let tell = fake.log().import.take().expect("the import asked for");
           tell(data::Import::Copying(420, 1_180));
           h.rt.waker().wake();
-          shot(&mut h, &format!("advanced-importing-{look}"));
+          shot(&mut h, &format!("history-importing-{look}"));
         }
         _ => {}
       }
@@ -1342,49 +1348,48 @@ fn handy_summary(home: &Home) -> Summary {
   Summary { dir, entries: 1_204, recordings: 1_180, bytes: 2_100_000_000, first, last }
 }
 
-/// Advanced's Data section: Import from Handy only when Handy's history is here, saying what it
-/// would bring, its copies' progress in place of that while it runs, then how it went; Export
-/// writes an archive into Downloads and says so.
+/// History's toolbar: Import from Handy only when Handy's history is here, in its place and
+/// disabled while it runs; how it goes in the search row, then how it went; Export writes an
+/// archive into Downloads and says so there.
 #[test]
 fn handys_history_is_imported_and_the_history_exported() {
   let home = Home::new("window-data", &TWO);
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
-  tab(&mut h, Page::Advanced);
-  assert!(h.rect(Id::of(data::IMPORT)).is_none(), "no Handy here");
+  tab(&mut h, Page::History);
+  assert!(h.rect(Id::of(IMPORT)).is_none(), "no Handy here");
+  let export_at = h.rect(Id::of(EXPORT)).unwrap();
 
   fake.log().handy = Some(Summary { first: None, last: None, ..handy_summary(&home) });
   tab(&mut h, Page::General);
   h.app_mut().refresh();
-  tab(&mut h, Page::Advanced);
-  let caption = |h: &Harness<Prefs>, id| h.text(row(id).key("caption")).map(str::to_owned);
-  let found = caption(&h, data::IMPORT).expect("Handy found");
-  assert_eq!(found, "1,204 dictations, 1,180 recordings · 2.1 GB");
-  let at = |h: &Harness<Prefs>| h.rect(Id::of(data::IMPORT)).unwrap();
+  tab(&mut h, Page::History);
+  assert_eq!(h.rect(Id::of(EXPORT)).unwrap(), export_at, "Export stays in its place");
+  let note = |h: &Harness<Prefs>| h.text(Id::of(NOTE)).map(str::to_owned);
+  let at = |h: &Harness<Prefs>| h.rect(Id::of(IMPORT)).unwrap();
   let before = at(&h);
-  click(&mut h, Id::of(data::IMPORT));
+  click(&mut h, Id::of(IMPORT));
   let tell = fake.log().import.take().expect("the import asked for");
   tell(data::Import::Copying(120, 900));
   h.rt.waker().wake();
   h.frame();
   assert_eq!(at(&h), before, "the button stays in place");
-  assert_eq!(caption(&h, data::IMPORT), None, "the progress in its place");
-  assert_eq!(hover(&mut h, Id::of(data::IMPORT)), (Cursor::Arrow, 0), "disabled while it runs");
+  assert_eq!(note(&h).as_deref(), Some("Importing from Handy: 120 of 900 recordings…"));
+  assert_eq!(hover(&mut h, Id::of(IMPORT)), (Cursor::Arrow, 0), "disabled while it runs");
   tell(data::Import::Done(Ok(Report { entries: 1_204, added: 1_200, copied: 1_180, failed: 0 })));
   h.rt.waker().wake();
   h.frame();
   h.frame();
   let done = "Imported 1,200 dictations (4 were here already), 1,180 recordings.";
-  assert_eq!(caption(&h, data::IMPORT).as_deref(), Some(done));
-  assert_eq!(at(&h), before, "the result line in place of the caption");
+  assert_eq!(note(&h).as_deref(), Some(done));
+  assert_eq!(at(&h), before);
 
-  let export = caption(&h, data::EXPORT).unwrap_or_default();
-  assert!(export.contains("wavo-app import <file>"), "{export}");
-  click(&mut h, Id::of(data::EXPORT));
+  click(&mut h, Id::of(EXPORT));
   let file = fake.log().exports.pop().expect("exported");
   assert!(file.parent().is_some_and(|d| d.ends_with("Downloads")), "{file:?}");
   let name = file.file_name().unwrap().to_string_lossy().into_owned();
   assert!(name.starts_with("wavo-export-") && name.ends_with(".tar"), "{name}");
-  let exported = caption(&h, data::EXPORT).unwrap_or_default();
-  assert!(exported.ends_with(" · 3 dictations · 1 MB"), "{exported}");
+  let exported = note(&h).unwrap_or_default();
+  assert!(exported.starts_with("Exported 3 dictations · 1 MB to "), "{exported}");
+  assert!(exported.ends_with(".tar"), "{exported}");
 }

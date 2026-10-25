@@ -1,12 +1,13 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! The History page: the dictations, newest first, in a plate per day, a page at a time with Show
-//! More, found by a search above them. A row is one line of the text (the whole text in a tooltip
-//! over it), then the time, length and whether it was not pasted; an entry without text says so
-//! and which model tried it ([`no_text`]). Its icon buttons: Undo (after a transcription that
-//! replaced a text), Play / Stop (the recording), Copy, Transcribe Again and Delete, which asks
-//! first in the window's dialog with the start of the text ([`super::Ask::Dictation`]). A click
-//! selects a row: it shows the model too. Reloaded when the session's history moves.
+//! More, found by a search above them, under the page's toolbar ([`super::data`]). A row is one
+//! line of the text (the whole text in a tooltip over it), then the time, length and whether it was
+//! not pasted; an entry without text says so and which model tried it ([`no_text`]). Its icon
+//! buttons: Undo (after a transcription that replaced a text), Play / Stop (the recording), Copy,
+//! Transcribe Again and Delete, which asks first in the window's dialog with the start of the text
+//! ([`super::Ask::Dictation`]). A click selects a row: it shows the model too. Reloaded when the
+//! session's history moves.
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +20,8 @@ use crate::history::{History, Local, local_time, now_ms, shorten};
 use crate::session::controller::label;
 
 pub const SEARCH: &str = "history-search";
+/// What the search row says.
+pub const NOTE: &str = "history-note";
 pub const MORE: &str = "more";
 /// A row, `(ROW, id)`: a click selects it; `(TEXT, id)` over its text shows the whole text. Its
 /// buttons: `(COPY, id)` and so on.
@@ -30,6 +33,8 @@ pub const RETRANSCRIBE: &str = "retranscribe";
 pub const UNDO: &str = "undo";
 pub const DELETE: &str = "delete";
 
+/// The widest the search row's note gets, ending in "…" (its tooltip has it whole).
+const NOTE_W: f32 = 330.0;
 /// Entries a page adds.
 pub const PAGE: usize = 50;
 /// The longest first line of a row, in characters.
@@ -231,18 +236,28 @@ struct Row {
 }
 
 impl Prefs {
-  /// The search field above the scrolling plates, and what the page says.
+  /// The toolbar, then the search field above the scrolling plates and what the page says: its
+  /// own note, else how an import or an export goes, on one line.
   pub(super) fn history_head(&mut self, ui: &mut Ui, s: Style) {
     let t = ui.theme();
+    self.history_tools(ui, s.pads([12.0, 20.0, 0.0, 20.0]));
+    let note = match &self.history.note {
+      Some(note) => Some((note.clone(), false)),
+      None => self.data_note(),
+    };
     let h = &mut self.history;
-    ui.row(s.align(Align::Start, Align::Center), |ui| {
+    ui.row(s.pads([10.0, 20.0, 2.0, 20.0]).align(Align::Start, Align::Center), |ui| {
       if ui.id(SEARCH).search(&mut h.search, "Search dictations").changed {
         h.limit = PAGE;
         h.selected = None;
       }
 
-      if let Some(note) = &h.note {
-        ui.text(note, TextStyle::new(t.small, t.muted).nowrap());
+      if let Some((text, failed)) = &note {
+        let color = if *failed { t.danger } else { t.muted };
+        let r = ui.col(Style::new().max_w(NOTE_W), |ui| {
+          ui.id(NOTE).text(text, TextStyle::new(t.small, color).ellipsis());
+        });
+        ui.tooltip(r.id, text);
       }
     });
   }

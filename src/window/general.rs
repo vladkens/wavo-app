@@ -6,19 +6,18 @@
 //! system can still ask, else Open Settings), gone once allowed; then the hotkey and how it
 //! records, the microphone, the model (a quick switch among the downloaded ones and the way to
 //! the Models page, or with none a button to download one), the language, launch at login.
-//! Advanced: the output, the history's retention, where the recordings are.
+//! Advanced: the output.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
-use nimbo::{Button, FormRow, FormStyle, Hotkey, Icon, Id, Select, Tile, Ui, open, paths};
+use nimbo::{Button, FormRow, FormStyle, Hotkey, Icon, Id, Select, Tile, Ui, paths};
 use tracing::{info, warn};
 
 use super::{Page, Prefs, Problem, models};
 use crate::audio::devices::Choice;
-use crate::history::Retention;
 use crate::language;
 use crate::settings::{Activation, HudPosition, Settings};
 
@@ -35,10 +34,8 @@ pub const PASTE: &str = "paste";
 pub const KEEP: &str = "keep";
 pub const HUD: &str = "hud";
 pub const LOGIN: &str = "login";
-pub const RETENTION: &str = "retention";
 pub const OPEN_ACCESSIBILITY: &str = "open-accessibility";
 pub const OPEN_MICROPHONE: &str = "open-microphone";
-pub const RECORDINGS_FOLDER: &str = "recordings-folder";
 
 /// The shortcut recorder records: it has the focus in a window that has the keys.
 pub fn records(ui: &Ui) -> bool {
@@ -76,16 +73,6 @@ const ACTIVATIONS: [(Activation, &str); 3] = [
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
 
-const RETENTIONS: [Retention; 7] = [
-  Retention::Unlimited,
-  Retention::Count(100),
-  Retention::Count(1000),
-  Retention::Count(10_000),
-  Retention::Days3,
-  Retention::Weeks2,
-  Retention::Months3,
-];
-
 /// Launch at login as the switch shows it: the system's state, the change on its way (the
 /// system answers in its own time, [`super::Shell::set_autostart`]) and one asked for meanwhile,
 /// and why the last change failed.
@@ -114,7 +101,7 @@ impl Login {
   }
 }
 
-/// A folder the Advanced page shows, with its size once a shell's thread added it up
+/// A folder the History page shows, with its size once a shell's thread added it up
 /// ([`super::Shell::folder_size`]).
 pub struct Folder {
   pub dir: PathBuf,
@@ -164,16 +151,6 @@ pub(super) fn thousands(n: impl ToString) -> String {
   }
 
   out
-}
-
-fn retention_title(r: Retention) -> String {
-  match r {
-    Retention::Unlimited => "Forever".into(),
-    Retention::Count(n) => format!("The last {} dictations", thousands(n)),
-    Retention::Days3 => "3 days".into(),
-    Retention::Weeks2 => "2 weeks".into(),
-    Retention::Months3 => "3 months".into(),
-  }
 }
 
 impl Prefs {
@@ -429,7 +406,7 @@ impl Prefs {
 
   /// The recordings' size, asked of the shell the first time the page shows after a refresh;
   /// `None` until it answers.
-  fn recordings_size(&mut self, ui: &Ui) -> Option<u64> {
+  pub(super) fn recordings_size(&mut self, ui: &Ui) -> Option<u64> {
     let folder = &mut self.recordings;
     if !folder.asked {
       folder.asked = true;
@@ -446,43 +423,6 @@ impl Prefs {
 
   pub(super) fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
     self.output(ui, fs);
-    ui.form_section(fs, "History", |ui| {
-      let mut all = RETENTIONS.to_vec();
-      if !all.contains(&self.settings.history_retention) {
-        all.insert(1, self.settings.history_retention);
-      }
-
-      let labels: Vec<String> = all.iter().map(|&r| retention_title(r)).collect();
-      ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
-        let at = all.iter().position(|&r| r == self.settings.history_retention).unwrap_or(0);
-        if let Some(i) = pick(ui, RETENTION, &labels, at, &[]) {
-          let r = all[i];
-          self.edit(move |s| s.history_retention = r);
-        }
-      });
-    });
-
-    let recordings = self.recordings.dir.clone();
-    let recorded = folder_caption(&recordings, self.recordings_size(ui));
-    let show = format!("Show in {}", open::file_manager());
-    let mut reveal = None;
-    // A path stays on one line, ending in "…": a long one has no space to wrap at.
-    let fs = &FormStyle { caption: fs.caption.ellipsis(), ..*fs };
-    ui.form_section(fs, "Files", |ui| {
-      let row = FormRow::new("Recordings").caption(&recorded).tile(Tile::Icon(Icon::FOLDER));
-      ui.form_row(fs, row, |ui| {
-        let r = ui.disabled(!recordings.is_dir()).id(RECORDINGS_FOLDER).button(&show);
-        ui.tooltip(r.id, "The history’s recordings, a folder a day");
-        if r.clicked {
-          reveal = Some(&recordings);
-        }
-      });
-    });
-    if let Some(dir) = reveal {
-      self.shell.reveal(dir);
-    }
-
-    self.data(ui, fs);
   }
 
   /// While the system does not allow them, the microphone's and Accessibility's rows, each with
@@ -577,7 +517,6 @@ mod tests {
   fn titles_of_the_choices() {
     assert_eq!(thousands(10_000), "10,000");
     assert_eq!(thousands(100), "100");
-    assert_eq!(retention_title(Retention::Count(1000)), "The last 1,000 dictations");
     assert_eq!(sentence("needs Wavo.app"), "Needs Wavo.app.");
   }
 }
