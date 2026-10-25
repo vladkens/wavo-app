@@ -1,9 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Moving the history between computers ([`archive`]: `wavo-app export`, `import <file>`) and
-//! taking it over from another dictation app ([`handy`]: `wavo-app import handy`).
-//!
-//! An import is the same whatever the source:
+//! Moving the history between computers ([`archive`]: `wavo-app export`, `import <file>`); Handy's
+//! history comes as such an archive too (scripts/handy.py).
 //!
 //! - Every entry with a recording comes over, its text or not (text can be made again from the
 //!   audio), and every entry with text; one with neither is left. One is in the history already
@@ -16,19 +14,15 @@
 //! - The new entries are busy until their recordings are copied: the retention and the session
 //!   leave them alone meanwhile (a crash leaves them to the next start's recovery).
 //! - It holds the app's single-instance lock ([`ctl::claim`]): it refuses while Wavo runs, and Wavo
-//!   does not start while it imports. A dry run reads the history read-only and takes no lock; the
-//!   running app, which holds the lock, imports beside its session ([`Lock::Held`]). One import at
-//!   a time goes into a history ([`Running`]).
+//!   does not start while it imports. A dry run reads the history read-only and takes no lock.
 
 pub mod archive;
-pub mod handy;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::hash::Hash;
 use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -39,23 +33,6 @@ use crate::ctl::{self, Claim};
 use crate::history::db::{Db, Entry};
 use crate::history::recordings::{self, Recordings};
 use crate::history::{DB_FILE, History};
-
-/// How an import goes with the single-instance lock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lock {
-  /// A dry run: no lock, nothing written.
-  DryRun,
-  /// It takes the lock (the command line), refused while Wavo runs.
-  Take,
-  /// The caller holds it: the running app.
-  Held,
-}
-
-impl Lock {
-  fn new(dry_run: bool) -> Self {
-    if dry_run { Lock::DryRun } else { Lock::Take }
-  }
-}
 
 /// An entry of another history, and where its recording is there.
 struct Item<S> {
@@ -160,36 +137,11 @@ struct Target {
   /// The entries added, busy until the import ends.
   added: Vec<i64>,
   _lock: Option<ctl::Server>,
-  _running: Option<Running>,
-}
-
-/// The data homes this process imports into, each by one import at a time.
-static RUNNING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-
-/// An import into a home, until dropped.
-struct Running(PathBuf);
-
-impl Running {
-  fn start(home: &Path) -> Result<Self> {
-    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-    if running.iter().any(|h| h == home) {
-      bail!("an import into {} is running already", home.display());
-    }
-
-    running.push(home.to_owned());
-    Ok(Self(home.to_owned()))
-  }
-}
-
-impl Drop for Running {
-  fn drop(&mut self) {
-    RUNNING.lock().unwrap_or_else(|e| e.into_inner()).retain(|h| *h != self.0);
-  }
 }
 
 impl Target {
-  fn open(home: &Path, lock: Lock) -> Result<Self> {
-    if lock == Lock::DryRun {
+  fn open(home: &Path, dry_run: bool) -> Result<Self> {
+    if dry_run {
       let db = home.join(DB_FILE);
       let starts = match db.is_file() {
         true => Db::open_read_only(&db)?.get_starts()?,
@@ -199,31 +151,20 @@ impl Target {
         true => Recordings::open(home)?.list()?.into_iter().collect(),
         false => HashSet::new(),
       };
-      return Ok(Self {
-        history: None,
-        starts,
-        on_disk,
-        added: Vec::new(),
-        _lock: None,
-        _running: None,
-      });
+      return Ok(Self { history: None, starts, on_disk, added: Vec::new(), _lock: None });
     }
 
-    let running = Running::start(home)?;
     fs::create_dir_all(home).with_context(|| format!("create {}", home.display()))?;
-    let lock = match lock {
-      Lock::Held => None,
-      _ => match ctl::claim(home)? {
-        Claim::Server(lock) => Some(lock),
-        Claim::Running => bail!("Wavo is running for {}: quit it first", home.display()),
-      },
+    let lock = match ctl::claim(home)? {
+      Claim::Server(lock) => lock,
+      Claim::Running => bail!("Wavo is running for {}: quit it first", home.display()),
     };
 
     let history = History::open(home)?;
     let starts = history.db.get_starts()?;
     let on_disk = history.recordings.list()?.into_iter().collect();
     let (history, added) = (Some(history), Vec::new());
-    Ok(Self { history, starts, on_disk, added, _lock: lock, _running: Some(running) })
+    Ok(Self { history, starts, on_disk, added, _lock: Some(lock) })
   }
 
   fn plan<S: Eq + Hash + Clone>(&self, items: Vec<Item<S>>) -> Plan<S> {
@@ -302,12 +243,6 @@ fn write_recording(dst: &Path, src: &mut impl Read, len: u64) -> io::Result<()> 
     n if n == len => Ok(()),
     n => Err(io::Error::new(io::ErrorKind::UnexpectedEof, format!("{n} of {len} bytes"))),
   })
-}
-
-/// Copies the file `src` into recording `dst` (see [`via_part`]); on APFS it is a clone, taking no
-/// space.
-fn copy_recording(dst: &Path, src: &Path) -> io::Result<()> {
-  via_part(dst, |part| fs::copy(src, part).map(drop))
 }
 
 pub fn part_of(path: &Path) -> PathBuf {

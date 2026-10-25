@@ -84,10 +84,10 @@ enum Command {
   /// Write the settings, the history and its recordings into one archive (a tar), to import on
   /// another computer
   Export { file: PathBuf },
-  /// Add to the history what it does not have of an archive of `wavo-app export`, or of Handy's
-  /// history on this computer (`handy`); Wavo must not be running
+  /// Add to the history what it does not have of an archive of `wavo-app export`; Wavo must not be
+  /// running
   Import {
-    /// The archive, or `handy` (its data directory, or `HANDY_DIR`)
+    /// The archive
     source: PathBuf,
     /// Also replace the settings with the archive's
     #[arg(long)]

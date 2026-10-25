@@ -38,9 +38,7 @@ use crate::history::{History, now_ms};
 use crate::session::controller::{EngineStatus, Phase};
 use crate::settings::Activation;
 use crate::testing::TempDir;
-use crate::transfer::Report;
 use crate::transfer::archive::Exported;
-use crate::transfer::handy::Summary;
 
 #[derive(Default)]
 struct Log {
@@ -71,10 +69,7 @@ struct Log {
   access: Option<Access>,
   /// The permissions Allow or Open Settings was clicked for.
   allowed: Vec<Pane>,
-  /// Handy's history as the shell finds it; the import asked for, with what tells it how it goes;
-  /// the archives exported.
-  handy: Option<Summary>,
-  import: Option<Box<dyn Fn(data::Import) + Send>>,
+  /// The archives exported.
   exports: Vec<PathBuf>,
 }
 
@@ -189,15 +184,6 @@ impl Shell for Fake {
 
   fn reveal(&self, dir: &Path) {
     self.log().folders.push(dir.to_owned());
-  }
-
-  fn handy(&self, done: Box<dyn FnOnce(Option<Summary>) + Send>) {
-    let found = self.log().handy.clone();
-    done(found);
-  }
-
-  fn import_handy(&self, _: PathBuf, tell: Box<dyn Fn(data::Import) + Send>) {
-    self.log().import = Some(tell);
   }
 
   /// Done at once, written nowhere.
@@ -1284,7 +1270,6 @@ fn every_page_renders_in_both_looks() {
     for (page, _, name) in PAGES {
       let fake = Fake::default();
       fake.log().recordings_size = Some(184_300_000);
-      fake.log().handy = Some(handy_summary(&home));
       let running = Download::Running { done: 114_000_000, total: 272_000_000, rate: Some(3.2e6) };
       fake.log().states.insert("gigaam-v3-e2e-ctc", running);
       let mut h = harness(&fake, Settings::default(), &home);
@@ -1323,62 +1308,20 @@ fn every_page_renders_in_both_looks() {
           assert!(h.rect(Id::of(CONFIRM).key("card")).is_some(), "{look}: the dialog");
           shot(&mut h, &format!("models-delete-{look}"));
         }
-        Page::Advanced => {
-          click(&mut h, Id::of(data::IMPORT));
-          let tell = fake.log().import.take().expect("the import asked for");
-          tell(data::Import::Copying(420, 1_180));
-          h.rt.waker().wake();
-          shot(&mut h, &format!("advanced-importing-{look}"));
-        }
         _ => {}
       }
     }
   }
 }
 
-/// Handy's history as a shot shows it: a year and more of dictations.
-fn handy_summary(home: &Home) -> Summary {
-  let (first, last) = (Some(now_ms() - 400 * 86_400_000), Some(now_ms() - 86_400_000));
-  let dir = home.path().join("handy");
-  Summary { dir, entries: 1_204, recordings: 1_180, bytes: 2_100_000_000, first, last }
-}
-
-/// Advanced's Data section: Import from Handy only when Handy's history is here, saying what it
-/// would bring, its copies' progress in place of that while it runs, then how it went; Export
-/// writes an archive into Downloads and says so.
+/// Advanced's Data section: Export writes an archive into Downloads and says so.
 #[test]
-fn handys_history_is_imported_and_the_history_exported() {
+fn the_history_is_exported() {
   let home = Home::new("window-data", &TWO);
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
   tab(&mut h, Page::Advanced);
-  assert!(h.rect(Id::of(data::IMPORT)).is_none(), "no Handy here");
-
-  fake.log().handy = Some(Summary { first: None, last: None, ..handy_summary(&home) });
-  tab(&mut h, Page::General);
-  h.app_mut().refresh();
-  tab(&mut h, Page::Advanced);
   let caption = |h: &Harness<Prefs>, id| h.text(row(id).key("caption")).map(str::to_owned);
-  let found = caption(&h, data::IMPORT).expect("Handy found");
-  assert_eq!(found, "1,204 dictations, 1,180 recordings · 2.1 GB");
-  let at = |h: &Harness<Prefs>| h.rect(Id::of(data::IMPORT)).unwrap();
-  let before = at(&h);
-  click(&mut h, Id::of(data::IMPORT));
-  let tell = fake.log().import.take().expect("the import asked for");
-  tell(data::Import::Copying(120, 900));
-  h.rt.waker().wake();
-  h.frame();
-  assert_eq!(at(&h), before, "the button stays in place");
-  assert_eq!(caption(&h, data::IMPORT), None, "the progress in its place");
-  assert_eq!(hover(&mut h, Id::of(data::IMPORT)), (Cursor::Arrow, 0), "disabled while it runs");
-  tell(data::Import::Done(Ok(Report { entries: 1_204, added: 1_200, copied: 1_180, failed: 0 })));
-  h.rt.waker().wake();
-  h.frame();
-  h.frame();
-  let done = "Imported 1,200 dictations (4 were here already), 1,180 recordings.";
-  assert_eq!(caption(&h, data::IMPORT).as_deref(), Some(done));
-  assert_eq!(at(&h), before, "the result line in place of the caption");
-
   let export = caption(&h, data::EXPORT).unwrap_or_default();
   assert!(export.contains("wavo-app import <file>"), "{export}");
   click(&mut h, Id::of(data::EXPORT));

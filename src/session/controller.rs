@@ -254,8 +254,6 @@ enum Msg {
   },
   /// The background thread removed entries.
   Cleaned,
-  /// Another connection added entries.
-  Imported,
   CheckModel,
   Quit,
 }
@@ -356,12 +354,6 @@ impl Handle {
   /// transcribe is looked at again, and an engine of another model than that lets go of it.
   pub fn check_model(&self) {
     let _ = self.0.send(Msg::CheckModel);
-  }
-
-  /// Another connection added entries (an import): the session publishes the history's change,
-  /// and transcribes those without text the model has not tried.
-  pub fn history_imported(&self) {
-    let _ = self.0.send(Msg::Imported);
   }
 
   /// Handles a control request; `quit` is refused, the app answers it.
@@ -597,7 +589,6 @@ impl<O: TextOutput> Controller<O> {
       Msg::Transcribed { take, result } => self.on_transcribed(take, result),
       Msg::Retranscribed { entry, result } => self.on_retranscribed(entry, result),
       Msg::Cleaned => {} // the history's changes show it
-      Msg::Imported => (self.untried, self.untried_on_load) = (true, false),
       // An engine of another model than the one to use now (its file gone, the first one
       // downloaded another) stops.
       Msg::CheckModel => {

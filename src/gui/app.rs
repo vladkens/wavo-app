@@ -40,12 +40,10 @@ use crate::session::controller::{Handle, Phase, Update};
 use crate::session::{self, Session};
 use crate::settings::{self, HudPosition, Settings};
 use crate::transfer::archive::{self, Exported};
-use crate::transfer::handy;
 use crate::ui::hud::{self, Mode};
 use crate::ui::icons::Icon;
 use crate::ui::menu::{self, Models, Warning};
 use crate::ui::overlay::{self, Overlay, Show};
-use crate::window::data::Import;
 use crate::window::downloads::{Download, Downloads};
 use crate::window::history::no_text;
 use crate::window::models::{Found, Pick};
@@ -580,27 +578,6 @@ impl window::Shell for MacShell {
     if let Err(e) = nimbo::open::reveal(dir) {
       warn!("show {}: {e}", dir.display());
     }
-  }
-
-  fn handy(&self, done: Box<dyn FnOnce(Option<handy::Summary>) + Send>) {
-    spawn("handy", move || done(handy::found()));
-  }
-
-  /// In the app, which holds the single-instance lock, beside the session's own connection to the
-  /// history; the session is told when it is done.
-  fn import_handy(&self, dir: PathBuf, tell: Box<dyn Fn(Import) + Send>) {
-    let home = self.home.clone();
-    let handle = self.handle.clone();
-    spawn("import", move || {
-      let mut copied = |done, total| tell(Import::Copying(done, total));
-      let result = handy::import_held(&home, &dir, &mut copied);
-      match &result {
-        Ok(_) => handle.history_imported(),
-        Err(e) => warn!("import from Handy: {e:#}"),
-      }
-
-      tell(Import::Done(result.map(|r| r.1).map_err(|e| format!("{e:#}"))));
-    });
   }
 
   fn export(&self, file: PathBuf, done: Box<dyn FnOnce(Result<Exported, String>) + Send>) {

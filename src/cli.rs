@@ -23,7 +23,7 @@ use crate::history::Retention;
 use crate::session::output::Stdout;
 use crate::session::{self, Session};
 use crate::settings::{self, Settings};
-use crate::transfer::{Report, archive, handy};
+use crate::transfer::{Report, archive};
 use crate::window::downloads::Download;
 use crate::window::models::size_text;
 use crate::window::{self, Access, Page, Prefs, Shell};
@@ -291,13 +291,6 @@ impl Shell for Headless {
   fn allow(&self, _: nimbo::permissions::Pane) {}
   fn open_url(&self, _: &str) {}
   fn reveal(&self, _: &Path) {}
-
-  /// Not looked for: a shot shows none of the person's Handy history.
-  fn handy(&self, done: Box<dyn FnOnce(Option<handy::Summary>) + Send>) {
-    done(None);
-  }
-
-  fn import_handy(&self, _: PathBuf, _: Box<dyn Fn(window::data::Import) + Send>) {}
   fn export(&self, _: PathBuf, _: Box<dyn FnOnce(Result<archive::Exported, String>) + Send>) {}
 }
 
@@ -314,31 +307,10 @@ pub fn export(file: &Path) -> Result<()> {
   Ok(())
 }
 
-/// `wavo-app import`: an archive of `wavo-app export`, or `handy`; a summary on stdout.
+/// `wavo-app import`: an archive of `wavo-app export`; a summary on stdout.
 pub fn import(source: &Path, take_settings: bool, dry_run: bool) -> Result<()> {
   let home = crate::home();
   let would = if dry_run { "would be " } else { "" };
-  if source == Path::new("handy") {
-    if take_settings {
-      bail!("Handy's settings are not imported: leave out --settings");
-    }
-
-    let (found, report) = handy::import(&home, &handy::dir(), dry_run)?;
-    let days =
-      |at: Option<i64>| at.and_then(crate::history::recordings::day_of).unwrap_or_default();
-    println!(
-      "Handy in {}: {} entries from {} to {}, {} recordings ({})",
-      found.dir.display(),
-      found.entries,
-      days(found.first),
-      days(found.last),
-      found.recordings,
-      size_text(found.bytes)
-    );
-    print_report(&home, &report, would);
-    return Ok(());
-  }
-
   let done = archive::import(&home, source, take_settings, dry_run)?;
   print_report(&home, &done.report, would);
   match (done.settings, take_settings) {

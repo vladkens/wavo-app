@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use super::{Item, Lock, Progress, Report, Scratch, Target};
+use super::{Item, Progress, Report, Scratch, Target};
 use crate::history::db::{self, Db};
 use crate::history::recordings::{self, Recordings};
 use crate::history::{DB_FILE, now_ms};
@@ -166,7 +166,7 @@ pub fn export(home: &Path, file: &Path) -> Result<Exported> {
 /// Imports the archive `file` into `home` (see the [module](super) docs); `take_settings` replaces
 /// the settings with the archive's. A dry run says what it would do and writes nothing.
 pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> Result<Imported> {
-  let mut target = Target::open(home, Lock::new(dry_run))?;
+  let mut target = Target::open(home, dry_run)?;
   let scratch = Scratch::new()?;
   let reader = File::open(file).with_context(|| format!("open {}", file.display()))?;
   let mut archive = tar::Archive::new(BufReader::with_capacity(BUFFER, reader));
