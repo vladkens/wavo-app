@@ -13,7 +13,7 @@ use super::icons::Icon;
 use crate::engine::supervisor::Phase as EnginePhase;
 use crate::history::{Local, local_time, shorten};
 use crate::session::controller::{NoModel, Outcome, Phase, Status};
-use crate::window::models::{Found, Pick, single_language, size_text};
+use crate::window::models::{Found, Pick, size_text};
 
 /// The most dictations «Recent» lists.
 pub const RECENT: usize = 10;
@@ -140,12 +140,7 @@ impl Models {
   pub fn new(found: &[Found], pick: &Pick) -> Self {
     let mut items: Vec<(String, String, bool)> = (found.iter().enumerate())
       .map(|(i, (m, _))| {
-        // A model meant for one language says so before it is picked.
-        let mut label = format!("{} — {}", m.full_name, size_text(m.size));
-        if let Some(only) = single_language(m) {
-          label += &format!(" · {only}");
-        }
-
+        let label = format!("{} — {}", m.full_name, size_text(m.size));
         (format!("model:{}", m.name), label, pick.active == Some(i) && pick.other.is_none())
       })
       .collect();
@@ -354,7 +349,7 @@ mod tests {
     let models = Models::new(&found, &pick);
     assert_eq!(models.title, "parakeet-tdt-0.6b-v2");
     assert!(!models.items[0].2 && models.items[1].2);
-    assert_eq!(models.items[1].1, "parakeet-tdt-0.6b-v2 — 730 MB · English only");
+    assert_eq!(models.items[1].1, "parakeet-tdt-0.6b-v2 — 730 MB");
     let pick = Pick { active: Some(0), other: Some(("whisper-turbo".into(), false)) };
     let gone = Models::new(&found, &pick);
     assert_eq!(gone.title, "whisper-turbo (not on disk)");
