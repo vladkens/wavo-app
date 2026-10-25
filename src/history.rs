@@ -129,7 +129,7 @@ pub fn fold(text: &str) -> String {
 
 fn migrate_v1(db: &Connection) -> Result<()> {
   let queries = vec![
-    // Ids are never used again (`AUTOINCREMENT`): an id the History tab or `wavo-app ctl` holds
+    // Ids are never used again (`AUTOINCREMENT`): an id the History tab holds
     // must not come back as another dictation.
     "CREATE TABLE entries (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

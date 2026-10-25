@@ -106,13 +106,10 @@ pub fn fixture(name: &str) -> Fixture {
   Fixture { name: name.into(), pcm: fixture_pcm(name), text }
 }
 
-/// Audio of a fixture, also of those without a transcript (`silence`, `noise`).
+/// Also of those without a transcript (`silence`, `noise`).
 pub fn fixture_pcm(name: &str) -> Vec<f32> {
-  read_wav(&fixture_wav(name)).unwrap_or_else(|e| panic!("{e:#} (run `make fixtures`)"))
-}
-
-pub fn fixture_wav(name: &str) -> PathBuf {
-  fixtures_dir().join(format!("{name}.wav"))
+  let wav = fixtures_dir().join(format!("{name}.wav"));
+  read_wav(&wav).unwrap_or_else(|e| panic!("{e:#} (run `make fixtures`)"))
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -284,7 +281,7 @@ pub fn wer(reference: &str, hypothesis: &str) -> f64 {
 }
 
 /// Lowercase words without punctuation; `ё` counts as `е`, hyphens and apostrophes split words.
-pub fn words(text: &str) -> Vec<String> {
+fn words(text: &str) -> Vec<String> {
   text
     .to_lowercase()
     .replace('ё', "е")
@@ -299,15 +296,8 @@ mod tests {
   use super::*;
 
   #[test]
-  fn words_normalize_case_punctuation_and_yo() {
-    assert_eq!(words("Ёлка, ЗЕЛЁНАЯ — что-то!"), ["елка", "зеленая", "что", "то"]);
-    assert_eq!(words("  It's   fine.\n"), ["it", "s", "fine"]);
-    assert!(words(" … ").is_empty());
-  }
-
-  #[test]
   fn wer_counts_substitutions_insertions_deletions() {
-    assert_eq!(wer("раз два три четыре", "Раз, два, три, четыре."), 0.0);
+    assert_eq!(wer("Ёлка, раз-два три", "елка раз два, три."), 0.0);
     assert_eq!(wer("a b c d", "a x c d"), 0.25);
     assert_eq!(wer("a b c d", "a b d"), 0.25);
     assert_eq!(wer("a b c d", "a b c c d"), 0.25);

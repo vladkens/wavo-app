@@ -2,21 +2,24 @@
 
 //! wavo-app: local dictation, a menu bar app; `export`, `import`, `reset` on the command line.
 
+// macOS first, Windows and Linux later (docs/plans/20261023-port.md).
+#[cfg(target_os = "macos")]
+mod app;
 mod audio;
 mod cli;
 mod ctl;
 mod engine;
 mod history;
-// macOS first, Windows and Linux later (docs/plans/20261023-port.md).
-#[cfg(target_os = "macos")]
-mod gui;
+// The macOS app's; elsewhere built for their tests.
+#[cfg(any(test, target_os = "macos"))]
+mod hud;
+#[cfg(any(test, target_os = "macos"))]
+mod menu;
 mod session;
 mod settings;
 #[cfg(test)]
 mod testing;
 mod transfer;
-#[cfg(any(test, target_os = "macos"))]
-mod ui;
 mod window;
 
 use std::path::PathBuf;
@@ -70,7 +73,7 @@ fn main() -> Result<()> {
   init_tracing();
   match cli.command {
     #[cfg(target_os = "macos")]
-    None => gui::run(),
+    None => app::run(),
     #[cfg(not(target_os = "macos"))]
     None => unreachable!("clap asks for a command"),
     Some(Command::Export { file }) => cli::export(&file),
