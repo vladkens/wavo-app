@@ -3,8 +3,9 @@
 //! `wavo-app gui`: the menu bar app on nimbo's app platform ([nimbo::app]), an accessory app: the
 //! [Tray] with the [menu], the [Hotkeys] that feed the session's input, the HUD in an [Overlay],
 //! the settings window ([Prefs]) on demand: at launch unless the person starts in the menu bar
-//! only and nothing is missing (a permission, asked for at once), from the menu, `wavo-app ctl
-//! open-settings` and `open-history`, a second launch and the app opened again (Finder, Spotlight).
+//! only and nothing is missing (a permission: the window opens on Permissions, nothing is asked
+//! until the person says so), from the menu, `wavo-app ctl open-settings` and `open-history`, a
+//! second launch and the app opened again (Finder, Spotlight).
 //! The session and the control socket are `wavo-app daemon`'s.
 //!
 //! The main thread owns the app ([App], in a thread local). Other threads reach it only through
@@ -15,7 +16,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -59,6 +60,8 @@ thread_local! {
 }
 
 static PROXY: OnceLock<Proxy> = OnceLock::new();
+/// Accessibility's prompt showed in this run: Allow opens System Settings from then on.
+static ASKED_ACCESSIBILITY: AtomicBool = AtomicBool::new(false);
 
 /// The main thread, for other threads and for what runs after the AppKit call in progress.
 pub fn proxy() -> &'static Proxy {
@@ -193,13 +196,16 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   };
   app.check_access();
   app.read_models();
-  // What is missing is asked for at once, and the window opens on General, which shows it: the
-  // first launch's guide (the window opens at launch unless the person chose the menu bar only).
-  let missing = app.ask_missing();
+  // Nothing is asked at launch: with a permission missing the window opens on Permissions, the
+  // first launch's guide, whose buttons ask (else it opens unless the person chose the menu bar
+  // only).
+  let missing = app.missing_permission();
   APP.with(|cell| *cell.borrow_mut() = Some(app));
   // Opened again while it runs: the settings window, as for a second launch.
   main.on_reopen(|main| open_window(main, None));
-  if !saved.start_in_tray || missing {
+  if missing {
+    proxy().post(|main| open_window(main, Some(Page::Permissions)));
+  } else if !saved.start_in_tray {
     proxy().post(|main| open_window(main, None));
   }
 
@@ -300,8 +306,10 @@ fn chosen(main: &mut Main, id: &str) {
     "history" => open_window(main, Some(Page::History)),
     "settings" => open_window(main, None),
     "quit" => main.quit(),
-    "warn:accessibility" => allow(Pane::Accessibility),
-    "warn:microphone" => allow(Pane::Microphone),
+    // Permissions says why and asks.
+    "warn:accessibility" | "warn:microphone" | "warn:download" => {
+      open_window(main, Some(Page::Permissions))
+    }
     "warn:clipboard" => allow(Pane::Pasteboard),
     // General explains it under the shortcut.
     "warn:secure-input" => open_window(main, Some(Page::General)),
@@ -360,14 +368,18 @@ fn open_window(main: &mut Main, page: Option<Page>) {
   with_app(|app| app.window = Some(w));
 }
 
-/// Allow… for `pane`: the system's prompt while it can still ask (Accessibility not given, whose
-/// dialog adds the app to the list, which the pane alone does not; the microphone never asked),
-/// else the pane in System Settings.
+/// Allow… for `pane`: the system's prompt while it can still ask (Accessibility not given nor
+/// asked for in this run, whose dialog adds the app to the list, which the pane alone does not;
+/// the microphone never asked), else the pane in System Settings.
 fn allow(pane: Pane) {
   match pane {
-    Pane::Accessibility if !permissions::accessibility(false) => {
+    Pane::Accessibility
+      if !permissions::accessibility(false)
+        && !ASKED_ACCESSIBILITY.swap(true, Ordering::Relaxed) =>
+    {
       info!("no Accessibility access: asking for it");
       permissions::accessibility(true);
+      with_window(Prefs::access_changed);
     }
     Pane::Microphone if permissions::microphone() == Access::NotDetermined => {
       request_microphone(|| {})
@@ -386,8 +398,8 @@ fn request_microphone(then: impl FnOnce() + Send + 'static) {
   info!("asking for microphone access");
   permissions::request_microphone(|granted| {
     info!("microphone access {}", if granted { "granted" } else { "denied" });
-    proxy().post(|_| {
-      with_app(App::microphone_answered);
+    proxy().post(|main| {
+      with_app(|app| app.microphone_answered(main));
       with_window(Prefs::access_changed);
       then();
     });
@@ -533,6 +545,7 @@ impl window::Shell for MacShell {
   fn access(&self) -> window::Access {
     window::Access {
       accessibility: permissions::accessibility(false),
+      accessibility_asked: ASKED_ACCESSIBILITY.load(Ordering::Relaxed),
       microphone: permissions::microphone(),
       secure_input: permissions::secure_input(),
       clipboard_unread: !SystemClipboard.readable(),
@@ -624,12 +637,19 @@ impl App {
           self.ask_microphone();
         }
 
+        // A permission missing: the HUD says which, the window opens where it is given. A denied
+        // microphone sends silence, which would say "no sound" instead.
+        let hint = self.permission_hint(update.settings.auto_paste);
+        if !recording && hint.is_some() {
+          proxy().post(|main| open_window(main, Some(Page::Permissions)));
+        }
+
         let r = status.recording.as_ref();
         let show = Show::Recording {
-          meter: update.meter.clone(),
+          meter: update.meter.clone().filter(|_| !self.mic_denied()),
           device: r.map_or_else(String::new, |r| r.device.clone()),
           seconds: r.map_or(0.0, |r| r.seconds),
-          no_model: hud::during(status),
+          no_model: hint.map(str::to_owned).or_else(|| hud::during(status)),
         };
         self.show(main, shown, show, position);
       }
@@ -737,24 +757,24 @@ impl App {
     }
   }
 
-  /// At launch: the system's prompts for what is missing, the microphone's first, then
-  /// Accessibility's (its dialog adds the app to the list); whether anything was.
-  fn ask_missing(&mut self) -> bool {
-    let accessibility = self.accessibility;
-    let then = move || {
-      if !accessibility {
-        allow(Pane::Accessibility);
-      }
-    };
-    match self.may_ask_microphone() {
-      true => {
-        self.asked_microphone = true;
-        request_microphone(then);
-      }
-      false => then(),
-    }
+  /// Accessibility or the microphone is not allowed (or not yet).
+  fn missing_permission(&self) -> bool {
+    !self.accessibility || self.no_microphone()
+  }
 
-    !accessibility || self.no_microphone()
+  /// The microphone is denied: the system won't ask again.
+  fn mic_denied(&self) -> bool {
+    !self.fake_mic && matches!(self.microphone, Access::Denied | Access::Restricted)
+  }
+
+  /// What the HUD says while recording without a permission dictation needs: the microphone's,
+  /// else Accessibility's for the paste.
+  fn permission_hint(&self, auto_paste: bool) -> Option<&'static str> {
+    match (self.mic_denied(), self.accessibility || !auto_paste) {
+      (true, _) => Some("allow the microphone to record"),
+      (false, false) => Some("allow Accessibility to paste"),
+      (false, true) => None,
+    }
   }
 
   /// A recording starts: the system's prompt, the first time in this run it was never answered.
@@ -776,10 +796,16 @@ impl App {
     !self.fake_mic && self.microphone != Access::Granted
   }
 
-  /// The microphone's prompt was answered.
-  fn microphone_answered(&mut self) {
+  /// The microphone's prompt was answered. Denied during the recording that asked for it: the HUD
+  /// and the window say so, as for a press without it.
+  fn microphone_answered(&mut self, main: &mut Main) {
     self.microphone = permissions::microphone();
     self.refresh();
+    let recording = self.update.clone().filter(|u| u.status.state == Phase::Recording);
+    if let Some(update) = recording.filter(|_| self.mic_denied()) {
+      self.on_update(main, update);
+      proxy().post(|main| open_window(main, Some(Page::Permissions)));
+    }
   }
 
   /// The menu opens: what the system does not tell the app is looked at again, and the models

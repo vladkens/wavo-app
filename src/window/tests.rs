@@ -407,13 +407,14 @@ fn pages_fit_or_scroll_and_the_toolbar_switches_them() {
   let oldest = *history_of(home.path(), &older, false).last().unwrap();
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
-  let general = [OPEN_ACCESSIBILITY, OPEN_MICROPHONE, HOTKEY, RESET, ACTIVATION, MIC, MODEL, LANG]
+  let general = [HOTKEY, RESET, ACTIVATION, MIC, MODEL, LANG]
     .into_iter()
     .chain([PASTE, KEEP, HUD, LOGIN, TRAY_ONLY])
     .map(Id::of)
     .collect();
-  let controls: [Vec<Id>; 5] = [
+  let controls: [Vec<Id>; 6] = [
     general,
+    vec![Id::of(OPEN_ACCESSIBILITY)],
     vec![Id::of(page::SEARCH), Id::of(page::LANG), Id::of((INFO, TWO[0])), Id::of((USE, TWO[1]))],
     vec![Id::of(SEARCH), Id::of((COPY, ids[8])), Id::of((PLAY, ids[8]))],
     [UNLOAD, RETENTION, MODEL_FOLDER, RECORDINGS_FOLDER].map(Id::of).to_vec(),
@@ -446,7 +447,7 @@ fn pages_fit_or_scroll_and_the_toolbar_switches_them() {
       h.frame();
     }
 
-    let id = last[i - 1];
+    let id = last[(*page == Page::History) as usize];
     let r = h.rect(id).unwrap_or_else(|| panic!("{name}: {id:?} is not shown"));
     assert!(inside(r) && r.y + r.h <= size.h, "{name}: {id:?} at {r:?} scrolled down");
   }
@@ -471,8 +472,7 @@ fn controls_show_hover_and_tooltips() {
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
   let info = |name: &str| row(name).key("info");
-  let mut general = vec![Id::of(OPEN_ACCESSIBILITY), Id::of(OPEN_MICROPHONE), Id::of(HOTKEY)];
-  general.extend([info(ACTIVATION), Id::of(MIC), Id::of(MODEL)]);
+  let mut general = vec![Id::of(HOTKEY), info(ACTIVATION), Id::of(MIC), Id::of(MODEL)];
   general.extend([Id::of(LANG), Id::of(PASTE), Id::of(HUD)]);
   general.extend([Id::of(LOGIN), Id::of(TABS).key(1)]);
   hovers_on(&mut h, &general);
@@ -492,6 +492,9 @@ fn controls_show_hover_and_tooltips() {
   // Keeping the clipboard means nothing without pasting.
   click(&mut h, Id::of(PASTE));
   assert_eq!(hover(&mut h, Id::of(KEEP)), (Cursor::Arrow, 0), "the row is disabled");
+
+  tab(&mut h, Page::Permissions);
+  hovers_on(&mut h, &[Id::of(OPEN_ACCESSIBILITY)]);
 
   tab(&mut h, Page::Models);
   let remote = hub::MODELS[2].name;
@@ -759,6 +762,9 @@ fn models_are_found_downloaded_and_used() {
   let home = Home::new("window-models", &TWO);
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
+  tab(&mut h, Page::Permissions);
+  hovers_on(&mut h, &[Id::of(OPEN_ACCESSIBILITY)]);
+
   tab(&mut h, Page::Models);
   let remote = hub::MODELS[2].name;
   click(&mut h, Id::of((DOWNLOAD, remote)));
@@ -1169,10 +1175,11 @@ fn a_dictation_is_transcribed_again() {
   );
 }
 
-/// The first launch: General shows what is missing, each with Allow, and with no model a button to
-/// the Models page in place of the model pop-up. A permission answered gets Open Settings.
+/// The first launch: Permissions shows what is missing, each with Allow, and with no model a
+/// button to the Models page; General none of it but the model's button. A permission answered
+/// gets Open Settings, one given its check alone.
 #[test]
-fn general_guides_the_first_launch() {
+fn permissions_guide_the_first_launch() {
   let home = Home::new("window-first-run", &[]);
   let fake = Fake::default();
   fake.log().access = Some(Access::default());
@@ -1180,7 +1187,9 @@ fn general_guides_the_first_launch() {
   assert!(h.rect(Id::of(MODEL)).is_none(), "no pop-up without a model");
   let caption = h.text(row(MODEL).key("caption"));
   assert_eq!(caption, Some("Dictation needs a speech model: download one to start."));
+  assert!(h.rect(Id::of(OPEN_ACCESSIBILITY)).is_none(), "not on General");
 
+  tab(&mut h, Page::Permissions);
   // The buttons' labels by their widths: Allow is the shorter.
   let widths = |h: &Harness<Prefs>| {
     [OPEN_ACCESSIBILITY, OPEN_MICROPHONE].map(|b| h.rect(Id::of(b)).unwrap().w)
@@ -1190,14 +1199,21 @@ fn general_guides_the_first_launch() {
   click(&mut h, Id::of(OPEN_MICROPHONE));
   assert_eq!(fake.log().allowed, [Pane::Accessibility, Pane::Microphone]);
 
-  // Answered, back in the window: a denied microphone is not asked again, only System Settings
-  // changes it.
-  let given = Access { accessibility: true, microphone: Grant::Denied, ..Access::default() };
-  fake.log().access = Some(given);
+  // Answered, back in the window: neither is asked again, only System Settings changes them.
+  let asked = Access { accessibility_asked: true, microphone: Grant::Denied, ..Access::default() };
+  fake.log().access = Some(asked);
   h.app_mut().access_changed();
   h.frame();
   let open = widths(&h);
   assert!(open[0] > allow[0] && open[1] > allow[1], "Open Settings: {allow:?} {open:?}");
+
+  let given = Access { accessibility: true, microphone: Grant::Granted, ..Access::default() };
+  fake.log().access = Some(given);
+  h.app_mut().access_changed();
+  h.frame();
+  assert!(
+    h.rect(Id::of(OPEN_ACCESSIBILITY)).is_none() && h.rect(Id::of(OPEN_MICROPHONE)).is_none()
+  );
 
   click(&mut h, Id::of(DOWNLOAD_MODEL));
   assert_eq!(h.app().page, Page::Models);
@@ -1242,14 +1258,16 @@ fn every_page_renders_in_both_looks() {
       assert_eq!(ground[0] < 100, appearance.dark, "{name} {look}: {ground:?}");
       shot(&mut h, &format!("{}-{look}", name.to_lowercase()));
       match page {
-        Page::General => {
+        Page::Permissions => {
           let empty = Home::new("window-shots-first-run", &[]);
           let first = Fake::default();
           first.log().access = Some(Access::default());
           let mut first_run = harness(&first, Settings::default(), &empty);
           first_run.event(Event::Appearance(appearance));
-          shot(&mut first_run, &format!("general-first-run-{look}"));
-
+          tab(&mut first_run, Page::Permissions);
+          shot(&mut first_run, &format!("permissions-first-run-{look}"));
+        }
+        Page::General => {
           click(&mut h, Id::of(MODEL));
           click(&mut h, Id::of(MODEL).key(("item", 1)));
           assert!(h.app().model_note().is_some(), "{look}: the note");

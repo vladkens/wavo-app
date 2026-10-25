@@ -1,11 +1,11 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! The settings window on nimbo, as macOS System Settings looks: toolbar tabs (General, Models,
-//! History, Advanced, About) over pages of grey plates, in a window [`WIDTH`] wide. General starts
-//! with what the app needs to work, the first launch's guide: the permissions, then the model (or
-//! the way to download one). General, Advanced and About are as high as their content
-//! ([`Ui::fit_window_height`]); Models and History scroll in a window [`SCROLLING`] high, under
-//! their search row. Light or dark and in the accent the system has.
+//! The settings window on nimbo, as macOS System Settings looks: toolbar tabs (General,
+//! Permissions, Models, History, Advanced, About) over pages of grey plates, in a window [`WIDTH`]
+//! wide. Permissions is the first launch's guide: what the system allows the app, and with no
+//! model the way to download one. General, Permissions, Advanced and About are as high as their
+//! content ([`Ui::fit_window_height`]); Models and History scroll in a window [`SCROLLING`] high,
+//! under their search row. Light or dark and in the accent the system has.
 //!
 //! The window is a plain [`App`]: it shows a copy of the settings and the session's status,
 //! which the shell keeps current ([`Prefs::update`]), and reaches the rest of the app only
@@ -59,14 +59,16 @@ pub const CONFIRM: &str = "confirm";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Page {
   General,
+  Permissions,
   Models,
   History,
   Advanced,
   About,
 }
 
-pub const PAGES: [(Page, Icon, &str); 5] = [
+pub const PAGES: [(Page, Icon, &str); 6] = [
   (Page::General, Icon::GEAR, "General"),
+  (Page::Permissions, Icon::ACCESSIBILITY, "Permissions"),
   (Page::Models, Icon::DOWNLOAD, "Models"),
   (Page::History, Icon::HISTORY, "History"),
   (Page::Advanced, Icon::SLIDERS, "Advanced"),
@@ -87,11 +89,14 @@ pub fn config(page: Page) -> Config {
   Config::new("Wavo", WIDTH, h).fixed()
 }
 
-/// What the system allows the app, as the General page shows it.
+/// What the system allows the app, as the Permissions and General pages show it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Access {
   /// Accessibility: the event tap and the paste.
   pub accessibility: bool,
+  /// Accessibility's prompt showed in this run: the system won't show it again, System Settings
+  /// changes it.
+  pub accessibility_asked: bool,
   pub microphone: Grant,
   /// Another app holds Secure Input: the hotkey goes through its backup path.
   pub secure_input: bool,
@@ -102,8 +107,14 @@ pub struct Access {
 impl Default for Access {
   /// Nothing allowed, nothing asked.
   fn default() -> Self {
-    let microphone = Grant::NotDetermined;
-    Self { accessibility: false, microphone, secure_input: false, clipboard_unread: false }
+    let (accessibility, accessibility_asked, microphone) = (false, false, Grant::NotDetermined);
+    Self {
+      accessibility,
+      accessibility_asked,
+      microphone,
+      secure_input: false,
+      clipboard_unread: false,
+    }
   }
 }
 
@@ -445,6 +456,7 @@ impl Prefs {
     };
     ui.col(page, |ui| match self.page {
       Page::General => self.general(ui, fs),
+      Page::Permissions => self.permissions(ui, fs),
       Page::Models => self.models(ui, fs),
       Page::History => self.history(ui, fs),
       Page::Advanced => self.advanced(ui, fs),
