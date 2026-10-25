@@ -76,7 +76,9 @@ fn prepare(path: &Path) {
   thread::spawn(move || {
     let started = Instant::now();
     match wavo::Model::prepare(&path, |_| ControlFlow::Continue(())) {
-      Ok(_) => info!("{}: prepared for the Neural Engine in {:?}", path.display(), started.elapsed()),
+      Ok(_) => {
+        info!("{}: prepared for the Neural Engine in {:?}", path.display(), started.elapsed())
+      }
       Err(e) => warn!("{}: not prepared for the Neural Engine: {e}", path.display()),
     }
 
