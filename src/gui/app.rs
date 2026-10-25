@@ -151,6 +151,8 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   let _ = PROXY.set(main.proxy());
   let fake_mic = config.fake_mic.is_some();
   let (home, hub) = (config.home.clone(), config.hub.clone());
+  // No settings yet: the first launch, which is the person's, never the system's at login.
+  let first = !home.join(crate::settings::FILE).exists();
   let observer = Box::new(|update: Update| {
     proxy().post(move |main| _ = with_app(|app| app.on_update(main, update)))
   });
@@ -198,8 +200,10 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   app.read_models();
   // Nothing is asked at launch: with a permission or a model missing the window opens on General,
   // whose buttons ask; else the app starts in the menu bar.
-  // Never at a launch at login: one the system may have started is left in the menu bar.
-  let missing = (app.missing_permission() || app.missing_model()) && !may_launch_at_login();
+  // Never at a launch at login: one the system may have started is left in the menu bar; the
+  // first launch always opens it.
+  let missing =
+    (app.missing_permission() || app.missing_model()) && (first || !may_launch_at_login());
   APP.with(|cell| *cell.borrow_mut() = Some(app));
   // Opened again while it runs: the settings window, as for a second launch.
   main.on_reopen(|main| open_window(main, None));

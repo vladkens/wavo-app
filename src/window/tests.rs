@@ -406,9 +406,9 @@ fn pages_fit_or_scroll_and_the_toolbar_switches_them() {
   let oldest = *history_of(home.path(), &older, false).last().unwrap();
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
-  let general = [OPEN_ACCESSIBILITY, MODEL, LANG, HOTKEY, RESET, ACTIVATION, MIC, PASTE, KEEP, LOGIN];
+  let general = [OPEN_ACCESSIBILITY, MODEL, LANG, HOTKEY, RESET, ACTIVATION, MIC, PASTE, KEEP];
   let general = general.map(Id::of).to_vec();
-  let advanced = [HUD, UNLOAD, RETENTION, MODEL_FOLDER, RECORDINGS_FOLDER];
+  let advanced = [LOGIN, HUD, UNLOAD, RETENTION, MODEL_FOLDER, RECORDINGS_FOLDER];
   let controls: [Vec<Id>; 5] = [
     general,
     vec![Id::of(page::SEARCH), Id::of(page::LANG), Id::of((INFO, TWO[0])), Id::of((USE, TWO[1]))],
@@ -469,7 +469,7 @@ fn controls_show_hover_and_tooltips() {
   let mut h = harness(&fake, Settings::default(), &home);
   let info = |name: &str| row(name).key("info");
   let mut general = vec![Id::of(HOTKEY), info(ACTIVATION), Id::of(MIC), Id::of(MODEL)];
-  general.extend([Id::of(LANG), Id::of(LOGIN), Id::of(TABS).key(1)]);
+  general.extend([Id::of(LANG), Id::of(TABS).key(1)]);
   general.extend([Id::of(OPEN_ACCESSIBILITY), info(OPEN_ACCESSIBILITY)]);
   hovers_on(&mut h, &general);
   assert_eq!(hover(&mut h, Id::of(RESET)), (Cursor::Arrow, 0), "reset is disabled at the default");
@@ -505,7 +505,7 @@ fn controls_show_hover_and_tooltips() {
   tab(&mut h, Page::Advanced);
   let advanced = [info(UNLOAD), Id::of(RETENTION), Id::of(MODEL_FOLDER), Id::of(RECORDINGS_FOLDER)];
   hovers_on(&mut h, &advanced);
-  hovers_on(&mut h, &[Id::of(HUD)]);
+  hovers_on(&mut h, &[Id::of(HUD), Id::of(LOGIN)]);
   click(&mut h, Id::of(MODEL_FOLDER));
   click(&mut h, Id::of(RECORDINGS_FOLDER));
   let recordings = home.path().join(crate::history::recordings::DIR);
@@ -605,10 +605,6 @@ fn selects_and_switches_edit_the_settings() {
   let usb = Choice { id: Some("usb mic".into()), name: "USB Mic".into() };
   assert_eq!(fake.log().settings.microphone, Some(usb));
 
-  // Launch at login goes to the system, not through the settings' edits.
-  click(&mut h, Id::of(LOGIN));
-  assert_eq!(fake.log().autostarts, [true]);
-
   click(&mut h, Id::of(KEEP));
   assert!(fake.log().settings.keep_in_clipboard);
   click(&mut h, Id::of(PASTE));
@@ -617,6 +613,9 @@ fn selects_and_switches_edit_the_settings() {
   assert!(fake.log().settings.keep_in_clipboard, "disabled while pasting is off");
 
   tab(&mut h, Page::Advanced);
+  // Launch at login goes to the system, not through the settings' edits.
+  click(&mut h, Id::of(LOGIN));
+  assert_eq!(fake.log().autostarts, [true]);
 
   click(&mut h, Id::of(RETENTION));
   click(&mut h, Id::of(RETENTION).key(("item", 1)));
@@ -705,6 +704,7 @@ fn launch_at_login_flips_at_once_and_turns_back_on_failure() {
   let home = Home::new("window-login", &TWO);
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
+  tab(&mut h, Page::Advanced);
   click(&mut h, Id::of(LOGIN));
   assert_eq!(fake.log().autostarts, [true], "asked of the shell");
   assert!(h.app().login.shown(false), "on before the answer");
@@ -1232,7 +1232,7 @@ fn general_rows_keep_one_line_whatever_they_say() {
   fake.log().access =
     Some(Access { accessibility: true, microphone: Grant::Granted, ..Access::default() });
   let mut h = harness(&fake, Settings::default(), &home);
-  let rows = [HOTKEY, ACTIVATION, MODEL, LOGIN];
+  let rows = [HOTKEY, ACTIVATION, MODEL];
   let heights = |h: &Harness<Prefs>| rows.map(|r| h.rect(row(r)).unwrap().h);
   let (before, page) = (heights(&h), h.rt.size.h);
   assert!(h.rect(row(HOTKEY).key("info")).is_none() && h.rect(row(MODEL).key("info")).is_none());
@@ -1249,10 +1249,14 @@ fn general_rows_keep_one_line_whatever_they_say() {
   h.rt.waker().wake();
   h.frame();
   h.frame();
-  for r in [HOTKEY, MODEL, LOGIN] {
+  for r in [HOTKEY, MODEL] {
     assert!(h.rect(row(r).key("info")).is_some(), "{r}: its ⓘ");
     assert!(h.text(row(r).key("caption")).is_none(), "{r}: no caption");
   }
+
+  tab(&mut h, Page::Advanced);
+  assert!(h.rect(row(LOGIN).key("info")).is_some(), "launch at login: its ⓘ");
+  tab(&mut h, Page::General);
 
   assert!(h.app().shortcut_note().is_some_and(|n| n.starts_with("Secure Input is on")));
   assert_eq!((heights(&h), h.rt.size.h), (before, page));

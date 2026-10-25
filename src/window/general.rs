@@ -298,7 +298,6 @@ impl Prefs {
     });
 
     self.output(ui, fs);
-    ui.form_section(fs, "App", |ui| self.login(ui, fs));
   }
 
   /// What the shortcut's ⓘ says, when it applies: Secure Input while it is on, else what macOS
@@ -451,6 +450,7 @@ impl Prefs {
 
   pub(super) fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
     ui.form_section(fs, "App", |ui| {
+      self.login(ui, fs);
       ui.form_row(fs, FormRow::new("Show the HUD at"), |ui| {
         let mut cur = self.settings.hud_position;
         if ui.id(HUD).select(&mut cur, &HUDS).changed {
