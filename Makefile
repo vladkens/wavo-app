@@ -28,7 +28,7 @@ update:
 clean:
 	cargo clean
 
-.PHONY: bundle run install shots fixtures test-models unload-memory
+.PHONY: bundle dist run install shots fixtures test-models unload-memory
 
 ICON := target/Wavo.icns
 APP := target/Wavo.app
@@ -42,6 +42,10 @@ $(ICON): assets/icon.png scripts/icns.sh
 bundle: $(ICON) # target/Wavo.app from the release profile, or PROFILE
 	cargo build --profile $(PROFILE)
 	scripts/bundle.sh target/$(PROFILE)/wavo-app $(ICON) $(APP)
+
+dist: bundle # target/distrib/Wavo-dev.zip, the release file for CI (vladkens/actions/rust-build)
+	mkdir -p target/distrib
+	ditto -c -k --keepParent $(APP) target/distrib/Wavo-dev.zip
 
 run: # quit the running Wavo, start target/Wavo.app built with the quick fast profile
 	$(MAKE) bundle PROFILE=fast
