@@ -22,13 +22,14 @@ use anyhow::{Context, Result};
 use nimbo::hotkey::{Hotkeys, Listener};
 use nimbo::permissions::{self, Access, Pane};
 use nimbo::tray::{Menu, Tray};
-use nimbo::{AppInfo, Clipboard, Main, Presence, Proxy, SystemClipboard, Window, autostart};
+use nimbo::{Clipboard, Main, Proxy, SystemClipboard, Window, autostart};
 use serde_json::{Value, json};
 use tracing::{info, warn};
 use wavo::hub::{Hub, ModelInfo};
 
 use super::output::GuiOutput;
 use super::paste;
+use crate::INFO;
 use crate::audio::devices;
 use crate::ctl::{self, Autostart, Claim, Reply, Request, Serving};
 use crate::history::db::Entry;
@@ -48,9 +49,6 @@ use crate::window::history::no_text;
 use crate::window::models::{Found, Pick};
 use crate::window::{self, Page, Prefs};
 
-/// The app as the system knows it: its menu bar presence, its login item.
-const INFO: AppInfo =
-  AppInfo { id: "me.vladkens.wavo", name: "Wavo", presence: Presence::Accessory };
 /// How often Accessibility access is checked while it is missing (and only then).
 const ACCESS_POLL: Duration = Duration::from_secs(2);
 /// How long `wavo-app ctl status` waits for the main thread for the shell's part.

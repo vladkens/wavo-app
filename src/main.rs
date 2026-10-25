@@ -12,6 +12,7 @@ mod history;
 #[cfg(target_os = "macos")]
 mod gui;
 mod language;
+mod reset;
 mod session;
 mod settings;
 #[cfg(test)]
@@ -27,10 +28,15 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use nimbo::{AppInfo, Presence};
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::prelude::*;
 
 use crate::ctl::Request;
+
+/// The app as the system knows it: its menu bar presence, its login item.
+const INFO: AppInfo =
+  AppInfo { id: "me.vladkens.wavo", name: "Wavo", presence: Presence::Accessory };
 
 #[derive(Parser)]
 #[command(version, about = "Local dictation", subcommand_required = !cfg!(target_os = "macos"))]
@@ -90,6 +96,19 @@ enum Command {
     #[arg(long)]
     dry_run: bool,
   },
+  /// Quit Wavo, turn launch at login off, reset its permissions (macOS) and delete its data and
+  /// caches, for a clean install; the Hugging Face cache stays
+  Reset {
+    /// Also delete the app this runs from (macOS)
+    #[arg(long)]
+    app: bool,
+    /// Print what it would do, change nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Do not ask first
+    #[arg(short)]
+    yes: bool,
+  },
   /// List audio input devices
   Devices,
   /// Record from the microphone (or the WAV file `WAVO_FAKE_MIC` names) into a 16 kHz mono WAV
@@ -124,6 +143,7 @@ fn main() -> Result<()> {
     Command::Ctl { request } => cli::ctl(request),
     Command::Export { file } => cli::export(&file),
     Command::Import { source, settings, dry_run } => cli::import(&source, settings, dry_run),
+    Command::Reset { app, dry_run, yes } => reset::run(app, dry_run, yes),
     Command::Devices => cli::devices(),
     Command::Record { seconds, device, out } => cli::record(seconds, device.as_deref(), &out),
   }
