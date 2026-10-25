@@ -2,11 +2,12 @@
 
 //! `wavo-app gui`: the menu bar app on nimbo's app platform ([nimbo::app]), an accessory app: the
 //! [Tray] with the [menu], the [Hotkeys] that feed the session's input, the HUD in an [Overlay],
-//! the settings window ([Prefs]) on demand: at launch only when something is missing (a
-//! permission or a model: the window opens on Permissions, nothing is asked until the person says
-//! so), from the menu, `wavo-app ctl open-settings` and `open-history`, a
-//! second launch and the app opened again (Finder, Spotlight).
-//! The session and the control socket are `wavo-app daemon`'s.
+//! the settings window ([Prefs]) when the person asks for it: at a launch only when something is
+//! missing (a permission or a model: the window opens on Permissions, nothing is asked until the
+//! person says so) and never at a launch at login, from the menu, `wavo-app ctl open-settings` and
+//! `open-history`, a second launch and the app opened again (Finder, Spotlight). Nothing else opens
+//! a window or takes the focus: an error or a permission missing shows in the HUD, the icon, the
+//! menu and the log. The session and the control socket are `wavo-app daemon`'s.
 //!
 //! The main thread owns the app ([App], in a thread local). Other threads reach it only through
 //! nimbo's [Proxy] ([proxy]): the session's observer posts every [Update] there, which goes on to
@@ -197,7 +198,8 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   app.read_models();
   // Nothing is asked at launch: with a permission or a model missing the window opens on
   // Permissions, the first launch's guide, whose buttons ask; else the app starts in the menu bar.
-  let missing = app.missing_permission() || app.missing_model();
+  // Never at a launch at login: one the system may have started is left in the menu bar.
+  let missing = (app.missing_permission() || app.missing_model()) && !may_launch_at_login();
   APP.with(|cell| *cell.borrow_mut() = Some(app));
   // Opened again while it runs: the settings window, as for a second launch.
   main.on_reopen(|main| open_window(main, None));
@@ -206,6 +208,12 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   }
 
   Ok(())
+}
+
+/// The app is a login item, so this launch may be the system's at login: nimbo does not tell a
+/// launch at login from the person's (Finder, the Dock), and the window must not open at login.
+fn may_launch_at_login() -> bool {
+  matches!(autostart::state(&INFO), Ok(autostart::State::Enabled))
 }
 
 /// The HUD at `position`, hidden until it shows; its overlay tells the app once it has hidden.
@@ -633,13 +641,9 @@ impl App {
           self.ask_microphone();
         }
 
-        // A permission missing: the HUD says which, the window opens where it is given. A denied
-        // microphone sends silence, which would say "no sound" instead.
+        // A permission missing: the HUD says which, and only the HUD (the menu too): no window
+        // opens by itself. A denied microphone sends silence, which would say "no sound" instead.
         let hint = self.permission_hint(update.settings.auto_paste);
-        if !recording && hint.is_some() {
-          proxy().post(|main| open_window(main, Some(Page::Permissions)));
-        }
-
         let r = status.recording.as_ref();
         let show = Show::Recording {
           meter: update.meter.clone().filter(|_| !self.mic_denied()),
@@ -798,14 +802,13 @@ impl App {
   }
 
   /// The microphone's prompt was answered. Denied during the recording that asked for it: the HUD
-  /// and the window say so, as for a press without it.
+  /// says so, as for a press without it.
   fn microphone_answered(&mut self, main: &mut Main) {
     self.microphone = permissions::microphone();
     self.refresh();
     let recording = self.update.clone().filter(|u| u.status.state == Phase::Recording);
     if let Some(update) = recording.filter(|_| self.mic_denied()) {
       self.on_update(main, update);
-      proxy().post(|main| open_window(main, Some(Page::Permissions)));
     }
   }
 
