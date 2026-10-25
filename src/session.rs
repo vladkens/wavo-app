@@ -979,6 +979,11 @@ impl<O: TextOutput> Controller<O> {
         let language = job.language.as_deref();
         log_history(self.history.db.update_text(id, &text, &job.model, language));
       }
+      // The model did not load: it tried nothing, and takes the entry by itself once it does.
+      (Outcome::NoModel, Some(id)) => {
+        log_history(self.history.db.mark_untried(id));
+        self.untried = true;
+      }
       (_, Some(id)) => log_history(self.history.db.mark_idle(id)),
       (_, None) => {}
     }
@@ -1718,12 +1723,18 @@ mod tests {
     let entry = s.entry(waiting).unwrap();
     assert_eq!((entry.text.as_str(), entry.tried_model, entry.busy), ("", None, false));
 
+    let failed = s.dictate(1);
+    assert_eq!(failed.outcome, Outcome::NoModel);
+    assert_eq!(s.kept(&failed).tried_model, None);
+
     fs::write(&model, b"GGUF").unwrap();
-    assert_eq!(s.dictate(1).outcome, Outcome::Done);
-    let done = poll("transcribed", Duration::from_secs(10), || {
-      s.entry(waiting).filter(|e| !e.text.is_empty() && !e.busy)
-    });
-    assert_eq!(done.text, "hello there");
+    assert_eq!(s.dictate(2).outcome, Outcome::Done);
+    for id in [waiting, failed.entry.unwrap()] {
+      let done = poll("transcribed", Duration::from_secs(10), || {
+        s.entry(id).filter(|e| !e.text.is_empty() && !e.busy)
+      });
+      assert_eq!(done.text, "hello there");
+    }
   }
 
   /// A failed retranscription keeps the text and says why; new text replaces it, an undo puts it
