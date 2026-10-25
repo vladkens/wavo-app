@@ -28,13 +28,18 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 wavo = { git = "https://github.com/vladkens/wavo", branch = "main", default-features = false, features = ["hub"] }
 
-# One profile for everything, so it all builds once: no LTO and incremental, a change rebuilds
-# the app's crate and links fast. `make dist` adds thin LTO for the release file (CI).
-# panic = "unwind" (the default), not "abort": the engine thread catches a panic of wavo or wgpu
-# and the app carries on.
+# Everything built here, once: no LTO and incremental, a change rebuilds the app's crate and links
+# fast. panic = "unwind" (the default), not "abort": the engine thread catches a panic of wavo or
+# wgpu and the app carries on. `dist` inherits it.
 [profile.release]
 strip = true
 incremental = true
+
+# The release file of `make dist` (CI): thin LTO.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+incremental = false
 
 [build-dependencies]
 png = "0.18.1"
