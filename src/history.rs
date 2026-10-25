@@ -20,7 +20,7 @@ use std::{fs, mem};
 
 use anyhow::{Context, Result, bail};
 use rusqlite::functions::FunctionFlags;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -240,18 +240,6 @@ impl Db {
     migrate(&db).with_context(|| format!("migrate {}", path.display()))?;
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
     db.create_scalar_function("wavo_fold", 1, flags, |ctx| Ok(fold(&ctx.get::<String>(0)?)))?;
-    Ok(Self { db })
-  }
-
-  /// A look at the database at `path` that writes nothing (an import's dry run): not migrated. A
-  /// WAL database whose app has quit has no `-shm` to open it read-only by: then it is immutable.
-  pub fn open_read_only(path: &Path) -> Result<Self> {
-    let at = path.display().to_string();
-    let at = at.replace('%', "%25").replace(' ', "%20").replace('?', "%3f").replace('#', "%23");
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-    let db = Connection::open_with_flags(format!("file:{at}?mode=ro"), flags)
-      .or_else(|_| Connection::open_with_flags(format!("file:{at}?mode=ro&immutable=1"), flags))
-      .with_context(|| format!("open {}", path.display()))?;
     Ok(Self { db })
   }
 

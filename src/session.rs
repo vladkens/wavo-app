@@ -679,8 +679,12 @@ impl<O: TextOutput> Controller<O> {
           bail!("entry {id} is being transcribed");
         }
 
-        let Some(o) = self.originals.remove(&id) else { bail!("entry {id} has no text before") };
-        self.history.db.update_text(id, &o.text, o.model.as_deref(), o.language.as_deref())
+        let Some(o) = self.originals.get(&id) else { bail!("entry {id} has no text before") };
+        let (model, language) = (o.model.as_deref(), o.language.as_deref());
+        self.history.db.update_text(id, &o.text, model, language)?;
+        // Kept until the text is back: a failed write can be tried again.
+        self.originals.remove(&id);
+        Ok(())
       }
       Request::Delete(id) => self.delete(id),
       Request::Unload => {

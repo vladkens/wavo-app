@@ -164,12 +164,21 @@ pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> R
     }
   };
 
-  // A dry run reads the history and lists the recordings, but creates and migrates nothing.
+  // A dry run reads a copy of the history (its WAL too: the app may be writing), and lists the
+  // recordings: nothing of the home is created, migrated or written.
   let history = if dry_run { None } else { Some(History::open(home)?) };
   let ours = match &history {
     Some(h) => h.db.get_entries()?,
     None if home.join(DB_FILE).is_file() => {
-      Db::open_read_only(&home.join(DB_FILE))?.get_entries()?
+      let copy = Scratch::new()?;
+      for suffix in ["", "-wal", "-shm"] {
+        let name = format!("{DB_FILE}{suffix}");
+        if home.join(&name).is_file() {
+          fs::copy(home.join(&name), copy.0.join(&name))?;
+        }
+      }
+
+      Db::open(&copy.0.join(DB_FILE))?.get_entries()?
     }
     None => Vec::new(),
   };
