@@ -4,11 +4,13 @@
 //! wavo's ([`Wavo`]) or a test's.
 
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::thread;
 use std::time::Instant;
 
 use anyhow::Result;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Loads model files; called on an engine thread, once per thread.
 pub trait Loader: Send + Sync {
@@ -50,8 +52,36 @@ pub struct Wavo;
 
 impl Loader for Wavo {
   fn load(&self, path: &Path) -> Result<Box<dyn SpeechModel>> {
+    prepare(path);
     Ok(Box::new(wavo::Model::load(path)?))
   }
+}
+
+/// A Parakeet or GigaAM file not yet prepared for the Neural Engine in this program (one wavo or
+/// another app downloaded) is prepared on a thread of its own, 15–40 s once; until then it loads
+/// on the GPU, and the next load after that runs on the Neural Engine.
+fn prepare(path: &Path) {
+  static PREPARING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+  if wavo::Model::prepared(path) != Some(false) {
+    return;
+  }
+
+  let mut preparing = PREPARING.lock().unwrap();
+  if preparing.iter().any(|p| p == path) {
+    return;
+  }
+
+  preparing.push(path.to_owned());
+  let path = path.to_owned();
+  thread::spawn(move || {
+    let started = Instant::now();
+    match wavo::Model::prepare(&path, |_| ControlFlow::Continue(())) {
+      Ok(_) => info!("{}: prepared for the Neural Engine in {:?}", path.display(), started.elapsed()),
+      Err(e) => warn!("{}: not prepared for the Neural Engine: {e}", path.display()),
+    }
+
+    PREPARING.lock().unwrap().retain(|p| *p != path);
+  });
 }
 
 impl SpeechModel for wavo::Model {
