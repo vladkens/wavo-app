@@ -1,11 +1,11 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! The settings window on nimbo, as macOS System Settings looks: toolbar tabs (General,
-//! Permissions, Models, History, Advanced, About) over pages of grey plates, in a window [`WIDTH`]
-//! wide. Permissions is the first launch's guide: what the system allows the app, and with no
-//! model the way to download one. General, Permissions, Advanced and About are as high as their
-//! content ([`Ui::fit_window_height`]); Models and History scroll in a window [`SCROLLING`] high,
-//! under their search row. Light or dark and in the accent the system has.
+//! The settings window on nimbo, as macOS System Settings looks: toolbar tabs (General, Models,
+//! History, Advanced, About) over pages of grey plates, in a window [`WIDTH`] wide. General starts
+//! with what the system does not allow the app yet, the first launch's guide. General, Advanced
+//! and About are as high as their content ([`Ui::fit_window_height`]), never scrolling; Models and
+//! History scroll in a window [`SCROLLING`] high, under their head rows. Light or dark and in the
+//! accent the system has.
 //!
 //! The window is a plain [`App`]: it shows a copy of the settings and the session's status,
 //! which the shell keeps current ([`Prefs::update`]), and reaches the rest of the app only
@@ -14,10 +14,12 @@
 //! next update. Deleting a model or a dictation asks first in a modal dialog over the window
 //! ([`Ask`]).
 //!
+//! What the system allows is looked at again whenever the window comes to the front.
+//!
 //! The models on disk are looked at again when the window opens, a page is switched to, a
 //! download ends or a model is deleted, and when the model in use is gone from the disk behind
 //! its back; then the session looks too ([`Shell::check_model`]). A model that can't transcribe
-//! says so where it shows ([`Prefs::model_problem`]: General's Model row, the Models page,
+//! says so where it shows ([`Prefs::model_problem`]: General's Model row's ⓘ, the Models page,
 //! History's Re-transcribe).
 
 mod about;
@@ -59,16 +61,14 @@ pub const CONFIRM: &str = "confirm";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Page {
   General,
-  Permissions,
   Models,
   History,
   Advanced,
   About,
 }
 
-pub const PAGES: [(Page, Icon, &str); 6] = [
+pub const PAGES: [(Page, Icon, &str); 5] = [
   (Page::General, Icon::GEAR, "General"),
-  (Page::Permissions, Icon::ACCESSIBILITY, "Permissions"),
   (Page::Models, Icon::DOWNLOAD, "Models"),
   (Page::History, Icon::HISTORY, "History"),
   (Page::Advanced, Icon::SLIDERS, "Advanced"),
@@ -89,7 +89,7 @@ pub fn config(page: Page) -> Config {
   Config::new("Wavo", WIDTH, h).fixed()
 }
 
-/// What the system allows the app, as the Permissions and General pages show it.
+/// What the system allows the app, as the General page shows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Access {
   /// Accessibility: the event tap and the paste.
@@ -456,7 +456,6 @@ impl Prefs {
     };
     ui.col(page, |ui| match self.page {
       Page::General => self.general(ui, fs),
-      Page::Permissions => self.permissions(ui, fs),
       Page::Models => self.models(ui, fs),
       Page::History => self.history(ui, fs),
       Page::Advanced => self.advanced(ui, fs),

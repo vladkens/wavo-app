@@ -111,12 +111,6 @@ impl Pick {
   }
 }
 
-/// `English only` for a model meant for one language.
-pub fn single_language(m: &ModelInfo) -> Option<String> {
-  let [code] = m.langs else { return None };
-  Some(format!("{} only", language::name(code)))
-}
-
 /// Whether model choice `query` names `model` in `hub`: by its name, or by the path of its file
 /// there (a file of the same name elsewhere is another).
 fn names(hub: &Hub, query: &str, model: &ModelInfo) -> bool {
@@ -366,7 +360,7 @@ impl Prefs {
     let t = ui.theme();
     let m = f.0;
     let deleting = self.models.deleting.contains(&m.name);
-    let languages = single_language(m).unwrap_or_else(|| m.languages.to_owned());
+    let languages = m.languages.to_owned();
     let (state, error) = match in_use {
       true => self.in_use_state(f),
       false => ("", false),

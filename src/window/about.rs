@@ -1,9 +1,12 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! The About page: the app's icon, name and version, one line, View on GitHub and Buy Me a
-//! Coffee, then the acknowledgements in a plate, each opening its page.
+//! Coffee, then the acknowledgements in a plate, each opening its page with the large ↗ in its row.
 
-use nimbo::{Align, Font, FormRow, FormStyle, Icon, Style, TextStyle, Ui, grow, px};
+use nimbo::{
+  Align, Button, ButtonStyle, ControlSize, Font, FormRow, FormStyle, Icon, Style, TextStyle, Ui,
+  Variant, grow, px,
+};
 
 use super::Prefs;
 
@@ -37,6 +40,12 @@ const ACKS: [(&str, &str, &str, &str); 6] = [
     "https://huggingface.co/handy-computer",
   ),
 ];
+
+/// The gap between a form row's label and its caption, as nimbo lays them out.
+const LABEL_GAP: f32 = 2.0;
+/// The acknowledgements' ↗, in points, and its mark: nimbo's `EXTERNAL` drawn larger in its box.
+const LINK_ICON: f32 = 22.0;
+const LINK_MARK: Icon = Icon::new("M6.5 17.5 17.5 6.5M8 6.5h9.5V16");
 
 /// `assets/icon.png` at 128 px (64 points at 2x) as RGBA, from build.rs.
 const ICON_PX: usize = 128;
@@ -73,16 +82,30 @@ impl Prefs {
     }
   }
 
+  /// The acknowledgements, a name and a line each, with a large ↗ centred in the row (not on the
+  /// name's line, where a row's controls go).
   pub(super) fn about(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let mut open = None;
+    let fs = &FormStyle { caption: fs.caption.ellipsis(), ..*fs };
+    // The row's height under its hairline: the name, its line, the padding around them.
+    let row_h = 2.0 * fs.pad_y + fs.label.line_h + LABEL_GAP + fs.caption.line_h;
+    // A large square ghost button; its ↗ is as big as its text and 2 more: [`LINK_ICON`].
+    let t = ui.theme();
+    let s = t.button_sized(Variant::Ghost, ControlSize::Large);
+    let side = s.frame.min[0];
+    let font = Font { size: LINK_ICON - 2.0, ..s.text.font };
+    let text = s.text.color(t.muted).font(font);
+    let link = ButtonStyle { frame: s.frame.w(px(side)).pad(0.0), text, ..s };
     ui.form_section(fs, "Acknowledgements", |ui| {
       for (id, name, what, url) in ACKS {
         ui.form_row(fs, FormRow::new(name).caption(what), |ui| {
-          let r = ui.id((LINK, id)).icon_button(Icon::EXTERNAL);
-          ui.tooltip(r.id, url.trim_start_matches("https://"));
-          if r.clicked {
-            open = Some(url);
-          }
+          ui.col(Style::new().h(px(row_h)).align(Align::Center, Align::Center), |ui| {
+            let r = Button::icon(LINK_MARK).style(link).show(ui.id((LINK, id)));
+            ui.tooltip(r.id, url.trim_start_matches("https://"));
+            if r.clicked {
+              open = Some(url);
+            }
+          });
         });
       }
     });
