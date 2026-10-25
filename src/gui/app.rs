@@ -25,7 +25,7 @@ use nimbo::permissions::{self, Access, Pane};
 use nimbo::tray::{Menu, Tray};
 use nimbo::{Clipboard, Main, Proxy, SystemClipboard, Window, autostart};
 use tracing::{error, info, warn};
-use wavo::hub::{Hub, ModelInfo};
+use wavo::hub::{self, Hub, ModelInfo};
 
 use super::output::GuiOutput;
 use super::paste;
@@ -33,16 +33,12 @@ use crate::ctl::{self, Claim};
 use crate::history::{self, Entry, History};
 use crate::session::{self, Handle, Phase, Request, Session, Update};
 use crate::settings::{self, HudPosition, Settings};
-use crate::transfer::{self, Exported};
 use crate::ui::hud::{self, Mode};
 use crate::ui::icons::Icon;
 use crate::ui::menu::{self, Models, Warning};
 use crate::ui::overlay::{self, Overlay, Show};
-use crate::window::downloads::{Download, Downloads};
-use crate::window::history::no_text;
-use crate::window::models::{Found, Pick};
-use crate::window::{self, Page, Prefs};
-use crate::{INFO, audio};
+use crate::window::{self, Download, Downloads, Found, Page, Pick, Prefs, no_text};
+use crate::{INFO, audio, transfer};
 
 /// How often Accessibility access is checked while it is missing (and only then).
 const ACCESS_POLL: Duration = Duration::from_secs(2);
@@ -376,8 +372,8 @@ fn with_window(f: impl FnOnce(&mut Prefs) + Send + 'static) {
 
 /// The settings window's way to the app: the session's handle, the downloads, and the main
 /// thread's proxy for whatever touches the app's state (the window runs inside a borrow of it at
-/// times). What may wait (the system's login items, a folder's size, a deletion) runs on a
-/// thread of its own: the window keeps drawing.
+/// times). What may wait (the system's login items, a deletion, an export) runs on a thread of
+/// its own: the window keeps drawing.
 struct MacShell {
   home: PathBuf,
   handle: Handle,
@@ -424,50 +420,30 @@ impl window::Shell for MacShell {
     self.downloads.get(name)
   }
 
-  /// Once it is gone, the session forgets a choice of it (the first model left takes its
-  /// place) and lets go of its file.
+  /// `Hub::remove` waits while another process downloads the model. Once it is gone, a choice of
+  /// it goes back to the first model left, and the session lets go of its file.
   fn delete_model(&self, model: &'static ModelInfo) {
     let (handle, hub) = (self.handle.clone(), self.hub.clone());
     spawn("model-delete", move || {
-      let result = window::models::delete(&hub, model);
-      if result.is_ok() {
-        let root = hub.clone();
-        handle.edit_settings(move |s| window::models::forget(s, &root, model));
-        handle.check_model();
+      match hub.remove(model.name) {
+        Ok(freed) => {
+          info!("deleted {} ({freed:?} bytes)", model.name);
+          let chosen = |q: &str| hub::lookup(q).is_ok_and(|m| m.name == model.name);
+          handle.edit_settings(move |s| s.model = s.model.take().filter(|q| !chosen(q)));
+          handle.check_model();
+        }
+        Err(e) => warn!("delete {}: {e}", model.name),
       }
 
-      with_window(move |prefs| prefs.model_deleted(model, result));
+      with_window(Prefs::models_changed);
     });
   }
 
-  fn check_model(&self) {
-    self.handle.check_model();
-  }
-
-  fn retranscribe(&self, id: i64) {
+  fn history(&self, req: Request) {
     let handle = self.handle.clone();
-    spawn("retranscribe", move || {
-      if let Some(e) = handle.request(Request::Retranscribe(id)).err() {
-        warn!("transcribe history entry {id} again: {e}");
-      }
-    });
-  }
-
-  fn undo_transcribe(&self, id: i64) {
-    let handle = self.handle.clone();
-    spawn("undo-transcribe", move || {
-      if let Some(e) = handle.request(Request::UndoTranscribe(id)).err() {
-        warn!("undo the transcription of history entry {id}: {e}");
-      }
-    });
-  }
-
-  fn delete_entry(&self, id: i64) {
-    let handle = self.handle.clone();
-    spawn("history-delete", move || {
-      if let Some(e) = handle.request(Request::Delete(id)).err() {
-        warn!("delete history entry {id}: {e}");
-        with_window(move |prefs| prefs.entry_not_deleted(&e));
+    spawn("history", move || {
+      if let Err(e) = handle.request(req) {
+        warn!("{req:?}: {e}");
       }
     });
   }
@@ -492,15 +468,9 @@ impl window::Shell for MacShell {
   fn access(&self) -> window::Access {
     window::Access {
       accessibility: permissions::accessibility(false),
-      accessibility_asked: ASKED_ACCESSIBILITY.load(Ordering::Relaxed),
       microphone: permissions::microphone(),
       secure_input: permissions::secure_input(),
-      clipboard_unread: !SystemClipboard.readable(),
     }
-  }
-
-  fn folder_size(&self, dir: PathBuf, done: Box<dyn FnOnce(u64) + Send>) {
-    spawn("folder-size", move || done(window::folder_size(&dir)));
   }
 
   fn allow(&self, pane: Pane) {
@@ -519,18 +489,31 @@ impl window::Shell for MacShell {
     }
   }
 
-  fn export(&self, file: PathBuf, done: Box<dyn FnOnce(Result<Exported, String>) + Send>) {
+  /// Into a new archive in Downloads (nimbo has no file picker), shown there.
+  fn export(&self) {
     let home = self.home.clone();
     spawn("export", move || {
-      let result = transfer::export(&home, &file);
-      match &result {
+      let file = export_file();
+      match transfer::export(&home, &file) {
         Ok(_) => _ = nimbo::open::reveal(&file).inspect_err(|e| warn!("show the archive: {e}")),
         Err(e) => warn!("export to {}: {e:#}", file.display()),
       }
-
-      done(result.map_err(|e| format!("{e:#}")));
     });
   }
+}
+
+/// `~/Downloads/wavo-export-2026-10-24.tar`, `-2` and so on if taken or being written.
+fn export_file() -> PathBuf {
+  let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+  let day = history::day_of(history::now_ms()).unwrap_or_default();
+  let dir = home.join("Downloads");
+  (1..)
+    .map(|n| match n {
+      1 => dir.join(format!("wavo-export-{day}.tar")),
+      n => dir.join(format!("wavo-export-{day}-{n}.tar")),
+    })
+    .find(|f| !f.exists() && !transfer::part_of(f).exists())
+    .unwrap()
 }
 
 impl App {
@@ -746,7 +729,7 @@ impl App {
 
   /// The models downloaded, for the menu; the session looks too when they changed.
   fn read_models(&mut self) {
-    let found = window::models::ready(self.hub.downloaded(), |name| self.downloads.get(name));
+    let found = window::ready(self.hub.downloaded(), |name| self.downloads.get(name));
     if found != self.found {
       self.found = found;
       self.handle.check_model();

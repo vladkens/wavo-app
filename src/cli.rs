@@ -11,7 +11,7 @@ use anyhow::{Result, bail};
 use nimbo::autostart;
 
 use crate::ctl::{self, Claim};
-use crate::window::models::size_text;
+use crate::window::size_text;
 use crate::{INFO, transfer};
 
 pub fn export(file: &Path) -> Result<()> {

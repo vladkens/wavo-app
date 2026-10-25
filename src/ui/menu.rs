@@ -13,7 +13,7 @@ use super::icons::Icon;
 use crate::engine::Phase as EnginePhase;
 use crate::history::{Local, local_time, shorten};
 use crate::session::{NoModel, Outcome, Phase, Status};
-use crate::window::models::{Found, Pick, size_text};
+use crate::window::{Found, Pick, size_text};
 
 /// The most dictations «Recent» lists.
 pub const RECENT: usize = 10;
