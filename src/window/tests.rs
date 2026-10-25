@@ -26,11 +26,11 @@ use nimbo::{
 use wavo::hub;
 
 use super::general::{
-  ACTIVATION, DOWNLOAD_MODEL, HOTKEY, HUD, KEEP, LANG, LOGIN, MIC, MODEL, MODEL_FOLDER,
-  OPEN_ACCESSIBILITY, OPEN_MICROPHONE, PASTE, RECORDINGS_FOLDER, RESET, RETENTION, UNLOAD, row,
+  ACTIVATION, DOWNLOAD_MODEL, HOTKEY, HUD, KEEP, LANG, LOGIN, MIC, MODEL, OPEN_ACCESSIBILITY,
+  OPEN_MICROPHONE, PASTE, RECORDINGS_FOLDER, RESET, RETENTION, row,
 };
 use super::history::{COPY, DELETE, PLAY, RETRANSCRIBE, ROW, SEARCH, TEXT, UNDO};
-use super::models::{self as page, CANCEL, DOWNLOAD, INFO, USE};
+use super::models::{self as page, CANCEL, DOWNLOAD, FOLDER, INFO, UNLOAD, USE};
 use super::*;
 use crate::audio::devices::Choice;
 use crate::history::db::NewEntry;
@@ -408,10 +408,11 @@ fn pages_fit_or_scroll_and_the_toolbar_switches_them() {
   let mut h = harness(&fake, Settings::default(), &home);
   let general =
     [OPEN_ACCESSIBILITY, HOTKEY, RESET, ACTIVATION, MIC, MODEL, LANG, LOGIN].map(Id::of).to_vec();
-  let advanced = [PASTE, KEEP, HUD, UNLOAD, RETENTION, MODEL_FOLDER, RECORDINGS_FOLDER];
+  let advanced = [PASTE, KEEP, HUD, RETENTION, RECORDINGS_FOLDER];
+  let models = [Id::of(page::SEARCH), Id::of(page::LANG), Id::of(UNLOAD), Id::of(FOLDER)];
   let controls: [Vec<Id>; 5] = [
     general,
-    vec![Id::of(page::SEARCH), Id::of(page::LANG), Id::of((INFO, TWO[0])), Id::of((USE, TWO[1]))],
+    [&models[..], &[Id::of((INFO, TWO[0])), Id::of((USE, TWO[1]))]].concat(),
     vec![Id::of(SEARCH), Id::of((COPY, ids[8])), Id::of((PLAY, ids[8]))],
     advanced.map(Id::of).to_vec(),
     vec![Id::of((about::LINK, "source")), Id::of((about::LINK, "models"))],
@@ -489,6 +490,8 @@ fn controls_show_hover_and_tooltips() {
   let remote = hub::MODELS[2].name;
   let models = [Id::of(page::LANG), Id::of((INFO, TWO[0])), Id::of((USE, TWO[1]))];
   hovers_on(&mut h, &models);
+  hovers_on(&mut h, &[row(UNLOAD).key("info"), Id::of(UNLOAD), Id::of(FOLDER)]);
+  click(&mut h, Id::of(FOLDER));
   hovers_on(&mut h, &[Id::of((page::DELETE, TWO[1])), Id::of((DOWNLOAD, remote))]);
 
   tab(&mut h, Page::History);
@@ -503,13 +506,11 @@ fn controls_show_hover_and_tooltips() {
   hovers_on(&mut h, &[Id::of(SEARCH).key("clear")]);
 
   tab(&mut h, Page::Advanced);
-  let advanced = [info(UNLOAD), Id::of(RETENTION), Id::of(MODEL_FOLDER), Id::of(RECORDINGS_FOLDER)];
-  hovers_on(&mut h, &advanced);
+  hovers_on(&mut h, &[Id::of(RETENTION), Id::of(RECORDINGS_FOLDER)]);
   hovers_on(&mut h, &[Id::of(PASTE), Id::of(HUD)]);
   // Keeping the clipboard means nothing without pasting.
   click(&mut h, Id::of(PASTE));
   assert_eq!(hover(&mut h, Id::of(KEEP)), (Cursor::Arrow, 0), "the row is disabled");
-  click(&mut h, Id::of(MODEL_FOLDER));
   click(&mut h, Id::of(RECORDINGS_FOLDER));
   let recordings = home.path().join(crate::history::recordings::DIR);
   assert_eq!(fake.log().folders, [home.hub.root().to_owned(), recordings]);
@@ -683,8 +684,8 @@ fn type_select(h: &mut Harness<Prefs>, id: Id, c: char) {
   assert!(h.rect(id.key("menu")).is_none(), "{id:?} closed by the pick");
 }
 
-/// Typing "r" in the open Language, Microphone and Unload pop-ups highlights the first item that
-/// starts with R, which Return picks.
+/// Typing a letter in the open Language, Microphone and Unload pop-ups highlights the first item
+/// that starts with it, which Return picks.
 #[test]
 fn pop_ups_select_by_typing() {
   let home = Home::new("window-type-select", &TWO);
@@ -695,9 +696,9 @@ fn pop_ups_select_by_typing() {
   type_select(&mut h, Id::of(MIC), 'r');
   let rode = Choice { id: Some("røde podmic usb".into()), name: "RØDE PodMic USB".into() };
   assert_eq!(fake.log().settings.microphone, Some(rode));
-  tab(&mut h, Page::Advanced);
-  type_select(&mut h, Id::of(UNLOAD), 'r');
-  assert_eq!(fake.log().settings.unload_after_minutes, Some(0), "Right after each dictation");
+  tab(&mut h, Page::Models);
+  type_select(&mut h, Id::of(UNLOAD), 'e');
+  assert_eq!(fake.log().settings.unload_after_minutes, Some(0), "Each dictation");
 }
 
 /// The switch flips at once while the system is asked off the main thread; the answer keeps it
