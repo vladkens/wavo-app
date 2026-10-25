@@ -28,7 +28,7 @@ update:
 clean:
 	cargo clean
 
-.PHONY: bundle dist run install shots fixtures test-models unload-memory
+.PHONY: bundle dist run install reset shots fixtures test-models unload-memory
 
 ICON := target/Wavo.icns
 APP := target/Wavo.app
@@ -54,6 +54,12 @@ run: # quit the running Wavo, start target/Wavo.app built with the quick fast pr
 install: # the same, installed into /Applications
 	$(MAKE) bundle PROFILE=fast
 	scripts/run.sh $(APP) /Applications/Wavo.app
+
+# The installed app's binary, else the release build's; ARGS go to it (--dry-run, --yes, --app).
+INSTALLED := /Applications/Wavo.app/Contents/MacOS/wavo-app
+
+reset: # delete Wavo's data and permissions: a clean install to test
+	$(or $(wildcard $(INSTALLED)),target/release/wavo-app) reset $(ARGS)
 
 shots: # the settings window's pages, headless, into target/shots/
 	WAVO_SHOTS=$(CURDIR)/target/shots cargo test --release every_page_renders
