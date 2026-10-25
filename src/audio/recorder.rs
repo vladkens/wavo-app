@@ -128,14 +128,16 @@ impl Level {
 pub struct Recording {
   /// The whole recording, 16 kHz mono, with its VAD scores.
   pub clip: Clip,
+  // Read by the tests only, until the audio step trims the recorder.
+  #[cfg_attr(not(test), allow(dead_code))]
   pub wav: PathBuf,
   /// The WAV file holds the whole recording: no write error.
   pub saved: bool,
-  pub device: String,
   /// Device fallback, a device error that ended capture, lost samples, a WAV write error, no
   /// sound at all.
   pub warnings: Vec<String>,
   /// From [`Recorder::start`] to the first buffer of samples.
+  #[cfg_attr(not(test), allow(dead_code))]
   pub open_latency: Option<Duration>,
 }
 
@@ -263,7 +265,6 @@ impl Recorder {
       clip: processed.clip,
       wav: processed.wav,
       saved: processed.saved,
-      device: std::mem::take(&mut self.device),
       warnings,
       open_latency: self.open_latency(),
     })

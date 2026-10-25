@@ -47,7 +47,7 @@ use crossbeam_channel::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use super::model::{Loader, Piece, SpeechModel, Wavo};
+use super::model::{Loader, Piece, SpeechModel};
 use crate::audio::SAMPLE_RATE;
 
 /// Engine threads past their deadline that may still hold their models before jobs fail with
@@ -79,9 +79,10 @@ pub struct EngineConfig {
 
 impl EngineConfig {
   /// wavo, default deadlines, no unload.
+  #[cfg(test)]
   pub fn new(model: PathBuf) -> Self {
     Self {
-      loader: Arc::new(Wavo),
+      loader: Arc::new(super::model::Wavo),
       model,
       deadlines: Deadlines::default(),
       unload_after: None,

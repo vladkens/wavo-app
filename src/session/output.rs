@@ -1,9 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Where dictated text goes: [`TextOutput`], which the platform shells implement; the headless
-//! app's [`Stdout`] and the tests' [`FakeOutput`].
-
-use std::io::{self, Write};
+//! Where dictated text goes: [`TextOutput`], which the platform shells implement, and the tests'
+//! [`FakeOutput`].
 
 /// Delivers dictated text to the app the person is typing in.
 pub trait TextOutput: Send + 'static {
@@ -37,32 +35,6 @@ pub enum NotPasted {
   Failed(String),
 }
 
-/// Output of the headless app: each text is a line on stdout; nothing is pasted anywhere.
-pub struct Stdout;
-
-impl Stdout {
-  fn line(text: &str) -> io::Result<()> {
-    let mut out = io::stdout().lock();
-    writeln!(out, "{text}")?;
-    out.flush()
-  }
-}
-
-impl TextOutput for Stdout {
-  type Target = ();
-
-  fn target(&mut self) {}
-
-  fn paste(&mut self, text: &str, _: &(), _: bool) -> Result<(), NotPasted> {
-    Self::line(text).map_err(|e| NotPasted::Failed(format!("stdout: {e}")))
-  }
-
-  fn copy(&mut self, text: &str) -> anyhow::Result<()> {
-    Ok(Self::line(text)?)
-  }
-}
-
-/// Records what it is asked to deliver; tests set `refuse` to act like a failed safety check.
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub struct FakeOutput(pub std::sync::Arc<std::sync::Mutex<FakeLog>>);

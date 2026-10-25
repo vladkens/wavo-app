@@ -4,10 +4,9 @@
 //! [Tray] with the [menu], the [Hotkeys] that feed the session's input, the HUD in an [Overlay],
 //! the settings window ([Prefs]) when the person asks for it: at a launch only when something is
 //! missing (a permission or a model: the window opens on General, nothing is asked until the
-//! person says so) and never at a launch at login, from the menu, `wavo-app ctl open-settings` and
-//! `open-history`, a second launch and the app opened again (Finder, Spotlight). Nothing else opens
-//! a window or takes the focus: an error or a permission missing shows in the HUD, the icon, the
-//! menu and the log. The session and the control socket are `wavo-app daemon`'s.
+//! person says so) and never at a launch at login, from the menu, a second launch and the app
+//! opened again (Finder, Spotlight). Nothing else opens a window or takes the focus: an error or a
+//! permission missing shows in the HUD, the icon, the menu and the log.
 //!
 //! The main thread owns the app ([App], in a thread local). Other threads reach it only through
 //! nimbo's [Proxy] ([proxy]): the session's observer posts every [Update] there, which goes on to
@@ -25,18 +24,17 @@ use nimbo::hotkey::{Hotkeys, Listener};
 use nimbo::permissions::{self, Access, Pane};
 use nimbo::tray::{Menu, Tray};
 use nimbo::{Clipboard, Main, Proxy, SystemClipboard, Window, autostart};
-use serde_json::{Value, json};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use wavo::hub::{Hub, ModelInfo};
 
 use super::output::GuiOutput;
 use super::paste;
 use crate::INFO;
 use crate::audio::devices;
-use crate::ctl::{self, Autostart, Claim, Reply, Request, Serving};
+use crate::ctl::{self, Claim};
 use crate::history::db::Entry;
 use crate::history::{self, History};
-use crate::session::controller::{Handle, Phase, Update};
+use crate::session::controller::{Handle, Phase, Request, Update};
 use crate::session::{self, Session};
 use crate::settings::{self, HudPosition, Settings};
 use crate::transfer::archive::{self, Exported};
@@ -51,8 +49,6 @@ use crate::window::{self, Page, Prefs};
 
 /// How often Accessibility access is checked while it is missing (and only then).
 const ACCESS_POLL: Duration = Duration::from_secs(2);
-/// How long `wavo-app ctl status` waits for the main thread for the shell's part.
-const STATUS_WAIT: Duration = Duration::from_secs(1);
 
 thread_local! {
   static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -107,7 +103,7 @@ struct App {
   asked_microphone: bool,
   fake_mic: bool,
   session: Session,
-  serving: Serving,
+  server: ctl::Server,
 }
 
 /// `wavo-app gui`. Returns at once if another instance runs for the same home (it is asked to
@@ -116,13 +112,11 @@ pub fn run() -> Result<()> {
   let config = session::Config::from_env();
   let home = config.home.clone();
   std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
-  let socket = ctl::socket_path(&home)?;
-  let server = match ctl::claim(&home).with_context(|| format!("claim {}", socket.display()))? {
+  let server = match ctl::claim(&home).with_context(|| format!("claim {}", home.display()))? {
     Claim::Server(server) => server,
     Claim::Running => {
-      let reply = ctl::request(&socket, &Request::OpenSettings)?;
-      let answer = reply.error.unwrap_or_else(|| "settings opened".into());
-      eprintln!("wavo-app is already running for {} ({answer})", home.display());
+      let opened = ctl::send(&home, "open").is_ok();
+      eprintln!("Wavo is already running for {} (settings opened: {opened})", home.display());
       return Ok(());
     }
   };
@@ -131,13 +125,13 @@ pub fn run() -> Result<()> {
     devices::warm_up();
   }
 
-  info!("wavo-app for {}: control socket {}", home.display(), socket.display());
+  info!("wavo-app for {}", home.display());
   let mut started = Ok(());
   nimbo::app(INFO, |main| {
     // Also on a quit the system asks for (logout), after which `nimbo::app` does not return.
     main.on_quit(|_| shutdown());
     if let Err(e) = start(main, config, server) {
-      main.alert("Wavo could not start", &format!("{e:#}"));
+      error!("Wavo could not start: {e:#}");
       started = Err(e);
       main.quit();
     }
@@ -166,10 +160,11 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     Hotkeys::new(move |edge| handle.input(edge.into()))
   };
 
-  let serving = {
-    let handle = handle.clone();
-    server.spawn(move |request| serve(request, &handle))?
-  };
+  server.serve(|cmd| match cmd {
+    "open" => proxy().post(|main| open_window(main, None)),
+    "quit" => proxy().post(|main| main.quit()),
+    _ => warn!("unknown command {cmd:?}"),
+  })?;
 
   let tray = Tray::new(Icon::Idle.tray(), Icon::Idle.description());
   tray.on_open(|_, _| _ = with_app(App::menu_opening));
@@ -197,7 +192,7 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     asked_microphone: false,
     fake_mic,
     session,
-    serving,
+    server,
   };
   app.check_access();
   app.read_models();
@@ -228,59 +223,6 @@ fn open_hud(main: &mut Main, position: HudPosition) -> Window<Overlay> {
   main.open(&overlay::config(position), Overlay::new(hidden))
 }
 
-/// A control request, on the control thread.
-fn serve(request: Request, handle: &Handle) -> Reply {
-  match request {
-    Request::Status => {
-      let mut reply = handle.request(Request::Status);
-      if let Value::Object(map) = &mut reply.result {
-        let shell = proxy().call(|_| with_app(|app| app.status()), STATUS_WAIT).flatten();
-        map.insert("shell".into(), shell.unwrap_or_default());
-      }
-
-      reply
-    }
-    Request::OpenSettings | Request::OpenHistory => {
-      let page = (request == Request::OpenHistory).then_some(Page::History);
-      proxy().post(move |main| open_window(main, page));
-      Reply::ok(json!({ "state": "opened" }))
-    }
-    // Here: the system takes a while, and the main thread draws meanwhile.
-    Request::Autostart { state } => autostart(state, handle),
-    Request::Quit => {
-      proxy().post(|main| main.quit());
-      Reply::ok(json!({ "state": "quitting" }))
-    }
-    request => handle.request(request),
-  }
-}
-
-/// `wavo-app ctl autostart`: launch at login as the system has it after the request; an error
-/// outside the app bundle.
-fn autostart(request: Autostart, handle: &Handle) -> Reply {
-  let result = match request {
-    Autostart::Status => autostart::state(&INFO),
-    Autostart::On | Autostart::Off => {
-      let on = request == Autostart::On;
-      let result = autostart::set(&INFO, on);
-      if result.is_ok() {
-        handle.edit_settings(move |s| s.autostart = on);
-      }
-
-      result
-    }
-  };
-
-  let state = match result {
-    Ok(autostart::State::Enabled) => "enabled",
-    Ok(autostart::State::RequiresApproval) => "requires_approval",
-    Ok(autostart::State::NotRegistered) => "not_registered",
-    Err(e) => return Reply::error(e),
-  };
-
-  Reply::ok(json!({ "state": state }))
-}
-
 /// As the app quits: the clipboard a paste holds comes back; the session stops its engine and
 /// keeps a recording in progress, then the socket goes (with the lock: the next instance's
 /// recovery must not find this one's dictation unfinished).
@@ -289,7 +231,7 @@ fn shutdown() {
   info!("wavo-app: quit");
   paste::finish();
   drop(app.session);
-  drop(app.serving);
+  drop(app.server);
 }
 
 /// A menu item was chosen, after the menu closed.
@@ -900,30 +842,5 @@ impl App {
       self.tray.set_menu(&menu);
       self.menu = menu;
     }
-  }
-
-  /// What `wavo-app ctl status` shows of the shell.
-  fn status(&self) -> Value {
-    let hotkeys = self.hotkeys.status();
-    let warnings = self.update.as_ref().map(|u| self.warnings(u)).unwrap_or_default();
-    json!({
-      "icon": self.icon,
-      "hotkey": hotkeys.hotkey.map(|h| h.label()),
-      "tap": format!("{:?}", hotkeys.listener).to_lowercase(),
-      "accessibility": self.accessibility,
-      "microphone": access(self.microphone),
-      "hud": self.hud.0.with(|o| json!({ "mode": o.mode(), "text": o.text() })),
-      "warnings": warnings.iter().map(|w| &w.text).collect::<Vec<_>>(),
-    })
-  }
-}
-
-/// The microphone's access as `wavo-app ctl status` shows it.
-fn access(access: Access) -> &'static str {
-  match access {
-    Access::Granted => "authorized",
-    Access::Denied => "denied",
-    Access::Restricted => "restricted",
-    Access::NotDetermined => "not_determined",
   }
 }

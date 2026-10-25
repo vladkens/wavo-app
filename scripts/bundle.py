@@ -21,7 +21,7 @@ permissions macOS would keep for that build only. In CI, which has no identity, 
 
 LSEnvironment sets MallocSpaceEfficient=1 (libmalloc's src/malloc.c: no large-block cache, empty
 pages given back at once): otherwise malloc keeps the large blocks a model frees after its
-unload (`make unload-memory`). It applies when LaunchServices starts the app.
+unload. It applies when LaunchServices starts the app.
 """
 
 import os

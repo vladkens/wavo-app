@@ -10,13 +10,8 @@
 //!   another model is there, never twice by the same one; a transcription again and its undo;
 //!   pastes refused, kept on the clipboard or off; a model switch; what a crash left. With
 //!   [`Faults`]: a run that panics, one that hangs past its deadline, a cancel while one is held.
-//! - `#[ignore]`, `make test-models`: the headless app (`wavo-app daemon`) as its own process with
-//!   a fake microphone, driven through `wavo-app ctl` and the socket, with GigaAM: a full
-//!   dictation, a cancel, no speech, a second instance.
 
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command as Process, Output, Stdio};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fs, thread};
@@ -24,21 +19,19 @@ use std::{fs, thread};
 use crossbeam_channel::{Receiver, bounded, unbounded};
 use wavo::hub::Hub;
 
-use super::controller::{Config, Handle, NoModel, Outcome, Phase, Session, Status, Update};
+use super::controller::{
+  Config, Handle, NoModel, Outcome, Phase, Reply, Request, Session, Status, Update,
+};
 use super::machine::{Command, Input};
 use super::output::{FakeOutput, NotPasted};
 use crate::audio::SAMPLE_RATE;
-use crate::ctl::{self, Reply, Request};
 use crate::engine::supervisor::{Deadlines, Phase as EnginePhase};
 use crate::history::db::{Entry, NewEntry};
 use crate::history::{History, Retention, now_ms, recordings};
 use crate::settings::{self, Activation, Settings};
 use crate::testing::{
-  FakeModels, Fault, Faults, TempDir, app_exe, download, entry_ids, fixture, fixture_wav, model_ru,
-  poll, wav_count, wer, write_wav,
+  FakeModels, Fault, Faults, TempDir, download, entry_ids, poll, wav_count, write_wav,
 };
-
-const MAX_WER: f64 = 0.15;
 
 fn status_of(reply: Reply) -> Status {
   assert_eq!(reply.error, None);
@@ -1062,7 +1055,6 @@ fn delete_takes_the_entry_and_its_recording_and_moves_the_history() {
   assert!(s.entries().is_empty() && !wav.exists());
   assert!(s.send(Request::Delete { id }).error.unwrap().contains("no history entry"));
   // An entry being transcribed cannot be deleted: `cancel_while_transcribing_…`.
-  assert!(s.send(Request::Quit).error.unwrap().contains("not handled"));
 }
 
 /// A session on its own, without an observer, with no models.
@@ -1158,224 +1150,6 @@ fn the_first_cleanup_runs_in_the_background() {
     (entry_ids(home.path()) == [untranscribed]).then_some(())
   });
   assert_eq!(recordings_in(home.path()), 1, "their recordings too");
-}
-
-// MARK: The headless app with a real model
-
-/// `wavo-app daemon` in its own temp home, recording fixture `mic`, GigaAM for a model.
-struct Daemon {
-  home: TempDir,
-  child: Option<Child>,
-  socket: PathBuf,
-  lines: Receiver<String>,
-  log: PathBuf,
-}
-
-impl Daemon {
-  fn start(name: &str, mic: &str) -> Self {
-    let home = TempDir::new(name);
-    let settings =
-      Settings { model: Some(model_ru().to_string_lossy().into_owned()), ..Settings::default() };
-    settings.save(&home.path().join(settings::FILE)).unwrap();
-    let log = home.path().join("daemon.log");
-    let mut child = Process::new(app_exe())
-      .arg("daemon")
-      .env("WAVO_HOME", home.path())
-      .env("WAVO_FAKE_MIC", fixture_wav(mic))
-      .env("WAVO_LOG", "warn,wavo_app=info")
-      .stdout(Stdio::piped())
-      .stderr(fs::File::create(&log).unwrap())
-      .spawn()
-      .unwrap();
-    let (tx, lines) = unbounded();
-    let stdout = child.stdout.take().unwrap();
-    thread::spawn(move || {
-      for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        let _ = tx.send(line);
-      }
-    });
-
-    let socket = ctl::socket_path(home.path()).unwrap();
-    let daemon = Self { home, child: Some(child), socket, lines, log };
-    poll("daemon", Duration::from_secs(10), || ctl::request(&daemon.socket, &Request::Status).ok());
-    daemon
-  }
-
-  fn request(&self, r: Request) -> Reply {
-    ctl::request(&self.socket, &r).unwrap()
-  }
-
-  fn status(&self) -> Status {
-    status_of(self.request(Request::Status))
-  }
-
-  /// `wavo-app ctl <args>` as its own process.
-  fn ctl(&self, args: &[&str]) -> Output {
-    let mut ctl = Process::new(app_exe());
-    ctl.arg("ctl").args(args).env("WAVO_HOME", self.home.path()).output().unwrap()
-  }
-
-  fn ctl_ok(&self, args: &[&str]) -> String {
-    let out = self.ctl(args);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "wavo-app ctl {args:?}: {stderr}");
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-  }
-
-  fn finished(&self, take: u64) -> Status {
-    finished(take, || self.status())
-  }
-
-  fn entry(&self, id: i64) -> Entry {
-    History::open(self.home.path()).unwrap().db.get_entry(id).unwrap().unwrap()
-  }
-
-  /// Records fixture `mic` (its length plus a margin) between `start` and `stop` over `wavo-app
-  /// ctl`.
-  fn dictate(&self, mic: &str) -> Instant {
-    assert_eq!(self.ctl_ok(&["start"]), "recording");
-    thread::sleep(Duration::from_secs_f64(fixture(mic).seconds() + 0.4));
-    let stopped = Instant::now();
-    let state = self.ctl_ok(&["stop"]);
-    assert!(["transcribing", "pasting", "idle"].contains(&state.as_str()), "{state}");
-    stopped
-  }
-
-  fn no_output_for(&self, wait: Duration) {
-    if let Ok(line) = self.lines.recv_timeout(wait) {
-      panic!("unexpected output: {line:?}");
-    }
-  }
-}
-
-impl Drop for Daemon {
-  fn drop(&mut self) {
-    let Some(mut child) = self.child.take() else { return };
-    let _ = ctl::request(&self.socket, &Request::Quit);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
-      thread::sleep(Duration::from_millis(10));
-    }
-
-    let _ = child.kill(); // if it did not quit
-    let _ = child.wait();
-    if thread::panicking() {
-      eprintln!("--- daemon log\n{}", fs::read_to_string(&self.log).unwrap_or_default());
-    }
-  }
-}
-
-fn median(mut times: Vec<Duration>) -> Duration {
-  times.sort();
-  times[times.len() / 2]
-}
-
-#[test]
-#[ignore = "needs models and the release binary: make test-models"]
-fn daemon_full_cycle_via_ctl() {
-  let d = Daemon::start("daemon-cycle", "ru-short");
-  let reference = fixture("ru-short");
-  // Warm up: the first dictation also loads the model.
-  for take in 1..=2 {
-    let stopped = d.dictate("ru-short");
-    let line = d.lines.recv_timeout(Duration::from_secs(60)).expect("text on stdout");
-    let to_text = stopped.elapsed();
-    let status = d.finished(take);
-    let last = status.last.unwrap();
-    eprintln!("take {take}: ctl stop → text on stdout {to_text:.0?}: {line}");
-    assert_eq!((last.outcome, last.pasted), (Outcome::Done, true));
-    assert_eq!(line, last.text);
-    let w = wer(&reference.text, &line);
-    assert!(w <= MAX_WER, "WER {:.1}%: {line}", w * 100.0);
-    let entry = d.entry(last.entry.unwrap());
-    let kept = (entry.busy, entry.pasted, entry.text.as_str());
-    assert_eq!(kept, (false, true, line.as_str()));
-    assert_eq!(entry.model.as_deref(), Some("gigaam-v3-e2e-rnnt-Q8_0"));
-    let recorded = entry.duration_ms as f64 / 1000.0;
-    assert!(recorded >= reference.seconds(), "{recorded} s recorded");
-    let audio = History::open(d.home.path()).unwrap().audio_file(&entry);
-    assert!(audio.is_some(), "the recording is kept");
-  }
-
-  // `toggle` works the same way.
-  assert_eq!(d.ctl_ok(&["toggle"]), "recording");
-  assert_eq!(d.status().state, Phase::Recording);
-  thread::sleep(Duration::from_secs_f64(reference.seconds() + 0.4));
-  assert_eq!(d.ctl_ok(&["toggle"]), "transcribing");
-  d.lines.recv_timeout(Duration::from_secs(10)).unwrap();
-  assert_eq!(d.finished(3).last.unwrap().outcome, Outcome::Done);
-
-  // Round trips of `wavo-app ctl status`: over the socket from here, and as a process.
-  let socket: Vec<Duration> = (0..200)
-    .map(|_| {
-      let started = Instant::now();
-      d.status();
-      started.elapsed()
-    })
-    .collect();
-  let process: Vec<Duration> = (0..20)
-    .map(|_| {
-      let started = Instant::now();
-      d.ctl_ok(&["status"]);
-      started.elapsed()
-    })
-    .collect();
-  let (socket, process) = (median(socket), median(process));
-  eprintln!(
-    "ctl status round trip: socket median {socket:.2?}, `wavo-app ctl` median {process:.2?}"
-  );
-  assert!(socket < Duration::from_millis(20), "{socket:?}");
-  assert!(process < Duration::from_millis(200), "{process:?}");
-}
-
-#[test]
-#[ignore = "needs models and the release binary: make test-models"]
-fn daemon_cancel_while_recording() {
-  let d = Daemon::start("daemon-cancel", "ru-short");
-  assert_eq!(d.ctl_ok(&["start"]), "recording");
-  thread::sleep(Duration::from_secs(1));
-  assert_eq!(d.ctl_ok(&["cancel"]), "idle");
-  let last = d.finished(1).last.unwrap();
-  assert_eq!((last.outcome, last.entry), (Outcome::Cancelled, None));
-  assert_eq!((entries_in(d.home.path()).len(), recordings_in(d.home.path())), (0, 0));
-  d.no_output_for(Duration::from_millis(300));
-}
-
-#[test]
-#[ignore = "needs models and the release binary: make test-models"]
-fn daemon_silence_is_no_speech() {
-  let d = Daemon::start("daemon-silence", "silence");
-  assert_eq!(d.ctl_ok(&["start"]), "recording");
-  thread::sleep(Duration::from_secs(2));
-  assert_eq!(d.ctl_ok(&["stop"]), "transcribing");
-  let status = d.finished(1);
-  let last = status.last.unwrap();
-  assert_eq!((last.outcome, last.entry), (Outcome::NoSpeech, None));
-  let kept = (entries_in(d.home.path()).len(), recordings_in(d.home.path()));
-  assert_eq!(kept, (0, 0), "nothing is kept");
-  assert_eq!(status.engine.progress, None, "no job reached the engine");
-  d.no_output_for(Duration::from_millis(300));
-}
-
-#[test]
-#[ignore = "needs models and the release binary: make test-models"]
-fn daemon_second_instance_exits_and_quit_ends_the_first() {
-  let d = Daemon::start("daemon-single", "silence");
-  let started = Instant::now();
-  let second =
-    Process::new(app_exe()).arg("daemon").env("WAVO_HOME", d.home.path()).output().unwrap();
-  let took = started.elapsed();
-  let stderr = String::from_utf8_lossy(&second.stderr);
-  assert!(second.status.success(), "{stderr}");
-  assert!(stderr.contains("already running"), "{stderr}");
-  assert!(took < Duration::from_secs(2), "{took:?}");
-  assert_eq!(d.status().state, Phase::Idle, "the first instance goes on");
-
-  // Quit removes the socket; then `wavo-app ctl` says nothing is running.
-  assert_eq!(d.ctl_ok(&["quit"]), "quitting");
-  poll("socket removed", Duration::from_secs(5), || (!d.socket.exists()).then_some(()));
-  let out = d.ctl(&["status"]);
-  assert!(String::from_utf8_lossy(&out.stderr).contains("not running"));
 }
 
 /// An entry an import is adding (busy in the history, its recording maybe not copied yet) is

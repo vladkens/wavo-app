@@ -13,7 +13,7 @@ is kept in Wavo's data home; when the bundle's differs (another identity, or the
 script), Wavo's permissions are reset first, so System Settings has no stale Wavo whose switch is
 on but counts for no build of it any more.
 
-The running Wavo (any copy) is asked to quit over its control socket, so it finishes what it is
+The running Wavo (any copy) is asked to quit (`wavo-app quit`), so it finishes what it is
 doing; one still running after 10 s is killed. With a dest the bundle replaces the one there. The
 app opens with its log in $WAVO_LOG_FILE (/tmp/wavo.log by default).
 """
@@ -52,7 +52,7 @@ def main() -> int:
     dr = requirement(app)
 
     if running():
-        subprocess.run([app / "Contents/MacOS/wavo-app", "ctl", "quit"], capture_output=True)
+        subprocess.run([app / "Contents/MacOS/wavo-app", "quit"], capture_output=True)
         for _ in range(50):
             if not running():
                 break

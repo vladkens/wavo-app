@@ -18,13 +18,6 @@ pub struct Choice {
   pub name: String,
 }
 
-impl Choice {
-  /// From the command line: one string that may be either an ID or a name.
-  pub fn id_or_name(s: &str) -> Self {
-    Self { id: Some(s.to_owned()), name: s.to_owned() }
-  }
-}
-
 /// A device as the backend lists it.
 #[derive(Debug, Clone)]
 pub struct Found<D> {
@@ -154,16 +147,12 @@ pub fn warm_up() {
   }
 }
 
-/// An input device as `wavo-app devices` shows it.
+/// An input device as the settings list it.
 #[derive(Debug, Clone)]
 pub struct Info {
   pub id: Option<String>,
   pub name: String,
   pub default: bool,
-  /// Default input format, `None` if the device would not say (e.g. it was just unplugged).
-  pub channels: Option<u16>,
-  pub rate: Option<u32>,
-  pub format: Option<String>,
 }
 
 /// Input devices in system order, the system default marked.
@@ -173,17 +162,7 @@ pub fn list() -> Vec<Info> {
   cpal
     .inputs()
     .into_iter()
-    .map(|Found { id, name, device }| {
-      let config = device.default_input_config().ok();
-      Info {
-        default: default.as_ref() == Some(&device),
-        channels: config.as_ref().map(|c| c.channels()),
-        rate: config.as_ref().map(|c| c.sample_rate()),
-        format: config.map(|c| c.sample_format().to_string()),
-        id,
-        name,
-      }
-    })
+    .map(|Found { id, name, device }| Info { default: default.as_ref() == Some(&device), id, name })
     .collect()
 }
 
@@ -288,10 +267,6 @@ mod tests {
     let fake = Fake { devices: vec![BUILT_IN, RODE], ..laptop() };
     let opened = fake.open(Some(&renamed)).unwrap();
     assert_eq!((opened.value, opened.warning), (RODE, None));
-
-    // The command line gives one string: an ID or a name.
-    assert_eq!(fake.open(Some(&Choice::id_or_name(RODE.0))).unwrap().value, RODE);
-    assert_eq!(fake.open(Some(&Choice::id_or_name(RODE.1))).unwrap().value, RODE);
   }
 
   #[test]

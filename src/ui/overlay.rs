@@ -93,7 +93,7 @@ impl Overlay {
     })
   }
 
-  /// See [State::text].
+  #[cfg(test)]
   pub fn text(&self) -> Option<String> {
     self.state.text()
   }

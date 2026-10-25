@@ -98,9 +98,6 @@ impl Shell for Fake {
       id: Some(name.to_lowercase()),
       name: name.into(),
       default,
-      channels: Some(1),
-      rate: Some(48_000),
-      format: None,
     };
     let names = [("MacBook Pro Microphone", true), ("USB Mic", false), ("RØDE PodMic USB", false)];
     names.into_iter().map(|(name, default)| info(name, default)).collect()

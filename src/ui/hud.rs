@@ -302,7 +302,8 @@ impl State {
     self.mode
   }
 
-  /// The text it shows, for `wavo-app ctl status`: `warning: <reason>`, `n/m`.
+  /// The text it shows, for the tests: `warning: <reason>`, `n/m`.
+  #[cfg(test)]
   pub fn text(&self) -> Option<String> {
     match self.mode {
       Mode::Error | Mode::Recording => self.text.as_ref().map(|t| format!("warning: {t}")),

@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! Test helpers: temp dirs, polling, audio and history files, speech fixtures, real models and
-//! fake ones in a cache, a fake engine and faults to inject, the app binary and WER.
+//! fake ones in a cache, a fake engine and faults to inject, and WER.
 
 use std::collections::VecDeque;
 use std::f32::consts::TAU;
@@ -162,16 +162,6 @@ pub fn download(hub: &wavo::hub::Hub, name: &str) -> PathBuf {
   fs::create_dir_all(file.parent().unwrap()).unwrap();
   fs::write(&file, b"GGUF").unwrap();
   file
-}
-
-/// The `wavo-app` binary next to this test binary (`target/<profile>/deps/..`). Unit tests cannot
-/// run `main`, so `make test-models` builds it first.
-pub fn app_exe() -> PathBuf {
-  let test_exe = env::current_exe().unwrap();
-  let dir = test_exe.parent().and_then(Path::parent).unwrap();
-  let exe = dir.join(format!("wavo-app{}", env::consts::EXE_SUFFIX));
-  assert!(exe.is_file(), "{} is missing: `cargo build --release` first", exe.display());
-  exe
 }
 
 /// A stand-in for wavo, in the process as wavo is: it loads any file (on device `fake`) unless the

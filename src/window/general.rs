@@ -20,8 +20,7 @@ use tracing::{info, warn};
 use super::{Page, Prefs, Problem, models};
 use crate::audio::devices::Choice;
 use crate::history::Retention;
-use crate::language;
-use crate::settings::{Activation, HudPosition, Settings};
+use crate::settings::{Activation, HudPosition, Settings, language_name};
 
 pub const HOTKEY: &str = "hotkey";
 pub const RESET: &str = "reset";
@@ -252,7 +251,7 @@ impl Prefs {
   fn languages(&self) -> (Vec<(String, String)>, usize) {
     let codes = self.active().map_or(&[][..], |f| f.0.langs);
     let mut langs: Vec<(String, String)> =
-      codes.iter().map(|c| (language::name(c), (*c).to_owned())).collect();
+      codes.iter().map(|c| (language_name(c), (*c).to_owned())).collect();
     langs.sort();
     let mut items = vec![("Auto-detect".to_owned(), "auto".to_owned())];
     items.extend(langs);
@@ -262,7 +261,7 @@ impl Prefs {
       return (items, i);
     }
 
-    let label = format!("{} (not one the model is meant for)", language::name(&current));
+    let label = format!("{} (not one the model is meant for)", language_name(&current));
     items.push((label, current));
     let at = items.len() - 1;
     (items, at)

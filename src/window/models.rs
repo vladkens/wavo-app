@@ -24,9 +24,8 @@ use super::downloads::Download;
 use super::{Ask, Prefs, Problem};
 use crate::engine::supervisor::Phase as EnginePhase;
 use crate::history::fold;
-use crate::language;
 use crate::session::controller::{NoModel, Phase, label};
-use crate::settings::Settings;
+use crate::settings::{Settings, language_name};
 
 /// The search field and the language pop-up above the plates.
 pub const SEARCH: &str = "model-search";
@@ -153,7 +152,7 @@ pub static LANGUAGES: LazyLock<Vec<(String, &'static str)>> = LazyLock::new(|| {
   let mut codes: Vec<&str> = hub::MODELS.iter().flat_map(|m| m.langs.iter().copied()).collect();
   codes.sort_unstable();
   codes.dedup();
-  let mut all: Vec<(String, &str)> = codes.into_iter().map(|c| (language::name(c), c)).collect();
+  let mut all: Vec<(String, &str)> = codes.into_iter().map(|c| (language_name(c), c)).collect();
   all.sort();
   all.insert(0, ("All languages".to_owned(), ""));
   all

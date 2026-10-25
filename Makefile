@@ -26,7 +26,7 @@ update:
 clean:
 	cargo clean
 
-.PHONY: bundle dist run install reset shots fixtures test-models unload-memory
+.PHONY: bundle dist run install reset shots fixtures test-models
 
 APP := target/Wavo.app
 PROFILE := release
@@ -52,7 +52,7 @@ install: # the same, installed into /Applications
 	$(MAKE) bundle PROFILE=fast
 	uv run scripts/run.py $(APP) /Applications/Wavo.app
 
-# The installed app's binary, else the release build's; ARGS go to it (--dry-run, --yes, --app).
+# The installed app's binary, else the release build's; ARGS go to it (--dry-run, --yes).
 INSTALLED := /Applications/Wavo.app/Contents/MacOS/wavo-app
 
 reset: # delete Wavo's data and permissions: a clean install to test
@@ -73,16 +73,8 @@ $(FIXTURES): scripts/fixtures.py $(wildcard scripts/fixtures/*.txt)
 
 # The ignored tests that need real models from the Hugging Face cache or the fixtures, by module
 # (not those that need a microphone); WAVO_TEST_MODEL_RU, WAVO_TEST_MODEL_EN and
-# WAVO_TEST_MODEL_PARAKEET pick the models by path. The daemon's tests run target/release/wavo-app.
+# WAVO_TEST_MODEL_PARAKEET pick the models by path.
 MODEL_TESTS := engine::tests:: session::tests:: audio::vad::tests::fixtures
 
 test-models: fixtures # the ignored tests on real models
-	cargo build --release
 	cargo test --release -- --ignored --test-threads=1 --nocapture $(MODEL_TESTS)
-
-# The headless app's footprint over 10 load and unload cycles of the first model found, with the
-# malloc setting the bundle will have; fails when it grows by more than a few MB (macOS: uv and
-# footprint).
-unload-memory: fixtures # the footprint after unloading a real model, 10 times
-	cargo build --release
-	MallocSpaceEfficient=1 uv run scripts/unload-memory.py target/release/wavo-app target/fixtures/en-short.wav

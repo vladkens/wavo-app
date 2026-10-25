@@ -42,7 +42,7 @@ pub enum Hold {
   Latched,
 }
 
-/// From `wavo-app ctl` or the menu.
+/// From a request or the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
   Toggle,

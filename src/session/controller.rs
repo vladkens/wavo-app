@@ -3,7 +3,7 @@
 //! The session controller: one "session" thread owns the [`Machine`], the recorder, the engine,
 //! the history and the text output, and carries out the machine's effects. What takes long runs
 //! elsewhere (the engine on its threads, a waiter thread per transcription), so the controller
-//! answers `wavo-app ctl` within milliseconds in every state.
+//! answers requests within milliseconds in every state.
 //!
 //! - Start → the microphone opens and the observer sees the recording first; then where the person
 //!   types is noted and the engine starts loading the model. The session never waits for the model:
@@ -18,7 +18,7 @@
 //! - Text is optional: no model, an engine error, nothing recognized all leave the entry without
 //!   text, its recording to transcribe again; the reason is the last dictation's, never the
 //!   history's. A transcription again replaces the text only with new text, keeping the one before
-//!   for one undo (`ctl undo-transcribe`).
+//!   for one undo.
 //! - Entries without text are transcribed again by themselves when another model can transcribe
 //!   (one appears, the choice changes; not the check at the start): one at a time, behind
 //!   dictations, each by a model that has not tried it yet (`tried_model`), so nothing loops.
@@ -58,7 +58,6 @@ use crate::audio::capture::{self, Source};
 use crate::audio::recorder::{Meter, Recorder};
 use crate::audio::vad::Clip;
 use crate::audio::wav;
-use crate::ctl::{Reply, Request};
 use crate::engine::model::{Loader, Wavo};
 use crate::engine::supervisor::{
   Deadlines, EngineError, JobId, Phase as EnginePhase, Transcription,
@@ -66,11 +65,9 @@ use crate::engine::supervisor::{
 use crate::engine::{Engine, EngineConfig};
 use crate::history::db::{Db, Entry, NewEntry, Spare};
 use crate::history::{History, Retention, now_ms};
-use crate::language;
-use crate::settings::{self, Activation, Settings};
+use crate::settings::{self, Activation, Settings, language_name};
 
-/// How long a request waits for the session thread; less than `wavo-app ctl` waits for the reply,
-/// so the client gets this error rather than a timeout of its own.
+/// How long a request waits for the session thread.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// After a stop the microphone stays open until the device has delivered what was said up to the
 /// stop (the built-in microphone of an M2 MacBook Pro delivers it 42 ms late, a 512-frame buffer
@@ -111,7 +108,7 @@ impl Config {
   }
 }
 
-/// What `wavo-app ctl status` shows.
+/// The session's state, for the shell.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Status {
   pub state: Phase,
@@ -240,6 +237,55 @@ pub struct Session {
 #[derive(Clone)]
 pub struct Handle(Sender<Msg>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+  // Toggle to Status: sent by the tests only, until the session step reworks its API.
+  #[cfg_attr(not(test), allow(dead_code))]
+  Toggle,
+  #[cfg_attr(not(test), allow(dead_code))]
+  Start,
+  #[cfg_attr(not(test), allow(dead_code))]
+  Stop,
+  #[cfg_attr(not(test), allow(dead_code))]
+  Cancel,
+  #[cfg_attr(not(test), allow(dead_code))]
+  Status,
+  /// Transcribe a history entry's recording again; the new text replaces the text.
+  Retranscribe {
+    id: i64,
+  },
+  /// Put back the text an entry's last transcription replaced.
+  UndoTranscribe {
+    id: i64,
+  },
+  Delete {
+    id: i64,
+  },
+  /// Free the model's memory now.
+  Unload,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reply {
+  pub error: Option<String>,
+  pub result: Value,
+}
+
+impl Reply {
+  fn error(message: impl Into<String>) -> Self {
+    Self { error: Some(message.into()), result: Value::Null }
+  }
+}
+
+impl From<Result<Value>> for Reply {
+  fn from(result: Result<Value>) -> Self {
+    match result {
+      Ok(result) => Self { error: None, result },
+      Err(e) => Self::error(format!("{e:#}")),
+    }
+  }
+}
+
 enum Msg {
   Input(Input),
   Request(Request, Sender<Reply>),
@@ -261,6 +307,7 @@ enum Msg {
 impl Session {
   /// Loads the settings, opens the history in `config.home` and starts the session thread, which
   /// recovers the history before anything else.
+  #[cfg(test)]
   pub fn start<O: TextOutput>(config: Config, output: O) -> Result<Self> {
     Self::start_with(config, output, None)
   }
@@ -356,7 +403,7 @@ impl Handle {
     let _ = self.0.send(Msg::CheckModel);
   }
 
-  /// Handles a control request; `quit` is refused, the app answers it.
+  /// Handles a request on the session thread.
   pub fn request(&self, request: Request) -> Reply {
     let (reply, rx) = bounded(1);
     if self.0.send(Msg::Request(request, reply)).is_err() {
@@ -503,8 +550,7 @@ impl<O: TextOutput> Controller<O> {
   }
 
   /// Recovers what a crash left (before any recording can make new files), then starts the first
-  /// retention in the background: with a lot to delete it would hold up the hotkey and `wavo-app
-  /// ctl`.
+  /// retention in the background: with a lot to delete it would hold up the hotkey.
   /// Nothing is transcribed by itself then: the model found at the start is no new one.
   fn startup(&mut self) {
     let _ = self.check_model();
@@ -633,9 +679,6 @@ impl<O: TextOutput> Controller<O> {
         let state = if self.engine.is_some() { "unloading" } else { "unloaded" };
         return Ok(json!({ "state": state }));
       }
-      Request::OpenSettings | Request::OpenHistory | Request::Autostart { .. } | Request::Quit => {
-        bail!("{request:?} is not handled by the session")
-      }
     };
 
     self.error = None;
@@ -677,7 +720,6 @@ impl<O: TextOutput> Controller<O> {
   }
 
   fn apply_settings(&mut self, new: Settings) {
-    let new = new.changed_from(&self.settings);
     if new == self.settings {
       return;
     }
@@ -1599,7 +1641,7 @@ fn loaded_label(info: Option<&ModelInfo>, name: &str) -> String {
 /// [`langs`](ModelInfo::langs)): `parakeet-tdt-0.6b-v2 understands English only`.
 fn understands_only(info: &ModelInfo) -> Option<String> {
   let [code] = info.langs else { return None };
-  Some(format!("{} understands {} only", info.full_name, language::name(code)))
+  Some(format!("{} understands {} only", info.full_name, language_name(code)))
 }
 
 #[cfg(test)]
