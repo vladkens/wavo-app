@@ -145,7 +145,7 @@ fn pick(ui: &mut Ui, id: &str, labels: &[String], at: usize, lines: &[usize]) ->
 }
 
 /// `10,000`.
-fn thousands(n: u32) -> String {
+pub(super) fn thousands(n: impl ToString) -> String {
   let digits = n.to_string();
   let mut out = String::new();
   for (i, c) in digits.chars().enumerate() {
@@ -515,6 +515,8 @@ impl Prefs {
     if let Some(dir) = reveal {
       self.shell.reveal(dir);
     }
+
+    self.data(ui, fs);
   }
 
   /// What the system allows, first: what the app can't work without.
