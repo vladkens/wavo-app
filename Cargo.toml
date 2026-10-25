@@ -28,19 +28,18 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 wavo = { git = "https://github.com/vladkens/wavo", branch = "main", default-features = false, features = ["hub"] }
 
-# panic = "unwind" (the default), not "abort": the engine thread catches a panic of wavo or wgpu
-# and the app carries on. `fast` inherits it.
+# Everything built here, once: no LTO and incremental, a change rebuilds the app's crate and links
+# fast. panic = "unwind" (the default), not "abort": the engine thread catches a panic of wavo or
+# wgpu and the app carries on. `dist` inherits it.
 [profile.release]
-lto = "thin"
 strip = true
-
-# `make run` and `make install`: release speed without LTO, rebuilt incrementally, for trying a
-# change.
-[profile.fast]
-inherits = "release"
-lto = false
 incremental = true
-codegen-units = 256
+
+# The release file of `make dist` (CI): thin LTO.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+incremental = false
 
 [build-dependencies]
 png = "0.18.1"

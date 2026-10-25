@@ -82,9 +82,7 @@ pub fn export(home: &Path, file: &Path) -> Result<Exported> {
 
   let scratch = Scratch::new()?;
   let copy = scratch.0.join(DB_FILE);
-  let conn = rusqlite::Connection::open(&db).with_context(|| format!("open {}", db.display()))?;
-  conn.execute("VACUUM INTO ?1", [copy.to_str().unwrap()])?;
-  drop(conn);
+  snapshot(&db, &copy)?;
 
   // The copy names only the recordings on disk, and keeps no entry with neither text nor one.
   let copy_db = Db::open(&copy)?;
@@ -164,15 +162,26 @@ pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> R
     }
   };
 
-  let history = match dry_run && !home.join(DB_FILE).is_file() {
-    true => None,
-    false => Some(History::open(home)?),
+  // A dry run reads a copy of the history and lists the recordings: nothing of the home is
+  // created or migrated.
+  let history = if dry_run { None } else { Some(History::open(home)?) };
+  let ours = match &history {
+    Some(h) => h.db.get_entries()?,
+    None if home.join(DB_FILE).is_file() => {
+      let scratch = Scratch::new()?;
+      let copy = scratch.0.join(DB_FILE);
+      snapshot(&home.join(DB_FILE), &copy)?;
+      Db::open(&copy)?.get_entries()?
+    }
+    None => Vec::new(),
   };
-
-  let ours = history.as_ref().map(|h| h.db.get_entries()).transpose()?.unwrap_or_default();
   let starts: HashMap<i64, Option<String>> =
     ours.into_iter().map(|e| (e.created_at, e.audio_path)).collect();
-  let on_disk = history.as_ref().map(|h| h.recordings.list()).transpose()?.unwrap_or_default();
+  let on_disk = match &history {
+    Some(h) => h.recordings.list()?,
+    None if home.join(RECORDINGS_DIR).is_dir() => Recordings::open(home)?.list()?,
+    None => Vec::new(),
+  };
   let on_disk: HashSet<String> = on_disk.into_iter().collect();
 
   let reader = File::open(file).with_context(|| format!("open {}", file.display()))?;
@@ -351,6 +360,13 @@ pub fn part_of(path: &Path) -> PathBuf {
 }
 
 /// A temp directory for an import's or export's own files, removed on drop.
+/// A consistent copy of the database `db` (`VACUUM INTO`) while the app may be writing it.
+fn snapshot(db: &Path, copy: &Path) -> Result<()> {
+  let conn = rusqlite::Connection::open(db).with_context(|| format!("open {}", db.display()))?;
+  conn.execute("VACUUM INTO ?1", [copy.to_str().unwrap()])?;
+  Ok(())
+}
+
 struct Scratch(PathBuf);
 
 impl Scratch {

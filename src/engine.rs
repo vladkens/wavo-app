@@ -71,10 +71,6 @@ pub fn has_neural_engine() -> bool {
 /// Models being prepared for the Neural Engine.
 static PREPARING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-pub fn preparing() -> bool {
-  !PREPARING.lock().unwrap().is_empty()
-}
-
 /// Prepares a Parakeet or GigaAM file for the Neural Engine on a thread of its own and calls `done`
 /// once it is. The system compiles it once per app binary and macOS version (10–30 s; the Core ML
 /// model itself is in wavo's cache, shared with the wavo CLI); until then the model runs on the
@@ -172,7 +168,9 @@ pub enum Event {
   Done(u64, Result<String, EngineError>),
 }
 
-/// Dropping it lets the thread finish the queued jobs, then it drops the model and ends.
+/// Dropping it, and its clones, lets the thread finish the queued jobs, then it drops the model
+/// and ends.
+#[derive(Clone)]
 pub struct Engine {
   tx: Sender<Msg>,
   status: Arc<Mutex<Status>>,

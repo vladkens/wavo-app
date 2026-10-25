@@ -200,10 +200,6 @@ pub struct Entry {
   pub tried_model: Option<String>,
   /// Being transcribed: the retention leaves it alone. Cleared on start (a crash left it).
   pub busy: bool,
-  /// The text a transcription replaced, with its model and language, for one undo.
-  pub prev_text: Option<String>,
-  pub prev_model: Option<String>,
-  pub prev_language: Option<String>,
   pub pasted: bool,
   /// Why a paste was refused (the focus moved, a password field…).
   pub not_pasted: Option<String>,
@@ -221,9 +217,6 @@ impl Entry {
       language: row.get("language")?,
       tried_model: row.get("tried_model")?,
       busy: row.get("busy")?,
-      prev_text: row.get("prev_text")?,
-      prev_model: row.get("prev_model")?,
-      prev_language: row.get("prev_language")?,
       pasted: row.get("pasted")?,
       not_pasted: row.get("not_pasted")?,
     })
@@ -337,9 +330,9 @@ impl Db {
   pub fn insert(&self, entries: &[Entry]) -> Result<Vec<i64>> {
     let qs = "
     INSERT INTO entries (
-      created_at, duration_ms, audio_path, text, model, language, tried_model, busy,
-      prev_text, prev_model, prev_language, pasted, not_pasted
-    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);
+      created_at, duration_ms, audio_path, text, model, language, tried_model, busy, pasted,
+      not_pasted
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);
     ";
 
     let tx = self.db.unchecked_transaction()?;
@@ -354,9 +347,6 @@ impl Db {
         e.language,
         e.tried_model,
         e.busy,
-        e.prev_text,
-        e.prev_model,
-        e.prev_language,
         e.pasted,
         e.not_pasted,
       ])?;
@@ -369,39 +359,18 @@ impl Db {
 
   // MARK: Updater
 
-  /// Entry `id`'s transcription made `text` with `model` in `language`: it replaces the text,
-  /// kept for one undo if there was any.
+  /// Entry `id` has `text`, from `model` in `language`. (Schema 1's `prev_*` columns, an undo
+  /// of old, are not used.)
   pub fn update_text(
     &self,
     id: i64,
     text: &str,
-    model: &str,
+    model: Option<&str>,
     language: Option<&str>,
   ) -> Result<()> {
-    let qs = "
-    UPDATE entries SET
-      prev_text = CASE WHEN text = '' THEN prev_text ELSE text END,
-      prev_model = CASE WHEN text = '' THEN prev_model ELSE model END,
-      prev_language = CASE WHEN text = '' THEN prev_language ELSE language END,
-      text = ?2, model = ?3, language = ?4, busy = 0
-    WHERE id = ?1;
-    ";
-
+    let qs = "UPDATE entries SET text = ?2, model = ?3, language = ?4, busy = 0 WHERE id = ?1;";
     self.db.prepare_cached(qs)?.execute(params![id, text, model, language])?;
     Ok(())
-  }
-
-  /// Puts back the text the last transcription replaced; the replacing one takes its place, so a
-  /// second undo brings it back. False if there is none.
-  pub fn update_undo(&self, id: i64) -> Result<bool> {
-    let qs = "
-    UPDATE entries SET
-      text = prev_text, model = prev_model, language = prev_language,
-      prev_text = text, prev_model = model, prev_language = language
-    WHERE id = ?1 AND prev_text IS NOT NULL;
-    ";
-
-    Ok(self.db.prepare_cached(qs)?.execute([id])? > 0)
   }
 
   /// The entries naming one of `names` name no recording.
@@ -693,26 +662,17 @@ mod tests {
   }
 
   #[test]
-  fn transcribed_again_and_undone() {
-    let dir = TempDir::new("history-undo");
+  fn transcribed_and_tried() {
+    let dir = TempDir::new("history-text");
     let h = History::open(dir.path()).unwrap();
     let (id, _) = add(&h, 0, "", true);
-    h.db.update_text(id, "Привет", "gigaam", Some("ru")).unwrap();
-    assert!(!h.db.update_undo(id).unwrap(), "the first text: nothing to undo");
-
+    h.db.mark_busy(id, "gigaam").unwrap();
+    h.db.update_text(id, "Привет", Some("gigaam"), Some("ru")).unwrap();
     h.db.mark_busy(id, "whisper").unwrap();
     h.db.mark_idle(id).unwrap();
-    let entry = h.db.get_entry(id).unwrap().unwrap();
-    assert_eq!((entry.text.as_str(), entry.tried_model.as_deref()), ("Привет", Some("whisper")));
-
-    h.db.update_text(id, "Pree-vet", "whisper", None).unwrap();
-    let replaced = h.db.get_entry(id).unwrap().unwrap();
-    assert!(h.db.update_undo(id).unwrap());
-    let undone = h.db.get_entry(id).unwrap().unwrap();
-    let got = (undone.text.as_str(), undone.language.as_deref(), undone.prev_text.as_deref());
-    assert_eq!(got, ("Привет", Some("ru"), Some("Pree-vet")));
-    assert!(h.db.update_undo(id).unwrap());
-    assert_eq!(h.db.get_entry(id).unwrap().unwrap(), replaced, "a second undo redoes");
+    let e = h.db.get_entry(id).unwrap().unwrap();
+    let got = (e.text.as_str(), e.model.as_deref(), e.tried_model.as_deref(), e.busy);
+    assert_eq!(got, ("Привет", Some("gigaam"), Some("whisper"), false));
   }
 
   #[test]

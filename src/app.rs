@@ -11,8 +11,8 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -681,6 +681,7 @@ impl window::Shell for MacShell {
       accessibility: permissions::accessibility(false),
       microphone: permissions::microphone(),
       secure_input: permissions::secure_input(),
+      clipboard_unread: !SystemClipboard.readable(),
     }
   }
 
@@ -704,12 +705,14 @@ impl window::Shell for MacShell {
     crate::engine::has_neural_engine()
   }
 
-  fn preparing(&self) -> bool {
-    crate::engine::preparing()
-  }
-
   /// Into a new archive in Downloads (nimbo has no file picker), shown there.
+  /// One at a time: a second click while one runs would pick the same file.
   fn export(&self) {
+    static EXPORTING: AtomicBool = AtomicBool::new(false);
+    if EXPORTING.swap(true, Ordering::AcqRel) {
+      return info!("export: one is running already");
+    }
+
     let home = self.home.clone();
     spawn("export", move || {
       let file = export_file();
@@ -717,6 +720,8 @@ impl window::Shell for MacShell {
         Ok(_) => _ = nimbo::open::reveal(&file).inspect_err(|e| warn!("show the archive: {e}")),
         Err(e) => warn!("export to {}: {e:#}", file.display()),
       }
+
+      EXPORTING.store(false, Ordering::Release);
     });
   }
 }
@@ -772,14 +777,31 @@ impl TextOutput for GuiOutput {
       return Err(NotPasted::Failed("no Accessibility access: ⌘V cannot be sent".into()));
     }
 
-    let text = text.to_owned();
-    let pasted = proxy().call(move |_| paste(&text, keep, &target), MAIN_WAIT);
-    pasted.unwrap_or_else(|| Err(NotPasted::Failed("the app was too busy to paste".into())))
+    // Given up after MAIN_WAIT: when the main thread gets to it, it is not pasted any more.
+    let (text, late) = (text.to_owned(), Arc::new(AtomicBool::new(false)));
+    let gave_up = late.clone();
+    let paste = move |_: &mut Main| match gave_up.load(Ordering::Acquire) {
+      true => Err(NotPasted::Failed("too late".into())),
+      false => paste(&text, keep, &target),
+    };
+    proxy().call(paste, MAIN_WAIT).unwrap_or_else(|| {
+      late.store(true, Ordering::Release);
+      Err(NotPasted::Failed("the app was too busy to paste".into()))
+    })
   }
 
   fn copy(&mut self, text: &str) -> Result<()> {
-    let text = text.to_owned();
-    proxy().call(move |_| SystemClipboard.write(&text), MAIN_WAIT).context("the app was too busy")
+    let (text, late) = (text.to_owned(), Arc::new(AtomicBool::new(false)));
+    let gave_up = late.clone();
+    let copy = move |_: &mut Main| {
+      if !gave_up.load(Ordering::Acquire) {
+        SystemClipboard.write(&text);
+      }
+    };
+    proxy().call(copy, MAIN_WAIT).ok_or_else(|| {
+      late.store(true, Ordering::Release);
+      anyhow::anyhow!("the app was too busy")
+    })
   }
 }
 
