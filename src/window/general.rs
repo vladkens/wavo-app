@@ -6,7 +6,8 @@
 //! system can still ask, else Open Settings), gone once allowed; then the hotkey and how it
 //! records, the microphone, the model (a quick switch among the downloaded ones and the way to
 //! the Models page, or with none a button to download one), the language, launch at login.
-//! Advanced: the output, the history's retention, where the recordings are.
+//! Advanced: the output, the model's unload, the history's retention, where the files are (the
+//! models, the recordings).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -33,11 +34,13 @@ pub const DOWNLOAD_MODEL: &str = "download-model";
 pub const LANG: &str = "lang";
 pub const PASTE: &str = "paste";
 pub const KEEP: &str = "keep";
+pub const UNLOAD: &str = "unload";
 pub const HUD: &str = "hud";
 pub const LOGIN: &str = "login";
 pub const RETENTION: &str = "retention";
 pub const OPEN_ACCESSIBILITY: &str = "open-accessibility";
 pub const OPEN_MICROPHONE: &str = "open-microphone";
+pub const MODEL_FOLDER: &str = "model-folder";
 pub const RECORDINGS_FOLDER: &str = "recordings-folder";
 
 /// The shortcut recorder records: it has the focus in a window that has the keys.
@@ -66,6 +69,8 @@ const ACCESSIBILITY_WHY: &str = "Wavo hears the shortcut in every app and pastes
 
 /// A warning sign, for a permission missing: a triangle with "!" in it.
 const WARNING: Icon = Icon::new("M12 4.5 3 19.5h18ZM12 10v4.5M12 17v.2");
+const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle this long. The next \
+  dictation loads it again, which takes a moment.";
 
 const ACTIVATIONS: [(Activation, &str); 3] = [
   (Activation::HoldOrToggle, "Hold to talk, or tap to start and stop"),
@@ -75,6 +80,8 @@ const ACTIVATIONS: [(Activation, &str); 3] = [
 
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
+
+const UNLOADS: [Option<u32>; 7] = [None, Some(0), Some(2), Some(5), Some(10), Some(15), Some(60)];
 
 const RETENTIONS: [Retention; 7] = [
   Retention::Unlimited,
@@ -130,7 +137,7 @@ impl Folder {
 }
 
 /// `~/.cache/huggingface/hub · 2.9 GB`, the path alone while the size is unknown or nothing.
-pub(super) fn folder_caption(dir: &Path, size: Option<u64>) -> String {
+fn folder_caption(dir: &Path, size: Option<u64>) -> String {
   match size {
     None | Some(0) => paths::display(dir),
     Some(n) => format!("{} · {}", paths::display(dir), models::size_text(n)),
@@ -139,13 +146,7 @@ pub(super) fn folder_caption(dir: &Path, size: Option<u64>) -> String {
 
 /// A pop-up `id` of `labels`, item `at` the current one, with a line after each of `lines`:
 /// the item picked, when it is another.
-pub(super) fn pick(
-  ui: &mut Ui,
-  id: &str,
-  labels: &[String],
-  at: usize,
-  lines: &[usize],
-) -> Option<usize> {
+fn pick(ui: &mut Ui, id: &str, labels: &[String], at: usize, lines: &[usize]) -> Option<usize> {
   let items: Vec<(usize, &str)> = labels.iter().enumerate().map(|(i, l)| (i, l.as_str())).collect();
   let mut cur = at;
   Select::new(&mut cur, &items).separators(lines).show(ui.id(id)).changed.then_some(cur)
@@ -164,6 +165,15 @@ pub(super) fn thousands(n: impl ToString) -> String {
   }
 
   out
+}
+
+fn unload_title(minutes: Option<u32>) -> String {
+  match minutes {
+    None => "Never".into(),
+    Some(0) => "Right after each dictation".into(),
+    Some(1) => "After 1 minute".into(),
+    Some(m) => format!("After {m} minutes"),
+  }
 }
 
 fn retention_title(r: Retention) -> String {
@@ -446,7 +456,23 @@ impl Prefs {
 
   pub(super) fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
     self.output(ui, fs);
-    ui.form_section(fs, "History", |ui| {
+    ui.form_section(fs, "Model and History", |ui| {
+      let mut unloads = UNLOADS.to_vec();
+      if !unloads.contains(&self.settings.unload_after_minutes) {
+        unloads.push(self.settings.unload_after_minutes);
+      }
+
+      let labels: Vec<String> = unloads.iter().map(|&u| unload_title(u)).collect();
+      let row = FormRow::new("Unload the model").info(UNLOAD_HELP);
+      ui.with_id(self::row(UNLOAD)).form_row(fs, row, |ui| {
+        let current = self.settings.unload_after_minutes;
+        let at = unloads.iter().position(|&u| u == current).unwrap_or(0);
+        if let Some(i) = pick(ui, UNLOAD, &labels, at, &[0]) {
+          let minutes = unloads[i];
+          self.edit(move |s| s.unload_after_minutes = minutes);
+        }
+      });
+
       let mut all = RETENTIONS.to_vec();
       if !all.contains(&self.settings.history_retention) {
         all.insert(1, self.settings.history_retention);
@@ -462,6 +488,9 @@ impl Prefs {
       });
     });
 
+    let dir = self.hub.root().to_owned();
+    let size: u64 = self.found.iter().map(|f| f.0.size).sum();
+    let caption = folder_caption(&dir, Some(size));
     let recordings = self.recordings.dir.clone();
     let recorded = folder_caption(&recordings, self.recordings_size(ui));
     let show = format!("Show in {}", open::file_manager());
@@ -469,6 +498,14 @@ impl Prefs {
     // A path stays on one line, ending in "…": a long one has no space to wrap at.
     let fs = &FormStyle { caption: fs.caption.ellipsis(), ..*fs };
     ui.form_section(fs, "Files", |ui| {
+      let row = FormRow::new("Model folder").caption(&caption).tile(Tile::Icon(Icon::FOLDER));
+      ui.form_row(fs, row, |ui| {
+        let r = ui.disabled(!dir.is_dir()).id(MODEL_FOLDER).button(&show);
+        ui.tooltip(r.id, "The Hugging Face cache, which other apps may share");
+        if r.clicked {
+          reveal = Some(&dir);
+        }
+      });
       let row = FormRow::new("Recordings").caption(&recorded).tile(Tile::Icon(Icon::FOLDER));
       ui.form_row(fs, row, |ui| {
         let r = ui.disabled(!recordings.is_dir()).id(RECORDINGS_FOLDER).button(&show);
@@ -578,6 +615,7 @@ mod tests {
     assert_eq!(thousands(10_000), "10,000");
     assert_eq!(thousands(100), "100");
     assert_eq!(retention_title(Retention::Count(1000)), "The last 1,000 dictations");
+    assert_eq!(unload_title(Some(1)), "After 1 minute");
     assert_eq!(sentence("needs Wavo.app"), "Needs Wavo.app.");
   }
 }

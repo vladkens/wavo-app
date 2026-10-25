@@ -1,11 +1,11 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! The Models page: how long a model stays loaded and where the models are, then wavo's models
-//! ([`hub::MODELS`]) in two plates, those downloaded into the Hugging Face cache and the rest
-//! available, each in wavo's order (a model keeps its place when another is used), under a search
-//! field (by name, family, maker and language: [`Search`]) and a language pop-up. The model in use
-//! is marked "✓ In use" in its place with its state, and stays shown whatever the search. Use picks
-//! a downloaded model, the bin deletes one after asking in the window's dialog, with the size it
+//! The Models page: wavo's models ([`hub::MODELS`]) in two plates, those downloaded into the
+//! Hugging Face cache and the rest available, each in wavo's order (a model keeps its place when
+//! another is used), under a search field (by name, family, maker and language: [`Search`]) and
+//! a language pop-up. The model in use is marked "✓ In use" in its place with its state, and
+//! stays shown whatever the search; one meant for a single language says so there. Use picks a
+//! downloaded model, the bin deletes one after asking in the window's dialog, with the size it
 //! frees (for the model in use, what takes its place), Download fetches one with its progress in
 //! place of its caption and ✕ cancels, ⓘ opens the original model's card. A chosen model whose
 //! file is gone stays in its place among the downloaded, "Not on disk" in the warning colour,
@@ -16,12 +16,11 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use isolang::Language;
-use nimbo::{Align, FormRow, FormStyle, Icon, Id, Style, Tile, Ui, Weight, grow, open, px};
+use nimbo::{Align, FormRow, FormStyle, Icon, Id, Style, Tile, Ui, Weight, grow, px};
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
 use super::downloads::Download;
-use super::general::{folder_caption, pick, row as row_id};
 use super::{Ask, Prefs, Problem};
 use crate::engine::supervisor::Phase as EnginePhase;
 use crate::history::fold;
@@ -40,13 +39,6 @@ pub const DOWNLOAD: &str = "download";
 pub const CANCEL: &str = "cancel";
 pub const DELETE: &str = "delete";
 pub const INFO: &str = "info";
-/// The unload pop-up and the model folder's button, above the plates.
-pub const UNLOAD: &str = "unload";
-pub const FOLDER: &str = "model-folder";
-
-const UNLOADS: [Option<u32>; 7] = [None, Some(0), Some(2), Some(5), Some(10), Some(15), Some(60)];
-const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle this long. The next \
-  dictation loads it again, which takes a moment.";
 
 /// The width of a download's progress bar, in place of its row's caption.
 const BAR: f32 = 120.0;
@@ -119,14 +111,10 @@ impl Pick {
   }
 }
 
-/// How long the model stays loaded, after "Unload the model after": `Each dictation`, `5 minutes`.
-fn unload_title(minutes: Option<u32>) -> String {
-  match minutes {
-    None => "Never".into(),
-    Some(0) => "Each dictation".into(),
-    Some(1) => "1 minute".into(),
-    Some(m) => format!("{m} minutes"),
-  }
+/// `English only` for a model meant for one language.
+pub fn single_language(m: &ModelInfo) -> Option<String> {
+  let [code] = m.langs else { return None };
+  Some(format!("{} only", language::name(code)))
 }
 
 /// Whether model choice `query` names `model` in `hub`: by its name, or by the path of its file
@@ -238,43 +226,6 @@ impl Prefs {
     });
   }
 
-  /// Above the plates: how long the model stays loaded, and the models' folder (its path and size
-  /// in the ⓘ).
-  fn options(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    let mut unloads = UNLOADS.to_vec();
-    if !unloads.contains(&self.settings.unload_after_minutes) {
-      unloads.push(self.settings.unload_after_minutes);
-    }
-
-    let labels: Vec<String> = unloads.iter().map(|&u| unload_title(u)).collect();
-    let dir = self.hub.root().to_owned();
-    let size: u64 = self.found.iter().map(|f| f.0.size).sum();
-    let about = format!(
-      "{}: the Hugging Face cache, which other apps may share.",
-      folder_caption(&dir, Some(size))
-    );
-    let mut reveal = false;
-    ui.form_section(fs, "", |ui| {
-      let row = FormRow::new("Unload the model after").info(UNLOAD_HELP);
-      ui.with_id(row_id(UNLOAD)).form_row(fs, row, |ui| {
-        let current = self.settings.unload_after_minutes;
-        let at = unloads.iter().position(|&u| u == current).unwrap_or(0);
-        if let Some(i) = pick(ui, UNLOAD, &labels, at, &[0]) {
-          let minutes = unloads[i];
-          self.edit(move |s| s.unload_after_minutes = minutes);
-        }
-      });
-      let row = FormRow::new("Model folder").info(&about);
-      ui.with_id(row_id(FOLDER)).form_row(fs, row, |ui| {
-        let show = format!("Show in {}", open::file_manager());
-        reveal = ui.disabled(!dir.is_dir()).id(FOLDER).button(&show).clicked;
-      });
-    });
-    if reveal {
-      self.shell.reveal(&dir);
-    }
-  }
-
   /// What the app does with model `m`, the one in use: `Loaded`, `Loading…`, `Recording…`, or a
   /// problem (`true`): it does not load.
   fn in_use_state(&self, m: &Found) -> (&'static str, bool) {
@@ -303,14 +254,19 @@ impl Prefs {
     (state, false)
   }
 
-  /// The options, then wavo's models in two plates, each row one line for the name and one for its
-  /// caption (or a download's progress in its place): every row has the same height in every
-  /// state.
+  /// wavo's models in two plates, each row one line for the name and one for its caption (or a
+  /// download's progress in its place): every row has the same height in every state.
   pub(super) fn models(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let t = ui.theme();
     // The notes above the plates wrap; the rows' captions stay on their line.
     let note = fs.caption;
     let fs = &FormStyle { caption: fs.caption.ellipsis(), ..*fs };
+    let found = &self.found;
+    let active = self.active().map(|f| f.0.name);
+    // The chosen model when it is gone from the disk: in its place among the downloaded.
+    let gone =
+      self.pick.gone().and_then(|_| self.settings.model.as_deref().and_then(super::lookup));
+    let mut act = None;
     if let Some(text) = &self.models.note {
       ui.text(text, note.color(t.danger));
     }
@@ -318,14 +274,6 @@ impl Prefs {
     if let Some(problem @ Problem::LoadFailed { .. }) = self.model_problem() {
       ui.text(problem.text(), note.color(t.warning));
     }
-
-    self.options(ui, fs);
-    let found = &self.found;
-    let active = self.active().map(|f| f.0.name);
-    // The chosen model when it is gone from the disk: in its place among the downloaded.
-    let gone =
-      self.pick.gone().and_then(|_| self.settings.model.as_deref().and_then(super::lookup));
-    let mut act = None;
 
     let search = Search::new(&self.models.search);
     let lang = LANGUAGES.get(self.models.lang).map_or("", |l| l.1);
@@ -418,11 +366,12 @@ impl Prefs {
     let t = ui.theme();
     let m = f.0;
     let deleting = self.models.deleting.contains(&m.name);
+    let languages = single_language(m).unwrap_or_else(|| m.languages.to_owned());
     let (state, error) = match in_use {
       true => self.in_use_state(f),
       false => ("", false),
     };
-    let mut caption = format!("{} · {}", m.languages, size_text(m.size));
+    let mut caption = format!("{languages} · {}", size_text(m.size));
     if in_use {
       caption = format!("{caption} · {state}");
     }
@@ -640,6 +589,5 @@ mod tests {
     assert_eq!(s.model, None);
     assert_eq!(size_text(1_700_000_000), "1.7 GB");
     assert_eq!(done_text(114_000_000, 272_000_000), "114 of 272 MB");
-    assert_eq!(unload_title(Some(1)), "1 minute");
   }
 }
