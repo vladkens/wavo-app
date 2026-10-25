@@ -406,17 +406,14 @@ fn pages_fit_or_scroll_and_the_toolbar_switches_them() {
   let oldest = *history_of(home.path(), &older, false).last().unwrap();
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
-  let general = [HOTKEY, RESET, ACTIVATION, MIC, MODEL, LANG]
-    .into_iter()
-    .chain([PASTE, KEEP, HUD, LOGIN])
-    .map(Id::of)
-    .collect();
-  let controls: [Vec<Id>; 6] = [
+  let general =
+    [OPEN_ACCESSIBILITY, HOTKEY, RESET, ACTIVATION, MIC, MODEL, LANG, LOGIN].map(Id::of).to_vec();
+  let advanced = [PASTE, KEEP, HUD, UNLOAD, RETENTION, MODEL_FOLDER, RECORDINGS_FOLDER];
+  let controls: [Vec<Id>; 5] = [
     general,
-    vec![Id::of(OPEN_ACCESSIBILITY)],
     vec![Id::of(page::SEARCH), Id::of(page::LANG), Id::of((INFO, TWO[0])), Id::of((USE, TWO[1]))],
     vec![Id::of(SEARCH), Id::of((COPY, ids[8])), Id::of((PLAY, ids[8]))],
-    [UNLOAD, RETENTION, MODEL_FOLDER, RECORDINGS_FOLDER].map(Id::of).to_vec(),
+    advanced.map(Id::of).to_vec(),
     vec![Id::of((about::LINK, "source")), Id::of((about::LINK, "models"))],
   ];
   let last_model = hub::MODELS.last().unwrap().name;
@@ -472,8 +469,8 @@ fn controls_show_hover_and_tooltips() {
   let mut h = harness(&fake, Settings::default(), &home);
   let info = |name: &str| row(name).key("info");
   let mut general = vec![Id::of(HOTKEY), info(ACTIVATION), Id::of(MIC), Id::of(MODEL)];
-  general.extend([Id::of(LANG), Id::of(PASTE), Id::of(HUD)]);
-  general.extend([Id::of(LOGIN), Id::of(TABS).key(1)]);
+  general.extend([Id::of(LANG), Id::of(LOGIN), Id::of(TABS).key(1)]);
+  general.extend([Id::of(OPEN_ACCESSIBILITY), info(OPEN_ACCESSIBILITY)]);
   hovers_on(&mut h, &general);
   assert_eq!(hover(&mut h, Id::of(RESET)), (Cursor::Arrow, 0), "reset is disabled at the default");
 
@@ -487,13 +484,6 @@ fn controls_show_hover_and_tooltips() {
   assert!(h.rect(tip).is_none(), "not yet");
   h.wait(Duration::from_millis(300));
   assert!(h.rect(tip).is_some(), "after the delay");
-
-  // Keeping the clipboard means nothing without pasting.
-  click(&mut h, Id::of(PASTE));
-  assert_eq!(hover(&mut h, Id::of(KEEP)), (Cursor::Arrow, 0), "the row is disabled");
-
-  tab(&mut h, Page::Permissions);
-  hovers_on(&mut h, &[Id::of(OPEN_ACCESSIBILITY)]);
 
   tab(&mut h, Page::Models);
   let remote = hub::MODELS[2].name;
@@ -515,6 +505,10 @@ fn controls_show_hover_and_tooltips() {
   tab(&mut h, Page::Advanced);
   let advanced = [info(UNLOAD), Id::of(RETENTION), Id::of(MODEL_FOLDER), Id::of(RECORDINGS_FOLDER)];
   hovers_on(&mut h, &advanced);
+  hovers_on(&mut h, &[Id::of(PASTE), Id::of(HUD)]);
+  // Keeping the clipboard means nothing without pasting.
+  click(&mut h, Id::of(PASTE));
+  assert_eq!(hover(&mut h, Id::of(KEEP)), (Cursor::Arrow, 0), "the row is disabled");
   click(&mut h, Id::of(MODEL_FOLDER));
   click(&mut h, Id::of(RECORDINGS_FOLDER));
   let recordings = home.path().join(crate::history::recordings::DIR);
@@ -587,13 +581,16 @@ fn the_recorder_saves_a_lone_modifier_the_hotkey_matches() {
     assert_eq!(Hotkey::parse(&loaded.hotkey).unwrap(), Hotkey::Modifier(key), "{saved}");
   }
 
-  // fn says what macOS does with it too.
+  // fn says what macOS does with it too, in the shortcut's ⓘ.
   click(&mut h, Id::of(TABS).key(0));
+  assert!(h.rect(row(HOTKEY).key("info")).is_none(), "nothing to say");
   fake.log().settings.hotkey = "fn".into();
   let settings = fake.log().settings.clone();
   h.app_mut().update(&settings, &status(Phase::Idle), 1);
   h.rt.waker().wake();
   h.frame();
+  assert!(h.rect(row(HOTKEY).key("info")).is_some());
+  assert!(h.app().shortcut_note().is_some_and(|n| n.contains("Press 🌐 key to")));
 }
 
 #[test]
@@ -611,6 +608,11 @@ fn selects_and_switches_edit_the_settings() {
   let usb = Choice { id: Some("usb mic".into()), name: "USB Mic".into() };
   assert_eq!(fake.log().settings.microphone, Some(usb));
 
+  // Launch at login goes to the system, not through the settings' edits.
+  click(&mut h, Id::of(LOGIN));
+  assert_eq!(fake.log().autostarts, [true]);
+
+  tab(&mut h, Page::Advanced);
   click(&mut h, Id::of(KEEP));
   assert!(fake.log().settings.keep_in_clipboard);
   click(&mut h, Id::of(PASTE));
@@ -618,43 +620,36 @@ fn selects_and_switches_edit_the_settings() {
   click(&mut h, Id::of(KEEP));
   assert!(fake.log().settings.keep_in_clipboard, "disabled while pasting is off");
 
-  // Launch at login goes to the system, not through the settings' edits.
-  click(&mut h, Id::of(LOGIN));
-  assert_eq!(fake.log().autostarts, [true]);
-
-  tab(&mut h, Page::Advanced);
   click(&mut h, Id::of(RETENTION));
   click(&mut h, Id::of(RETENTION).key(("item", 1)));
   assert_eq!(fake.log().settings.history_retention, crate::history::Retention::Count(100));
   assert_eq!(fake.log().edits, 5);
 }
 
-/// General's Model pop-up: the downloaded models, the one in use checked, then "Manage models…".
-/// A model picked is used as Models' Use does, with a note when it is meant for one language;
-/// the last item goes to the Models page.
+/// General's Model pop-up: the downloaded models, the one in use checked, then "Download more…".
+/// A model picked is used as Models' Use does, the row saying nothing of its languages; the last
+/// item goes to the Models page.
 #[test]
 fn the_general_model_pop_up_switches_models() {
   let home = Home::new("window-model-pick", &TWO);
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
-  assert_eq!(h.app().model_note(), None, "parakeet-v3 knows 25 languages");
   let before = h.rt.size.h;
   click(&mut h, Id::of(MODEL));
   for i in 0..3 {
     assert!(h.rect(Id::of(MODEL).key(("item", i))).is_some(), "item {i}");
   }
 
-  assert!(h.rect(Id::of(MODEL).key(("item", 3))).is_none(), "two models and Manage");
+  assert!(h.rect(Id::of(MODEL).key(("item", 3))).is_none(), "two models and Download more");
+  let (items, _) = h.app().model_choices();
+  assert_eq!(items.last().map(String::as_str), Some("Download more…"));
   click(&mut h, Id::of(MODEL).key(("item", 1)));
   assert_eq!(fake.log().settings.model.as_deref(), Some(TWO[1]));
-  let note = h.app().model_note();
-  assert_eq!(note.as_deref(), Some("parakeet-tdt-0.6b-v2 understands English only."));
-  // The caption makes the row taller: the window grows to it.
+  // An English model says nothing of it: the row and the window keep their height.
   h.frame();
   h.frame();
-  assert!(h.rt.size.h > before, "{before} → {:?}", h.rt.size);
-  let sc = page_scroll(&h, Page::General);
-  assert!(sc.content.h <= sc.viewport.h + 0.5, "{sc:?}");
+  assert_eq!(h.rt.size.h, before);
+  assert!(h.rect(row(MODEL).key("info")).is_none() && h.text(row(MODEL).key("caption")).is_none());
 
   // The current one again changes nothing; the last item goes to Models.
   let edits = fake.log().edits;
@@ -722,18 +717,20 @@ fn launch_at_login_flips_at_once_and_turns_back_on_failure() {
   assert_eq!(h.app().login.state, Ok(Autostart::Enabled));
   assert!(h.app().settings.autostart);
 
-  // Refused: it goes back and says why under the row, the switch as wide as before.
-  let width = h.rect(Id::of(LOGIN)).unwrap().w;
+  // Refused: it goes back and says why in the row's ⓘ, the row as high, the switch as wide as
+  // before.
+  let (width, height) = (h.rect(Id::of(LOGIN)).unwrap().w, h.rect(row(LOGIN)).unwrap().h);
+  assert!(h.rect(row(LOGIN).key("info")).is_none(), "nothing to say");
   click(&mut h, Id::of(LOGIN));
   assert_eq!(fake.log().autostarts, [true, false]);
   h.app_mut().autostart_set(false, Err("unregister: Operation not permitted (code 1)".into()));
   h.rt.waker().wake();
   h.wait(Duration::from_secs(1));
   assert!(h.app().login.shown(false), "on again");
-  let caption = h.text(row(LOGIN).key("caption")).map(str::to_owned);
   let want = "Couldn't turn it off: unregister: Operation not permitted (code 1)";
-  assert_eq!(caption.as_deref(), Some(want));
-  assert_eq!(h.rect(Id::of(LOGIN)).unwrap().w, width);
+  assert_eq!(h.app().login_note().as_deref(), Some(want));
+  assert!(h.rect(row(LOGIN).key("info")).is_some());
+  assert_eq!((h.rect(Id::of(LOGIN)).unwrap().w, h.rect(row(LOGIN)).unwrap().h), (width, height));
 
   // A click while one is on its way goes once it ends; the error is gone.
   click(&mut h, Id::of(LOGIN));
@@ -759,9 +756,6 @@ fn models_are_found_downloaded_and_used() {
   let home = Home::new("window-models", &TWO);
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
-  tab(&mut h, Page::Permissions);
-  hovers_on(&mut h, &[Id::of(OPEN_ACCESSIBILITY)]);
-
   tab(&mut h, Page::Models);
   let remote = hub::MODELS[2].name;
   click(&mut h, Id::of((DOWNLOAD, remote)));
@@ -923,8 +917,7 @@ fn the_model_in_use_is_deleted_and_the_next_takes_its_place() {
   let message = delete(&mut h, "whisper-tiny");
   assert!(message.ends_with("It is the only model: dictation stops until you download another."));
   tab(&mut h, Page::General);
-  let caption = h.text(row(MODEL).key("caption"));
-  assert_eq!(caption, Some("Dictation needs a speech model: download one to start."));
+  assert!(h.rect(Id::of(DOWNLOAD_MODEL)).is_some() && h.rect(Id::of(MODEL)).is_none());
 }
 
 /// The chosen model's file deleted behind the window's back: the next frame sees it, looks at the
@@ -955,7 +948,8 @@ fn a_model_gone_behind_the_windows_back_shows_not_on_disk() {
 
   tab(&mut h, Page::General);
   let instead = "parakeet-tdt-0.6b-v3 is not on disk: whisper-tiny transcribes instead.";
-  assert_eq!(h.text(row(MODEL).key("caption")), Some(instead));
+  assert_eq!(h.app().model_problem().map(|p| p.text()).as_deref(), Some(instead));
+  assert!(h.rect(row(MODEL).key("info")).is_some());
   let (items, at) = h.app().model_choices();
   assert_eq!(items[at], "parakeet-tdt-0.6b-v3 (not on disk)");
 
@@ -1024,14 +1018,14 @@ fn model_rows_keep_one_height_in_every_state() {
 }
 
 /// A control keeps its width whatever its row says: General's Model pop-up with and without the
-/// warning under it, Models' Download with and without a failure.
+/// warning in its ⓘ (the row as high), Models' Download with and without a failure.
 #[test]
 fn controls_keep_their_width_whatever_the_row_says() {
   let home = Home::new("window-widths", &TWO);
   let fake = Fake::default();
   let settings = Settings { model: Some(TWO[0].into()), ..Settings::default() };
   let mut h = harness(&fake, settings.clone(), &home);
-  let model = h.rect(Id::of(MODEL)).unwrap();
+  let (model, height) = (h.rect(Id::of(MODEL)).unwrap(), h.rect(row(MODEL)).unwrap().h);
   let mut st = status(Phase::Idle);
   let error = "the GPU is out of memory while loading the encoder's weights".into();
   st.no_model = Some(NoModel::LoadFailed { model: "parakeet-tdt-0.6b-v3".into(), error });
@@ -1039,8 +1033,10 @@ fn controls_keep_their_width_whatever_the_row_says() {
   h.rt.waker().wake();
   h.frame();
   h.frame();
-  let caption = h.text(row(MODEL).key("caption")).unwrap_or_default().to_owned();
-  assert!(caption.starts_with("parakeet-tdt-0.6b-v3 could not be loaded"), "{caption}");
+  let note = h.app().model_problem().map(|p| p.text()).unwrap_or_default();
+  assert!(note.starts_with("parakeet-tdt-0.6b-v3 could not be loaded"), "{note}");
+  assert!(h.rect(row(MODEL).key("info")).is_some());
+  assert_eq!(h.rect(row(MODEL)).unwrap().h, height, "as high");
   let after = h.rect(Id::of(MODEL)).unwrap();
   assert_eq!((after.w, after.x + after.w), (model.w, model.x + model.w), "same width and edge");
 
@@ -1172,21 +1168,22 @@ fn a_dictation_is_transcribed_again() {
   );
 }
 
-/// The first launch: Permissions shows what is missing, each with Allow, and with no model a
-/// button to the Models page; General none of it but the model's button. A permission answered
-/// gets Open Settings, one given its check alone.
+/// The first launch: General starts with a row for each permission missing, why in its ⓘ and
+/// Allow, and with no model a button to the Models page in place of the Model pop-up. A permission
+/// answered gets Open Settings; one given loses its row, looked at again when the window comes to
+/// the front.
 #[test]
-fn permissions_guide_the_first_launch() {
+fn general_guides_the_first_launch() {
   let home = Home::new("window-first-run", &[]);
   let fake = Fake::default();
   fake.log().access = Some(Access::default());
   let mut h = harness(&fake, Settings::default(), &home);
   assert!(h.rect(Id::of(MODEL)).is_none(), "no pop-up without a model");
-  let caption = h.text(row(MODEL).key("caption"));
-  assert_eq!(caption, Some("Dictation needs a speech model: download one to start."));
-  assert!(h.rect(Id::of(OPEN_ACCESSIBILITY)).is_none(), "not on General");
+  assert!(h.rect(row(MODEL).key("info")).is_none(), "the button says it");
+  for b in [OPEN_MICROPHONE, OPEN_ACCESSIBILITY] {
+    assert!(h.rect(row(b).key("info")).is_some(), "{b}: why");
+  }
 
-  tab(&mut h, Page::Permissions);
   // The buttons' labels by their widths: Allow is the shorter.
   let widths = |h: &Harness<Prefs>| {
     [OPEN_ACCESSIBILITY, OPEN_MICROPHONE].map(|b| h.rect(Id::of(b)).unwrap().w)
@@ -1204,22 +1201,69 @@ fn permissions_guide_the_first_launch() {
   let open = widths(&h);
   assert!(open[0] > allow[0] && open[1] > allow[1], "Open Settings: {allow:?} {open:?}");
 
+  // The microphone given in System Settings: its row goes once the window is in front again.
+  let mic = Access { microphone: Grant::Granted, ..asked };
+  fake.log().access = Some(mic);
+  h.event(Event::Focus(false));
+  h.frame();
+  assert!(h.rect(Id::of(OPEN_MICROPHONE)).is_some(), "not looked at in the back");
+  h.event(Event::Focus(true));
+  h.frame();
+  h.frame();
+  assert!(
+    h.rect(Id::of(OPEN_MICROPHONE)).is_none() && h.rect(Id::of(OPEN_ACCESSIBILITY)).is_some()
+  );
+
   let given = Access { accessibility: true, microphone: Grant::Granted, ..Access::default() };
   fake.log().access = Some(given);
   h.app_mut().access_changed();
   h.frame();
-  assert!(
-    h.rect(Id::of(OPEN_ACCESSIBILITY)).is_none() && h.rect(Id::of(OPEN_MICROPHONE)).is_none()
-  );
+  assert!(h.rect(Id::of(OPEN_ACCESSIBILITY)).is_none());
 
   click(&mut h, Id::of(DOWNLOAD_MODEL));
   assert_eq!(h.app().page, Page::Models);
 }
 
+/// General's rows are one line high whatever they say: the shortcut's notes, a model that does
+/// not load and launch at login's error go in an ⓘ that shows only then, and the page keeps its
+/// height.
+#[test]
+fn general_rows_keep_one_line_whatever_they_say() {
+  let home = Home::new("window-general-rows", &TWO);
+  let fake = Fake::default();
+  fake.log().access =
+    Some(Access { accessibility: true, microphone: Grant::Granted, ..Access::default() });
+  let mut h = harness(&fake, Settings::default(), &home);
+  let rows = [HOTKEY, ACTIVATION, MODEL, LOGIN];
+  let heights = |h: &Harness<Prefs>| rows.map(|r| h.rect(row(r)).unwrap().h);
+  let (before, page) = (heights(&h), h.rt.size.h);
+  assert!(h.rect(row(HOTKEY).key("info")).is_none() && h.rect(row(MODEL).key("info")).is_none());
+
+  let settings = Settings { hotkey: "fn".into(), ..Settings::default() };
+  let mut st = status(Phase::Idle);
+  let error = "the GPU is out of memory".into();
+  st.no_model = Some(NoModel::LoadFailed { model: "parakeet-tdt-0.6b-v3".into(), error });
+  let access = fake.log().access.unwrap();
+  fake.log().access = Some(Access { secure_input: true, ..access });
+  h.app_mut().access_changed();
+  h.app_mut().update(&settings, &st, 1);
+  h.app_mut().autostart_set(true, Err("register: not permitted".into()));
+  h.rt.waker().wake();
+  h.frame();
+  h.frame();
+  for r in [HOTKEY, MODEL, LOGIN] {
+    assert!(h.rect(row(r).key("info")).is_some(), "{r}: its ⓘ");
+    assert!(h.text(row(r).key("caption")).is_none(), "{r}: no caption");
+  }
+
+  assert!(h.app().shortcut_note().is_some_and(|n| n.starts_with("Secure Input is on")));
+  assert_eq!((heights(&h), h.rt.size.h), (before, page));
+}
+
 /// Every page in both looks, as people see them: two models downloaded and one downloading, a
 /// history of today's and yesterday's dictations with one selected; written to `WAVO_SHOTS` when
-/// it is set. General and Models also with an English-only model in use and with the chosen model
-/// gone; Models with its delete asked.
+/// it is set. General also on the first launch (the permissions missing, no model); General and
+/// Models with the chosen model gone; Models with its delete asked.
 #[test]
 fn every_page_renders_in_both_looks() {
   let home =
@@ -1255,22 +1299,13 @@ fn every_page_renders_in_both_looks() {
       assert_eq!(ground[0] < 100, appearance.dark, "{name} {look}: {ground:?}");
       shot(&mut h, &format!("{}-{look}", name.to_lowercase()));
       match page {
-        Page::Permissions => {
+        Page::General => {
           let empty = Home::new("window-shots-first-run", &[]);
           let first = Fake::default();
           first.log().access = Some(Access::default());
           let mut first_run = harness(&first, Settings::default(), &empty);
           first_run.event(Event::Appearance(appearance));
-          tab(&mut first_run, Page::Permissions);
-          shot(&mut first_run, &format!("permissions-first-run-{look}"));
-        }
-        Page::General => {
-          click(&mut h, Id::of(MODEL));
-          click(&mut h, Id::of(MODEL).key(("item", 1)));
-          assert!(h.app().model_note().is_some(), "{look}: the note");
-          shot(&mut h, &format!("general-english-only-{look}"));
-          tab(&mut h, Page::Models);
-          shot(&mut h, &format!("models-english-only-{look}"));
+          shot(&mut first_run, &format!("general-first-run-{look}"));
 
           let gone = Settings { model: Some("whisper-tiny".into()), ..Settings::default() };
           let mut h = harness(&fake, gone, &home);

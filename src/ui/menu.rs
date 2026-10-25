@@ -2,8 +2,8 @@
 
 //! The menu bar menu and icon, from the session's status and what the system says ([System]):
 //! a header with the app, the hotkey and the state; the warnings that need the person, short, most
-//! opening where to fix them (the settings window says more: the permissions and a first model on
-//! its Permissions page); Copy Last Dictation and the recent
+//! opening where to fix them (the settings window says more: the permissions on its General page,
+//! a first model on Models); Copy Last Dictation and the recent
 //! dictations; the model in use with the others downloaded, Unload Model; History…, Settings… and
 //! Quit.
 

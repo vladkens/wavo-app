@@ -3,7 +3,7 @@
 //! `wavo-app gui`: the menu bar app on nimbo's app platform ([nimbo::app]), an accessory app: the
 //! [Tray] with the [menu], the [Hotkeys] that feed the session's input, the HUD in an [Overlay],
 //! the settings window ([Prefs]) when the person asks for it: at a launch only when something is
-//! missing (a permission or a model: the window opens on Permissions, nothing is asked until the
+//! missing (a permission or a model: the window opens on General, nothing is asked until the
 //! person says so) and never at a launch at login, from the menu, `wavo-app ctl open-settings` and
 //! `open-history`, a second launch and the app opened again (Finder, Spotlight). Nothing else opens
 //! a window or takes the focus: an error or a permission missing shows in the HUD, the icon, the
@@ -196,15 +196,15 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   };
   app.check_access();
   app.read_models();
-  // Nothing is asked at launch: with a permission or a model missing the window opens on
-  // Permissions, the first launch's guide, whose buttons ask; else the app starts in the menu bar.
+  // Nothing is asked at launch: with a permission or a model missing the window opens on General,
+  // whose buttons ask; else the app starts in the menu bar.
   // Never at a launch at login: one the system may have started is left in the menu bar.
   let missing = (app.missing_permission() || app.missing_model()) && !may_launch_at_login();
   APP.with(|cell| *cell.borrow_mut() = Some(app));
   // Opened again while it runs: the settings window, as for a second launch.
   main.on_reopen(|main| open_window(main, None));
   if missing {
-    proxy().post(|main| open_window(main, Some(Page::Permissions)));
+    proxy().post(|main| open_window(main, Some(Page::General)));
   }
 
   Ok(())
@@ -310,14 +310,12 @@ fn chosen(main: &mut Main, id: &str) {
     "history" => open_window(main, Some(Page::History)),
     "settings" => open_window(main, None),
     "quit" => main.quit(),
-    // Permissions says why and asks.
-    "warn:accessibility" | "warn:microphone" | "warn:download" => {
-      open_window(main, Some(Page::Permissions))
-    }
+    // General says why and asks; Models downloads one.
+    "warn:accessibility" | "warn:microphone" => open_window(main, Some(Page::General)),
     "warn:clipboard" => allow(Pane::Pasteboard),
-    // General explains it under the shortcut.
+    // General explains it in the shortcut's ⓘ.
     "warn:secure-input" => open_window(main, Some(Page::General)),
-    "warn:model" => open_window(main, Some(Page::Models)),
+    "warn:download" | "warn:model" => open_window(main, Some(Page::Models)),
     _ => {}
   }
 }
