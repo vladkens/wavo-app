@@ -1,4 +1,4 @@
-.PHONY: prepare check test
+.PHONY: prepare check test build update clean
 
 # Linux does not build the macOS shell, the only user of parts of the session: dead code is
 # checked on macOS.
@@ -14,6 +14,17 @@ check:
 
 test:
 	cargo test --release
+
+build:
+	cargo build --release
+	ls -lh target/release/wavo-app
+
+update:
+	cargo upgrade --incompatible
+	cargo update
+
+clean:
+	cargo clean
 
 .PHONY: install dist
 
