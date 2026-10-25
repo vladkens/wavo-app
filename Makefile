@@ -37,10 +37,11 @@ PROFILE := release
 $(ICON): assets/icon.png scripts/icns.sh
 	scripts/icns.sh assets/icon.png $@
 
-# target/Wavo.app (scripts/bundle.sh), signed with the identity $$WAVO_SIGN_IDENTITY when the
-# keychain has it, ad hoc otherwise. Built, never opened.
+# target/Wavo.app (scripts/bundle.sh), signed with Wavo's own identity, made in the login
+# keychain the first time (scripts/sign-identity.py; not in CI). Built, never opened.
 bundle: $(ICON) # target/Wavo.app from the release profile, or PROFILE
 	cargo build --profile $(PROFILE)
+	[ -n "$$CI" ] || uv run scripts/sign-identity.py
 	scripts/bundle.sh target/$(PROFILE)/wavo-app $(ICON) $(APP)
 
 dist: bundle # target/distrib/Wavo-dev.zip, the release file for CI (vladkens/actions/rust-build)
