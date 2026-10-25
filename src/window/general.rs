@@ -271,6 +271,7 @@ impl Prefs {
   pub(super) fn general(&mut self, ui: &mut Ui, fs: &FormStyle) {
     self.missing(ui, fs);
     ui.form_section(fs, "Dictation", |ui| {
+      self.model(ui, fs);
       let mut row = FormRow::new("Shortcut");
       if let Some(note) = self.shortcut_note() {
         row = row.info(note);
@@ -294,9 +295,9 @@ impl Prefs {
           self.edit(move |s| s.microphone = choice.clone());
         }
       });
-      self.model(ui, fs);
     });
 
+    self.output(ui, fs);
     ui.form_section(fs, "App", |ui| self.login(ui, fs));
   }
 
@@ -404,8 +405,8 @@ impl Prefs {
     }
   }
 
-  /// How the text goes out: pasted, kept on the clipboard (with why it may not come back in the
-  /// ⓘ), and where the HUD shows.
+  /// How the text goes out: pasted, and kept on the clipboard (with why it may not come back in
+  /// the ⓘ).
   fn output(&mut self, ui: &mut Ui, fs: &FormStyle) {
     ui.form_section(fs, "Output", |ui| {
       let row = FormRow::new("Paste the text into the app you dictate in");
@@ -426,12 +427,6 @@ impl Prefs {
         let mut on = self.settings.keep_in_clipboard;
         if ui.id(KEEP).toggle(&mut on, "").changed {
           self.edit(move |s| s.keep_in_clipboard = on);
-        }
-      });
-      ui.form_row(fs, FormRow::new("Show the HUD at"), |ui| {
-        let mut cur = self.settings.hud_position;
-        if ui.id(HUD).select(&mut cur, &HUDS).changed {
-          self.edit(move |s| s.hud_position = cur);
         }
       });
     });
@@ -455,8 +450,14 @@ impl Prefs {
   }
 
   pub(super) fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    self.output(ui, fs);
-    ui.form_section(fs, "Model and History", |ui| {
+    ui.form_section(fs, "App", |ui| {
+      ui.form_row(fs, FormRow::new("Show the HUD at"), |ui| {
+        let mut cur = self.settings.hud_position;
+        if ui.id(HUD).select(&mut cur, &HUDS).changed {
+          self.edit(move |s| s.hud_position = cur);
+        }
+      });
+
       let mut unloads = UNLOADS.to_vec();
       if !unloads.contains(&self.settings.unload_after_minutes) {
         unloads.push(self.settings.unload_after_minutes);

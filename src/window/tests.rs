@@ -406,9 +406,9 @@ fn pages_fit_or_scroll_and_the_toolbar_switches_them() {
   let oldest = *history_of(home.path(), &older, false).last().unwrap();
   let fake = Fake::default();
   let mut h = harness(&fake, Settings::default(), &home);
-  let general =
-    [OPEN_ACCESSIBILITY, HOTKEY, RESET, ACTIVATION, MIC, MODEL, LANG, LOGIN].map(Id::of).to_vec();
-  let advanced = [PASTE, KEEP, HUD, UNLOAD, RETENTION, MODEL_FOLDER, RECORDINGS_FOLDER];
+  let general = [OPEN_ACCESSIBILITY, MODEL, LANG, HOTKEY, RESET, ACTIVATION, MIC, PASTE, KEEP, LOGIN];
+  let general = general.map(Id::of).to_vec();
+  let advanced = [HUD, UNLOAD, RETENTION, MODEL_FOLDER, RECORDINGS_FOLDER];
   let controls: [Vec<Id>; 5] = [
     general,
     vec![Id::of(page::SEARCH), Id::of(page::LANG), Id::of((INFO, TWO[0])), Id::of((USE, TWO[1]))],
@@ -505,10 +505,7 @@ fn controls_show_hover_and_tooltips() {
   tab(&mut h, Page::Advanced);
   let advanced = [info(UNLOAD), Id::of(RETENTION), Id::of(MODEL_FOLDER), Id::of(RECORDINGS_FOLDER)];
   hovers_on(&mut h, &advanced);
-  hovers_on(&mut h, &[Id::of(PASTE), Id::of(HUD)]);
-  // Keeping the clipboard means nothing without pasting.
-  click(&mut h, Id::of(PASTE));
-  assert_eq!(hover(&mut h, Id::of(KEEP)), (Cursor::Arrow, 0), "the row is disabled");
+  hovers_on(&mut h, &[Id::of(HUD)]);
   click(&mut h, Id::of(MODEL_FOLDER));
   click(&mut h, Id::of(RECORDINGS_FOLDER));
   let recordings = home.path().join(crate::history::recordings::DIR);
@@ -612,13 +609,14 @@ fn selects_and_switches_edit_the_settings() {
   click(&mut h, Id::of(LOGIN));
   assert_eq!(fake.log().autostarts, [true]);
 
-  tab(&mut h, Page::Advanced);
   click(&mut h, Id::of(KEEP));
   assert!(fake.log().settings.keep_in_clipboard);
   click(&mut h, Id::of(PASTE));
   assert!(!fake.log().settings.auto_paste);
   click(&mut h, Id::of(KEEP));
   assert!(fake.log().settings.keep_in_clipboard, "disabled while pasting is off");
+
+  tab(&mut h, Page::Advanced);
 
   click(&mut h, Id::of(RETENTION));
   click(&mut h, Id::of(RETENTION).key(("item", 1)));
