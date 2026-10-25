@@ -1063,6 +1063,7 @@ mod tests {
   }
 
   #[test]
+  #[cfg(target_os = "macos")] // afplay
   fn playback_of_a_missing_file_fails_on_its_thread() {
     let (tx, rx) = std::sync::mpsc::channel();
     let p = Playback::start(Path::new("/nonexistent/take.wav"), move || _ = tx.send(())).unwrap();
