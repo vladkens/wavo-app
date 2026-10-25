@@ -1,0 +1,4 @@
+# macOS 14 is the least nimbo runs on (its readme): the binary is built for it, here only, so make
+# and cargo build alike; the bundle's Info.plist takes it from the binary (scripts/bundle.py).
+[env]
+MACOSX_DEPLOYMENT_TARGET = "14.0"

@@ -1,0 +1,1792 @@
+// Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
+
+//! Dictation session: one "session" thread owns the state [`Machine`], the recorder, the engine,
+//! the history and the text output. The engine runs on its own thread, so the session answers in
+//! milliseconds in every state.
+//!
+//! - A recording with speech gets its entry (busy, without text) before the engine has it: a crash
+//!   leaves an entry to transcribe again, which the next start recovers before any recording.
+//! - Text is optional: no model, an engine error or nothing recognized leave the entry without
+//!   text. Such entries are transcribed by themselves once another model can transcribe: one at a
+//!   time, behind dictations, each by a model that has not tried it yet (`tried_model`).
+//! - A chosen model not on disk gives way to the first one found, with a warning; the choice stays.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+use std::{fs, mem};
+
+use anyhow::{Context, Result, anyhow, bail};
+use crossbeam_channel::{Receiver, Sender, at, bounded, never, select, unbounded};
+use nimbo::hotkey::Edge;
+use tracing::{debug, info, warn};
+use wavo::hub::{self, Hub, ModelInfo};
+
+use crate::audio::{self, Clip, Meter, Recorder, Source};
+use crate::engine::{self, Engine, EngineError, Loader, Wavo};
+use crate::history::{Entry, History, now_ms};
+use crate::settings::{self, Activation, Settings, language_name};
+
+/// The microphone stays open this long after the stop, for the end of a word the key-up cut.
+const POST_ROLL: Duration = Duration::from_millis(200);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+// MARK: Machine
+
+/// In [`Activation::HoldOrToggle`], a press held at least this long is push-to-talk; a shorter
+/// one is a tap that latches the recording on.
+pub const HOLD_THRESHOLD: Duration = Duration::from_millis(300);
+/// A press this soon after the previous one, with no release in between, is autorepeat even when
+/// the platform does not flag it (macOS repeats a key after at most ~1.8 s): a lost release costs
+/// at most this long.
+pub const REPEAT_WINDOW: Duration = Duration::from_secs(2);
+
+/// Number of a dictation, from 1.
+pub type Take = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+  Idle,
+  Recording { take: Take, hold: Hold },
+  Transcribing { take: Take },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+  /// The hotkey that started the recording is down since then: its release decides.
+  Held(Instant),
+  /// Records until the next press: a tap or toggle mode started it.
+  Latched,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Input {
+  KeyDown {
+    at: Instant,
+    repeat: bool,
+  },
+  KeyUp {
+    at: Instant,
+  },
+  /// Another key went down while the hotkey, a modifier alone, was held: the press was a chord
+  /// (⌥E). A recording it started is dropped without a trace.
+  KeyAborted,
+  /// Cancels a recording or its transcription.
+  Escape,
+  /// The microphone did not open.
+  RecordingFailed {
+    take: Take,
+  },
+  /// The microphone stopped by itself: what it recorded is transcribed.
+  MicStopped {
+    take: Take,
+  },
+  /// The dictation ended, delivered or not.
+  Finished {
+    take: Take,
+  },
+}
+
+impl From<Edge> for Input {
+  fn from(edge: Edge) -> Self {
+    match edge {
+      Edge::Down { at, repeat } => Input::KeyDown { at, repeat },
+      Edge::Up { at } => Input::KeyUp { at },
+      Edge::Escape => Input::Escape,
+      Edge::Aborted => Input::KeyAborted,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Effect {
+  StartRecording(Take),
+  StopRecording(Take),
+  CancelRecording(Take),
+  /// Like a cancel, without a word: the press was no hotkey press.
+  AbortRecording(Take),
+  CancelTranscription(Take),
+}
+
+/// A pure reducer: hotkey edges and what came of earlier effects in, the effect to carry out out.
+#[derive(Debug)]
+struct Machine {
+  activation: Activation,
+  state: State,
+  last_take: Take,
+  /// The last press or repeat of the hotkey, if no release came after it.
+  key_down: Option<Instant>,
+  /// The take the press in progress started, until its release.
+  pressed: Option<Take>,
+}
+
+impl Machine {
+  fn new(activation: Activation) -> Self {
+    Self { activation, state: State::Idle, last_take: 0, key_down: None, pressed: None }
+  }
+
+  fn handle(&mut self, input: Input) -> Option<Effect> {
+    use State::{Idle, Recording, Transcribing};
+    match (self.state, self.track_key(input)) {
+      (_, Input::KeyDown { repeat: true, .. }) => None,
+      (Idle, Input::KeyDown { at, .. }) => {
+        let hold = match self.activation {
+          Activation::Toggle => Hold::Latched,
+          Activation::HoldOrToggle | Activation::PushToTalk => Hold::Held(at),
+        };
+
+        self.last_take += 1;
+        self.pressed = Some(self.last_take);
+        self.state = Recording { take: self.last_take, hold };
+        Some(Effect::StartRecording(self.last_take))
+      }
+      // A second press before the release: the release to come decides.
+      (Recording { hold: Hold::Held(_), .. }, Input::KeyDown { .. }) => None,
+      (Recording { take, hold: Hold::Latched }, Input::KeyDown { .. }) => self.stop(take),
+      (Recording { take, hold: Hold::Held(since) }, Input::KeyUp { at }) => {
+        let tap = at.saturating_duration_since(since) < HOLD_THRESHOLD;
+        if self.activation == Activation::HoldOrToggle && tap {
+          self.state = Recording { take, hold: Hold::Latched };
+          return None;
+        }
+
+        self.stop(take)
+      }
+      (_, Input::KeyDown { .. } | Input::KeyUp { .. }) => None,
+
+      (Recording { take, .. }, Input::KeyAborted) if self.pressed == Some(take) => {
+        (self.state, self.pressed) = (Idle, None);
+        Some(Effect::AbortRecording(take))
+      }
+      (_, Input::KeyAborted) => {
+        self.pressed = None;
+        None
+      }
+
+      (Recording { take, .. }, Input::Escape) => {
+        self.state = Idle;
+        Some(Effect::CancelRecording(take))
+      }
+      (Transcribing { take }, Input::Escape) => {
+        self.state = Idle;
+        Some(Effect::CancelTranscription(take))
+      }
+      (Idle, Input::Escape) => None,
+
+      (Recording { take, .. }, Input::RecordingFailed { take: t })
+      | (Transcribing { take }, Input::Finished { take: t })
+        if t == take =>
+      {
+        self.state = Idle;
+        None
+      }
+      (Recording { take, .. }, Input::MicStopped { take: t }) if t == take => self.stop(take),
+      // Late news of a take that is no longer current.
+      (_, Input::RecordingFailed { .. } | Input::MicStopped { .. } | Input::Finished { .. }) => {
+        None
+      }
+    }
+  }
+
+  /// Flags an unflagged autorepeat (see [`REPEAT_WINDOW`]).
+  fn track_key(&mut self, input: Input) -> Input {
+    match input {
+      Input::KeyDown { at, repeat } => {
+        let held = self.key_down.is_some_and(|t| at.saturating_duration_since(t) < REPEAT_WINDOW);
+        self.key_down = Some(at);
+        Input::KeyDown { at, repeat: repeat || held }
+      }
+      Input::KeyUp { .. } => {
+        (self.key_down, self.pressed) = (None, None);
+        input
+      }
+      Input::KeyAborted => {
+        self.key_down = None;
+        input
+      }
+      _ => input,
+    }
+  }
+
+  fn stop(&mut self, take: Take) -> Option<Effect> {
+    self.state = State::Transcribing { take };
+    Some(Effect::StopRecording(take))
+  }
+}
+
+// MARK: Output
+
+/// Delivers dictated text to the app the person is typing in.
+pub trait TextOutput: Send + 'static {
+  /// Where the person is typing: the frontmost app and its focused window.
+  type Target: Send + 'static;
+
+  /// Taken when a recording starts.
+  fn target(&mut self) -> Self::Target;
+
+  /// Pastes `text` into `target`, unless the focus has moved since or pasting there is unsafe. The
+  /// clipboard is restored afterwards unless `keep_in_clipboard`.
+  fn paste(
+    &mut self,
+    text: &str,
+    target: &Self::Target,
+    keep_in_clipboard: bool,
+  ) -> Result<(), NotPasted>;
+
+  fn copy(&mut self, text: &str) -> Result<()>;
+}
+
+/// Why a text was not pasted. It is in the history either way.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NotPasted {
+  #[error("the focus moved to another window during the dictation")]
+  FocusChanged,
+  #[error("the focused field is a password field")]
+  SecureField,
+  #[error("{0}")]
+  Failed(String),
+}
+
+// MARK: Status
+
+#[derive(Clone)]
+pub struct Config {
+  /// Settings, history and recordings.
+  pub home: PathBuf,
+  pub hub: Hub,
+  pub loader: Arc<dyn Loader>,
+  /// A WAV file played instead of the microphone (`WAVO_FAKE_MIC`).
+  pub fake_mic: Option<PathBuf>,
+}
+
+impl Config {
+  pub fn from_env() -> Self {
+    Self {
+      home: crate::home(),
+      hub: Hub::new(),
+      loader: Arc::new(Wavo),
+      fake_mic: audio::fake_mic(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Status {
+  pub state: Phase,
+  pub recording: Option<RecordingStatus>,
+  pub engine: EngineStatus,
+  pub last: Option<Last>,
+  /// Entries being transcribed again.
+  pub retranscribing: Vec<i64>,
+  /// The last problem that is no entry's: the microphone did not open, a failed retranscription…
+  pub error: Option<String>,
+  /// Settings problems, the model fallback, and the current or last dictation's.
+  pub warnings: Vec<String>,
+  /// Why no model can transcribe now: recordings are kept for later.
+  pub no_model: Option<NoModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NoModel {
+  #[error("no model is downloaded")]
+  NoneDownloaded,
+  #[error("{model} is not on disk")]
+  Gone { model: String },
+  #[error("{model} could not be loaded: {error}")]
+  LoadFailed { model: String, error: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Phase {
+  #[default]
+  Idle,
+  Recording,
+  Transcribing,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordingStatus {
+  pub device: String,
+  pub seconds: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EngineStatus {
+  /// Model file name without extension, once an engine has one.
+  pub model: Option<String>,
+  pub phase: engine::Phase,
+  /// Where the loaded model runs.
+  pub device: Option<String>,
+  /// Finished and planned pieces of the job in progress.
+  pub progress: Option<(usize, usize)>,
+}
+
+/// How a dictation ended, shown once; the history keeps none of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Outcome {
+  Done,
+  /// The engine failed (the entry is kept without text) or the recording did not close.
+  #[default]
+  Failed,
+  /// Speech of which the engine made no text: a language the model does not know, most likely.
+  NoText,
+  /// Speech recorded while no model could transcribe it: kept without text.
+  NoModel,
+  /// No speech: the engine was not called, nothing is kept.
+  NoSpeech,
+  Cancelled,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Last {
+  pub take: Take,
+  pub entry: Option<i64>,
+  pub outcome: Outcome,
+  pub text: String,
+  pub error: Option<String>,
+  pub pasted: bool,
+  pub not_pasted: Option<String>,
+}
+
+/// What a platform shell shows, sent to the [`Observer`] after every change.
+#[derive(Debug, Clone)]
+pub struct Update {
+  pub status: Status,
+  pub settings: Settings,
+  /// The level of the recording in progress.
+  pub meter: Option<Meter>,
+  /// Moves on every change of the history: a history window reloads then.
+  pub history: u64,
+}
+
+/// Called on the session thread; it must return at once.
+pub type Observer = Box<dyn FnMut(Update) + Send>;
+
+// MARK: Session
+
+/// Dropping it ends the session thread: a recording in progress is closed and kept (the next
+/// start adopts it).
+pub struct Session {
+  handle: Handle,
+  thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+pub struct Handle(Sender<Msg>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+  /// Transcribe an entry's recording again; new text replaces the text.
+  Retranscribe(i64),
+  /// Put back the text an entry's last transcription replaced.
+  UndoTranscribe(i64),
+  Delete(i64),
+  /// Free the model's memory, after the job in progress.
+  Unload,
+}
+
+enum Msg {
+  Input(Input),
+  Request(Request, Sender<Result<(), String>>),
+  Edit(Box<dyn FnOnce(&mut Settings) + Send>),
+  CheckModel,
+  /// The model at this path is prepared for the Neural Engine now.
+  Prepared(PathBuf),
+  Quit,
+}
+
+impl Session {
+  /// Loads the settings and the history in `config.home` and starts the session thread; the
+  /// observer's first update comes once the history is recovered.
+  pub fn start<O: TextOutput>(config: Config, output: O, observer: Observer) -> Result<Self> {
+    fs::create_dir_all(&config.home)
+      .with_context(|| format!("create {}", config.home.display()))?;
+    let (settings, warning) = Settings::load(&config.home.join(settings::FILE));
+    if let Some(w) = &warning {
+      warn!("{w}");
+    }
+
+    let history = History::open(&config.home)?;
+    let (tx, rx) = unbounded();
+    let (events_tx, events) = unbounded();
+    let controller = Controller {
+      tx: tx.clone(),
+      machine: Machine::new(settings.activation),
+      settings,
+      history,
+      output,
+      config,
+      engine: None,
+      events_tx,
+      events,
+      next_job: 0,
+      dictation: None,
+      last: None,
+      last_warnings: Vec::new(),
+      retranscribing: Vec::new(),
+      untried: false,
+      model_path: None,
+      model_error: None,
+      model_fallback: None,
+      error: None,
+      settings_warning: warning,
+      observer,
+      published: None,
+    };
+
+    let spawn = thread::Builder::new().name("session".into()).spawn(move || controller.run(rx));
+    let thread = spawn.context("spawn the session thread")?;
+    Ok(Self { handle: Handle(tx), thread: Some(thread) })
+  }
+
+  pub fn handle(&self) -> Handle {
+    self.handle.clone()
+  }
+}
+
+impl Drop for Session {
+  fn drop(&mut self) {
+    let _ = self.handle.0.send(Msg::Quit);
+    if let Some(thread) = self.thread.take() {
+      let _ = thread.join();
+    }
+  }
+}
+
+impl Handle {
+  pub fn input(&self, input: Input) {
+    let _ = self.0.send(Msg::Input(input));
+  }
+
+  /// Edits apply in order to the latest settings, which are saved and used from then on.
+  pub fn edit_settings(&self, edit: impl FnOnce(&mut Settings) + Send + 'static) {
+    let _ = self.0.send(Msg::Edit(Box::new(edit)));
+  }
+
+  /// The models on disk changed: which one transcribes is looked at again.
+  pub fn check_model(&self) {
+    let _ = self.0.send(Msg::CheckModel);
+  }
+
+  pub fn request(&self, request: Request) -> Result<(), String> {
+    let (reply, rx) = bounded(1);
+    if self.0.send(Msg::Request(request, reply)).is_err() {
+      return Err("the session has stopped".into());
+    }
+
+    rx.recv_timeout(REQUEST_TIMEOUT).unwrap_or_else(|_| Err("the session did not answer".into()))
+  }
+}
+
+// MARK: Controller
+
+/// The engine for the model that transcribes now.
+struct Loaded {
+  /// The model file's name without extension.
+  name: String,
+  /// wavo's, unless the model is a file of the person's own.
+  info: Option<&'static ModelInfo>,
+  path: PathBuf,
+  engine: Engine,
+}
+
+struct Job {
+  id: u64,
+  model: String,
+  language: Option<String>,
+}
+
+struct Retranscription {
+  job: Job,
+  entry: i64,
+  /// Started by itself, not asked for: its failure is no news.
+  auto: bool,
+}
+
+struct Dictation<T> {
+  /// How it ends, as it goes.
+  last: Last,
+  target: Option<T>,
+  /// Unix ms.
+  created_at: i64,
+  audio: String,
+  started: Instant,
+  /// The post-roll runs from then until the recorder closes.
+  stopped: Option<Instant>,
+  recorder: Option<Recorder>,
+  /// The engine loads the model for it.
+  prewarmed: bool,
+  job: Option<Job>,
+  duration_ms: i64,
+  warnings: Vec<String>,
+}
+
+struct Controller<O: TextOutput> {
+  /// Its own inbox, for what background threads tell it.
+  tx: Sender<Msg>,
+  config: Config,
+  machine: Machine,
+  settings: Settings,
+  history: History,
+  output: O,
+  engine: Option<Loaded>,
+  events_tx: Sender<engine::Event>,
+  events: Receiver<engine::Event>,
+  next_job: u64,
+  dictation: Option<Dictation<O::Target>>,
+  last: Option<Last>,
+  last_warnings: Vec<String>,
+  retranscribing: Vec<Retranscription>,
+  /// Entries without text may wait for the model now found.
+  untried: bool,
+  /// The model [`Controller::check_model`] last found.
+  model_path: Option<PathBuf>,
+  model_error: Option<NoModel>,
+  /// The warning of a chosen model not on disk while another one transcribes.
+  model_fallback: Option<String>,
+  error: Option<String>,
+  settings_warning: Option<String>,
+  observer: Observer,
+  /// The last update's status (without the recording's time), settings and history changes.
+  published: Option<(Status, Settings, u64)>,
+}
+
+impl<O: TextOutput> Controller<O> {
+  fn run(mut self, rx: Receiver<Msg>) {
+    // What a crash left, before any recording makes new files; the model found now is no new one.
+    let _ = self.check_model();
+    self.untried = false;
+    self.prepare();
+    if let Err(e) = self.history.recover(now_ms()) {
+      warn!("history recovery: {e:#}");
+    }
+
+    self.cleanup();
+    self.publish();
+    let events = self.events.clone();
+    loop {
+      let recorder = self.dictation.as_ref().and_then(|d| Some((d.recorder.as_ref()?, d.stopped)));
+      let failures = recorder.map_or_else(never, |(r, _)| r.failures().clone());
+      let post_roll = match recorder {
+        Some((_, Some(stopped))) => at(stopped + POST_ROLL),
+        _ => never(),
+      };
+
+      select! {
+        recv(rx) -> msg => match msg {
+          Ok(Msg::Quit) | Err(_) => break,
+          Ok(msg) => self.on_msg(msg),
+        },
+        recv(failures) -> failure => self.on_mic_failure(failure.unwrap_or_default()),
+        recv(post_roll) -> _ => self.transcribe(),
+        recv(events) -> event => self.on_engine(event.unwrap()),
+      }
+
+      self.transcribe_untried();
+      self.publish();
+    }
+  }
+
+  fn publish(&mut self) {
+    let status = self.status();
+    let mut key = status.clone();
+    if let Some(r) = key.recording.as_mut() {
+      r.seconds = 0.0;
+    }
+
+    let key = (key, self.settings.clone(), self.history.db.changes());
+    if self.published.as_ref() == Some(&key) {
+      return;
+    }
+
+    let history = key.2;
+    self.published = Some(key);
+    let meter = self.dictation.as_ref().and_then(|d| d.recorder.as_ref()).map(Recorder::meter);
+    (self.observer)(Update { status, settings: self.settings.clone(), meter, history });
+  }
+
+  fn on_msg(&mut self, msg: Msg) {
+    match msg {
+      Msg::Input(input) => {
+        // A press is a new attempt: the last one's error goes.
+        if matches!(input, Input::KeyDown { repeat: false, .. }) {
+          self.error = None;
+        }
+
+        self.feed(input);
+      }
+      Msg::Request(request, reply) => {
+        let _ = reply.send(self.on_request(request).map_err(|e| format!("{e:#}")));
+      }
+      Msg::Edit(edit) => {
+        let mut settings = self.settings.clone();
+        edit(&mut settings);
+        self.apply_settings(settings);
+      }
+      Msg::CheckModel => {
+        let path = self.check_model().ok().map(|(path, _)| path);
+        if self.engine.as_ref().is_some_and(|l| Some(&l.path) != path.as_ref()) {
+          self.engine = None;
+        }
+
+        self.prepare();
+      }
+      Msg::Prepared(path) => {
+        // Loaded on the GPU meanwhile: the next job loads it on the Neural Engine, in ~0.1 s.
+        let on_gpu = |l: &Loaded| {
+          let device = l.engine.status().device.unwrap_or_default();
+          l.path == path && !device.contains("Neural Engine")
+        };
+
+        if self.settings.neural_engine && self.engine.as_ref().is_some_and(on_gpu) {
+          self.engine = None;
+        }
+      }
+      Msg::Quit => unreachable!("handled by the loop"),
+    }
+  }
+
+  fn on_request(&mut self, request: Request) -> Result<()> {
+    match request {
+      Request::Retranscribe(id) => {
+        let entry =
+          self.history.db.get_entry(id)?.ok_or_else(|| anyhow!("no history entry {id}"))?;
+        self.retranscribe(entry, false)
+      }
+      Request::UndoTranscribe(id) => {
+        if self.is_busy(id) {
+          bail!("entry {id} is being transcribed");
+        }
+
+        if !self.history.db.update_undo(id)? {
+          bail!("entry {id} has no text before its last transcription");
+        }
+
+        Ok(())
+      }
+      Request::Delete(id) => self.delete(id),
+      Request::Unload => {
+        info!("the model is unloaded on request");
+        self.untried = false;
+        if let Some(l) = &self.engine {
+          l.engine.unload();
+        }
+
+        Ok(())
+      }
+    }
+  }
+
+  fn feed(&mut self, input: Input) {
+    let Some(effect) = self.machine.handle(input) else { return };
+    debug!(?input, ?effect, "session");
+    match effect {
+      Effect::StartRecording(take) => self.start_recording(take),
+      Effect::StopRecording(_) => self.stop_recording(),
+      Effect::CancelRecording(_) => self.cancel(),
+      Effect::AbortRecording(_) => {
+        // The last dictation and its warnings stay the ones before.
+        let (last, warnings) = (self.last.take(), mem::take(&mut self.last_warnings));
+        self.cancel();
+        (self.last, self.last_warnings) = (last, warnings);
+      }
+      Effect::CancelTranscription(_) => self.cancel(),
+    }
+  }
+
+  fn apply_settings(&mut self, new: Settings) {
+    if new == self.settings {
+      return;
+    }
+
+    if let Err(e) = new.save(&self.config.home.join(settings::FILE)) {
+      warn!("{e:#}");
+      self.error = Some(format!("could not save the settings: {e:#}"));
+    }
+
+    let old = mem::replace(&mut self.settings, new);
+    self.machine.activation = self.settings.activation;
+    if old.model != self.settings.model
+      || old.unload_after_minutes != self.settings.unload_after_minutes
+      || old.neural_engine != self.settings.neural_engine
+    {
+      // Its thread finishes its jobs, then drops the model.
+      self.engine = None;
+    }
+
+    if old.model != self.settings.model {
+      let _ = self.check_model();
+    }
+
+    if old.model != self.settings.model || old.neural_engine != self.settings.neural_engine {
+      self.prepare();
+    }
+
+    if old.history_retention != self.settings.history_retention {
+      self.cleanup();
+    }
+  }
+
+  // MARK: Models
+
+  /// The model to transcribe with, from the files on disk and the choice, without loading it, and
+  /// wavo's info on it; or why there is none.
+  fn check_model(&mut self) -> Result<(PathBuf, Option<&'static ModelInfo>), NoModel> {
+    let chosen = self.settings.model.clone();
+    if let Some(chosen) = &chosen
+      && let Ok(path) = self.config.hub.resolve(chosen)
+    {
+      (self.model_error, self.model_fallback) = (None, None);
+      return Ok((self.found_model(path), hub::lookup(chosen).ok()));
+    }
+
+    let error = match (self.config.hub.downloaded().into_iter().next(), chosen) {
+      (Some((info, path)), chosen) => {
+        let note = chosen
+          .map(|c| format!("{} is not on disk: {} transcribes instead", label(&c), info.full_name));
+        (self.model_error, self.model_fallback) = (None, note);
+        return Ok((self.found_model(path), Some(info)));
+      }
+      (None, Some(chosen)) => NoModel::Gone { model: label(&chosen) },
+      (None, None) => NoModel::NoneDownloaded,
+    };
+
+    (self.model_path, self.model_fallback) = (None, None);
+    self.model_error = Some(error.clone());
+    Err(error)
+  }
+
+  /// Another model than before may transcribe the entries without text.
+  fn found_model(&mut self, path: PathBuf) -> PathBuf {
+    if self.model_path.as_ref() != Some(&path) {
+      self.untried = true;
+      self.model_path = Some(path.clone());
+    }
+
+    path
+  }
+
+  /// The model found, prepared for the Neural Engine ahead of its first dictation, as the app
+  /// starts or another model is found: a new app binary compiles it again once.
+  fn prepare(&self) {
+    let Some(path) = &self.model_path else { return };
+    if !self.settings.neural_engine {
+      return;
+    }
+
+    let (tx, prepared) = (self.tx.clone(), path.clone());
+    self.config.loader.prepare(path, Box::new(move || _ = tx.send(Msg::Prepared(prepared))));
+  }
+
+  /// None on disk, or one that does not load.
+  fn no_model(&self) -> Option<NoModel> {
+    self.model_error.clone().or_else(|| {
+      let loaded = self.engine.as_ref()?;
+      let error = loaded.engine.status().load_error?;
+      Some(NoModel::LoadFailed { model: loaded_label(loaded.info, &loaded.name), error })
+    })
+  }
+
+  /// The engine of the model to transcribe with: one of another model goes.
+  fn engine(&mut self) -> Result<&Loaded, NoModel> {
+    let (path, info) = self.check_model()?;
+    if self.engine.as_ref().is_some_and(|l| l.path != path) {
+      self.engine = None;
+    }
+
+    let loaded = self.engine.get_or_insert_with(|| {
+      let name = file_stem(&path);
+      info!("model {name} ({})", path.display());
+      let (loader, ane) = (self.config.loader.clone(), self.settings.neural_engine);
+      let (unload_after, events) = (self.settings.unload_after(), self.events_tx.clone());
+      let engine = Engine::start(loader, path.clone(), ane, unload_after, events);
+      Loaded { name, info, path, engine }
+    });
+
+    Ok(loaded)
+  }
+
+  fn next_job(&mut self, model: String, language: Option<String>) -> Job {
+    self.next_job += 1;
+    Job { id: self.next_job, model, language }
+  }
+
+  fn on_engine(&mut self, event: engine::Event) {
+    let engine::Event::Done(id, result) = event else { return };
+    if self.dictation.as_ref().and_then(|d| d.job.as_ref()).is_some_and(|j| j.id == id) {
+      return self.on_transcribed(result);
+    }
+
+    if let Some(at) = self.retranscribing.iter().position(|r| r.job.id == id) {
+      let r = self.retranscribing.remove(at);
+      self.on_retranscribed(r, result);
+    }
+  }
+
+  /// The outcome, text and error of an engine's result.
+  fn outcome(&self, result: Result<String, EngineError>) -> (Outcome, String, Option<String>) {
+    match result {
+      Ok(text) if text.trim().is_empty() => {
+        let note = self.engine.as_ref().and_then(|l| l.info).and_then(understands_only);
+        (Outcome::NoText, String::new(), note)
+      }
+      Ok(text) => (Outcome::Done, text.trim().to_owned(), None),
+      Err(EngineError::Load(error)) => {
+        let model =
+          self.engine.as_ref().map_or("the model".into(), |l| loaded_label(l.info, &l.name));
+        (Outcome::NoModel, String::new(), Some(NoModel::LoadFailed { model, error }.to_string()))
+      }
+      Err(e) => (Outcome::Failed, String::new(), Some(e.to_string())),
+    }
+  }
+
+  // MARK: Dictation
+
+  /// The microphone first, and the shell shows the recording at once; then the focus check (up to
+  /// a second) and the engine loads the model while the person speaks.
+  fn start_recording(&mut self, take: Take) {
+    let started = Instant::now();
+    let created_at = now_ms();
+    let (audio, wav) = self.history.recordings.new_file(created_at);
+    let source = Source::new(self.config.fake_mic.clone(), self.settings.microphone.clone());
+    let recorder = match Recorder::start(&source, &wav) {
+      Ok(recorder) => recorder,
+      Err(e) => {
+        let error = format!("could not start recording: {e:#}");
+        warn!("dictation {take}: {error}");
+        self.error = Some(error);
+        // Its day folder goes if nothing else is in it.
+        let _ = self.history.recordings.remove(&audio);
+        return self.feed(Input::RecordingFailed { take });
+      }
+    };
+
+    info!("dictation {take}: recording from {:?}", recorder.device());
+    self.dictation = Some(Dictation {
+      last: Last { take, ..Last::default() },
+      target: None,
+      created_at,
+      audio,
+      started,
+      stopped: None,
+      warnings: recorder.warning().map(str::to_owned).into_iter().collect(),
+      recorder: Some(recorder),
+      prewarmed: false,
+      job: None,
+      duration_ms: 0,
+    });
+    self.publish();
+
+    let target = self.output.target();
+    debug!("dictation {take}: focus noted after {:.0?}", started.elapsed());
+    self.dictation.as_mut().unwrap().target = Some(target);
+    match self.engine() {
+      Ok(loaded) => loaded.engine.prewarm(),
+      Err(e) => return info!("dictation {take}: recording without a model: {e}"),
+    }
+
+    self.dictation.as_mut().unwrap().prewarmed = true;
+  }
+
+  fn stop_recording(&mut self) {
+    let d = self.dictation.as_mut().unwrap();
+    d.stopped = Some(Instant::now());
+    if d.recorder.as_ref().is_some_and(Recorder::failed) {
+      self.transcribe();
+    }
+  }
+
+  fn on_mic_failure(&mut self, failure: String) {
+    let d = self.dictation.as_ref().unwrap();
+    let take = d.last.take;
+    warn!("dictation {take}: the recording stopped: {failure}");
+    match d.stopped {
+      Some(_) => self.transcribe(),
+      None => self.feed(Input::MicStopped { take }),
+    }
+  }
+
+  /// Closes the microphone and hands the recording to the engine: with speech, its entry first.
+  fn transcribe(&mut self) {
+    let d = self.dictation.as_mut().unwrap();
+    let take = d.last.take;
+    let recorder = d.recorder.take().unwrap();
+    let rec = match recorder.stop() {
+      Ok(rec) => rec,
+      Err(e) => {
+        self.discard();
+        return self.end(Outcome::Failed, Some(format!("the recording failed: {e:#}")));
+      }
+    };
+
+    for w in rec.warnings {
+      if !d.warnings.contains(&w) {
+        warn!("dictation {take}: {w}");
+        d.warnings.push(w);
+      }
+    }
+
+    d.duration_ms = rec.clip.duration_ms();
+    let Some(input) = rec.clip.engine_input() else {
+      self.discard();
+      return self.end(Outcome::NoSpeech, None);
+    };
+
+    if !rec.saved {
+      // Transcribed and pasted all the same, but no entry keeps a broken file.
+      warn!("dictation {take}: its recording could not be saved: no entry");
+      self.discard();
+    }
+
+    let language = self.settings.engine_language();
+    let model = self.engine().map(|l| l.name.clone());
+    let entry = if rec.saved { self.add_entry(model.as_deref().ok()) } else { None };
+    self.dictation.as_mut().unwrap().last.entry = entry;
+    let model = match model {
+      Ok(model) => model,
+      Err(e) => return self.end(Outcome::NoModel, Some(e.to_string())),
+    };
+
+    let job = self.next_job(model, language.clone());
+    self.engine.as_ref().unwrap().engine.transcribe(job.id, input.pcm, language, false);
+    self.dictation.as_mut().unwrap().job = Some(job);
+  }
+
+  /// The entry of the dictation: without text, busy if a model transcribes it.
+  fn add_entry(&self, model: Option<&str>) -> Option<i64> {
+    let d = self.dictation.as_ref().unwrap();
+    let entry = Entry {
+      created_at: d.created_at,
+      duration_ms: d.duration_ms,
+      audio_path: Some(d.audio.clone()),
+      tried_model: model.map(str::to_owned),
+      busy: model.is_some(),
+      ..Entry::default()
+    };
+
+    // The text still reaches the person; the recording becomes an entry on the next start.
+    let ids = self.history.db.insert(&[entry]).inspect_err(|e| warn!("history: {e:#}"));
+    ids.ok().map(|ids| ids[0])
+  }
+
+  fn on_transcribed(&mut self, result: Result<String, EngineError>) {
+    let (outcome, text, error) = self.outcome(result);
+    let d = self.dictation.as_mut().unwrap();
+    let job = d.job.take().unwrap();
+    match (outcome, d.last.entry) {
+      (Outcome::Done, Some(id)) => {
+        let language = job.language.as_deref();
+        log_history(self.history.db.update_text(id, &text, &job.model, language));
+      }
+      // The model did not load: it tried nothing, and takes the entry by itself once it does.
+      (Outcome::NoModel, Some(id)) => {
+        log_history(self.history.db.mark_untried(id));
+        self.untried = true;
+      }
+      (_, Some(id)) => log_history(self.history.db.mark_idle(id)),
+      (_, None) => {}
+    }
+
+    if let Some(e) = &error {
+      warn!("dictation {}: {outcome:?}: {e}", d.last.take);
+    }
+
+    (d.last.outcome, d.last.text, d.last.error) = (outcome, text, error);
+    if outcome == Outcome::Done {
+      self.deliver();
+    }
+
+    let take = self.dictation.as_ref().unwrap().last.take;
+    self.feed(Input::Finished { take });
+    self.complete();
+  }
+
+  fn deliver(&mut self) {
+    let d = self.dictation.as_mut().unwrap();
+    let auto_paste = self.settings.auto_paste;
+    let refused = match (&d.target, auto_paste) {
+      (Some(target), true) => {
+        let keep = self.settings.keep_in_clipboard;
+        self.output.paste(&d.last.text, target, keep).err().map(|e| e.to_string())
+      }
+      (None, true) => Some("the app in focus when the dictation started is unknown".into()),
+      // Without auto-paste the clipboard is how the text gets out.
+      (_, false) => Some(match self.output.copy(&d.last.text) {
+        Ok(()) => "auto-paste is off; the text is on the clipboard".to_owned(),
+        Err(e) => format!("auto-paste is off, and copying failed: {e:#}"),
+      }),
+    };
+
+    if let Some(why) = &refused {
+      info!("dictation {}: not pasted: {why}", d.last.take);
+    }
+
+    (d.last.pasted, d.last.not_pasted) = (refused.is_none(), refused);
+    if let Some(id) = d.last.entry {
+      // Without auto-paste nothing was refused: the history keeps no reason.
+      let why = d.last.not_pasted.as_deref().filter(|_| auto_paste);
+      log_history(self.history.db.mark_pasted(id, d.last.pasted, why));
+    }
+  }
+
+  /// Ends the dictation before it reached the engine.
+  fn end(&mut self, outcome: Outcome, error: Option<String>) {
+    let d = self.dictation.as_mut().unwrap();
+    if let Some(e) = &error {
+      warn!("dictation {}: {e}", d.last.take);
+    }
+
+    (d.last.outcome, d.last.error) = (outcome, error);
+    let take = d.last.take;
+    self.feed(Input::Finished { take });
+    self.complete();
+  }
+
+  /// The person cancelled, while recording or transcribing: nothing of the dictation is kept.
+  fn cancel(&mut self) {
+    let d = self.dictation.as_mut().unwrap();
+    if let Some(recorder) = d.recorder.take() {
+      let _ = recorder.stop();
+    }
+
+    if let (Some(job), Some(loaded)) = (d.job.take(), &self.engine) {
+      loaded.engine.cancel(job.id);
+    }
+
+    d.last.outcome = Outcome::Cancelled;
+    self.discard();
+    self.complete();
+  }
+
+  /// Nothing of the dictation is kept: its entry, if it has one, and its recording go.
+  fn discard(&mut self) {
+    let d = self.dictation.as_mut().unwrap();
+    if let Err(e) = self.history.recordings.remove(&d.audio) {
+      warn!("dictation {}: {e:#}", d.last.take);
+    }
+
+    if let Some(id) = d.last.entry.take() {
+      log_history(self.history.db.delete_entries(&[id]));
+    }
+  }
+
+  /// The dictation becomes the last one, and the retention runs.
+  fn complete(&mut self) {
+    let d = self.dictation.take().unwrap();
+    if d.prewarmed
+      && let Some(loaded) = &self.engine
+    {
+      loaded.engine.release();
+    }
+
+    let after_stop = d.stopped.map(|s| format!(", {:.0?} after the stop", s.elapsed()));
+    let seconds = d.duration_ms as f64 / 1000.0;
+    let (take, outcome) = (d.last.take, d.last.outcome);
+    info!("dictation {take}: {outcome:?} ({seconds:.1} s{})", after_stop.unwrap_or_default());
+    (self.last, self.last_warnings) = (Some(d.last), d.warnings);
+    self.cleanup();
+  }
+
+  // MARK: History
+
+  fn is_busy(&self, id: i64) -> bool {
+    let current = self.dictation.as_ref().is_some_and(|d| d.last.entry == Some(id));
+    current || self.retranscribing.iter().any(|r| r.entry == id)
+  }
+
+  /// `entry`'s recording through the engine again, behind dictations. One without text whose
+  /// recording has no speech (or is gone) is deleted: there is nothing to keep.
+  fn retranscribe(&mut self, entry: Entry, auto: bool) -> Result<()> {
+    let id = entry.id;
+    if entry.busy || self.is_busy(id) {
+      bail!("entry {id} is being transcribed");
+    }
+
+    let clip = match self.history.audio_file(&entry) {
+      Some(wav) => audio::read_wav(&wav).map(Clip::analyze),
+      None => Err(anyhow!("the recording of entry {id} is gone")),
+    };
+
+    let Some(input) = clip.as_ref().ok().and_then(Clip::engine_input) else {
+      let why = clip.map_or_else(|e| format!("{e:#}"), |_| "no speech in its recording".into());
+      if !entry.text.is_empty() {
+        bail!("entry {id}: {why}; it stays as it is");
+      }
+
+      info!("entry {id}: {why}; it goes");
+      return self.delete(id);
+    };
+
+    let language = self.settings.engine_language();
+    let model = self.engine()?.name.clone();
+    // Marked tried before it runs: a crash or a failure is not tried again by the same model.
+    self.history.db.mark_busy(id, &model)?;
+    info!("entry {id}: transcribing {:.1} s again with {model}", input.seconds());
+    let job = self.next_job(model, language.clone());
+    self.engine.as_ref().unwrap().engine.transcribe(job.id, input.pcm, language, true);
+    self.retranscribing.push(Retranscription { job, entry: id, auto });
+    Ok(())
+  }
+
+  /// One entry without text at a time, when no dictation runs, by a model that has not tried it;
+  /// while the model does not load they wait, for the next dictation that loads it.
+  fn transcribe_untried(&mut self) {
+    while self.untried
+      && self.dictation.is_none()
+      && self.retranscribing.is_empty()
+      && self.no_model().is_none()
+    {
+      let Some(model) = self.model_path.as_deref().map(file_stem) else { return };
+      let entry = self.history.db.get_untried(&model).inspect_err(|e| warn!("history: {e:#}"));
+      let Some(entry) = entry.ok().flatten() else {
+        self.untried = false;
+        return;
+      };
+
+      let id = entry.id;
+      if let Err(e) = self.retranscribe(entry, true) {
+        warn!("entry {id}: {e:#}");
+        self.untried = false;
+      }
+    }
+  }
+
+  fn on_retranscribed(&mut self, r: Retranscription, result: Result<String, EngineError>) {
+    let (outcome, text, error) = self.outcome(result);
+    info!("entry {}: transcribed again: {outcome:?}", r.entry);
+    match outcome {
+      Outcome::Done => {
+        let language = r.job.language.as_deref();
+        log_history(self.history.db.update_text(r.entry, &text, &r.job.model, language));
+      }
+      // Tried again by itself once the model loads (see transcribe_untried).
+      Outcome::NoModel if r.auto => log_history(self.history.db.mark_untried(r.entry)),
+      _ => log_history(self.history.db.mark_idle(r.entry)),
+    }
+
+    if r.auto {
+      self.cleanup();
+    } else if outcome != Outcome::Done {
+      let why = match (outcome, error) {
+        (Outcome::NoText, None) => "nothing recognized".into(),
+        (Outcome::NoText, Some(note)) => format!("nothing recognized: {note}"),
+        (_, error) => error.unwrap_or_default(),
+      };
+
+      self.error = Some(format!("entry {} could not be transcribed again: {why}", r.entry));
+    }
+  }
+
+  /// Deletes entry `id` with its recording; the last dictation's text goes with it.
+  fn delete(&mut self, id: i64) -> Result<()> {
+    if self.is_busy(id) {
+      bail!("entry {id} is being transcribed");
+    }
+
+    if !self.history.delete(id)? {
+      bail!("no history entry {id}");
+    }
+
+    info!("entry {id}: deleted with its recording");
+    if self.last.as_ref().is_some_and(|l| l.entry == Some(id)) {
+      self.last = None;
+    }
+
+    Ok(())
+  }
+
+  /// The retention spares entries without text while no model can transcribe them, or while they
+  /// are being transcribed by themselves.
+  fn cleanup(&mut self) {
+    let spare = self.no_model().is_some() || self.untried;
+    match self.history.cleanup(self.settings.history_retention, now_ms(), spare) {
+      Ok(0) => {}
+      Ok(n) => info!("history: {n} old entries removed"),
+      Err(e) => warn!("history cleanup: {e:#}"),
+    }
+  }
+
+  fn status(&self) -> Status {
+    let d = self.dictation.as_ref();
+    let mut warnings: Vec<String> =
+      self.settings_warning.iter().chain(&self.model_fallback).cloned().collect();
+    warnings.extend(d.map_or(&self.last_warnings, |d| &d.warnings).iter().cloned());
+    let engine = self.engine.as_ref().map_or_else(EngineStatus::default, |l| {
+      let s = l.engine.status();
+      let model = Some(l.name.clone());
+      EngineStatus { model, phase: s.phase, device: s.device, progress: s.progress }
+    });
+
+    Status {
+      state: match self.machine.state {
+        State::Idle => Phase::Idle,
+        State::Recording { .. } => Phase::Recording,
+        State::Transcribing { .. } => Phase::Transcribing,
+      },
+      recording: d.and_then(|d| {
+        let device = d.recorder.as_ref()?.device().to_owned();
+        Some(RecordingStatus { device, seconds: d.started.elapsed().as_secs_f64() })
+      }),
+      engine,
+      last: self.last.clone(),
+      retranscribing: self.retranscribing.iter().map(|r| r.entry).collect(),
+      error: self.error.clone(),
+      warnings,
+      no_model: self.no_model(),
+    }
+  }
+}
+
+fn log_history(result: Result<()>) {
+  if let Err(e) = result {
+    warn!("history: {e:#}");
+  }
+}
+
+/// A model file's name without extension, as entries keep it: `gigaam-v3-e2e-rnnt-Q8_0`.
+fn file_stem(path: &Path) -> String {
+  path.file_stem().map_or_else(|| path.display().to_string(), |s| s.to_string_lossy().into())
+}
+
+/// What a model choice (wavo's name, or a file's path) is called, also once its file is gone:
+/// wavo's full name (`parakeet-tdt-0.6b-v3`), else the file's name without `.gguf`.
+pub fn label(choice: &str) -> String {
+  if let Ok(info) = hub::lookup(choice) {
+    return info.full_name.into();
+  }
+
+  let file = Path::new(choice).file_name().and_then(|f| f.to_str()).unwrap_or(choice);
+  file.strip_suffix(".gguf").unwrap_or(file).to_owned()
+}
+
+fn loaded_label(info: Option<&ModelInfo>, name: &str) -> String {
+  info.map_or_else(|| name.to_owned(), |m| m.full_name.to_owned())
+}
+
+/// `parakeet-tdt-0.6b-v2 understands English only`, for a model meant for one language.
+fn understands_only(info: &ModelInfo) -> Option<String> {
+  let [code] = info.langs else { return None };
+  Some(format!("{} understands {} only", info.full_name, language_name(code)))
+}
+
+#[cfg(test)]
+mod tests {
+  use std::sync::Mutex;
+
+  use super::*;
+  use crate::audio::SAMPLE_RATE;
+  use crate::history::{RECORDINGS_DIR, Retention};
+  use crate::testing::{FakeModels, TempDir, download, poll, tone, wav_count, write_wav};
+
+  // MARK: Machine
+
+  struct Drive {
+    m: Machine,
+    t0: Instant,
+  }
+
+  impl Drive {
+    fn new(activation: Activation) -> Self {
+      Self { m: Machine::new(activation), t0: Instant::now() }
+    }
+
+    fn down(&mut self, ms: u64) -> Option<Effect> {
+      let at = self.t0 + Duration::from_millis(ms);
+      self.m.handle(Input::KeyDown { at, repeat: false })
+    }
+
+    fn repeat(&mut self, ms: u64) -> Option<Effect> {
+      let at = self.t0 + Duration::from_millis(ms);
+      self.m.handle(Input::KeyDown { at, repeat: true })
+    }
+
+    fn up(&mut self, ms: u64) -> Option<Effect> {
+      self.m.handle(Input::KeyUp { at: self.t0 + Duration::from_millis(ms) })
+    }
+
+    fn latched(&self) -> bool {
+      matches!(self.m.state, State::Recording { hold: Hold::Latched, .. })
+    }
+
+    fn finish(&mut self, take: Take) {
+      assert_eq!(self.m.handle(Input::Finished { take }), None);
+      assert_eq!(self.m.state, State::Idle);
+    }
+  }
+
+  use Effect::{
+    AbortRecording, CancelRecording, CancelTranscription, StartRecording, StopRecording,
+  };
+
+  #[test]
+  fn hold_or_toggle_holds_or_latches_on_a_tap() {
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    assert_eq!(d.down(0), Some(StartRecording(1)));
+    assert_eq!(d.up(300), Some(StopRecording(1)), "a hold of the threshold");
+    d.finish(1);
+    assert_eq!(d.down(1_000), Some(StartRecording(2)));
+    assert_eq!(d.up(1_299), None, "a tap latches");
+    assert!(d.latched());
+    assert_eq!(d.down(4_000), Some(StopRecording(2)), "the next press stops");
+    assert_eq!(d.up(6_000), None);
+  }
+
+  #[test]
+  fn push_to_talk_and_toggle() {
+    let mut d = Drive::new(Activation::PushToTalk);
+    assert_eq!(d.down(0), Some(StartRecording(1)));
+    assert_eq!(d.up(40), Some(StopRecording(1)), "however short");
+
+    let mut d = Drive::new(Activation::Toggle);
+    assert_eq!(d.down(0), Some(StartRecording(1)));
+    assert_eq!(d.up(2_000), None, "a long hold changes nothing");
+    assert_eq!(d.down(5_000), Some(StopRecording(1)));
+    assert_eq!(d.down(5_100), None, "transcribing ignores the hotkey");
+  }
+
+  #[test]
+  fn autorepeat_flagged_or_not_is_ignored() {
+    let mut d = Drive::new(Activation::Toggle);
+    d.down(0);
+    assert_eq!(d.repeat(600), None);
+    for ms in (700..4_000).step_by(33) {
+      assert_eq!(d.down(ms), None, "unflagged repeat at {ms} ms");
+    }
+
+    assert!(d.latched());
+    d.up(4_000);
+    assert_eq!(d.down(4_200), Some(StopRecording(1)), "a press after a release counts");
+
+    // A release that never came costs at most the window.
+    let mut d = Drive::new(Activation::Toggle);
+    d.down(0);
+    assert_eq!(d.down(1_000), None);
+    let later = REPEAT_WINDOW.as_millis() as u64 + 1_000;
+    assert_eq!(d.down(later), Some(StopRecording(1)));
+  }
+
+  #[test]
+  fn escape_cancels_a_recording_or_its_transcription_and_late_news_is_ignored() {
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    assert_eq!(d.m.handle(Input::Escape), None);
+    d.down(0);
+    assert_eq!(d.m.handle(Input::Escape), Some(CancelRecording(1)));
+    assert_eq!(d.up(500), None, "the release after a cancel");
+    d.down(1_000);
+    d.up(2_000);
+    assert_eq!(d.m.handle(Input::Escape), Some(CancelTranscription(2)));
+    d.down(3_000);
+    for late in [Input::Finished { take: 2 }, Input::MicStopped { take: 2 }] {
+      assert_eq!(d.m.handle(late), None);
+    }
+
+    assert_eq!(d.m.handle(Input::MicStopped { take: 3 }), Some(StopRecording(3)));
+  }
+
+  #[test]
+  fn a_press_that_was_a_chord_drops_the_recording_it_started() {
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    d.down(0);
+    assert_eq!(d.m.handle(Input::KeyAborted), Some(AbortRecording(1)));
+    assert_eq!(d.up(80), None);
+
+    // A press that stopped a latched recording: what it stopped stays stopped.
+    let mut d = Drive::new(Activation::Toggle);
+    d.down(0);
+    d.up(100);
+    assert_eq!(d.m.handle(Input::KeyAborted), None, "after the release the press is over");
+    assert_eq!(d.down(3_000), Some(StopRecording(1)));
+    assert_eq!(d.m.handle(Input::KeyAborted), None);
+  }
+
+  // MARK: Session
+
+  #[derive(Clone, Default)]
+  struct FakeOutput(Arc<Mutex<FakeLog>>);
+
+  #[derive(Default)]
+  struct FakeLog {
+    /// Targets taken so far; a target is its number.
+    targets: u32,
+    /// `(text, target, keep_in_clipboard)` of each paste.
+    pasted: Vec<(String, u32, bool)>,
+    copied: Vec<String>,
+    refuse: Option<NotPasted>,
+  }
+
+  impl FakeOutput {
+    fn log(&self) -> std::sync::MutexGuard<'_, FakeLog> {
+      self.0.lock().unwrap()
+    }
+  }
+
+  impl TextOutput for FakeOutput {
+    type Target = u32;
+
+    fn target(&mut self) -> u32 {
+      self.log().targets += 1;
+      self.log().targets
+    }
+
+    fn paste(&mut self, text: &str, target: &u32, keep: bool) -> Result<(), NotPasted> {
+      let mut log = self.log();
+      if let Some(refused) = log.refuse.clone() {
+        return Err(refused);
+      }
+
+      log.pasted.push((text.to_owned(), *target, keep));
+      Ok(())
+    }
+
+    fn copy(&mut self, text: &str) -> Result<()> {
+      self.log().copied.push(text.to_owned());
+      Ok(())
+    }
+  }
+
+  /// A session in a temp home recording `mic`, with `models` of wavo's in its Hugging Face cache.
+  struct InProcess {
+    home: TempDir,
+    hub: Hub,
+    models: FakeModels,
+    output: FakeOutput,
+    handle: Handle,
+    first: Update,
+    updates: Receiver<Update>,
+    _session: Session,
+  }
+
+  impl InProcess {
+    fn start(
+      name: &str,
+      settings: &Settings,
+      mic: Option<&[f32]>,
+      text: &str,
+      models: &[&str],
+    ) -> Self {
+      let home = TempDir::new(name);
+      let hub = Hub::at(home.path().join("hub"));
+      for name in models {
+        download(&hub, name);
+      }
+
+      settings.save(&home.path().join(settings::FILE)).unwrap();
+      let mic_path = home.path().join("mic.wav");
+      if let Some(pcm) = mic {
+        write_wav(&mic_path, pcm);
+      }
+
+      let models = FakeModels::new(text);
+      let config = Config {
+        home: home.path().to_owned(),
+        hub: hub.clone(),
+        loader: Arc::new(models.clone()),
+        fake_mic: Some(mic_path),
+      };
+
+      let output = FakeOutput::default();
+      let (tx, updates) = unbounded();
+      let observer = Box::new(move |update| _ = tx.send(update));
+      let session = Session::start(config, output.clone(), observer).unwrap();
+      let first = updates.recv_timeout(Duration::from_secs(10)).expect("the first update");
+      let handle = session.handle();
+      Self { home, hub, models, output, handle, first, updates, _session: session }
+    }
+
+    fn update_where(&self, what: &str, matches: impl Fn(&Update) -> bool) -> Update {
+      loop {
+        let update = self.updates.recv_timeout(Duration::from_secs(10));
+        let update = update.unwrap_or_else(|_| panic!("no update: {what}"));
+        if matches(&update) {
+          return update;
+        }
+      }
+    }
+
+    fn press(&self) {
+      self.handle.input(Input::KeyDown { at: Instant::now(), repeat: false });
+      self.handle.input(Input::KeyUp { at: Instant::now() });
+    }
+
+    /// Starts a recording and waits until its audio arrives.
+    fn record(&self, level: f32) {
+      self.press();
+      let recording = self.update_where("recording", |u| u.status.state == Phase::Recording);
+      let meter = recording.meter.unwrap();
+      poll("the level", Duration::from_secs(10), || (meter.level() > level).then_some(()));
+    }
+
+    fn finished(&self, take: Take) -> Status {
+      let done = |u: &Update| u.status.last.as_ref().is_some_and(|l| l.take == take);
+      self
+        .update_where("the end of the dictation", |u| u.status.state == Phase::Idle && done(u))
+        .status
+    }
+
+    /// Records the tone for a moment as dictation `take`.
+    fn dictate(&self, take: Take) -> Last {
+      self.record(0.3);
+      thread::sleep(Duration::from_millis(300));
+      self.press();
+      self.finished(take).last.unwrap()
+    }
+
+    fn history(&self) -> History {
+      History::open(self.home.path()).unwrap()
+    }
+
+    fn entry(&self, id: i64) -> Option<Entry> {
+      self.history().db.get_entry(id).unwrap()
+    }
+
+    fn recordings(&self) -> usize {
+      wav_count(&self.home.path().join(RECORDINGS_DIR))
+    }
+
+    /// The history entry of `last`, which keeps its recording.
+    fn kept(&self, last: &Last) -> Entry {
+      let entry = self.entry(last.entry.expect("an entry")).unwrap();
+      assert!(self.history().audio_file(&entry).is_some(), "the recording is kept");
+      entry
+    }
+
+    fn retranscribed(&self, id: i64) -> Entry {
+      self.handle.request(Request::Retranscribe(id)).unwrap();
+      poll("transcribed again", Duration::from_secs(10), || self.entry(id).filter(|e| !e.busy))
+    }
+
+    /// An entry with `text` and a recording of `pcm` (16 kHz), `age_ms` old.
+    fn add_entry(&self, age_ms: i64, text: &str, pcm: &[f32]) -> i64 {
+      let history = self.history();
+      let created_at = now_ms() - age_ms;
+      let (name, path) = history.recordings.new_file(created_at);
+      write_wav(&path, pcm);
+      let duration_ms = pcm.len() as i64 * 1000 / i64::from(SAMPLE_RATE);
+      let text = text.to_owned();
+      let entry =
+        Entry { created_at, duration_ms, audio_path: Some(name), text, ..Entry::default() };
+      history.db.insert(&[entry]).unwrap()[0]
+    }
+  }
+
+  fn loud(seconds: f64) -> Vec<f32> {
+    tone(seconds, 0.5)
+  }
+
+  /// Taken for speech by the VAD; dictations of it are transcribed, kept and delivered where they
+  /// started. Then a paste refused (only in the history), and auto-paste off (copied).
+  #[test]
+  fn dictations_are_transcribed_kept_and_delivered() {
+    let s = InProcess::start(
+      "session-done",
+      &Settings::default(),
+      Some(&loud(10.0)),
+      "hello there",
+      &["parakeet-v3"],
+    );
+    for take in 1..=3 {
+      match take {
+        2 => s.output.log().refuse = Some(NotPasted::FocusChanged),
+        3 => {
+          s.output.log().refuse = None;
+          s.handle.edit_settings(|s| s.auto_paste = false);
+          s.update_where("auto-paste off", |u| !u.settings.auto_paste);
+        }
+        _ => {}
+      }
+
+      let last = s.dictate(take);
+      assert_eq!((last.outcome, last.text.as_str()), (Outcome::Done, "hello there"), "{take}");
+      let entry = s.kept(&last);
+      assert_eq!(
+        (entry.text.as_str(), entry.busy, entry.pasted),
+        ("hello there", false, last.pasted)
+      );
+      assert_eq!(entry.model.as_deref(), Some("parakeet-tdt-0.6b-v3-Q8_0"));
+      let log = s.output.log();
+      match take {
+        1 => assert_eq!(log.pasted, [("hello there".into(), 1, false)]),
+        2 => assert!(last.not_pasted.unwrap().contains("focus")),
+        _ => {
+          assert_eq!((log.pasted.len(), log.copied.len()), (1, 1));
+          assert!(last.not_pasted.unwrap().contains("clipboard"));
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn silence_is_no_speech_and_never_reaches_the_engine() {
+    let s = InProcess::start(
+      "session-silence",
+      &Settings::default(),
+      Some(&tone(10.0, 0.001)),
+      "",
+      &["parakeet-v3"],
+    );
+    s.record(0.0);
+    s.press();
+    let status = s.finished(1);
+    let last = status.last.unwrap();
+    assert_eq!((last.outcome, last.pasted, last.entry), (Outcome::NoSpeech, false, None));
+    assert_eq!((s.models.runs().len(), s.recordings()), (0, 0), "nothing kept");
+    assert_eq!(s.output.log().targets, 1, "focus noted at the start");
+  }
+
+  /// Escape while recording or transcribing keeps nothing; the next dictation has the same warm
+  /// engine.
+  #[test]
+  fn escape_keeps_nothing() {
+    let s = InProcess::start(
+      "session-cancel",
+      &Settings::default(),
+      Some(&loud(20.0)),
+      "hello there",
+      &["parakeet-v3"],
+    );
+    s.record(0.3);
+    s.handle.input(Input::Escape);
+    assert_eq!(s.finished(1).last.unwrap().outcome, Outcome::Cancelled);
+
+    let gate = s.models.hold();
+    s.record(0.3);
+    s.press();
+    s.update_where("a run", |u| u.status.engine.phase == engine::Phase::Running);
+    s.handle.input(Input::Escape);
+    let last = s.finished(2).last.unwrap();
+    assert_eq!((last.outcome, last.entry), (Outcome::Cancelled, None));
+    drop(gate);
+    assert_eq!(s.dictate(3).text, "hello there");
+    assert_eq!((s.recordings(), s.models.loads(), s.output.log().pasted.len()), (1, 1, 1));
+  }
+
+  /// No model: said from the start; the recording is kept without text and transcribed by itself
+  /// once one is there, as is an older entry; one without speech goes, one with text stays.
+  #[test]
+  fn without_a_model_recordings_wait_for_one() {
+    let s = InProcess::start(
+      "session-no-model",
+      &Settings::default(),
+      Some(&loud(10.0)),
+      "hello there",
+      &[],
+    );
+    assert_eq!(s.first.status.no_model, Some(NoModel::NoneDownloaded));
+    let last = s.dictate(1);
+    assert_eq!(
+      (last.outcome, last.error.as_deref()),
+      (Outcome::NoModel, Some("no model is downloaded"))
+    );
+    let entry = s.kept(&last);
+    assert_eq!((entry.text.as_str(), entry.tried_model, entry.busy), ("", None, false));
+    let refused = s.handle.request(Request::Retranscribe(entry.id)).unwrap_err();
+    assert!(refused.contains("no model"), "{refused}");
+
+    let older = s.add_entry(2_000, "", &loud(1.0));
+    let silent = s.add_entry(3_000, "", &tone(0.5, 0.0));
+    let with_text = s.add_entry(4_000, "текст", &loud(1.0));
+    download(&s.hub, "parakeet-v3");
+    s.handle.check_model();
+    for id in [entry.id, older] {
+      let done = poll("transcribed", Duration::from_secs(10), || {
+        s.entry(id).filter(|e| !e.text.is_empty() && !e.busy)
+      });
+      assert_eq!(done.text, "hello there");
+    }
+
+    poll("the silent one gone", Duration::from_secs(10), || {
+      s.entry(silent).is_none().then_some(())
+    });
+    assert_eq!(s.entry(with_text).unwrap().tried_model, None, "one with text is left alone");
+    assert!(s.output.log().pasted.is_empty());
+  }
+
+  /// A model that does not load tries no entry: they wait for a dictation that loads it.
+  #[test]
+  fn entries_without_text_wait_for_a_model_that_loads() {
+    let s = InProcess::start(
+      "session-broken-model",
+      &Settings::default(),
+      Some(&loud(10.0)),
+      "hello there",
+      &[],
+    );
+    let waiting = s.add_entry(2_000, "", &loud(1.0));
+    let model = download(&s.hub, "parakeet-v3");
+    fs::write(&model, b"BROKEN").unwrap();
+    s.handle.check_model();
+    s.update_where("the load failed", |u| {
+      matches!(u.status.no_model, Some(NoModel::LoadFailed { .. }))
+        && u.status.retranscribing.is_empty()
+    });
+    let entry = s.entry(waiting).unwrap();
+    assert_eq!((entry.text.as_str(), entry.tried_model, entry.busy), ("", None, false));
+
+    let failed = s.dictate(1);
+    assert_eq!(failed.outcome, Outcome::NoModel);
+    assert_eq!(s.kept(&failed).tried_model, None);
+
+    fs::write(&model, b"GGUF").unwrap();
+    assert_eq!(s.dictate(2).outcome, Outcome::Done);
+    for id in [waiting, failed.entry.unwrap()] {
+      let done = poll("transcribed", Duration::from_secs(10), || {
+        s.entry(id).filter(|e| !e.text.is_empty() && !e.busy)
+      });
+      assert_eq!(done.text, "hello there");
+    }
+  }
+
+  /// A failed retranscription keeps the text and says why; new text replaces it, an undo puts it
+  /// back, a second undo the new one again.
+  #[test]
+  fn a_retranscription_replaces_the_text_only_with_text_and_undoes() {
+    let s = InProcess::start(
+      "session-again",
+      &Settings::default(),
+      None,
+      "hello there",
+      &["parakeet-v3"],
+    );
+    let id = s.add_entry(1_000, "текст", &loud(1.0));
+    s.models.panic_next();
+    let entry = s.retranscribed(id);
+    assert_eq!((entry.text.as_str(), entry.prev_text), ("текст", None));
+    let error = s.update_where("the error", |u| u.status.error.is_some()).status.error.unwrap();
+    assert!(
+      error.starts_with(&format!("entry {id} could not")) && error.contains("panicked"),
+      "{error}"
+    );
+
+    let undo = || s.handle.request(Request::UndoTranscribe(id));
+    assert!(undo().unwrap_err().contains("no text before"));
+    let again = s.retranscribed(id);
+    assert_eq!((again.text.as_str(), again.prev_text.as_deref()), ("hello there", Some("текст")));
+    undo().unwrap();
+    assert_eq!(s.entry(id).unwrap().text, "текст");
+    undo().unwrap();
+    assert_eq!(s.entry(id).unwrap(), again);
+  }
+
+  #[test]
+  fn a_microphone_that_will_not_open_leaves_nothing_behind() {
+    let settings = Settings { history_retention: Retention::Count(1), ..Settings::default() };
+    let s = InProcess::start("session-no-mic", &settings, None, "", &[]);
+    s.press();
+    let failed = s.update_where("the error", |u| u.status.error.is_some()).status;
+    assert!(failed.error.unwrap().contains("could not start recording"));
+    assert_eq!((failed.state, failed.last), (Phase::Idle, None));
+    let dir = s.home.path().join(RECORDINGS_DIR);
+    assert_eq!(fs::read_dir(dir).unwrap().count(), 0, "no file, nor its day folder");
+  }
+
+  #[test]
+  fn models_are_labelled_and_a_model_for_one_language_says_which() {
+    assert_eq!(label("parakeet-v3"), "parakeet-tdt-0.6b-v3");
+    assert_eq!(label("/models/broken.gguf"), "broken");
+    let note = |name| understands_only(hub::lookup(name).unwrap());
+    let v2 = "parakeet-tdt-0.6b-v2 understands English only";
+    assert_eq!(note("parakeet-v2").as_deref(), Some(v2));
+    assert_eq!(note("parakeet-v3"), None);
+  }
+}
