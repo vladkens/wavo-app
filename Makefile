@@ -1,6 +1,6 @@
 .PHONY: prepare check test build update clean
 
-# macOS 14 is the least nimbo runs on; the bundle's Info.plist says the same (scripts/bundle.sh).
+# macOS 14 is the least nimbo runs on; the bundle's Info.plist says the same (scripts/bundle.py).
 export MACOSX_DEPLOYMENT_TARGET := 14.0
 # Linux does not build the macOS shell, the only user of parts of the session: dead code is
 # checked on macOS.
@@ -30,19 +30,14 @@ clean:
 
 .PHONY: bundle dist run install reset shots fixtures test-models unload-memory
 
-ICON := target/Wavo.icns
 APP := target/Wavo.app
 PROFILE := release
 
-$(ICON): assets/icon.png scripts/icns.sh
-	scripts/icns.sh assets/icon.png $@
-
-# target/Wavo.app (scripts/bundle.sh), signed with Wavo's own identity, made in the login
-# keychain the first time (scripts/sign-identity.py; not in CI). Built, never opened.
-bundle: $(ICON) # target/Wavo.app from the release profile, or PROFILE
+# target/Wavo.app (scripts/bundle.py), signed with Wavo's own identity, made in the login
+# keychain the first time. Built, never opened.
+bundle: # target/Wavo.app from the release profile, or PROFILE
 	cargo build --profile $(PROFILE)
-	[ -n "$$CI" ] || uv run scripts/sign-identity.py
-	scripts/bundle.sh target/$(PROFILE)/wavo-app $(ICON) $(APP)
+	uv run scripts/bundle.py target/$(PROFILE)/wavo-app assets/icon.png $(APP)
 
 dist: bundle # target/distrib/Wavo-dev.zip, the release file for CI (vladkens/actions/rust-build)
 	mkdir -p target/distrib
@@ -50,11 +45,11 @@ dist: bundle # target/distrib/Wavo-dev.zip, the release file for CI (vladkens/ac
 
 run: # quit the running Wavo, start target/Wavo.app built with the quick fast profile
 	$(MAKE) bundle PROFILE=fast
-	scripts/run.sh $(APP)
+	uv run scripts/run.py $(APP)
 
 install: # the same, installed into /Applications
 	$(MAKE) bundle PROFILE=fast
-	scripts/run.sh $(APP) /Applications/Wavo.app
+	uv run scripts/run.py $(APP) /Applications/Wavo.app
 
 # The installed app's binary, else the release build's; ARGS go to it (--dry-run, --yes, --app).
 INSTALLED := /Applications/Wavo.app/Contents/MacOS/wavo-app
@@ -65,14 +60,14 @@ reset: # delete Wavo's data and permissions: a clean install to test
 shots: # the settings window's pages, headless, into target/shots/
 	WAVO_SHOTS=$(CURDIR)/target/shots cargo test --release every_page_renders
 
-# WAV fixtures and reference transcripts in target/fixtures/ (scripts/gen-fixtures.sh, macOS
+# WAV fixtures and reference transcripts in target/fixtures/ (scripts/fixtures.py, macOS
 # voices and ffmpeg); regenerated when the script or a text changes.
 FIXTURES := target/fixtures/.stamp
 
 fixtures: $(FIXTURES) # speech fixtures for test-models
 
-$(FIXTURES): scripts/gen-fixtures.sh $(wildcard scripts/fixtures/*.txt)
-	scripts/gen-fixtures.sh target/fixtures
+$(FIXTURES): scripts/fixtures.py $(wildcard scripts/fixtures/*.txt)
+	uv run scripts/fixtures.py target/fixtures
 	touch $@
 
 # The ignored tests that need real models from the Hugging Face cache or the fixtures, by module
