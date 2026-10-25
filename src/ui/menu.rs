@@ -2,7 +2,8 @@
 
 //! The menu bar menu and icon, from the session's status and what the system says ([System]):
 //! a header with the app, the hotkey and the state; the warnings that need the person, short, most
-//! opening where to fix them (the settings window says more); Copy Last Dictation and the recent
+//! opening where to fix them (the settings window says more: the permissions and a first model on
+//! its Permissions page); Copy Last Dictation and the recent
 //! dictations; the model in use with the others downloaded, Unload Model; History…, Settings… and
 //! Quit.
 
@@ -87,7 +88,7 @@ pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> 
 
   match &status.no_model {
     Some(NoModel::NoneDownloaded) => {
-      let download = warn("warn:model", "Download a Speech Model…".into(), true);
+      let download = warn("warn:download", "Download a Speech Model…".into(), true);
       list.push(Warning { marked: false, ..download });
     }
     Some(NoModel::Gone { model }) => {
@@ -462,7 +463,7 @@ mod tests {
       "warn:microphone",
       "warn:clipboard",
       "warn:secure-input",
-      "warn:model",
+      "warn:download",
     ];
     assert_eq!(ids, expected);
   }

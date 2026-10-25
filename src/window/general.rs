@@ -1,11 +1,12 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! The General and Advanced pages. General first guides through what the app needs: what the
-//! system allows (Accessibility, the microphone: their state and a button that asks or opens
-//! System Settings), then the model (a quick switch among the downloaded ones, the way to the
-//! Models page, or with none a button to download one) and the language; then the hotkey and how
-//! it records, the microphone, the output, launch at login, the menu bar start. Advanced: the
-//! model's unload, the history's retention, where the files are (the models, the recordings).
+//! The General, Permissions and Advanced pages. General: the model (a quick switch among the
+//! downloaded ones, the way to the Models page, or with none a button to download one) and the
+//! language; then the hotkey and how it records, the microphone, the output, launch at login, the
+//! menu bar start. Permissions guides the first launch through what the app needs: what the system
+//! allows (the microphone, Accessibility: why, their state and a button that asks or opens System
+//! Settings), and with no model the way to download one. Advanced: the model's unload, the
+//! history's retention, where the files are (the models, the recordings).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -27,7 +28,7 @@ pub const ACTIVATION: &str = "activation";
 pub const MIC: &str = "mic";
 /// The model pop-up: the downloaded models, then "Manage models…".
 pub const MODEL: &str = "use-model";
-/// With no model downloaded, in place of [`MODEL`]: the Models page.
+/// With no model downloaded, in place of [`MODEL`] and on Permissions: the Models page.
 pub const DOWNLOAD_MODEL: &str = "download-model";
 pub const LANG: &str = "lang";
 pub const PASTE: &str = "paste";
@@ -269,7 +270,6 @@ impl Prefs {
   }
 
   pub(super) fn general(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    self.permissions(ui, fs);
     ui.form_section(fs, "Dictation", |ui| {
       self.model(ui, fs);
       // Secure Input, while it is on, before the fn key's standing note.
@@ -519,39 +519,53 @@ impl Prefs {
     self.data(ui, fs);
   }
 
-  /// What the system allows, first: what the app can't work without.
-  fn permissions(&mut self, ui: &mut Ui, fs: &FormStyle) {
+  /// The Permissions page: the microphone and Accessibility, each with why, its state and its
+  /// button; with no model downloaded, the way to download one. Its title says how many are
+  /// missing.
+  pub(super) fn permissions(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let access = self.access;
-    ui.form_section(fs, "Permissions", |ui| {
-      let row = FormRow::new("Accessibility")
-        .caption("Lets the shortcut work in every app and pastes the text.")
-        .tile(Tile::Icon(Icon::ACCESSIBILITY));
-      ui.form_row(fs, row, |ui| {
-        let (grant, ask) = match access.accessibility {
-          true => (Grant::Granted, false),
-          false => (Grant::Denied, true),
-        };
-        self.permission(ui, grant, ask, OPEN_ACCESSIBILITY, Pane::Accessibility)
-      });
-      let row = FormRow::new("Microphone")
-        .caption("Records your voice while you dictate.")
-        .tile(Tile::Icon(Icon::MIC));
+    let mic = access.microphone == Grant::Granted;
+    let title = match [mic, access.accessibility].iter().filter(|g| !**g).count() {
+      0 => "Wavo has the permissions it needs",
+      1 => "Wavo needs a permission",
+      _ => "Wavo needs two permissions",
+    };
+    let no_model = self.model_problem() == Some(Problem::NoneDownloaded);
+    ui.form_section(fs, title, |ui| {
+      let row =
+        FormRow::new("Microphone").caption("To record your voice.").tile(Tile::Icon(Icon::MIC));
       // A denied microphone is not asked again: only System Settings changes it.
       ui.form_row(fs, row, |ui| {
         let ask = access.microphone == Grant::NotDetermined;
         self.permission(ui, access.microphone, ask, OPEN_MICROPHONE, Pane::Microphone)
       });
+      let row = FormRow::new("Accessibility")
+        .caption("To paste the text and to hear the hotkey in every app.")
+        .tile(Tile::Icon(Icon::ACCESSIBILITY));
+      ui.form_row(fs, row, |ui| {
+        let grant = if access.accessibility { Grant::Granted } else { Grant::Denied };
+        let ask = !access.accessibility_asked;
+        self.permission(ui, grant, ask, OPEN_ACCESSIBILITY, Pane::Accessibility)
+      });
+      if no_model {
+        let row =
+          FormRow::new("Speech model").caption("None yet.").tile(Tile::Icon(Icon::DOWNLOAD));
+        ui.form_row(fs, row, |ui| {
+          if Button::new("Download…").primary().show(ui.id(DOWNLOAD_MODEL)).clicked {
+            self.page = Page::Models;
+          }
+        });
+      }
     });
   }
 
-  /// A permission's state and its button, [`super::Shell::allow`]: Allow while the system can
+  /// A permission's state, or its button, [`super::Shell::allow`]: Allow while the system can
   /// still ask, else Open Settings.
   fn permission(&mut self, ui: &mut Ui, grant: Grant, ask: bool, id: &str, pane: Pane) {
-    match grant {
-      Grant::Granted => ui.badge("Allowed", Tone::Success),
-      Grant::Denied | Grant::Restricted => ui.badge("Not allowed", Tone::Warning),
-      Grant::NotDetermined => ui.badge("Not asked yet", Tone::Neutral),
-    };
+    if grant == Grant::Granted {
+      ui.badge("✓ Allowed", Tone::Success);
+      return;
+    }
 
     let button = if ask { Button::new("Allow").primary() } else { Button::new("Open Settings") };
     if button.show(ui.id(id)).clicked {
