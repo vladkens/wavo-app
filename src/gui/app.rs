@@ -151,12 +151,9 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   let _ = PROXY.set(main.proxy());
   let fake_mic = config.fake_mic.is_some();
   let (home, hub) = (config.home.clone(), config.hub.clone());
-  // No settings yet: the first launch, which is the person's, never the system's at login.
-  let settings_file = home.join(crate::settings::FILE);
-  let first = !settings_file.exists();
   // A model chosen by its path, outside the Hugging Face cache: the session has it before the
   // app's first update, so the check at launch reads it from the file.
-  let saved_file = std::fs::read(&settings_file)
+  let saved_file = std::fs::read(home.join(crate::settings::FILE))
     .ok()
     .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
     .and_then(|v| v.get("model")?.as_str().map(PathBuf::from))
@@ -208,10 +205,9 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   app.read_models();
   // Nothing is asked at launch: with a permission or a model missing the window opens on General,
   // whose buttons ask; else the app starts in the menu bar.
-  // Never at a launch at login: one the system may have started is left in the menu bar; the
-  // first launch always opens it.
+  // Never at a launch at login: one the system may have started is left in the menu bar.
   let no_model = app.missing_model() && !saved_file;
-  let missing = (app.missing_permission() || no_model) && (first || !may_launch_at_login());
+  let missing = (app.missing_permission() || no_model) && !may_launch_at_login();
   APP.with(|cell| *cell.borrow_mut() = Some(app));
   // Opened again while it runs: the settings window, as for a second launch.
   main.on_reopen(|main| open_window(main, None));
