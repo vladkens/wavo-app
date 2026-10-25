@@ -82,9 +82,7 @@ pub fn export(home: &Path, file: &Path) -> Result<Exported> {
 
   let scratch = Scratch::new()?;
   let copy = scratch.0.join(DB_FILE);
-  let conn = rusqlite::Connection::open(&db).with_context(|| format!("open {}", db.display()))?;
-  conn.execute("VACUUM INTO ?1", [copy.to_str().unwrap()])?;
-  drop(conn);
+  snapshot(&db, &copy)?;
 
   // The copy names only the recordings on disk, and keeps no entry with neither text nor one.
   let copy_db = Db::open(&copy)?;
@@ -164,21 +162,16 @@ pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> R
     }
   };
 
-  // A dry run reads a copy of the history (its WAL too: the app may be writing), and lists the
-  // recordings: nothing of the home is created, migrated or written.
+  // A dry run reads a copy of the history and lists the recordings: nothing of the home is
+  // created or migrated.
   let history = if dry_run { None } else { Some(History::open(home)?) };
   let ours = match &history {
     Some(h) => h.db.get_entries()?,
     None if home.join(DB_FILE).is_file() => {
-      let copy = Scratch::new()?;
-      for suffix in ["", "-wal", "-shm"] {
-        let name = format!("{DB_FILE}{suffix}");
-        if home.join(&name).is_file() {
-          fs::copy(home.join(&name), copy.0.join(&name))?;
-        }
-      }
-
-      Db::open(&copy.0.join(DB_FILE))?.get_entries()?
+      let scratch = Scratch::new()?;
+      let copy = scratch.0.join(DB_FILE);
+      snapshot(&home.join(DB_FILE), &copy)?;
+      Db::open(&copy)?.get_entries()?
     }
     None => Vec::new(),
   };
@@ -367,6 +360,13 @@ pub fn part_of(path: &Path) -> PathBuf {
 }
 
 /// A temp directory for an import's or export's own files, removed on drop.
+/// A consistent copy of the database `db` (`VACUUM INTO`) while the app may be writing it.
+fn snapshot(db: &Path, copy: &Path) -> Result<()> {
+  let conn = rusqlite::Connection::open(db).with_context(|| format!("open {}", db.display()))?;
+  conn.execute("VACUUM INTO ?1", [copy.to_str().unwrap()])?;
+  Ok(())
+}
+
 struct Scratch(PathBuf);
 
 impl Scratch {
