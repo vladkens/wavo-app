@@ -160,6 +160,10 @@ pub struct FakeModels {
   /// The samples of each piece run, in order.
   runs: Arc<Mutex<Vec<usize>>>,
   panic_next: Arc<AtomicBool>,
+  /// Runs of a model loaded for the Neural Engine fail, as Core ML may.
+  ane_fails: Arc<AtomicBool>,
+  /// `ane` of each load, in order.
+  ane_loads: Arc<Mutex<Vec<bool>>>,
   gate: Arc<Mutex<Option<Receiver<()>>>>,
 }
 
@@ -172,6 +176,8 @@ impl FakeModels {
       live: Arc::default(),
       runs: Arc::default(),
       panic_next: Arc::default(),
+      ane_fails: Arc::default(),
+      ane_loads: Arc::default(),
       gate: Arc::default(),
     }
   }
@@ -198,6 +204,14 @@ impl FakeModels {
     self.panic_next.store(true, Ordering::SeqCst);
   }
 
+  pub fn ane_fails(&self) {
+    self.ane_fails.store(true, Ordering::SeqCst);
+  }
+
+  pub fn ane_loads(&self) -> Vec<bool> {
+    self.ane_loads.lock().unwrap().clone()
+  }
+
   /// Every piece waits until the sender is dropped.
   pub fn hold(&self) -> Sender<()> {
     let (tx, rx) = bounded(0);
@@ -207,18 +221,19 @@ impl FakeModels {
 }
 
 impl Loader for FakeModels {
-  fn load(&self, path: &Path) -> anyhow::Result<Box<dyn SpeechModel>> {
+  fn load(&self, path: &Path, ane: bool) -> anyhow::Result<Box<dyn SpeechModel>> {
     if fs::read(path)?.starts_with(b"BROKEN") {
       anyhow::bail!("not a speech model");
     }
 
     self.loads.fetch_add(1, Ordering::SeqCst);
     self.live.fetch_add(1, Ordering::SeqCst);
-    Ok(Box::new(FakeModel(self.clone())))
+    self.ane_loads.lock().unwrap().push(ane);
+    Ok(Box::new(FakeModel(self.clone(), ane)))
   }
 }
 
-struct FakeModel(FakeModels);
+struct FakeModel(FakeModels, bool);
 
 impl SpeechModel for FakeModel {
   fn device(&self) -> String {
@@ -233,6 +248,10 @@ impl SpeechModel for FakeModel {
   ) -> anyhow::Result<String> {
     let m = &self.0;
     assert!(!m.panic_next.swap(false, Ordering::SeqCst), "injected panic in a run");
+    if self.1 && m.ane_fails.load(Ordering::SeqCst) {
+      return Err(wavo::Error::NeuralEngine("injected".into()).into());
+    }
+
     let pieces = wavo::split(pcm, m.window_ms);
     let count = pieces.len();
     for (index, range) in pieces.into_iter().enumerate() {

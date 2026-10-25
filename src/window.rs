@@ -97,6 +97,15 @@ pub trait Shell {
   fn export(&self) {}
   fn open_url(&self, _url: &str) {}
   fn reveal(&self, _dir: &Path) {}
+  /// This Mac has a Neural Engine wavo can use.
+  fn has_neural_engine(&self) -> bool {
+    false
+  }
+
+  /// A model is being prepared for the Neural Engine.
+  fn preparing(&self) -> bool {
+    false
+  }
 }
 
 enum Delete {
@@ -529,6 +538,9 @@ impl Prefs {
 
 const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle this long. The next \
   dictation loads it again, which takes a moment.";
+const ANE_HELP: &str = "Parakeet and GigaAM run on the Neural Engine: as fast as on the GPU at a \
+  fraction of the energy. Each new version of Wavo prepares the model once, in the background \
+  (10–30 s); meanwhile it runs on the GPU. Whisper always runs on the GPU.";
 const EXPORT_NOTE: &str =
   "Into Downloads as a .tar archive; to bring one back, run wavo-app import <file>.";
 
@@ -556,6 +568,20 @@ const RETENTIONS: [(Retention, &str); 7] = [
 ];
 
 impl Prefs {
+  /// Where the model runs, or why not on the Neural Engine.
+  fn neural_engine_note(&self, has: bool) -> String {
+    let device = self.status.engine.device.as_deref();
+    match device {
+      _ if !has => "Needs Apple silicon and macOS 15 or later".into(),
+      _ if self.settings.neural_engine && self.shell.preparing() => {
+        "Preparing the model for the Neural Engine…".into()
+      }
+      Some(device) => format!("Now on {device}"),
+      None if self.settings.neural_engine => "Parakeet and GigaAM models".into(),
+      None => "Every model runs on the GPU".into(),
+    }
+  }
+
   fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
     ui.form_section(fs, "App", |ui| {
       self.login(ui, fs);
@@ -570,6 +596,17 @@ impl Prefs {
         let mut cur = self.settings.unload_after_minutes;
         if Select::new(&mut cur, &UNLOADS).separators(&[0]).show(ui.id("unload")).changed {
           self.edit(move |s| s.unload_after_minutes = cur);
+        }
+      });
+
+      let has = self.shell.has_neural_engine();
+      let caption = self.neural_engine_note(has);
+      let row =
+        FormRow::new("Use the Neural Engine").info(ANE_HELP).caption(&caption).disabled(!has);
+      ui.form_row(fs, row, |ui| {
+        let mut on = self.settings.neural_engine && has;
+        if ui.id("ane").toggle(&mut on, "").changed {
+          self.edit(move |s| s.neural_engine = on);
         }
       });
 
@@ -1465,6 +1502,10 @@ mod tests {
       edit(&mut self.log().settings);
     }
 
+    fn has_neural_engine(&self) -> bool {
+      true
+    }
+
     fn pause_hotkey(&self, paused: bool) {
       self.log().paused.push(paused);
     }
@@ -1724,6 +1765,8 @@ mod tests {
     click(&mut h, Id::of("retention"));
     click(&mut h, Id::of("retention").key(("item", 1)));
     assert_eq!(fake.log().settings.history_retention, Retention::Count(100));
+    click(&mut h, Id::of("ane"));
+    assert!(!fake.log().settings.neural_engine);
 
     // Launch at login goes to the system, one change at a time; a refusal says why.
     click(&mut h, Id::of("login"));

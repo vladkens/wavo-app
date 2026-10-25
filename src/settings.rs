@@ -35,6 +35,8 @@ pub struct Settings {
   pub keep_in_clipboard: bool,
   /// Free the idle model after this many minutes: 0 right after each dictation, `None` never.
   pub unload_after_minutes: Option<u32>,
+  /// Parakeet and GigaAM run on the Neural Engine once prepared for it, else on the GPU.
+  pub neural_engine: bool,
   pub history_retention: Retention,
   /// Launch at login.
   pub autostart: bool,
@@ -71,6 +73,7 @@ impl Default for Settings {
       auto_paste: true,
       keep_in_clipboard: false,
       unload_after_minutes: Some(5),
+      neural_engine: true,
       history_retention: Retention::Unlimited,
       autostart: false,
       hud_position: HudPosition::Bottom,

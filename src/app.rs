@@ -604,7 +604,9 @@ impl window::Shell for MacShell {
   }
 
   fn download(&self, model: &'static ModelInfo) {
-    self.downloads.pull(self.hub.clone(), model, |ended| {
+    // A model for the Neural Engine is prepared for it right after the download, unless it is off.
+    let ane = Settings::load(&self.home.join(settings::FILE)).0.neural_engine;
+    self.downloads.pull(self.hub.clone().prepare(ane), model, |ended| {
       if !ended {
         // Progress only redraws: not retried while the window is busy, where it piles up.
         return proxy().post(|_| {
@@ -693,6 +695,14 @@ impl window::Shell for MacShell {
     if let Err(e) = nimbo::open::reveal(dir) {
       warn!("show {}: {e}", dir.display());
     }
+  }
+
+  fn has_neural_engine(&self) -> bool {
+    crate::engine::has_neural_engine()
+  }
+
+  fn preparing(&self) -> bool {
+    crate::engine::preparing()
   }
 
   /// Into a new archive in Downloads (nimbo has no file picker), shown there.

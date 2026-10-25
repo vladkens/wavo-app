@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::ops::ControlFlow;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,11 @@ use tracing::{debug, info, warn};
 // MARK: Models
 
 pub trait Loader: Send + Sync {
-  fn load(&self, path: &Path) -> Result<Box<dyn SpeechModel>>;
+  /// `ane`: on the Neural Engine when the file is prepared for it, else on the GPU.
+  fn load(&self, path: &Path, ane: bool) -> Result<Box<dyn SpeechModel>>;
+
+  /// Prepares the file for the Neural Engine in the background; `done` once it is.
+  fn prepare(&self, _path: &Path, _done: Box<dyn FnOnce() + Send>) {}
 }
 
 /// Lives and is dropped on the engine thread that loaded it.
@@ -41,16 +45,41 @@ pub trait SpeechModel {
 pub struct Wavo;
 
 impl Loader for Wavo {
-  fn load(&self, path: &Path) -> Result<Box<dyn SpeechModel>> {
-    prepare(path);
-    Ok(Box::new(wavo::Model::load(path)?))
+  fn load(&self, path: &Path, ane: bool) -> Result<Box<dyn SpeechModel>> {
+    let backend = if ane { wavo::Backend::Auto } else { wavo::Backend::Gpu };
+    Ok(Box::new(wavo::Model::load_with(path, backend)?))
+  }
+
+  fn prepare(&self, path: &Path, done: Box<dyn FnOnce() + Send>) {
+    if has_neural_engine() {
+      prepare(path, done);
+    }
   }
 }
 
-/// A Parakeet or GigaAM file not yet prepared for the Neural Engine (one wavo or another app
-/// downloaded) is prepared on a thread of its own, 15–40 s once; until then it loads on the GPU.
-fn prepare(path: &Path) {
-  static PREPARING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+// MARK: Neural Engine
+
+/// This Mac has a Neural Engine wavo can use: Apple silicon on macOS 15 or later.
+pub fn has_neural_engine() -> bool {
+  static HAS: OnceLock<bool> = OnceLock::new();
+  *HAS.get_or_init(|| {
+    let devices = wavo::devices().unwrap_or_default();
+    devices.iter().any(|d| d.kind == wavo::DeviceKind::NeuralEngine)
+  })
+}
+
+/// Models being prepared for the Neural Engine.
+static PREPARING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+pub fn preparing() -> bool {
+  !PREPARING.lock().unwrap().is_empty()
+}
+
+/// Prepares a Parakeet or GigaAM file for the Neural Engine on a thread of its own and calls `done`
+/// once it is. The system compiles it once per app binary and macOS version (10–30 s; the Core ML
+/// model itself is in wavo's cache, shared with the wavo CLI); until then the model runs on the
+/// GPU.
+fn prepare(path: &Path, done: Box<dyn FnOnce() + Send>) {
   if wavo::Model::prepared(path) != Some(false) {
     return;
   }
@@ -64,14 +93,16 @@ fn prepare(path: &Path) {
   let path = path.to_owned();
   thread::spawn(move || {
     let started = Instant::now();
-    match wavo::Model::prepare(&path, |_| ControlFlow::Continue(())) {
-      Ok(_) => {
-        info!("{}: prepared for the Neural Engine in {:?}", path.display(), started.elapsed())
+    let prepared = wavo::Model::prepare(&path, |_| ControlFlow::Continue(()));
+    PREPARING.lock().unwrap().retain(|p| *p != path);
+    match prepared {
+      Ok(true) => {
+        info!("{}: prepared for the Neural Engine in {:.1?}", path.display(), started.elapsed());
+        done();
       }
+      Ok(false) => {}
       Err(e) => warn!("{}: not prepared for the Neural Engine: {e}", path.display()),
     }
-
-    PREPARING.lock().unwrap().retain(|p| *p != path);
   });
 }
 
@@ -126,6 +157,8 @@ pub enum Phase {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Status {
   pub phase: Phase,
+  /// Where the loaded model runs: `Apple M2 Neural Engine (Core ML)`.
+  pub device: Option<String>,
   /// Finished and planned pieces of the job in progress.
   pub progress: Option<(usize, usize)>,
   /// Why the last load failed, until one succeeds.
@@ -168,6 +201,7 @@ impl Engine {
   pub fn start(
     loader: Arc<dyn Loader>,
     path: PathBuf,
+    ane: bool,
     unload_after: Option<Duration>,
     events: Sender<Event>,
   ) -> Self {
@@ -178,6 +212,7 @@ impl Engine {
       let worker = Worker {
         loader,
         path,
+        ane,
         unload_after,
         rx,
         events,
@@ -234,6 +269,8 @@ impl Engine {
 struct Worker {
   loader: Arc<dyn Loader>,
   path: PathBuf,
+  /// Off after the Neural Engine failed a run: the GPU for the rest of the engine's life.
+  ane: bool,
   unload_after: Option<Duration>,
   rx: Receiver<Msg>,
   events: Sender<Event>,
@@ -322,7 +359,7 @@ impl Worker {
 
     self.set(|s| s.phase = Phase::Loading);
     let started = Instant::now();
-    let loaded = panic::catch_unwind(AssertUnwindSafe(|| self.loader.load(&self.path)));
+    let loaded = panic::catch_unwind(AssertUnwindSafe(|| self.loader.load(&self.path, self.ane)));
     let loaded = match loaded {
       Ok(Ok(model)) => Ok(model),
       Ok(Err(e)) => Err(format!("{e:#}")),
@@ -334,7 +371,7 @@ impl Worker {
         let (path, device) = (self.path.display(), model.device());
         info!("engine loaded {path} on {device} in {:.2?}", started.elapsed());
         self.model = Some(model);
-        self.set(|s| (s.phase, s.load_error) = (Phase::Idle, None));
+        self.set(|s| (s.phase, s.device, s.load_error) = (Phase::Idle, Some(device), None));
         Ok(())
       }
       Err(e) => {
@@ -376,13 +413,18 @@ impl Worker {
     self.model = Some(model);
     self.set(|s| (s.phase, s.progress) = (Phase::Idle, None));
     // After a panic or a lost GPU device the model may not work again.
-    let broken = match &run {
-      Ok(Ok(_)) => false,
-      Ok(Err(e)) => e.downcast_ref().is_some_and(wavo::Error::is_fatal),
-      Err(_) => true,
+    let error = match &run {
+      Ok(Err(e)) => e.downcast_ref::<wavo::Error>(),
+      _ => None,
     };
 
-    if broken {
+    // Auto would pick the Neural Engine again and fail the same way.
+    if self.ane && matches!(error, Some(wavo::Error::NeuralEngine(_))) {
+      warn!("the Neural Engine failed: the GPU from now on");
+      self.ane = false;
+    }
+
+    if run.is_err() || error.is_some_and(wavo::Error::is_fatal) {
       self.drop_model();
     }
 
@@ -408,7 +450,7 @@ impl Worker {
       warn!("dropping the model panicked: {}", panic_message(&*panic));
     }
 
-    self.set(|s| s.phase = Phase::Stopped);
+    self.set(|s| (s.phase, s.device) = (Phase::Stopped, None));
   }
 
   fn done(&self, id: u64, result: Result<String, EngineError>) {
@@ -452,11 +494,15 @@ mod tests {
 
   impl Fake {
     fn start(name: &str, models: &FakeModels, unload_after: Option<Duration>) -> Self {
+      Self::start_on(name, models, false, unload_after)
+    }
+
+    fn start_on(name: &str, models: &FakeModels, ane: bool, unload: Option<Duration>) -> Self {
       let dir = TempDir::new(name);
       fs::write(dir.path().join("model.gguf"), b"GGUF").unwrap();
       let (tx, events) = unbounded();
       let loader = Arc::new(models.clone());
-      let engine = Engine::start(loader, dir.path().join("model.gguf"), unload_after, tx);
+      let engine = Engine::start(loader, dir.path().join("model.gguf"), ane, unload, tx);
       Self { dir, engine, events }
     }
 
@@ -491,7 +537,20 @@ mod tests {
     let runs = models.runs();
     assert_eq!(runs.iter().sum::<usize>(), 25 * SECOND);
     assert!(runs.iter().all(|&n| n <= 10 * SECOND), "{runs:?}");
-    assert_eq!(f.engine.status(), Status { phase: Phase::Idle, ..Status::default() });
+    let idle = Status { phase: Phase::Idle, device: Some("fake".into()), ..Status::default() };
+    assert_eq!(f.engine.status(), idle);
+  }
+
+  #[test]
+  fn after_the_neural_engine_fails_the_model_runs_on_the_gpu() {
+    let models = FakeModels::new("text");
+    let f = Fake::start_on("engine-ane", &models, true, None);
+    assert_eq!(f.run(1, SECOND).unwrap(), "text");
+
+    models.ane_fails();
+    assert!(matches!(f.run(2, SECOND), Err(EngineError::Failed(_))));
+    assert_eq!(f.run(3, SECOND).unwrap(), "text", "a fresh model on the GPU");
+    assert_eq!(models.ane_loads(), [true, false]);
   }
 
   #[test]
@@ -580,7 +639,7 @@ mod tests {
   fn check_wer(model: PathBuf, cases: &[(&str, Option<&str>)]) {
     let name = model.file_stem().unwrap().to_string_lossy().into_owned();
     let (tx, events) = unbounded();
-    let engine = Engine::start(Arc::new(Wavo), model, None, tx);
+    let engine = Engine::start(Arc::new(Wavo), model, false, None, tx);
     let mut failed = Vec::new();
     for (id, &(fixture_name, lang)) in cases.iter().cycle().take(cases.len() + 1).enumerate() {
       let f = fixture(fixture_name);

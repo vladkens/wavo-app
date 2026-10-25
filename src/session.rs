@@ -316,6 +316,8 @@ pub struct EngineStatus {
   /// Model file name without extension, once an engine has one.
   pub model: Option<String>,
   pub phase: engine::Phase,
+  /// Where the loaded model runs.
+  pub device: Option<String>,
   /// Finished and planned pieces of the job in progress.
   pub progress: Option<(usize, usize)>,
 }
@@ -389,6 +391,8 @@ enum Msg {
   Request(Request, Sender<Result<(), String>>),
   Edit(Box<dyn FnOnce(&mut Settings) + Send>),
   CheckModel,
+  /// The model at this path is prepared for the Neural Engine now.
+  Prepared(PathBuf),
   Quit,
 }
 
@@ -407,6 +411,7 @@ impl Session {
     let (tx, rx) = unbounded();
     let (events_tx, events) = unbounded();
     let controller = Controller {
+      tx: tx.clone(),
       machine: Machine::new(settings.activation),
       settings,
       history,
@@ -518,6 +523,8 @@ struct Dictation<T> {
 }
 
 struct Controller<O: TextOutput> {
+  /// Its own inbox, for what background threads tell it.
+  tx: Sender<Msg>,
   config: Config,
   machine: Machine,
   settings: Settings,
@@ -550,6 +557,7 @@ impl<O: TextOutput> Controller<O> {
     // What a crash left, before any recording makes new files; the model found now is no new one.
     let _ = self.check_model();
     self.untried = false;
+    self.prepare();
     if let Err(e) = self.history.recover(now_ms()) {
       warn!("history recovery: {e:#}");
     }
@@ -621,6 +629,19 @@ impl<O: TextOutput> Controller<O> {
         if self.engine.as_ref().is_some_and(|l| Some(&l.path) != path.as_ref()) {
           self.engine = None;
         }
+
+        self.prepare();
+      }
+      Msg::Prepared(path) => {
+        // Loaded on the GPU meanwhile: the next job loads it on the Neural Engine, in ~0.1 s.
+        let on_gpu = |l: &Loaded| {
+          let device = l.engine.status().device.unwrap_or_default();
+          l.path == path && !device.contains("Neural Engine")
+        };
+
+        if self.settings.neural_engine && self.engine.as_ref().is_some_and(on_gpu) {
+          self.engine = None;
+        }
       }
       Msg::Quit => unreachable!("handled by the loop"),
     }
@@ -688,6 +709,7 @@ impl<O: TextOutput> Controller<O> {
     self.machine.activation = self.settings.activation;
     if old.model != self.settings.model
       || old.unload_after_minutes != self.settings.unload_after_minutes
+      || old.neural_engine != self.settings.neural_engine
     {
       // Its thread finishes its jobs, then drops the model.
       self.engine = None;
@@ -695,6 +717,10 @@ impl<O: TextOutput> Controller<O> {
 
     if old.model != self.settings.model {
       let _ = self.check_model();
+    }
+
+    if old.model != self.settings.model || old.neural_engine != self.settings.neural_engine {
+      self.prepare();
     }
 
     if old.history_retention != self.settings.history_retention {
@@ -741,6 +767,18 @@ impl<O: TextOutput> Controller<O> {
     path
   }
 
+  /// The model found, prepared for the Neural Engine ahead of its first dictation, as the app
+  /// starts or another model is found: a new app binary compiles it again once.
+  fn prepare(&self) {
+    let Some(path) = &self.model_path else { return };
+    if !self.settings.neural_engine {
+      return;
+    }
+
+    let (tx, prepared) = (self.tx.clone(), path.clone());
+    self.config.loader.prepare(path, Box::new(move || _ = tx.send(Msg::Prepared(prepared))));
+  }
+
   /// None on disk, or one that does not load.
   fn no_model(&self) -> Option<NoModel> {
     self.model_error.clone().or_else(|| {
@@ -760,8 +798,9 @@ impl<O: TextOutput> Controller<O> {
     let loaded = self.engine.get_or_insert_with(|| {
       let name = file_stem(&path);
       info!("model {name} ({})", path.display());
-      let (loader, unload_after) = (self.config.loader.clone(), self.settings.unload_after());
-      let engine = Engine::start(loader, path.clone(), unload_after, self.events_tx.clone());
+      let (loader, ane) = (self.config.loader.clone(), self.settings.neural_engine);
+      let (unload_after, events) = (self.settings.unload_after(), self.events_tx.clone());
+      let engine = Engine::start(loader, path.clone(), ane, unload_after, events);
       Loaded { name, info, path, engine }
     });
 
@@ -1165,7 +1204,8 @@ impl<O: TextOutput> Controller<O> {
     warnings.extend(d.map_or(&self.last_warnings, |d| &d.warnings).iter().cloned());
     let engine = self.engine.as_ref().map_or_else(EngineStatus::default, |l| {
       let s = l.engine.status();
-      EngineStatus { model: Some(l.name.clone()), phase: s.phase, progress: s.progress }
+      let model = Some(l.name.clone());
+      EngineStatus { model, phase: s.phase, device: s.device, progress: s.progress }
     });
 
     Status {
