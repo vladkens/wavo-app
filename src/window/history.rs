@@ -16,7 +16,7 @@ use super::{Ask, Prefs};
 use crate::audio::playback::Playback;
 use crate::history::db::Entry;
 use crate::history::{History, Local, local_time, now_ms, shorten};
-use crate::session::controller::label;
+use crate::session::label;
 
 pub const SEARCH: &str = "history-search";
 pub const MORE: &str = "more";

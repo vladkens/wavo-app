@@ -35,7 +35,7 @@ use super::*;
 use crate::audio::devices::Choice;
 use crate::history::db::NewEntry;
 use crate::history::{History, now_ms};
-use crate::session::controller::{EngineStatus, Phase};
+use crate::session::{EngineStatus, Phase};
 use crate::settings::Activation;
 use crate::testing::TempDir;
 use crate::transfer::archive::Exported;
@@ -193,8 +193,6 @@ impl Shell for Fake {
 fn status(state: Phase) -> Status {
   Status {
     state,
-    activation: Activation::HoldOrToggle,
-    entry: None,
     recording: None,
     engine: EngineStatus::default(),
     last: None,

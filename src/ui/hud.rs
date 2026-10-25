@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use crate::session::controller::{NoModel, Outcome as Ended, Status};
+use crate::session::{NoModel, Outcome as Ended, Status};
 
 // Geometry, in points.
 pub const WIDTH: f32 = 176.0;
@@ -473,10 +473,8 @@ impl State {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::engine::supervisor::Phase as EnginePhase;
-  use crate::session::controller::{EngineStatus, Last, Phase};
-  use crate::session::output::NotPasted;
-  use crate::settings::Activation;
+  use crate::engine::Phase as EnginePhase;
+  use crate::session::{EngineStatus, Last, NotPasted, Phase};
 
   const MS: fn(u64) -> Duration = Duration::from_millis;
 
@@ -538,8 +536,6 @@ mod tests {
   fn status(last: Option<Last>, error: Option<&str>) -> Status {
     Status {
       state: Phase::Idle,
-      activation: Activation::HoldOrToggle,
-      entry: None,
       recording: None,
       engine: EngineStatus { phase: EnginePhase::Stopped, ..EngineStatus::default() },
       last,
@@ -559,7 +555,6 @@ mod tests {
       error: error.map(str::to_owned),
       pasted,
       not_pasted: why.map(str::to_owned),
-      seconds: 1.0,
     }
   }
 

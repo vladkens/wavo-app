@@ -10,9 +10,9 @@
 use nimbo::tray::{Item, Menu};
 
 use super::icons::Icon;
-use crate::engine::supervisor::Phase as EnginePhase;
+use crate::engine::Phase as EnginePhase;
 use crate::history::{Local, local_time, shorten};
-use crate::session::controller::{NoModel, Outcome, Phase, Status};
+use crate::session::{NoModel, Outcome, Phase, Status};
 use crate::window::models::{Found, Pick, size_text};
 
 /// The most dictations «Recent» lists.
@@ -120,7 +120,7 @@ pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> 
 pub fn icon(status: &Status, warnings: &[Warning]) -> Icon {
   match status.state {
     Phase::Recording => Icon::Recording,
-    Phase::Transcribing | Phase::Pasting => Icon::Transcribing,
+    Phase::Transcribing => Icon::Transcribing,
     Phase::Idle if warnings.is_empty() => Icon::Idle,
     Phase::Idle => Icon::Warning,
   }
@@ -231,7 +231,6 @@ fn state(status: &Status) -> Option<&'static str> {
     Phase::Recording => Some("Recording…"),
     Phase::Transcribing if loading => Some("Loading the model…"),
     Phase::Transcribing => Some("Transcribing…"),
-    Phase::Pasting => Some("Pasting…"),
     Phase::Idle if loading => Some("Loading the model…"),
     Phase::Idle if status.error.is_some() => Some("Error"),
     Phase::Idle => None,
@@ -253,14 +252,11 @@ fn capitalized(text: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::session::controller::{EngineStatus, Last};
-  use crate::settings::Activation;
+  use crate::session::{EngineStatus, Last};
 
   fn status(state: Phase) -> Status {
     Status {
       state,
-      activation: Activation::HoldOrToggle,
-      entry: None,
       recording: None,
       engine: EngineStatus::default(),
       last: None,
@@ -321,7 +317,6 @@ mod tests {
       error: None,
       pasted: true,
       not_pasted: None,
-      seconds: 1.0,
     });
     let ready =
       labels(&menu(None, &s, &[], &["09:05 · Hi".into()], &Models::new(&[], &Pick::default())));

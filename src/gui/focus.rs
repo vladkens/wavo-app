@@ -6,7 +6,7 @@
 use nimbo::focus::{self, Focused};
 use tracing::{debug, info};
 
-use crate::session::output::NotPasted;
+use crate::session::NotPasted;
 
 /// The app in focus now, for the paste to check against.
 pub fn current() -> Option<Focused> {

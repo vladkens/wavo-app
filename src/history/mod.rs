@@ -27,7 +27,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use self::db::{Db, Entry, EntryAudio, NewEntry, Spare};
+use self::db::{Db, Entry, EntryAudio, NewEntry};
 use self::recordings::Recordings;
 use crate::audio::vad::Clip;
 use crate::audio::wav;
@@ -217,10 +217,10 @@ impl History {
   }
 
   /// Applies `retention` at `now` (Unix ms): removes older entries with their audio. Entries
-  /// without text that `spare` spares stay, and do not count: their audio is all there is of them,
+  /// without text stay when `spare`, and do not count: their audio is all there is of them,
   /// and a model may still make text of it. An entry whose file cannot be deleted stays, to be
   /// tried again next time. Returns how many entries were removed.
-  pub fn cleanup(&self, retention: Retention, now: i64, spare: &Spare) -> Result<usize> {
+  pub fn cleanup(&self, retention: Retention, now: i64, spare: bool) -> Result<usize> {
     let doomed: Vec<EntryAudio> = match (retention, retention.max_age()) {
       (Retention::Unlimited, _) => return Ok(0),
       (Retention::Count(n), _) => self.db.get_beyond_newest(n.max(1), spare)?,
@@ -380,7 +380,7 @@ mod tests {
     }
 
     let (_, kept) = add(&h, 0, "new");
-    assert_eq!(h.cleanup(Retention::Days3, NOW, &Spare::Nothing).unwrap(), 3);
+    assert_eq!(h.cleanup(Retention::Days3, NOW, false).unwrap(), 3);
     let kept_day = kept.parent().unwrap().file_name().unwrap().to_str().unwrap().to_owned();
     assert_eq!(top(dir.path()), (vec![kept_day, "trash".into()], 1));
     fs::remove_file(&kept).unwrap();
@@ -397,8 +397,8 @@ mod tests {
     let entries: Vec<(i64, PathBuf)> = (0..5).map(|i| add(&h, (5 - i) * 1_000, "")).collect();
     // One being transcribed is neither removed nor counted.
     let (busy, _) = busy(&h, 10 * DAY);
-    assert_eq!(h.cleanup(Retention::Unlimited, NOW, &Spare::Nothing).unwrap(), 0);
-    assert_eq!(h.cleanup(Retention::Count(2), NOW, &Spare::Nothing).unwrap(), 3);
+    assert_eq!(h.cleanup(Retention::Unlimited, NOW, false).unwrap(), 0);
+    assert_eq!(h.cleanup(Retention::Count(2), NOW, false).unwrap(), 3);
 
     assert_eq!(entry_ids(dir.path()), [entries[3].0, entries[4].0, busy]);
     for (i, (_, path)) in entries.iter().enumerate() {
@@ -406,9 +406,9 @@ mod tests {
     }
 
     assert_eq!(top(dir.path()).1, 3);
-    assert_eq!(h.cleanup(Retention::Count(2), NOW, &Spare::Nothing).unwrap(), 0, "idempotent");
+    assert_eq!(h.cleanup(Retention::Count(2), NOW, false).unwrap(), 0, "idempotent");
     // Zero keeps one: the retention never empties the history entirely.
-    assert_eq!(h.cleanup(Retention::Count(0), NOW, &Spare::Nothing).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Count(0), NOW, false).unwrap(), 1);
   }
 
   #[test]
@@ -420,18 +420,18 @@ mod tests {
     let (busy, busy_wav) = busy(&h, 400 * DAY);
     let left = || entry_ids(dir.path()).len() - 1;
 
-    assert_eq!(h.cleanup(Retention::Months3, NOW, &Spare::Nothing).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Months3, NOW, false).unwrap(), 1);
     assert_eq!(left(), 6);
     assert!(!entries[6].1.exists());
-    assert_eq!(h.cleanup(Retention::Weeks2, NOW, &Spare::Nothing).unwrap(), 2);
+    assert_eq!(h.cleanup(Retention::Weeks2, NOW, false).unwrap(), 2);
     assert_eq!(left(), 4);
-    assert_eq!(h.cleanup(Retention::Days3, NOW, &Spare::Nothing).unwrap(), 2);
+    assert_eq!(h.cleanup(Retention::Days3, NOW, false).unwrap(), 2);
     assert_eq!(entry_ids(dir.path()), [entries[0].0, entries[1].0, busy]);
     assert_eq!(top(dir.path()).1, 3);
     assert!(entries[1].1.exists() && !entries[2].1.exists() && busy_wav.exists());
 
     // Time passes: a day later the 3-day-old entry goes too.
-    assert_eq!(h.cleanup(Retention::Days3, NOW + DAY, &Spare::Nothing).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Days3, NOW + DAY, false).unwrap(), 1);
     assert_eq!(entry_ids(dir.path()), [entries[0].0, busy]);
   }
 
@@ -443,13 +443,11 @@ mod tests {
     let h = History::open(dir.path()).unwrap();
     let (text, _) = add(&h, 10 * DAY, "text");
     let (untranscribed, wav) = add(&h, 10 * DAY, "");
-    assert_eq!(h.cleanup(Retention::Days3, NOW, &Spare::All).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Days3, NOW, true).unwrap(), 1);
     assert_eq!(entry_ids(dir.path()), [untranscribed]);
     assert!(wav.exists() && text > 0);
-    assert_eq!(h.cleanup(Retention::Count(1), NOW, &Spare::All).unwrap(), 0);
-    let untried = Spare::UntriedBy("whisper".into());
-    assert_eq!(h.cleanup(Retention::Days3, NOW, &untried).unwrap(), 0, "to be transcribed");
-    assert_eq!(h.cleanup(Retention::Days3, NOW, &Spare::Nothing).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Count(1), NOW, true).unwrap(), 0);
+    assert_eq!(h.cleanup(Retention::Days3, NOW, false).unwrap(), 1);
     assert!(entry_ids(dir.path()).is_empty());
   }
 
@@ -459,7 +457,7 @@ mod tests {
     let h = History::open(dir.path()).unwrap();
     let (_, path) = add(&h, 10 * DAY, "text");
     fs::remove_file(&path).unwrap();
-    assert_eq!(h.cleanup(Retention::Days3, NOW, &Spare::Nothing).unwrap(), 1);
+    assert_eq!(h.cleanup(Retention::Days3, NOW, false).unwrap(), 1);
     assert!(entry_ids(dir.path()).is_empty());
   }
 

@@ -41,7 +41,7 @@ use wavo::hub::{self, Hub, ModelInfo};
 use self::downloads::Download;
 use self::models::{Found, Pick};
 use crate::audio::devices;
-use crate::session::controller::{NoModel, Status};
+use crate::session::{NoModel, Status};
 use crate::settings::Settings;
 
 /// The window's width.

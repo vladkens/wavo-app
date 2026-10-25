@@ -143,28 +143,6 @@ fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<Entry> {
   })
 }
 
-/// The entries without text the retention leaves alone.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Spare {
-  Nothing,
-  /// All of them: no model can transcribe them.
-  All,
-  /// Those this model has not tried: the session is transcribing them by itself.
-  UntriedBy(String),
-}
-
-impl Spare {
-  /// `?2` and `?3` of the retention's queries: an entry without text goes only if neither is
-  /// spared nor untried by `?3`.
-  fn params(&self) -> (bool, Option<&str>) {
-    match self {
-      Spare::Nothing => (false, None),
-      Spare::All => (true, None),
-      Spare::UntriedBy(model) => (false, Some(model)),
-    }
-  }
-}
-
 /// An entry's id and its recording.
 pub type EntryAudio = (i64, Option<String>);
 
@@ -273,33 +251,30 @@ impl Db {
     Ok(item)
   }
 
-  /// The entries after the newest `keep`. Entries being transcribed, and those `spare` spares, are
-  /// neither returned nor counted.
-  pub fn get_beyond_newest(&self, keep: u32, spare: &Spare) -> Result<Vec<EntryAudio>> {
+  /// The entries after the newest `keep`. Entries being transcribed, and those without text when
+  /// `spare`, are neither returned nor counted.
+  pub fn get_beyond_newest(&self, keep: u32, spare: bool) -> Result<Vec<EntryAudio>> {
     let qs = "
     SELECT id, audio_path FROM entries
-    WHERE busy = 0 AND (text != '' OR (?2 = 0 AND (?3 IS NULL OR tried_model IS ?3)))
+    WHERE busy = 0 AND (text != '' OR ?2 = 0)
     ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?1;
     ";
 
-    let (all, untried_by) = spare.params();
     let mut stmt = self.db.prepare_cached(qs)?;
-    let rows = stmt.query_map(params![keep, all, untried_by], entry_audio_from_row)?;
+    let rows = stmt.query_map(params![keep, spare], entry_audio_from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
   }
 
-  /// The entries recorded before `at` (Unix ms), but those being transcribed and those `spare`
-  /// spares.
-  pub fn get_created_before(&self, at: i64, spare: &Spare) -> Result<Vec<EntryAudio>> {
+  /// The entries recorded before `at` (Unix ms), but those being transcribed and those without
+  /// text when `spare`.
+  pub fn get_created_before(&self, at: i64, spare: bool) -> Result<Vec<EntryAudio>> {
     let qs = "
     SELECT id, audio_path FROM entries
-    WHERE busy = 0 AND (text != '' OR (?2 = 0 AND (?3 IS NULL OR tried_model IS ?3)))
-      AND created_at < ?1;
+    WHERE busy = 0 AND (text != '' OR ?2 = 0) AND created_at < ?1;
     ";
 
-    let (all, untried_by) = spare.params();
     let mut stmt = self.db.prepare_cached(qs)?;
-    let rows = stmt.query_map(params![at, all, untried_by], entry_audio_from_row)?;
+    let rows = stmt.query_map(params![at, spare], entry_audio_from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
   }
 
@@ -426,14 +401,6 @@ impl Db {
   pub fn mark_idle(&self, id: i64) -> Result<()> {
     let qs = "UPDATE entries SET busy = 0 WHERE id = ?1;";
     self.db.prepare_cached(qs)?.execute([id])?;
-    Ok(())
-  }
-
-  /// The model of entry `id`'s transcription did not load: it did not try the entry, which keeps
-  /// `tried_model` from before.
-  pub fn update_untried(&self, id: i64, tried_model: Option<&str>) -> Result<()> {
-    let qs = "UPDATE entries SET busy = 0, tried_model = ?2 WHERE id = ?1;";
-    self.db.prepare_cached(qs)?.execute(params![id, tried_model])?;
     Ok(())
   }
 
@@ -599,8 +566,6 @@ mod tests {
     // Again with another model: a run without text keeps the text, and says who tried.
     db.mark_busy(id, "whisper").unwrap();
     db.mark_idle(id).unwrap();
-    db.mark_busy(id, "broken").unwrap();
-    db.update_untried(id, Some("whisper")).unwrap();
     let entry = db.get_entry(id).unwrap().unwrap();
     assert_eq!(
       (entry.text.as_str(), entry.model.as_deref()),
@@ -682,13 +647,12 @@ mod tests {
     .map(|e| db.insert_entry(e).unwrap())
     .collect();
     let picked = |items: Vec<EntryAudio>| items.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
-    let before = |spare| picked(db.get_created_before(5, &spare).unwrap());
-    assert_eq!(before(Spare::Nothing), [ids[0], ids[1], ids[2]]);
-    assert_eq!(before(Spare::All), [ids[0]]);
-    assert_eq!(before(Spare::UntriedBy("whisper".into())), [ids[0], ids[2]]);
-    let beyond = |spare| picked(db.get_beyond_newest(1, &spare).unwrap());
-    assert_eq!(beyond(Spare::Nothing), [ids[2], ids[1], ids[0]]);
-    assert_eq!(beyond(Spare::All), [ids[0]]);
+    let before = |spare| picked(db.get_created_before(5, spare).unwrap());
+    assert_eq!(before(false), [ids[0], ids[1], ids[2]]);
+    assert_eq!(before(true), [ids[0]]);
+    let beyond = |spare| picked(db.get_beyond_newest(1, spare).unwrap());
+    assert_eq!(beyond(false), [ids[2], ids[1], ids[0]]);
+    assert_eq!(beyond(true), [ids[0]]);
   }
 
   #[test]

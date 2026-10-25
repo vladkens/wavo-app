@@ -53,7 +53,6 @@ pub struct Recorder {
   signals: Arc<Signals>,
   live: Arc<Live>,
   /// Of the device.
-  rate: u32,
   stop: Arc<AtomicBool>,
   failures: Receiver<String>,
   thread: Option<JoinHandle<Processed>>,
@@ -162,7 +161,6 @@ impl Recorder {
     let signals = capture.signals.clone();
     let processor = Processor::new(capture.format.channels as usize, capture.format.rate, sink)?;
     let live = processor.live.clone();
-    let rate = capture.format.rate;
     let stop = Arc::new(AtomicBool::new(false));
     let (failures_tx, failures) = bounded(1);
     let (thread_stop, thread_signals) = (stop.clone(), signals.clone());
@@ -178,7 +176,6 @@ impl Recorder {
       started,
       signals,
       live,
-      rate,
       stop,
       failures,
       thread: Some(thread),
@@ -196,6 +193,7 @@ impl Recorder {
   }
 
   /// RMS of the last ~33 ms, linear, 0 to 1.
+  #[cfg(test)]
   pub fn level(&self) -> f32 {
     self.meter().level()
   }
@@ -204,23 +202,6 @@ impl Recorder {
   /// then, and [`stop`](Recorder::stop) returns what was recorded.
   pub fn failures(&self) -> &Receiver<String> {
     &self.failures
-  }
-
-  /// How long the audio recorded so far ends without speech (at most a second).
-  pub fn quiet(&self) -> Duration {
-    vad::duration(self.live.quiet.load(Ordering::Relaxed) as usize)
-  }
-
-  /// The audio the device has delivered so far.
-  pub fn delivered(&self) -> Duration {
-    Duration::from_secs_f64(self.signals.delivered() as f64 / f64::from(self.rate))
-  }
-
-  /// The audio the VAD has scored so far, behind [`delivered`](Self::delivered) by the
-  /// resampler's block and a VAD frame (up to ~50 ms). [`quiet`](Self::quiet) read after it is at
-  /// least as recent.
-  pub fn scored(&self) -> Duration {
-    vad::duration(self.live.scored.load(Ordering::Acquire) as usize)
   }
 
   /// The device failed: capture has ended.

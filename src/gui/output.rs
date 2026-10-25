@@ -18,7 +18,7 @@ use nimbo::{Clipboard, SystemClipboard};
 use tracing::warn;
 
 use super::{focus, paste, proxy};
-use crate::session::output::{NotPasted, TextOutput};
+use crate::session::{NotPasted, TextOutput};
 
 /// How long the session thread waits for the main thread for the target.
 const MAIN_TIMEOUT: Duration = Duration::from_secs(1);

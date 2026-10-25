@@ -5,7 +5,6 @@
 //! edges trimmed, long pauses shortened).
 
 use std::ops::Range;
-use std::time::Duration;
 
 use earshot::Detector;
 
@@ -32,11 +31,6 @@ pub const KEPT_PAUSE_MS: usize = 300;
 /// Frames in `ms` milliseconds (16 ms each), rounded down.
 pub const fn frames(ms: usize) -> usize {
   ms * SAMPLE_RATE as usize / 1000 / FRAME
-}
-
-/// The length of `frames` frames.
-pub fn duration(frames: usize) -> Duration {
-  Duration::from_secs_f64((frames * FRAME) as f64 / f64::from(SAMPLE_RATE))
 }
 
 /// Streaming detector: feed 16 kHz samples in any chunk sizes, get one score per frame.

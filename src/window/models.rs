@@ -22,9 +22,9 @@ use wavo::hub::{self, Hub, ModelInfo};
 
 use super::downloads::Download;
 use super::{Ask, Prefs, Problem};
-use crate::engine::supervisor::Phase as EnginePhase;
+use crate::engine::Phase as EnginePhase;
 use crate::history::fold;
-use crate::session::controller::{NoModel, Phase, label};
+use crate::session::{NoModel, Phase, label};
 use crate::settings::{Settings, language_name};
 
 /// The search field and the language pop-up above the plates.
@@ -240,7 +240,6 @@ impl Prefs {
       Phase::Recording => "Recording…",
       Phase::Transcribing | Phase::Idle if loading => "Loading…",
       Phase::Transcribing => "Transcribing…",
-      Phase::Pasting => "Pasting…",
       Phase::Idle if status.engine.phase == EnginePhase::Stopped => "Ready",
       Phase::Idle => "Loaded",
     };

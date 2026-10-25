@@ -34,8 +34,7 @@ use crate::audio::devices;
 use crate::ctl::{self, Claim};
 use crate::history::db::Entry;
 use crate::history::{self, History};
-use crate::session::controller::{Handle, Phase, Request, Update};
-use crate::session::{self, Session};
+use crate::session::{self, Handle, Phase, Request, Session, Update};
 use crate::settings::{self, HudPosition, Settings};
 use crate::transfer::archive::{self, Exported};
 use crate::ui::hud::{self, Mode};
@@ -153,7 +152,7 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   let observer = Box::new(|update: Update| {
     proxy().post(move |main| _ = with_app(|app| app.on_update(main, update)))
   });
-  let session = Session::start_observed(config, GuiOutput, observer)?;
+  let session = Session::start(config, GuiOutput, observer)?;
   let handle = session.handle();
   let hotkeys = {
     let handle = handle.clone();
@@ -450,7 +449,7 @@ impl window::Shell for MacShell {
   fn retranscribe(&self, id: i64) {
     let handle = self.handle.clone();
     spawn("retranscribe", move || {
-      if let Some(e) = handle.request(Request::Retranscribe { id }).error {
+      if let Some(e) = handle.request(Request::Retranscribe(id)).err() {
         warn!("transcribe history entry {id} again: {e}");
       }
     });
@@ -459,7 +458,7 @@ impl window::Shell for MacShell {
   fn undo_transcribe(&self, id: i64) {
     let handle = self.handle.clone();
     spawn("undo-transcribe", move || {
-      if let Some(e) = handle.request(Request::UndoTranscribe { id }).error {
+      if let Some(e) = handle.request(Request::UndoTranscribe(id)).err() {
         warn!("undo the transcription of history entry {id}: {e}");
       }
     });
@@ -468,7 +467,7 @@ impl window::Shell for MacShell {
   fn delete_entry(&self, id: i64) {
     let handle = self.handle.clone();
     spawn("history-delete", move || {
-      if let Some(e) = handle.request(Request::Delete { id }).error {
+      if let Some(e) = handle.request(Request::Delete(id)).err() {
         warn!("delete history entry {id}: {e}");
         with_window(move |prefs| prefs.entry_not_deleted(&e));
       }
@@ -556,7 +555,7 @@ impl App {
     let status = &update.status;
     // Its error shows in the menu.
     let _ = self.hotkeys.set(&update.settings.hotkey);
-    self.hotkeys.escape(status.state == Phase::Recording);
+    self.hotkeys.escape(status.state != Phase::Idle);
     let position = update.settings.hud_position;
     let shown = self.hud.0.with(|o| o.mode()).unwrap_or(Mode::Hidden);
     match status.state {
@@ -578,7 +577,7 @@ impl App {
         };
         self.show(main, shown, show, position);
       }
-      Phase::Transcribing | Phase::Pasting => {
+      Phase::Transcribing => {
         self.show(main, shown, Show::Transcribing(status.engine.progress), position)
       }
       Phase::Idle => {
@@ -645,7 +644,7 @@ impl App {
   fn unload(&mut self) {
     let handle = self.handle.clone();
     spawn("unload", move || {
-      if let Some(e) = handle.request(Request::Unload).error {
+      if let Some(e) = handle.request(Request::Unload).err() {
         warn!("unload the model: {e}");
       }
     });

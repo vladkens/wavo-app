@@ -64,6 +64,7 @@ impl Signals {
   }
 
   /// Frames the source has delivered so far.
+  #[cfg(test)]
   pub fn delivered(&self) -> u64 {
     self.delivered.load(Ordering::Relaxed)
   }

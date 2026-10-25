@@ -29,7 +29,7 @@ use nimbo::{Clipboard, Key, Modifiers, Shortcut, SystemClipboard};
 use tracing::{debug, info, warn};
 
 use super::proxy;
-use crate::session::output::NotPasted;
+use crate::session::NotPasted;
 
 /// The restore waits this long after the read: some apps read more than once per paste.
 const QUIET: Duration = Duration::from_millis(200);
