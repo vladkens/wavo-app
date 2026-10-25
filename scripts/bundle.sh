@@ -4,7 +4,8 @@
 #
 # The version comes from the binary (`wavo-app --version`, i.e. Cargo.toml), the least macOS from
 # $MACOSX_DEPLOYMENT_TARGET (the Makefile's, which the binary is built for). The bundle is signed
-# with the identity $WAVO_SIGN_IDENTITY, when set and the keychain has it: its designated
+# with the identity $WAVO_SIGN_IDENTITY ("Horolog Local Signing" by default) when the keychain
+# has it: its designated
 # requirement names the bundle id and the certificate, not the code hash,
 # so the permissions macOS grants (Microphone, Accessibility) survive rebuilds. Without the
 # identity, or when codesign does not finish in time (a keychain dialog nobody answers), the
@@ -21,7 +22,7 @@ icon=$2
 app=$3
 id=me.vladkens.wavo
 macos=${MACOSX_DEPLOYMENT_TARGET:?the least macOS version, as the binary is built for}
-identity=${WAVO_SIGN_IDENTITY:-}
+identity=${WAVO_SIGN_IDENTITY:-Horolog Local Signing}
 sign_timeout=${WAVO_SIGN_TIMEOUT:-60}
 
 version=$("$bin" --version | awk '{ print $2 }')
@@ -83,9 +84,7 @@ with_timeout() {
 }
 
 signed=
-if [ -z "$identity" ]; then
-  echo "bundle: no WAVO_SIGN_IDENTITY: signing ad hoc" >&2
-elif security find-identity -v -p codesigning | grep -qF "\"$identity\""; then
+if security find-identity -v -p codesigning | grep -qF "\"$identity\""; then
   if with_timeout "$sign_timeout" codesign --force --sign "$identity" --timestamp=none "$app"; then
     signed=$identity
   else
