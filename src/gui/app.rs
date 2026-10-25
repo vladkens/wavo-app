@@ -398,8 +398,8 @@ fn request_microphone(then: impl FnOnce() + Send + 'static) {
   info!("asking for microphone access");
   permissions::request_microphone(|granted| {
     info!("microphone access {}", if granted { "granted" } else { "denied" });
-    proxy().post(|_| {
-      with_app(App::microphone_answered);
+    proxy().post(|main| {
+      with_app(|app| app.microphone_answered(main));
       with_window(Prefs::access_changed);
       then();
     });
@@ -796,10 +796,16 @@ impl App {
     !self.fake_mic && self.microphone != Access::Granted
   }
 
-  /// The microphone's prompt was answered.
-  fn microphone_answered(&mut self) {
+  /// The microphone's prompt was answered. Denied during the recording that asked for it: the HUD
+  /// and the window say so, as for a press without it.
+  fn microphone_answered(&mut self, main: &mut Main) {
     self.microphone = permissions::microphone();
     self.refresh();
+    let recording = self.update.clone().filter(|u| u.status.state == Phase::Recording);
+    if let Some(update) = recording.filter(|_| self.mic_denied()) {
+      self.on_update(main, update);
+      proxy().post(|main| open_window(main, Some(Page::Permissions)));
+    }
   }
 
   /// The menu opens: what the system does not tell the app is looked at again, and the models
