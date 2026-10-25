@@ -1,7 +1,5 @@
 .PHONY: prepare check test build update clean
 
-# macOS 14 is the least nimbo runs on; the bundle's Info.plist says the same (scripts/bundle.py).
-export MACOSX_DEPLOYMENT_TARGET := 14.0
 # Linux does not build the macOS shell, the only user of parts of the session: dead code is
 # checked on macOS.
 LINTS := -D warnings $(if $(filter Linux,$(shell uname -s)),-A dead_code)

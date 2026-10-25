@@ -8,8 +8,8 @@
   scripts/bundle.py <binary> <icon.png> <Wavo.app>
 
 The icon becomes Wavo.icns (every size of an iconset scaled down from the 1024 px PNG). The
-version comes from the binary (`wavo-app --version`, i.e. Cargo.toml), the least macOS from
-$MACOSX_DEPLOYMENT_TARGET (the Makefile's, which the binary is built for).
+version comes from the binary (`wavo-app --version`, i.e. Cargo.toml), the least macOS too (the
+one it is built for, from .cargo/config.toml).
 
 The bundle is signed with Wavo's own identity, "Wavo Local Signing" ($WAVO_SIGN_IDENTITY to
 use another), made in the login keychain before the first bundle: its designated requirement
@@ -119,8 +119,9 @@ def sign(app: Path) -> str:
 
 def main() -> int:
     binary, png, app = (Path(a) for a in sys.argv[1:4])
-    macos = os.environ["MACOSX_DEPLOYMENT_TARGET"]
     version = run(binary, "--version", capture_output=True, text=True).stdout.split()[1]
+    build = run("vtool", "-show-build", binary, capture_output=True, text=True).stdout
+    macos = next(ln.split()[1] for ln in build.splitlines() if ln.split()[:1] == ["minos"])
     if not os.environ.get("CI") and not has_identity():
         make_identity()
 

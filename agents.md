@@ -4,7 +4,7 @@ The dictation app (`wavo-app`, `publish = false`): hold a hotkey, speak, release
 
 ## Dependencies
 
-- wavo, like nimbo, is a git dependency on its `main`: `Cargo.lock` holds the commit and `cargo update -p wavo` moves it; a `[patch."https://github.com/vladkens/wavo"]` in an uncommitted `.cargo/config.toml` builds against a local wavo checkout.
+- wavo, like nimbo, is a git dependency on its `main`: `Cargo.lock` holds the commit and `cargo update -p wavo` moves it; a `[patch."https://github.com/vladkens/wavo"]` added to `.cargo/config.toml`, never committed, builds against a local wavo checkout.
 - nimbo is a git dependency on its `main` until it is on crates.io: missing toolkit pieces go into nimbo, not around it.
 - Change dependencies only with `cargo add` / `cargo remove` / `cargo upgrade`, never by hand.
 - Profiles: `release` (thin LTO, stripped) and `fast` (no LTO, incremental). Both unwind on a panic, as the engine thread needs; keep it so.
