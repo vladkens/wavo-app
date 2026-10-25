@@ -173,8 +173,11 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   app.check_access();
   app.read_models();
 
-  // Nothing is asked at launch: General's buttons ask. Never at a launch at login.
-  let no_model = app.pick.active.is_none() && app.pick.other.as_ref().is_none_or(|(_, on)| !on);
+  // Nothing is asked at launch: General's buttons ask. Never at a launch at login. The session has
+  // not told its settings yet: a model chosen by its path is read from the file.
+  let saved = Settings::load(&app.home.join(settings::FILE)).0;
+  let pick = Pick::new(&app.hub, saved.model.as_deref(), &app.found);
+  let no_model = pick.active.is_none() && pick.other.as_ref().is_none_or(|(_, on)| !on);
   let missing = !app.accessibility || app.mic() != Access::Granted || no_model;
   let missing = missing && !may_launch_at_login();
   APP.with(|cell| *cell.borrow_mut() = Some(app));
@@ -799,8 +802,22 @@ fn paste(text: &str, keep: bool, target: &Focused) -> Result<(), NotPasted> {
     return Err(NotPasted::FocusChanged);
   }
 
-  if now.secure == Ok(true) {
-    return Err(NotPasted::SecureField);
+  // The app told its window at the start: it must tell it now too.
+  let known = target.window.is_ok();
+  if known && let Err(e) = &now.window {
+    return Err(NotPasted::Failed(format!("{} did not tell its focused window ({e})", now.name)));
+  }
+
+  match &now.secure {
+    Ok(true) => return Err(NotPasted::SecureField),
+    Ok(false) => {}
+    // An app that answers at all must answer this too; one that never did can't be checked, unless
+    // Secure Input is on: then it may well be a password field.
+    Err(e) if known || permissions::secure_input() => {
+      let why = format!("{} did not tell its focused element ({e})", now.name);
+      return Err(NotPasted::Failed(why));
+    }
+    Err(_) => {}
   }
 
   let id = NEXT.fetch_add(1, Ordering::Relaxed);

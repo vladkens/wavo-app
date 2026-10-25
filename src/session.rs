@@ -1124,9 +1124,14 @@ impl<O: TextOutput> Controller<O> {
     Ok(())
   }
 
-  /// One entry without text at a time, when no dictation runs, by a model that has not tried it.
+  /// One entry without text at a time, when no dictation runs, by a model that has not tried it;
+  /// while the model does not load they wait, for the next dictation that loads it.
   fn transcribe_untried(&mut self) {
-    while self.untried && self.dictation.is_none() && self.retranscribing.is_empty() {
+    while self.untried
+      && self.dictation.is_none()
+      && self.retranscribing.is_empty()
+      && self.no_model().is_none()
+    {
       let Some(model) = self.model_path.as_deref().map(file_stem) else { return };
       let entry = self.history.db.get_untried(&model).inspect_err(|e| warn!("history: {e:#}"));
       let Some(entry) = entry.ok().flatten() else {
@@ -1150,12 +1155,12 @@ impl<O: TextOutput> Controller<O> {
         let language = r.job.language.as_deref();
         log_history(self.history.db.update_text(r.entry, &text, &r.job.model, language));
       }
+      // Tried again by itself once the model loads (see transcribe_untried).
+      Outcome::NoModel if r.auto => log_history(self.history.db.mark_untried(r.entry)),
       _ => log_history(self.history.db.mark_idle(r.entry)),
     }
 
     if r.auto {
-      // A model that does not load would try every entry for nothing.
-      self.untried &= outcome != Outcome::NoModel;
       self.cleanup();
     } else if outcome != Outcome::Done {
       let why = match (outcome, error) {
@@ -1690,6 +1695,35 @@ mod tests {
     });
     assert_eq!(s.entry(with_text).unwrap().tried_model, None, "one with text is left alone");
     assert!(s.output.log().pasted.is_empty());
+  }
+
+  /// A model that does not load tries no entry: they wait for a dictation that loads it.
+  #[test]
+  fn entries_without_text_wait_for_a_model_that_loads() {
+    let s = InProcess::start(
+      "session-broken-model",
+      &Settings::default(),
+      Some(&loud(10.0)),
+      "hello there",
+      &[],
+    );
+    let waiting = s.add_entry(2_000, "", &loud(1.0));
+    let model = download(&s.hub, "parakeet-v3");
+    fs::write(&model, b"BROKEN").unwrap();
+    s.handle.check_model();
+    s.update_where("the load failed", |u| {
+      matches!(u.status.no_model, Some(NoModel::LoadFailed { .. }))
+        && u.status.retranscribing.is_empty()
+    });
+    let entry = s.entry(waiting).unwrap();
+    assert_eq!((entry.text.as_str(), entry.tried_model, entry.busy), ("", None, false));
+
+    fs::write(&model, b"GGUF").unwrap();
+    assert_eq!(s.dictate(1).outcome, Outcome::Done);
+    let done = poll("transcribed", Duration::from_secs(10), || {
+      s.entry(waiting).filter(|e| !e.text.is_empty() && !e.busy)
+    });
+    assert_eq!(done.text, "hello there");
   }
 
   /// A failed retranscription keeps the text and says why; new text replaces it, an undo puts it

@@ -66,8 +66,9 @@ impl Local {
     (self.year, self.month, self.day)
   }
 
+  /// Empty for the month 0 of a date out of range (an imported entry's).
   pub fn month_name(self) -> &'static str {
-    MONTHS[self.month as usize - 1]
+    MONTHS.get((self.month as usize).wrapping_sub(1)).copied().unwrap_or_default()
   }
 
   /// `09:05`.
@@ -418,6 +419,13 @@ impl Db {
   /// The transcription of entry `id` ended without text: it keeps what it had.
   pub fn mark_idle(&self, id: i64) -> Result<()> {
     self.db.prepare_cached("UPDATE entries SET busy = 0 WHERE id = ?1;")?.execute([id])?;
+    Ok(())
+  }
+
+  /// A run whose model did not even load did not try entry `id`.
+  pub fn mark_untried(&self, id: i64) -> Result<()> {
+    let qs = "UPDATE entries SET busy = 0, tried_model = NULL WHERE id = ?1;";
+    self.db.prepare_cached(qs)?.execute([id])?;
     Ok(())
   }
 
