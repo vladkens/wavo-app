@@ -1,9 +1,9 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! The menu bar icon, one per state, from the SVGs in `assets/status-icon/`: the app icon's
-//! wave-"w", big and centred in an 18 × 18 view box, a state's mark (a dot, three dots, a dot with
-//! "!" cut out) as big as its top-right corner holds, laid over it with the "w" cut away around it.
-//! A template: the OS draws it at every scale.
+//! wave-"w", big and centred in an 18 × 18 view box; a state shows as a disc on its right arm with
+//! the "w" cut away around it and a letter cut out of it: R recording, T transcribing, ! needs
+//! attention. A template: the OS draws it at every scale.
 
 use nimbo::tray::TrayIcon;
 
