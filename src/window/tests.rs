@@ -32,13 +32,12 @@ use super::general::{
 use super::history::{COPY, DELETE, PLAY, RETRANSCRIBE, ROW, SEARCH, TEXT, UNDO};
 use super::models::{self as page, CANCEL, DOWNLOAD, INFO, USE};
 use super::*;
-use crate::audio::devices::Choice;
-use crate::history::db::NewEntry;
-use crate::history::{History, now_ms};
+use crate::audio::{self, Choice};
+use crate::history::{Entry, History, now_ms};
 use crate::session::{EngineStatus, Phase};
 use crate::settings::Activation;
 use crate::testing::TempDir;
-use crate::transfer::archive::Exported;
+use crate::transfer::Exported;
 
 #[derive(Default)]
 struct Log {
@@ -93,8 +92,8 @@ impl Shell for Fake {
     self.log().paused.push(paused);
   }
 
-  fn devices(&self) -> Vec<devices::Info> {
-    let info = |name: &str, default| devices::Info {
+  fn devices(&self) -> Vec<audio::Device> {
+    let info = |name: &str, default| audio::Device {
       id: Some(name.to_lowercase()),
       name: name.into(),
       default,
@@ -238,16 +237,16 @@ fn history_of(home: &Path, items: &[(&str, i64, f32)], audio: bool) -> Vec<i64> 
       }
 
       let (model, tried) = ("parakeet-tdt-0.6b-v3-Q8_0", "whisper-tiny-Q8_0");
-      let entry = NewEntry {
+      let entry = Entry {
         created_at: now - ago * 60_000,
         duration_ms: (secs * 1000.0) as i64,
-        audio_path: audio.then_some(name.as_str()),
-        text,
-        model: (!text.is_empty()).then_some(model),
-        tried_model: text.is_empty().then_some(tried),
-        ..NewEntry::default()
+        audio_path: audio.then_some(name),
+        text: text.into(),
+        model: (!text.is_empty()).then(|| model.into()),
+        tried_model: text.is_empty().then(|| tried.into()),
+        ..Entry::default()
       };
-      h.db.insert_entry(&entry).unwrap()
+      h.db.insert(&[entry]).unwrap()[0]
     })
     .collect()
 }
@@ -489,7 +488,7 @@ fn controls_show_hover_and_tooltips() {
   hovers_on(&mut h, &[Id::of(HUD), Id::of(LOGIN)]);
   click(&mut h, Id::of(MODEL_FOLDER));
   click(&mut h, Id::of(RECORDINGS_FOLDER));
-  let recordings = home.path().join(crate::history::recordings::DIR);
+  let recordings = home.path().join(crate::history::RECORDINGS_DIR);
   assert_eq!(fake.log().folders, [home.hub.root().to_owned(), recordings]);
 
   tab(&mut h, Page::About);

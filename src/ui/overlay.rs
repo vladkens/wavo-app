@@ -13,7 +13,7 @@ use nimbo::{
 };
 
 use super::hud::{self, Mode, Shape, State};
-use crate::audio::recorder::Meter;
+use crate::audio::Meter;
 use crate::settings::HudPosition;
 
 const FONT: Font = Font::ui(13.0);

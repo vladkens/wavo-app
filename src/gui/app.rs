@@ -29,14 +29,11 @@ use wavo::hub::{Hub, ModelInfo};
 
 use super::output::GuiOutput;
 use super::paste;
-use crate::INFO;
-use crate::audio::devices;
 use crate::ctl::{self, Claim};
-use crate::history::db::Entry;
-use crate::history::{self, History};
+use crate::history::{self, Entry, History};
 use crate::session::{self, Handle, Phase, Request, Session, Update};
 use crate::settings::{self, HudPosition, Settings};
-use crate::transfer::archive::{self, Exported};
+use crate::transfer::{self, Exported};
 use crate::ui::hud::{self, Mode};
 use crate::ui::icons::Icon;
 use crate::ui::menu::{self, Models, Warning};
@@ -45,6 +42,7 @@ use crate::window::downloads::{Download, Downloads};
 use crate::window::history::no_text;
 use crate::window::models::{Found, Pick};
 use crate::window::{self, Page, Prefs};
+use crate::{INFO, audio};
 
 /// How often Accessibility access is checked while it is missing (and only then).
 const ACCESS_POLL: Duration = Duration::from_secs(2);
@@ -121,7 +119,7 @@ pub fn run() -> Result<()> {
   };
 
   if config.fake_mic.is_none() {
-    devices::warm_up();
+    audio::warm_up();
   }
 
   info!("wavo-app for {}", home.display());
@@ -396,8 +394,8 @@ impl window::Shell for MacShell {
     proxy().post(move |_| _ = with_app(|app| app.hotkeys.pause(paused)));
   }
 
-  fn devices(&self) -> Vec<devices::Info> {
-    devices::list()
+  fn devices(&self) -> Vec<audio::Device> {
+    audio::devices()
   }
 
   /// The window shows how it goes; once it ends the models are looked at again: the menu's (and
@@ -524,7 +522,7 @@ impl window::Shell for MacShell {
   fn export(&self, file: PathBuf, done: Box<dyn FnOnce(Result<Exported, String>) + Send>) {
     let home = self.home.clone();
     spawn("export", move || {
-      let result = archive::export(&home, &file);
+      let result = transfer::export(&home, &file);
       match &result {
         Ok(_) => _ = nimbo::open::reveal(&file).inspect_err(|e| warn!("show the archive: {e}")),
         Err(e) => warn!("export to {}: {e:#}", file.display()),

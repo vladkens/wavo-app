@@ -18,7 +18,7 @@ use nimbo::{Button, FormRow, FormStyle, Hotkey, Icon, Id, Select, Tile, Ui, open
 use tracing::{info, warn};
 
 use super::{Page, Prefs, Problem, models};
-use crate::audio::devices::Choice;
+use crate::audio::Choice;
 use crate::history::Retention;
 use crate::settings::{Activation, HudPosition, Settings, language_name};
 

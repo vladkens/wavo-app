@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use isolang::Language;
 use serde::{Deserialize, Serialize};
 
-use crate::audio::devices::Choice;
+use crate::audio::Choice;
 use crate::history::Retention;
 
 pub const FILE: &str = "settings.json";

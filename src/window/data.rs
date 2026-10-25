@@ -12,9 +12,8 @@ use nimbo::{FormRow, FormStyle, Icon, Tile, Ui, paths};
 use super::Prefs;
 use super::general::{row as row_id, thousands};
 use super::models::size_text;
-use crate::history::now_ms;
-use crate::history::recordings::day_of;
-use crate::transfer::archive::Exported;
+use crate::history::{day_of, now_ms};
+use crate::transfer::Exported;
 
 pub const EXPORT: &str = "export";
 

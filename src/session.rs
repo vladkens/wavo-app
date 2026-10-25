@@ -23,13 +23,9 @@ use nimbo::hotkey::Edge;
 use tracing::{debug, info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
-use crate::audio::capture::{self, Source};
-use crate::audio::recorder::{Meter, Recorder};
-use crate::audio::vad::Clip;
-use crate::audio::wav;
+use crate::audio::{self, Clip, Meter, Recorder, Source};
 use crate::engine::{self, Engine, EngineError, Loader, Wavo};
-use crate::history::db::{Entry, NewEntry};
-use crate::history::{History, now_ms};
+use crate::history::{Entry, History, now_ms};
 use crate::settings::{self, Activation, Settings, language_name};
 
 /// The microphone stays open this long after the stop, for the end of a word the key-up cut.
@@ -270,7 +266,7 @@ impl Config {
       home: crate::home(),
       hub: Hub::new(),
       loader: Arc::new(Wavo),
-      fake_mic: capture::fake_mic(),
+      fake_mic: audio::fake_mic(),
     }
   }
 }
@@ -822,7 +818,7 @@ impl<O: TextOutput> Controller<O> {
         warn!("dictation {take}: {error}");
         self.error = Some(error);
         // Its day folder goes if nothing else is in it.
-        let _ = self.history.recordings.discard(&audio);
+        let _ = self.history.recordings.remove(&audio);
         return self.feed(Input::RecordingFailed { take });
       }
     };
@@ -921,17 +917,18 @@ impl<O: TextOutput> Controller<O> {
   /// The entry of the dictation: without text, busy if a model transcribes it.
   fn add_entry(&self, model: Option<&str>) -> Option<i64> {
     let d = self.dictation.as_ref().unwrap();
-    let entry = NewEntry {
+    let entry = Entry {
       created_at: d.created_at,
       duration_ms: d.duration_ms,
-      audio_path: Some(&d.audio),
-      tried_model: model,
+      audio_path: Some(d.audio.clone()),
+      tried_model: model.map(str::to_owned),
       busy: model.is_some(),
-      ..NewEntry::default()
+      ..Entry::default()
     };
 
     // The text still reaches the person; the recording becomes an entry on the next start.
-    self.history.db.insert_entry(&entry).inspect_err(|e| warn!("history: {e:#}")).ok()
+    let ids = self.history.db.insert(&[entry]).inspect_err(|e| warn!("history: {e:#}"));
+    ids.ok().map(|ids| ids[0])
   }
 
   fn on_transcribed(&mut self, result: Result<String, EngineError>) {
@@ -1021,12 +1018,12 @@ impl<O: TextOutput> Controller<O> {
   /// Nothing of the dictation is kept: its entry, if it has one, and its recording go.
   fn discard(&mut self) {
     let d = self.dictation.as_mut().unwrap();
-    if let Err(e) = self.history.recordings.discard(&d.audio) {
+    if let Err(e) = self.history.recordings.remove(&d.audio) {
       warn!("dictation {}: {e:#}", d.last.take);
     }
 
     if let Some(id) = d.last.entry.take() {
-      log_history(self.history.db.delete_entry(id));
+      log_history(self.history.db.delete_entries(&[id]));
     }
   }
 
@@ -1063,7 +1060,7 @@ impl<O: TextOutput> Controller<O> {
     }
 
     let clip = match self.history.audio_file(&entry) {
-      Some(wav) => wav::read(&wav).map(Clip::analyze),
+      Some(wav) => audio::read_wav(&wav).map(Clip::analyze),
       None => Err(anyhow!("the recording of entry {id} is gone")),
     };
 
@@ -1229,7 +1226,7 @@ mod tests {
 
   use super::*;
   use crate::audio::SAMPLE_RATE;
-  use crate::history::{Retention, recordings};
+  use crate::history::{RECORDINGS_DIR, Retention};
   use crate::testing::{FakeModels, TempDir, download, poll, tone, wav_count, write_wav};
 
   // MARK: Machine
@@ -1494,7 +1491,7 @@ mod tests {
     }
 
     fn recordings(&self) -> usize {
-      wav_count(&self.home.path().join(recordings::DIR))
+      wav_count(&self.home.path().join(RECORDINGS_DIR))
     }
 
     /// The history entry of `last`, which keeps its recording.
@@ -1516,9 +1513,10 @@ mod tests {
       let (name, path) = history.recordings.new_file(created_at);
       write_wav(&path, pcm);
       let duration_ms = pcm.len() as i64 * 1000 / i64::from(SAMPLE_RATE);
-      let new =
-        NewEntry { created_at, duration_ms, audio_path: Some(&name), text, ..NewEntry::default() };
-      history.db.insert_entry(&new).unwrap()
+      let text = text.to_owned();
+      let entry =
+        Entry { created_at, duration_ms, audio_path: Some(name), text, ..Entry::default() };
+      history.db.insert(&[entry]).unwrap()[0]
     }
   }
 
@@ -1693,7 +1691,7 @@ mod tests {
     let failed = s.update_where("the error", |u| u.status.error.is_some()).status;
     assert!(failed.error.unwrap().contains("could not start recording"));
     assert_eq!((failed.state, failed.last), (Phase::Idle, None));
-    let dir = s.home.path().join(recordings::DIR);
+    let dir = s.home.path().join(RECORDINGS_DIR);
     assert_eq!(fs::read_dir(dir).unwrap().count(), 0, "no file, nor its day folder");
   }
 

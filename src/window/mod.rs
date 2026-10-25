@@ -40,7 +40,7 @@ use wavo::hub::{self, Hub, ModelInfo};
 
 use self::downloads::Download;
 use self::models::{Found, Pick};
-use crate::audio::devices;
+use crate::audio;
 use crate::session::{NoModel, Status};
 use crate::settings::Settings;
 
@@ -161,7 +161,7 @@ pub trait Shell {
   /// The recorder records a new hotkey: the current one is not matched meanwhile.
   fn pause_hotkey(&self, paused: bool);
   /// The input devices, the system default marked.
-  fn devices(&self) -> Vec<devices::Info>;
+  fn devices(&self) -> Vec<audio::Device>;
   /// Downloads `model` ([`downloads::Downloads::pull`]); a download that ends tells the window
   /// ([`Prefs::models_changed`]).
   fn download(&self, model: &'static ModelInfo);
@@ -203,7 +203,7 @@ pub trait Shell {
   fn export(
     &self,
     file: PathBuf,
-    done: Box<dyn FnOnce(Result<crate::transfer::archive::Exported, String>) + Send>,
+    done: Box<dyn FnOnce(Result<crate::transfer::Exported, String>) + Send>,
   );
 }
 
@@ -270,7 +270,7 @@ pub struct Prefs {
   status: Option<Status>,
   shell: Box<dyn Shell>,
   hub: Hub,
-  devices: Vec<devices::Info>,
+  devices: Vec<audio::Device>,
   found: Vec<Found>,
   /// Which of them transcribes: looked at again when they or the choice change.
   pick: Pick,
@@ -304,7 +304,7 @@ impl Prefs {
       pick: Pick::default(),
       login: general::Login::default(),
       access: Access::default(),
-      recordings: general::Folder::new(home.join(crate::history::recordings::DIR)),
+      recordings: general::Folder::new(home.join(crate::history::RECORDINGS_DIR)),
       recording: false,
       focused: false,
       ask: None,

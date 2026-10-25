@@ -14,9 +14,7 @@ use std::{env, fs, thread};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use rusqlite::Connection;
 
-use crate::audio::vad::Clip;
-use crate::audio::wav::WavSink;
-use crate::audio::{SAMPLE_RATE, wav};
+use crate::audio::{Clip, SAMPLE_RATE, WavSink, read_wav};
 use crate::engine::{Loader, SpeechModel};
 use crate::history::DB_FILE;
 
@@ -110,7 +108,7 @@ pub fn fixture(name: &str) -> Fixture {
 
 /// Audio of a fixture, also of those without a transcript (`silence`, `noise`).
 pub fn fixture_pcm(name: &str) -> Vec<f32> {
-  wav::read(&fixture_wav(name)).unwrap_or_else(|e| panic!("{e:#} (run `make fixtures`)"))
+  read_wav(&fixture_wav(name)).unwrap_or_else(|e| panic!("{e:#} (run `make fixtures`)"))
 }
 
 pub fn fixture_wav(name: &str) -> PathBuf {

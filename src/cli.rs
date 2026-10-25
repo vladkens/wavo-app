@@ -10,13 +10,12 @@ use std::{fs, thread};
 use anyhow::{Result, bail};
 use nimbo::autostart;
 
-use crate::INFO;
 use crate::ctl::{self, Claim};
-use crate::transfer::archive;
 use crate::window::models::size_text;
+use crate::{INFO, transfer};
 
 pub fn export(file: &Path) -> Result<()> {
-  let done = archive::export(&crate::home(), file)?;
+  let done = transfer::export(&crate::home(), file)?;
   let size = size_text(done.bytes);
   println!("{}: {} entries, {} recordings, {size}", file.display(), done.entries, done.recordings);
   Ok(())
@@ -24,8 +23,8 @@ pub fn export(file: &Path) -> Result<()> {
 
 pub fn import(source: &Path, take_settings: bool, dry_run: bool) -> Result<()> {
   let would = if dry_run { "would be " } else { "" };
-  let done = archive::import(&crate::home(), source, take_settings, dry_run)?;
-  let r = &done.report;
+  let done = transfer::import(&crate::home(), source, take_settings, dry_run)?;
+  let r = &done;
   let there = r.entries - r.added;
   println!("{} entries: {} {would}added, {there} there already", r.entries, r.added);
   println!("{} recordings {would}copied", r.copied);

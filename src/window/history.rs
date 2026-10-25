@@ -13,9 +13,8 @@ use std::path::{Path, PathBuf};
 use nimbo::{Align, Button, Float, FormRow, FormStyle, Icon, Id, Style, TextStyle, Ui, grow};
 
 use super::{Ask, Prefs};
-use crate::audio::playback::Playback;
-use crate::history::db::Entry;
-use crate::history::{History, Local, local_time, now_ms, shorten};
+use crate::audio::Playback;
+use crate::history::{Entry, History, Local, local_time, now_ms, shorten};
 use crate::session::label;
 
 pub const SEARCH: &str = "history-search";

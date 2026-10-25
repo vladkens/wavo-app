@@ -29,8 +29,8 @@ its recording's. A row without text comes with its recording, as an entry no mod
 with neither is left. A row's start is its second in ms plus its id's last three digits, the same
 every time, so importing twice adds nothing.
 
-The archive is a Wavo archive (src/transfer/archive.rs): the manifest, then `history.db` in Wavo's
-schema 1 (src/history/db.rs), then the recordings.
+The archive is a Wavo archive (src/transfer.rs): the manifest, then `history.db` in Wavo's
+schema 1 (src/history.rs), then the recordings.
 """
 
 import json
@@ -50,7 +50,7 @@ MODEL = "handy"
 WAV_HEADER = 44
 WAV_BYTES_PER_MS = 32
 
-# Wavo's history, schema 1 (src/history/db.rs, migrate_v1).
+# Wavo's history, schema 1 (src/history.rs, migrate_v1).
 SCHEMA = """
 CREATE TABLE entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
