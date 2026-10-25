@@ -33,8 +33,9 @@ clean:
 APP := target/Wavo.app
 PROFILE := release
 
-# target/Wavo.app (scripts/bundle.py), signed with Wavo's own identity, made in the login
-# keychain the first time. Built, never opened.
+# target/Wavo.app (scripts/bundle.py), signed with Wavo's own identity, "Wavo Local Signing",
+# made in the login keychain before the first bundle; no bundle when it can't sign (CI: ad hoc).
+# Built, never opened.
 bundle: # target/Wavo.app from the release profile, or PROFILE
 	cargo build --profile $(PROFILE)
 	uv run scripts/bundle.py target/$(PROFILE)/wavo-app assets/icon.png $(APP)
@@ -43,6 +44,8 @@ dist: bundle # target/distrib/Wavo-dev.zip, the release file for CI (vladkens/ac
 	mkdir -p target/distrib
 	ditto -c -k --keepParent $(APP) target/distrib/Wavo-dev.zip
 
+# scripts/run.py: Wavo's permissions are reset first when the bundle's signature is not the one
+# they were granted to.
 run: # quit the running Wavo, start target/Wavo.app built with the quick fast profile
 	$(MAKE) bundle PROFILE=fast
 	uv run scripts/run.py $(APP)

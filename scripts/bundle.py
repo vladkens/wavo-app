@@ -12,11 +12,12 @@ version comes from the binary (`wavo-app --version`, i.e. Cargo.toml), the least
 $MACOSX_DEPLOYMENT_TARGET (the Makefile's, which the binary is built for).
 
 The bundle is signed with Wavo's own identity, "Wavo Local Signing" ($WAVO_SIGN_IDENTITY to
-use another), made in the login keychain the first time (not in CI): its designated requirement
+use another), made in the login keychain before the first bundle: its designated requirement
 names the bundle id and the certificate, not the code hash, so the permissions macOS grants
-(Microphone, Accessibility) survive rebuilds. Without it, or when codesign does not finish in
-time (a keychain dialog nobody answers), the bundle is signed ad hoc and macOS asks again after
-every rebuild.
+(Microphone, Accessibility) survive rebuilds. The certificate stays untrusted, which the
+requirement doesn't need. A bundle that can't be signed with it (codesign failed or didn't finish
+in time: a keychain dialog nobody answers) is no bundle, never one signed ad hoc, whose
+permissions macOS would keep for that build only. In CI, which has no identity, it is ad hoc.
 
 LSEnvironment sets MallocSpaceEfficient=1 (libmalloc's src/malloc.c: no large-block cache, empty
 pages given back at once): otherwise malloc keeps the large blocks a model frees after its
@@ -92,30 +93,36 @@ def make_identity() -> None:
             capture_output=True)
         run(openssl, "pkcs12", "-export", "-inkey", key, "-in", cert, "-out", p12,
             "-passout", "pass:wavo", capture_output=True)
-        run("security", "import", p12, "-P", "wavo", "-T", "/usr/bin/codesign", capture_output=True)
+        keychain = Path.home() / "Library/Keychains/login.keychain-db"
+        run("security", "import", p12, "-k", keychain, "-P", "wavo", "-T", "/usr/bin/codesign",
+            capture_output=True)
 
-    print(f'bundle: made the code signing identity "{IDENTITY}"', file=sys.stderr)
+    if not has_identity():
+        sys.exit(f'bundle: made "{IDENTITY}", but `security find-identity` does not list it')
+
+    print(f'bundle: made the code signing identity "{IDENTITY}" in the login keychain', file=sys.stderr)
 
 
 def sign(app: Path) -> str:
-    if not has_identity() and not os.environ.get("CI"):
-        make_identity()
+    if os.environ.get("CI"):
+        run("codesign", "--force", "--sign", "-", "--timestamp=none", app)
+        return "ad hoc (CI)"
 
-    if has_identity():
-        try:
-            run("codesign", "--force", "--sign", IDENTITY, "--timestamp=none", app, timeout=60)
-            return IDENTITY
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            print(f'bundle: codesign with "{IDENTITY}" failed ({e}): signing ad hoc', file=sys.stderr)
+    try:
+        run("codesign", "--force", "--sign", IDENTITY, "--timestamp=none", app, timeout=60)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        shutil.rmtree(app, ignore_errors=True)
+        sys.exit(f'bundle: codesign with "{IDENTITY}" failed ({e}): no bundle')
 
-    run("codesign", "--force", "--sign", "-", "--timestamp=none", app)
-    return "ad hoc (permissions are asked for again after each rebuild)"
+    return IDENTITY
 
 
 def main() -> int:
     binary, png, app = (Path(a) for a in sys.argv[1:4])
     macos = os.environ["MACOSX_DEPLOYMENT_TARGET"]
     version = run(binary, "--version", capture_output=True, text=True).stdout.split()[1]
+    if not os.environ.get("CI") and not has_identity():
+        make_identity()
 
     shutil.rmtree(app, ignore_errors=True)
     (app / "Contents/MacOS").mkdir(parents=True)
