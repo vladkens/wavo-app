@@ -4,7 +4,7 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use anyhow::{Result, bail};
@@ -100,14 +100,21 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
     }
   }
 
-  // The app last: this may run from it.
+  // The app last: this may run from it. One that can't go is told and left.
+  let mut left = 0;
   for path in &paths {
-    match path.is_dir() {
-      true => remove_dir(path)?,
-      false => fs::remove_file(path)?,
+    match remove(path) {
+      Ok(()) => println!("removed {}", path.display()),
+      Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+      Err(e) => {
+        println!("could not remove {}: {e}", path.display());
+        left += 1;
+      }
     }
+  }
 
-    println!("removed {}", path.display());
+  if left > 0 {
+    bail!("{left} left, remove them by hand");
   }
 
   Ok(())
@@ -126,18 +133,41 @@ fn app_bundle() -> Option<PathBuf> {
   Some(app.to_owned())
 }
 
-/// Deletes `dir` and all in it. macOS can leave entries out of a folder's listing while it is
-/// emptied (a delete once stopped "not empty" with 51 folders never visited): again, until it is
-/// gone.
-fn remove_dir(dir: &Path) -> io::Result<()> {
-  for _ in 0..10 {
-    match fs::remove_dir_all(dir) {
-      Err(e) if e.raw_os_error() == Some(libc::ENOTEMPTY) => continue,
+/// Deletes `path`, a folder with all in it or a file; again, for up to 5 s, while an error may
+/// pass. macOS can leave entries out of a folder's listing while it is emptied (a delete once
+/// stopped "not empty" with 51 folders never visited). On Windows the app that just quit may hold
+/// its files open after its lock is free (history.db with its -wal and -shm, its log).
+fn remove(path: &Path) -> io::Result<()> {
+  let deadline = Instant::now() + Duration::from_secs(5);
+  loop {
+    let done = match path.is_dir() {
+      true => fs::remove_dir_all(path),
+      false => fs::remove_file(path),
+    };
+    match done {
+      Err(e) if passing(&e) && Instant::now() < deadline => {
+        thread::sleep(Duration::from_millis(50))
+      }
       done => return done,
     }
   }
+}
 
-  fs::remove_dir_all(dir)
+/// A folder not empty yet; on Windows also a file another process has open (a sharing or lock
+/// violation) or is deleting (access denied).
+fn passing(e: &io::Error) -> bool {
+  #[cfg(unix)]
+  let codes = [libc::ENOTEMPTY];
+  #[cfg(windows)]
+  let codes = {
+    use windows_sys::Win32::Foundation::{
+      ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
+    };
+
+    [ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY]
+      .map(|c| c as i32)
+  };
+  e.raw_os_error().is_some_and(|c| codes.contains(&c))
 }
 
 fn confirm() -> Result<bool> {
@@ -179,5 +209,18 @@ mod tests {
     let p = PathBuf::from;
     let dirs = vec![p("/data/wavo"), p("/data/wavo2"), p("/data/wavo/cache"), p("/cache/wavo")];
     assert_eq!(outermost(dirs), [p("/data/wavo"), p("/data/wavo2"), p("/cache/wavo")]);
+  }
+
+  #[test]
+  fn removes_a_folder_or_a_file() {
+    let dir = crate::testing::TempDir::new("remove");
+    let (folder, file) = (dir.path().join("home"), dir.path().join("Wavo.AppImage"));
+    fs::create_dir_all(folder.join("recordings")).unwrap();
+    fs::write(folder.join("recordings/a.wav"), "").unwrap();
+    fs::write(&file, "").unwrap();
+    remove(&folder).unwrap();
+    remove(&file).unwrap();
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    assert_eq!(remove(&file).unwrap_err().kind(), io::ErrorKind::NotFound, "at once");
   }
 }
