@@ -289,6 +289,14 @@ impl App for Prefs {
     }
 
     self.focused = focused;
+    // A recording played to its end lets the speakers go, whatever page shows.
+    let h = &mut self.history;
+    if let Some((_, p)) = h.playing.take_if(|(_, p)| !p.playing())
+      && let Some(e) = p.error()
+    {
+      h.note = Some((format!("Could not play the recording: {e}"), ui.now()));
+    }
+
     // The title bar is part of the window's content.
     let bar = ui.titlebar().map_or(0.0, |(h, _)| h);
     match self.page.scrolls() {
@@ -1548,12 +1556,6 @@ impl Prefs {
     let h = &mut self.history;
     if let Some(said) = h.said.take() {
       h.note = Some((said, ui.now()));
-    }
-
-    if let Some((_, p)) = h.playing.take_if(|(_, p)| !p.playing())
-      && let Some(e) = p.error()
-    {
-      h.note = Some((format!("Could not play the recording: {e}"), ui.now()));
     }
 
     if let Some(wait) = h.load(ui.now()) {
