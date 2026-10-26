@@ -33,8 +33,13 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
   let home = crate::home();
   let hub = Hub::new();
   let models = hub.downloaded();
-  let dirs = [home.clone(), nimbo::paths::cache_dir(INFO.id), nimbo::paths::cache_dir("wavo")];
-  let mut paths: Vec<PathBuf> = dirs.into_iter().filter(|p| p.exists()).collect();
+  // nimbo's own files, such as the Wayland paste's portal token, where they are not the data dir:
+  // on macOS both are one, which a `WAVO_HOME` stands in for and must not reach past.
+  let config = nimbo::paths::config_dir(INFO.id);
+  let config = (config != nimbo::paths::data_dir(INFO.id)).then_some(config);
+  let caches = [nimbo::paths::cache_dir(INFO.id), nimbo::paths::cache_dir("wavo")];
+  let dirs = [home.clone()].into_iter().chain(config).chain(caches);
+  let mut paths: Vec<PathBuf> = dirs.filter(|p| p.exists()).collect();
   paths.extend(app_bundle());
   let list = || {
     paths.iter().for_each(|p| println!("{}", p.display()));
