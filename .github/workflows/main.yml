@@ -40,6 +40,18 @@ jobs:
       - run: cargo clippy --release --all-targets -- -D warnings
       - run: make test
 
+  # Windows: its clippy and tests. The shell is macOS's only so far: dead code is checked there.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: cargo clippy --release --locked --all-targets -- -D warnings -A dead_code
+      - run: cargo test --release --locked
+
   build:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
@@ -54,7 +66,7 @@ jobs:
 
   publish:
     if: github.ref == 'refs/heads/main'
-    needs: [test, macos, build]
+    needs: [test, macos, windows, build]
     runs-on: ubuntu-latest
     permissions:
       attestations: write
