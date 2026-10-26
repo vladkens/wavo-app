@@ -41,9 +41,9 @@
 <details>
 <summary>Linux: Wayland, GNOME and the tray</summary>
 
-On Wayland the paste goes through the desktop's RemoteDesktop portal, which asks once; the hotkey needs its GlobalShortcuts portal (KDE Plasma 6, GNOME 48 and later), and the menu's "Allow the Hotkey…" lets the desktop ask for it. Where there is no such portal (GNOME before 48 on Wayland, as in Ubuntu 24.04, where the paste still works), add a shortcut in the desktop's own keyboard settings that runs `/path/to/Wavo-dev-linux-<arch>.AppImage toggle`: it starts a dictation and the next one stops it.
+On Wayland the paste goes through the desktop's RemoteDesktop portal, which asks once, at the first paste or earlier through the menu's "Allow Paste…"; the hotkey needs its GlobalShortcuts portal (KDE Plasma 6, GNOME 48 and later), and the menu's "Allow the Hotkey…" lets the desktop ask for it. Where there is no such portal (GNOME before 48 on Wayland, as in Ubuntu 24.04, where the paste still works), add a shortcut in the desktop's own keyboard settings that runs `/path/to/Wavo-dev-linux-<arch>.AppImage toggle`: it starts a dictation and the next one stops it.
 
-On GNOME the HUD doesn't show under Wayland, and the tray icon tells the state. The tray icon needs a panel that shows StatusNotifierItems: KDE, Xfce, Cinnamon, MATE, or GNOME with the AppIndicator extension, which Ubuntu ships.
+The tray icon needs a panel that shows StatusNotifierItems: KDE, Xfce, Cinnamon, MATE, or GNOME with the AppIndicator extension, which Ubuntu ships.
 
 </details>
 
