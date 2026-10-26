@@ -59,12 +59,13 @@ impl Loader for Wavo {
 
 // MARK: Neural Engine
 
-/// This Mac has a Neural Engine wavo can use: Apple silicon on macOS 15 or later.
+/// This Mac has a Neural Engine wavo can use: Apple silicon on macOS 15 or later. Off macOS there
+/// is none, and the GPUs are not woken up to find out.
 pub fn has_neural_engine() -> bool {
   static HAS: OnceLock<bool> = OnceLock::new();
   *HAS.get_or_init(|| {
-    let devices = wavo::devices().unwrap_or_default();
-    devices.iter().any(|d| d.kind == wavo::DeviceKind::NeuralEngine)
+    let devices = || wavo::devices().unwrap_or_default();
+    cfg!(target_os = "macos") && devices().iter().any(|d| d.kind == wavo::DeviceKind::NeuralEngine)
   })
 }
 

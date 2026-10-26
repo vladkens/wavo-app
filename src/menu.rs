@@ -4,6 +4,7 @@
 //! opening where they are fixed; Copy Last Dictation and Recent; the model in use with the others
 //! downloaded; Unload Model, History…, Settings…, Quit.
 
+use nimbo::Hotkey;
 use nimbo::tray::{Item, Menu, TrayIcon};
 
 use crate::audio::{Choice, Device};
@@ -94,7 +95,10 @@ pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> 
   }
 
   if let Some(e) = &system.hotkey_error {
-    add("warn:hotkey", format!("The hotkey “{hotkey}” does not work: {e}"), false);
+    // As the platform names its keys (Ctrl+Alt+K, not the stored ctrl+option+k); a click opens
+    // General, where it changes.
+    let label = Hotkey::parse(hotkey).map_or_else(|_| hotkey.to_owned(), |h| h.label());
+    add("warn:hotkey", format!("The hotkey “{label}” does not work: {e}"), true);
   }
 
   if system.hotkey_portal {
@@ -192,15 +196,21 @@ pub fn menu(
     Item::new("unload", "Unload Model").enabled(loaded),
     Item::separator(),
     Item::new("history", "History…"),
-    Item::new("settings", "Settings…").key("cmd+comma"),
+    // A tray menu's keys work only in macOS's; Windows' and Linux's would show keys that do
+    // nothing.
+    with_key(Item::new("settings", "Settings…"), "cmd+comma"),
     Item::separator(),
-    Item::new("quit", "Quit Wavo").key("cmd+q"),
+    with_key(Item::new("quit", "Quit Wavo"), "cmd+q"),
   ]);
   Menu::new(items)
 }
 
 /// The longest microphone or model in the menu.
 const NAME: usize = 32;
+
+fn with_key(item: Item, key: &str) -> Item {
+  if cfg!(target_os = "macos") { item.key(key) } else { item }
+}
 
 /// A microphone or a model as the menu and its submenus name it: a longer one shortened at a word,
 /// inside its brackets when it has some: `System Default (MacBook Pro…)`.
@@ -308,7 +318,7 @@ mod tests {
     let ids: Vec<_> = list.iter().map(|w| (w.id, w.action)).collect();
     let expected = [
       ("warn:accessibility", true),
-      ("warn:hotkey", false),
+      ("warn:hotkey", true),
       ("warn:hotkey-portal", true),
       ("warn:paste-portal", true),
       ("warn:microphone", true),
@@ -334,7 +344,9 @@ mod tests {
       (items[1].label.as_str(), items[8].label.as_str()),
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")
     );
-    assert!(items[1].enabled && !items[2].enabled);
+    // The hotkey's warning opens General too, its key as the platform names it.
+    assert!(items[1].enabled && items[2].enabled);
+    assert!(items[2].label.contains("“F5” does not work"), "{}", items[2].label);
     // One name in the menu and its submenu, a long one shortened.
     let mic = items.iter().find(|i| i.id == "mic").unwrap();
     assert_eq!(mic.label, "Elgato Wave:3 Microphone Array");

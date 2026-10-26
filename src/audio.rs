@@ -7,7 +7,6 @@
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -70,11 +69,85 @@ fn inputs(host: &cpal::Host) -> Vec<Input> {
   host.input_devices().map(|ds| ds.filter_map(Input::new).collect()).unwrap_or_default()
 }
 
-/// Input devices in system order, the system default marked.
+/// ALSA's cards, index and ID, from `/proc/asound/cards` (` 0 [PCH  ]: HDA-Intel - HDA Intel PCH`);
+/// none off Linux.
+fn card_ids() -> Vec<(String, String)> {
+  let text = fs::read_to_string("/proc/asound/cards").unwrap_or_default();
+  let card = |line: &str| {
+    let (index, rest) = line.trim_start().split_once(' ')?;
+    let id = rest.trim_start().strip_prefix('[')?.split(']').next()?.trim();
+    index.bytes().all(|b| b.is_ascii_digit()).then(|| (index.to_owned(), id.to_owned()))
+  };
+  text.lines().filter_map(card).collect()
+}
+
+/// The inputs the settings list: ALSA's (Linux) one per capture device ([cards]), other systems'
+/// all.
+fn listed(all: Vec<Input>) -> Vec<Input> {
+  // cpal's ALSA IDs are `alsa:<PCM>`.
+  let pcms: Vec<&str> = all.iter().filter_map(|x| x.id.as_deref()?.strip_prefix("alsa:")).collect();
+  if pcms.len() != all.len() {
+    return all;
+  }
+
+  let keep = cards(&pcms, &card_ids());
+  let all = all.into_iter().enumerate();
+  all.filter(|(i, _)| keep.contains(i)).map(|(_, x)| x).collect()
+}
+
+/// A card's PCMs, the best first: its default (with conversions, shared with other apps where the
+/// card allows), its front, its plug.
+const CARD_PCMS: [&str; 3] = ["sysdefault", "front", "plughw"];
+
+/// ALSA lists every PCM it has, by name (`pcms`): virtual ones (`null` records silence; `default`,
+/// which the System Default item is, and `pipewire` and `pulse`, which it goes through; `jack`,
+/// `oss`, the rate converters) and each card's device 3 to 5 times (`sysdefault:`, `front:`,
+/// `dsnoop:`, `hw:`, `plughw:`, and cpal's own `hw:` and `plughw:` by card index). The ones listed,
+/// by index: one per card's capture device, the first of [CARD_PCMS] it has (a laptop's built-in
+/// microphones are often a card's device 6 or 7, beside its jack's 0: only `plughw:` has those).
+fn cards(pcms: &[&str], ids: &[(String, String)]) -> Vec<usize> {
+  /// `sysdefault:CARD=PCH` (its device 0), `plughw:CARD=PCH,DEV=6`, `plughw:0,6`: the card, the
+  /// device and the rank.
+  fn device(pcm: &str) -> Option<(&str, &str, usize)> {
+    let (kind, args) = pcm.split_once(':')?;
+    let rank = CARD_PCMS.iter().position(|&k| k == kind)?;
+    let mut args = args.split(',');
+    let card = args.next()?;
+    let dev = args.next().map_or("0", |d| d.strip_prefix("DEV=").unwrap_or(d));
+    Some((card.strip_prefix("CARD=").unwrap_or(card), dev, rank))
+  }
+
+  // cpal lists each card by index too: the same card as its ID by `ids`; without them, one ALSA
+  // lists by ID unless it lists none.
+  let index = |card: &str| card.bytes().all(|b| b.is_ascii_digit());
+  let named = pcms.iter().filter_map(|p| device(p)).any(|(c, _, _)| !index(c));
+  let id = |card| ids.iter().find(|(i, _)| i == card).map_or(card, |(_, id)| id.as_str());
+  let mut best: Vec<((&str, &str), usize, usize)> = Vec::new();
+  for (i, pcm) in pcms.iter().enumerate() {
+    let Some((card, dev, rank)) = device(pcm) else { continue };
+    let card = id(card);
+    if ids.is_empty() && named && index(card) {
+      continue;
+    }
+
+    match best.iter_mut().find(|b| b.0 == (card, dev)) {
+      Some(b) if rank < b.1 => (b.1, b.2) = (rank, i),
+      Some(_) => {}
+      None => best.push(((card, dev), rank, i)),
+    }
+  }
+
+  let mut keep: Vec<usize> = best.into_iter().map(|b| b.2).collect();
+  keep.sort_unstable();
+  keep
+}
+
+/// Input devices in system order, the system default marked. ALSA's `default` is no device and is
+/// not listed: on Linux the System Default item names none.
 pub fn devices() -> Vec<Device> {
   let host = cpal::default_host();
   let default = host.default_input_device();
-  let inputs = inputs(&host).into_iter();
+  let inputs = listed(inputs(&host)).into_iter();
   inputs
     .map(|x| Device { default: default.as_ref() == Some(&x.device), id: x.id, name: x.name })
     .collect()
@@ -95,10 +168,14 @@ fn open_device<T>(
     let found = match &default {
       Some(d) if d.is(choice) => Some((d.device.clone(), d.name.clone())),
       _ => {
-        let all = inputs(&host);
-        let by_id = all.iter().position(|x| x.id.is_some() && x.id == choice.id);
-        let at = by_id.or_else(|| all.iter().position(|x| x.name == choice.name));
-        at.map(|i| (all[i].device.clone(), all[i].name.clone()))
+        // By ID among all, an unlisted one too; by name among the listed: ALSA names a card's PCMs
+        // after the card, and the one listed is the best.
+        let mut all = inputs(&host);
+        let found = match all.iter().position(|x| x.id.is_some() && x.id == choice.id) {
+          Some(i) => Some(all.swap_remove(i)),
+          None => listed(all).into_iter().find(|x| x.name == choice.name),
+        };
+        found.map(|x| (x.device, x.name))
       }
     };
 
@@ -140,6 +217,28 @@ pub fn warm_up() {
 }
 
 // MARK: Capture
+
+/// `$f::<T>(…)` with `T` the sample type of `$format`: devices default to any of them (32-bit
+/// integers on Intel HDA and many USB microphones). DSD is no PCM.
+macro_rules! by_format {
+  ($format:expr, $f:ident($($arg:expr),*)) => {
+    match $format {
+      SampleFormat::I8 => $f::<i8>($($arg),*),
+      SampleFormat::I16 => $f::<i16>($($arg),*),
+      SampleFormat::I24 => $f::<cpal::I24>($($arg),*),
+      SampleFormat::I32 => $f::<i32>($($arg),*),
+      SampleFormat::I64 => $f::<i64>($($arg),*),
+      SampleFormat::U8 => $f::<u8>($($arg),*),
+      SampleFormat::U16 => $f::<u16>($($arg),*),
+      SampleFormat::U24 => $f::<cpal::U24>($($arg),*),
+      SampleFormat::U32 => $f::<u32>($($arg),*),
+      SampleFormat::U64 => $f::<u64>($($arg),*),
+      SampleFormat::F32 => $f::<f32>($($arg),*),
+      SampleFormat::F64 => $f::<f64>($($arg),*),
+      other => Err(anyhow!("unsupported sample format {other}")),
+    }
+  };
+}
 
 /// The ring holds this much audio; the recorder drains it every [POLL].
 const RING_SECONDS: usize = 2;
@@ -200,12 +299,8 @@ fn open_stream(device: &cpal::Device) -> Result<(Capture, Consumer<f32>)> {
   // A multiple of the channels: with whole frames written, a frame never wraps around the end.
   let (producer, ring) = RingBuffer::new(rate as usize * channels * RING_SECONDS);
   let failure = Arc::new(OnceLock::new());
-  let stream = match supported.sample_format() {
-    SampleFormat::F32 => build::<f32>(device, config, producer, failure.clone())?,
-    SampleFormat::I16 => build::<i16>(device, config, producer, failure.clone())?,
-    other => bail!("unsupported sample format {other}"),
-  };
-
+  let format = supported.sample_format();
+  let stream = by_format!(format, build(device, config, producer, failure.clone()))?;
   stream.play().context("start the input stream")?;
   let feed = Feed::Mic { _stream: stream };
   let capture =
@@ -460,7 +555,7 @@ struct Processor {
   channels: usize,
   mono: Vec<f32>,
   out: Vec<f32>,
-  resampler: To16k,
+  resampler: Resample,
   vad: Vad,
   pcm: Vec<f32>,
   /// `None` after a write error.
@@ -476,7 +571,7 @@ impl Processor {
       channels,
       mono: Vec::new(),
       out: Vec::new(),
-      resampler: To16k::new(rate)?,
+      resampler: Resample::new(rate, SAMPLE_RATE)?,
       vad: Vad::default(),
       pcm: Vec::new(),
       wav: Some(wav),
@@ -561,10 +656,10 @@ impl Level {
 /// Chunk size hint for the FFT resampler; the real input chunk is rounded to fit the ratio.
 const CHUNK: usize = 1024;
 
-/// Streaming mono resampler to 16 kHz (rubato's FFT one, startup delay trimmed): input in any
-/// chunk sizes, and on [finish](To16k::finish) the tail, so the output is as long as the input.
-struct To16k {
-  /// `None` at 16 kHz: samples pass through.
+/// Streaming mono resampler (rubato's FFT one, startup delay trimmed): input in any chunk sizes,
+/// and on [finish](Resample::finish) the tail, so the output is as long as the input.
+struct Resample {
+  /// `None` at the same rate: samples pass through.
   fft: Option<Fft<f32>>,
   ratio: f64,
   pending: Vec<f32>,
@@ -575,23 +670,23 @@ struct To16k {
   produced: usize,
 }
 
-impl To16k {
-  fn new(rate: u32) -> Result<Self> {
-    let fft = match rate {
-      SAMPLE_RATE => None,
-      _ => Some(
-        Fft::<f32>::new(rate as usize, SAMPLE_RATE as usize, CHUNK, 1, FixedSync::Both)
-          .map_err(|e| anyhow!("resampler {rate} Hz → {SAMPLE_RATE} Hz: {e}"))?,
+impl Resample {
+  fn new(from: u32, to: u32) -> Result<Self> {
+    let fft = match from == to {
+      true => None,
+      false => Some(
+        Fft::<f32>::new(from as usize, to as usize, CHUNK, 1, FixedSync::Both)
+          .map_err(|e| anyhow!("resampler {from} Hz → {to} Hz: {e}"))?,
       ),
     };
 
     let delay = fft.as_ref().map_or(0, |f| f.output_delay());
     let scratch = vec![0.0; fft.as_ref().map_or(0, |f| f.output_frames_max())];
-    let ratio = f64::from(SAMPLE_RATE) / f64::from(rate);
+    let ratio = f64::from(to) / f64::from(from);
     Ok(Self { fft, ratio, pending: Vec::new(), scratch, delay, fed: 0, produced: 0 })
   }
 
-  /// Appends the 16 kHz samples that are ready to `out`.
+  /// Appends the resampled samples that are ready to `out`.
   fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
     let Some(fft) = &mut self.fft else { return out.extend_from_slice(input) };
     self.pending.extend_from_slice(input);
@@ -796,7 +891,7 @@ pub fn read_wav(path: &Path) -> Result<Vec<f32>> {
   };
 
   let mono: Vec<f32> = samples.chunks_exact(spec.channels.max(1) as usize).map(downmix).collect();
-  let mut resampler = To16k::new(spec.sample_rate)?;
+  let mut resampler = Resample::new(spec.sample_rate, SAMPLE_RATE)?;
   let mut pcm = Vec::new();
   resampler.push(&mono, &mut pcm);
   resampler.finish(&mut pcm);
@@ -839,83 +934,117 @@ impl WavSink {
 
 // MARK: Playback
 
-/// A recording played by `afplay` on the default output; dropping it stops it.
-pub struct Playback(Arc<Play>);
+/// A recording played on the default output through cpal, resampled to the output's rate (the
+/// same path on every system); dropping it stops it.
+pub struct Playback {
+  play: Arc<Play>,
+  _stream: cpal::Stream,
+}
 
 struct Play {
-  child: Mutex<Child>,
-  stopped: AtomicBool,
   done: AtomicBool,
-  error: Mutex<Option<String>>,
+  error: OnceLock<String>,
+  ended: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl Play {
+  /// Played to its end, or failed: `ended` runs once, on the audio thread.
+  fn end(&self, error: Option<String>) {
+    if self.done.load(Ordering::Acquire) {
+      return;
+    }
+
+    if let Some(e) = error {
+      warn!("playback: {e}");
+      let _ = self.error.set(e);
+    }
+
+    if !self.done.swap(true, Ordering::AcqRel)
+      && let Some(ended) = self.ended.lock().unwrap().take()
+    {
+      ended();
+    }
+  }
 }
 
 impl Playback {
-  /// `ended` runs on the player's thread when it has played to its end or could not play
-  /// ([error](Playback::error)), not when it is stopped.
+  /// `ended` runs when it has played to its end or could not play ([error](Playback::error)),
+  /// not when it is stopped.
   pub fn start(path: &Path, ended: impl FnOnce() + Send + 'static) -> Result<Self> {
-    let child = Command::new("/usr/bin/afplay")
-      .arg(path)
-      .stdin(Stdio::null())
-      .stdout(Stdio::null())
-      .stderr(Stdio::null())
-      .spawn()
-      .context("start afplay")?;
+    let pcm = read_wav(path)?;
+    let device = cpal::default_host().default_output_device().context("no speakers")?;
+    let supported = device.default_output_config().context("output format")?;
+    let config = supported.config();
+    let mut resampler = Resample::new(SAMPLE_RATE, config.sample_rate)?;
+    let mut out = Vec::new();
+    resampler.push(&pcm, &mut out);
+    resampler.finish(&mut out);
 
+    let ended: Box<dyn FnOnce() + Send> = Box::new(ended);
     let play = Arc::new(Play {
-      child: Mutex::new(child),
-      stopped: AtomicBool::new(false),
       done: AtomicBool::new(false),
-      error: Mutex::new(None),
+      error: OnceLock::new(),
+      ended: Mutex::new(Some(ended)),
     });
-
-    let (shared, path) = (play.clone(), path.to_owned());
-    thread::Builder::new().name("playback".into()).spawn(move || {
-      // Polled, so that a stop can kill the child meanwhile.
-      let status = loop {
-        if let Some(status) = shared.child.lock().unwrap().try_wait().transpose() {
-          break status;
-        }
-
-        thread::sleep(Duration::from_millis(50));
-      };
-
-      let error = match status {
-        Ok(s) if s.success() => None,
-        Ok(s) => Some(format!("could not play {} (afplay: {s})", path.display())),
-        Err(e) => Some(format!("could not play {}: {e}", path.display())),
-      };
-
-      let stopped = shared.stopped.load(Ordering::Acquire);
-      if !stopped && let Some(e) = &error {
-        warn!("{e}");
-        *shared.error.lock().unwrap() = error;
-      }
-
-      shared.done.store(true, Ordering::Release);
-      if !stopped {
-        ended();
-      }
-    })?;
-
-    Ok(Self(play))
+    let format = supported.sample_format();
+    let stream = by_format!(format, output(&device, config, out, play.clone()))?;
+    stream.play().context("start the output stream")?;
+    Ok(Self { play, _stream: stream })
   }
 
   /// Not done yet.
   pub fn playing(&self) -> bool {
-    !self.0.done.load(Ordering::Acquire)
+    !self.play.done.load(Ordering::Acquire)
   }
 
   /// Why it could not play, once it is done.
   pub fn error(&self) -> Option<String> {
-    self.0.error.lock().unwrap().clone()
+    self.play.error.get().cloned()
   }
 }
 
-impl Drop for Playback {
-  fn drop(&mut self) {
-    self.0.stopped.store(true, Ordering::Release);
-    let _ = self.0.child.lock().unwrap().kill();
-  }
+/// The callback runs on the audio thread: each sample to every channel, then silence.
+fn output<T: SizedSample + FromSample<f32>>(
+  device: &cpal::Device,
+  config: cpal::StreamConfig,
+  pcm: Vec<f32>,
+  play: Arc<Play>,
+) -> Result<cpal::Stream> {
+  let (channels, rate) = (config.channels as usize, config.sample_rate as usize);
+  let failed = play.clone();
+  let mut at = 0;
+  // Written is not heard yet: it ends once the device's clock passes when the last sample plays, so
+  // that stopping it cuts nothing queued; a backend without that clock, a second later.
+  let mut last: Option<cpal::StreamInstant> = None;
+  let stream = device.build_output_stream(
+    config,
+    move |out: &mut [T], info: &cpal::OutputCallbackInfo| {
+      let start = at;
+      for frame in out.chunks_mut(channels) {
+        frame.fill(T::from_sample(pcm.get(at).copied().unwrap_or(0.0)));
+        at += 1;
+      }
+
+      let time = info.timestamp();
+      if last.is_none() && at >= pcm.len() {
+        let before = Duration::from_secs_f64(pcm.len().saturating_sub(start) as f64 / rate as f64);
+        last = time.playback.checked_add(before);
+      }
+
+      let heard = last.is_some_and(|t| time.callback.checked_duration_since(t).is_some());
+      if heard || at >= pcm.len() + rate {
+        play.end(None);
+      }
+    },
+    move |e: cpal::Error| match e.kind() {
+      cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => {
+        debug!("output: {e}")
+      }
+      _ => failed.end(Some(e.to_string())),
+    },
+    None,
+  )?;
+  Ok(stream)
 }
 
 #[cfg(test)]
@@ -932,22 +1061,108 @@ mod tests {
 
   #[test]
   fn resampling_keeps_duration_and_pitch() {
-    for rate in [16_000, 22_050, 44_100, 48_000] {
-      let mut r = To16k::new(rate).unwrap();
+    // Down to 16 kHz for recordings, up to the output's rate for playback.
+    let pairs = [16_000, 22_050, 44_100, 48_000].map(|r| (r, SAMPLE_RATE));
+    for (from, to) in pairs.into_iter().chain([(SAMPLE_RATE, 44_100), (SAMPLE_RATE, 48_000)]) {
+      let mut r = Resample::new(from, to).unwrap();
       let mut out = Vec::new();
-      for chunk in sine(rate, 2.0).chunks(441) {
+      for chunk in sine(from, 2.0).chunks(441) {
         r.push(chunk, &mut out);
       }
 
       r.finish(&mut out);
-      assert!(out.len().abs_diff(32_000) <= 1, "{rate} Hz: {} samples", out.len());
+      let at = |secs: f32| (secs * to as f32) as usize;
+      assert!(out.len().abs_diff(at(2.0)) <= 1, "{from} → {to} Hz: {} samples", out.len());
       // 440 Hz crosses zero 880 times a second; the edges, where the filter rings, are left out.
-      let mid = &out[1_600..30_400];
+      let mid = &out[at(0.1)..at(1.9)];
       let crossings = mid.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
-      assert!(crossings.abs_diff(1_584) <= 4, "{rate} Hz: {crossings} crossings");
+      assert!(crossings.abs_diff(1_584) <= 4, "{from} → {to} Hz: {crossings} crossings");
       let peak = mid.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-      assert!((peak - 0.5).abs() < 0.02, "{rate} Hz: peak {peak}");
+      assert!((peak - 0.5).abs() < 0.02, "{from} → {to} Hz: peak {peak}");
     }
+  }
+
+  #[test]
+  fn alsa_lists_one_pcm_per_capture_device() {
+    fn listed<'a>(pcms: &[&'a str]) -> Vec<&'a str> {
+      cards(pcms, &[]).into_iter().map(|i| pcms[i]).collect()
+    }
+
+    // A laptop with PipeWire, a webcam and two of the same USB microphone: ALSA's hints for
+    // capture (`arecord -L`), then cpal's own by index.
+    let pcms = [
+      "null",
+      "lavrate",
+      "samplerate",
+      "speexrate",
+      "jack",
+      "oss",
+      "pipewire",
+      "pulse",
+      "upmix",
+      "vdownmix",
+      "default",
+      "hw:CARD=PCH,DEV=0",
+      "plughw:CARD=PCH,DEV=0",
+      "hw:CARD=PCH,DEV=6",
+      "plughw:CARD=PCH,DEV=6",
+      "sysdefault:CARD=PCH",
+      "front:CARD=PCH,DEV=0",
+      "dsnoop:CARD=PCH,DEV=0",
+      "hw:CARD=Webcam,DEV=0",
+      "plughw:CARD=Webcam,DEV=0",
+      "sysdefault:CARD=Webcam",
+      "front:CARD=Webcam,DEV=0",
+      "dsnoop:CARD=Webcam,DEV=0",
+      "usbstream:CARD=Webcam",
+      "plughw:CARD=Device,DEV=0",
+      "sysdefault:CARD=Device",
+      "dsnoop:CARD=Device,DEV=0",
+      "plughw:CARD=Device_1,DEV=0",
+      "sysdefault:CARD=Device_1",
+      "front:CARD=Device_1,DEV=0",
+      "hw:CARD=0,DEV=0",
+      "plughw:CARD=0,DEV=0",
+      "hw:CARD=1,DEV=0",
+      "plughw:CARD=1,DEV=0",
+    ];
+    // The built-in microphones on the card's device 6 stay: only `plughw:` has them.
+    let defaults = ["PCH", "Webcam", "Device", "Device_1"].map(|c| format!("sysdefault:CARD={c}"));
+    let mut expected = defaults.to_vec();
+    expected.insert(0, "plughw:CARD=PCH,DEV=6".into());
+    assert_eq!(listed(&pcms), expected);
+
+    // No default for a card, no hints at all: its front, else its plug by index.
+    let pcms = ["null", "plughw:CARD=Mic,DEV=0", "front:CARD=Mic,DEV=0", "dsnoop:CARD=Mic,DEV=0"];
+    assert_eq!(listed(&pcms), ["front:CARD=Mic,DEV=0"]);
+    let pcms = ["hw:CARD=0,DEV=0", "plughw:CARD=0,DEV=0", "plughw:CARD=0,DEV=2", "plughw:1,0"];
+    let devices = ["plughw:CARD=0,DEV=0", "plughw:CARD=0,DEV=2", "plughw:1,0"];
+    assert_eq!(listed(&pcms), devices);
+    assert!(listed(&["null", "default", "pipewire", "pulse", "jack", "oss", ""]).is_empty());
+
+    // With the cards' IDs, one by index is the same card: a card ALSA has no hints for stays.
+    let ids = [("0", "PCH"), ("2", "Mic")].map(|(i, id)| (i.to_owned(), id.to_owned()));
+    let pcms = ["sysdefault:CARD=PCH", "plughw:0,0", "plughw:2,0"];
+    let got: Vec<_> = cards(&pcms, &ids).into_iter().map(|i| pcms[i]).collect();
+    assert_eq!(got, ["sysdefault:CARD=PCH", "plughw:2,0"]);
+  }
+
+  #[test]
+  fn every_pcm_format_has_its_sample_type() {
+    fn format<T: SizedSample>() -> Result<SampleFormat> {
+      Ok(T::FORMAT)
+    }
+
+    use SampleFormat::*;
+    for f in [I8, I16, I24, I32, I64, U8, U16, U24, U32, U64, F32, F64] {
+      assert_eq!(by_format!(f, format()).unwrap(), f);
+    }
+
+    assert!(by_format!(DsdU8, format()).is_err());
+    let (mut ring, mut got) = RingBuffer::new(4);
+    push(&mut ring, &[i32::MIN, 0, 1 << 30, 0], 2);
+    let got: Vec<f32> = (0..4).map(|_| got.pop().unwrap()).collect();
+    assert_eq!(got, [-1.0, 0.0, 0.5, 0.0]);
   }
 
   #[test]
@@ -1064,11 +1279,8 @@ mod tests {
 
   #[test]
   #[cfg(target_os = "macos")] // afplay
-  fn playback_of_a_missing_file_fails_on_its_thread() {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let p = Playback::start(Path::new("/nonexistent/take.wav"), move || _ = tx.send(())).unwrap();
-    rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(!p.playing());
-    assert!(p.error().is_some_and(|e| e.contains("take.wav")), "{:?}", p.error());
+  fn playback_of_a_missing_file_fails_at_once() {
+    let Err(e) = Playback::start(Path::new("/nonexistent/take.wav"), || {}) else { panic!() };
+    assert!(format!("{e:#}").contains("take.wav"), "{e:#}");
   }
 }
