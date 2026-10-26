@@ -40,12 +40,16 @@ SHA256 = {
     "runtime-aarch64": "00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444",
 }
 
-DESKTOP = """[Desktop Entry]
+# The app id, nimbo's X11 WM_CLASS and Wayland app id: desktops find the .desktop entry, and its
+# icon, by it.
+ID = "me.vladkens.wavo"
+DESKTOP = f"""[Desktop Entry]
 Type=Application
 Name=Wavo
 Comment=Local dictation: hold a hotkey, speak, and the text lands where you were typing
 Exec=wavo-app
-Icon=wavo
+Icon={ID}
+StartupWMClass={ID}
 Categories=Utility;Accessibility;
 Terminal=false
 """
@@ -114,9 +118,9 @@ def linux(binary: Path) -> Path:
     (appdir / "usr" / "bin").mkdir(parents=True)
     shutil.copy2(binary, appdir / "usr" / "bin" / "wavo-app")
     (appdir / "AppRun").symlink_to("usr/bin/wavo-app")
-    (appdir / "wavo.desktop").write_text(DESKTOP)
-    shutil.copy2(ICON, appdir / "wavo.png")
-    (appdir / ".DirIcon").symlink_to("wavo.png")
+    (appdir / f"{ID}.desktop").write_text(DESKTOP)
+    shutil.copy2(ICON, appdir / f"{ID}.png")
+    (appdir / ".DirIcon").symlink_to(f"{ID}.png")
 
     out = OUT / f"Wavo-dev-linux-{a}.AppImage"
     # Runs without FUSE (CI has none): the tool unpacks itself.
