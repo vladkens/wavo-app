@@ -7,7 +7,7 @@
 //! in nimbo's harness with a fake one.
 
 use std::collections::HashMap;
-use std::ops::ControlFlow;
+use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,9 +25,7 @@ use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
 use crate::audio::{self, Choice, Playback};
-use crate::history::{
-  Entry, History, Local, RECORDINGS_DIR, Retention, day_of, fold, local_time, now_ms,
-};
+use crate::history::{Entry, History, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms};
 use crate::session::{NoModel, Request, Status, label};
 use crate::settings::{Activation, HudPosition, Settings, language_name};
 use crate::transfer::Imported;
@@ -1320,9 +1318,6 @@ fn imported_text(r: &Imported) -> String {
 
 // MARK: History
 
-/// Entries a page adds.
-const PAGE_SIZE: usize = 50;
-
 /// A calendar day: year, month, day.
 type Day = (i32, u32, u32);
 
@@ -1332,16 +1327,14 @@ struct HistoryPage {
   /// The session's history changes: a move reloads.
   revision: u64,
   search: String,
+  /// All of them the search finds, newest first: the list builds only the rows it shows.
   entries: Vec<Entry>,
-  /// The count and duration of each day shown, all its entries, not only those loaded.
-  days: HashMap<String, (usize, i64)>,
+  /// Their days: each one's entries and duration.
+  days: Vec<(Day, Range<usize>, i64)>,
   /// The whole history's ([Db::get_total]), read again when it changes.
   total: Option<(usize, i64, Option<i64>)>,
-  /// Show More clicked so many times.
-  pages: usize,
-  more: bool,
-  /// What the entries were loaded for: the search, the pages and the revision.
-  loaded: Option<(String, usize, u64)>,
+  /// What the entries were loaded for: the search and the revision.
+  loaded: Option<(String, u64)>,
   playing: Option<(i64, Playback)>,
   /// The entry the panel under the list shows.
   selected: Option<i64>,
@@ -1351,13 +1344,13 @@ struct HistoryPage {
 
 impl HistoryPage {
   fn load(&mut self) {
-    let key = (self.search.trim().to_owned(), self.pages, self.revision);
+    let key = (self.search.trim().to_owned(), self.revision);
     if self.loaded.as_ref() == Some(&key) {
       return;
     }
 
-    // The history changed, not only the search or the pages shown.
-    let moved = self.loaded.as_ref().is_some_and(|k| k.2 != key.2);
+    // The history changed, not only the search.
+    let moved = self.loaded.as_ref().is_some_and(|k| k.1 != key.1);
     self.loaded = Some(key.clone());
     let Some(history) = &self.db else {
       self.note = Some("Could not open the history: see the log".into());
@@ -1369,18 +1362,31 @@ impl HistoryPage {
       self.total = db.get_total().inspect_err(|e| warn!("history: {e:#}")).ok();
     }
 
-    let limit = (self.pages + 1) * PAGE_SIZE;
-    let page = db.get_page(&key.0, limit + 1).and_then(|mut entries| {
-      let more = entries.len() > limit;
-      entries.truncate(limit);
-      let since = entries.last().map_or(i64::MAX, |e| e.created_at);
-      Ok((entries, db.get_days(&key.0, since)?, more))
-    });
-    match page {
-      Ok((entries, days, more)) => (self.entries, self.days, self.more) = (entries, days, more),
+    // All of them: 86k entries read in about 0.1 s.
+    match db.get_page(&key.0, i64::MAX as usize) {
+      Ok(entries) => (self.days, self.entries) = (days(&entries), entries),
       Err(e) => self.note = Some(format!("Could not read the history: {e:#}")),
     }
   }
+}
+
+/// The days of `entries`, newest first: each one's entries and their duration in ms.
+fn days(entries: &[Entry]) -> Vec<(Day, Range<usize>, i64)> {
+  let mut days: Vec<(Day, Range<usize>, i64)> = Vec::new();
+  for (i, e) in entries.iter().enumerate() {
+    let day = date_of(e.created_at);
+    match days.last_mut() {
+      Some((d, r, ms)) if *d == day => (r.end, *ms) = (i + 1, *ms + e.duration_ms),
+      _ => days.push((day, i..i + 1, e.duration_ms)),
+    }
+  }
+
+  days
+}
+
+/// A row of a name and a line under it: the padding, the two lines and nimbo's 2 points between.
+fn two_line_h(fs: &FormStyle) -> f32 {
+  2.0 * fs.pad_y + fs.label.line_h + 2.0 + fs.caption.line_h
 }
 
 fn date_of(ms: i64) -> Day {
@@ -1471,9 +1477,7 @@ impl Prefs {
     let t = ui.theme();
     let h = &mut self.history;
     ui.row(s, |ui| {
-      if ui.id("history-search").search(&mut h.search, "Search dictations").changed {
-        h.pages = 0;
-      }
+      ui.id("history-search").search(&mut h.search, "Search dictations");
 
       if let Some(note) = &h.note {
         ui.text(note, TextStyle::new(t.small, t.muted).nowrap());
@@ -1504,43 +1508,28 @@ impl Prefs {
       ui.form_section(fs, "", |ui| ui.form_row(fs, FormRow::new(empty), |_| {}));
     }
 
-    let mut days: Vec<(Day, Vec<&Entry>)> = Vec::new();
-    for e in &h.entries {
-      let day = date_of(e.created_at);
-      match days.last_mut() {
-        Some((d, list)) if *d == day => list.push(e),
-        _ => days.push((day, vec![e])),
-      }
-    }
-
+    // A plate a day, built only where it shows (nimbo's form list).
     let (now, mut act) = (now_ms(), None);
     let fs = &FormStyle { caption: fs.caption.ellipsis(), pad_y: fs.pad_y + 4.0, ..*fs };
-    for (day, entries) in &days {
-      let key = day_of(entries[0].created_at).unwrap_or_default();
-      let note = day_note(h.days.get(&key).copied().unwrap_or_default());
-      ui.form_section_with(
-        fs,
-        &day_title(*day, now),
-        |ui| ui.text(&note, fs.note),
-        |ui| {
-          for e in entries {
-            let selected = h.selected == Some(e.id);
-            let playing = h.playing.as_ref().is_some_and(|(id, _)| *id == e.id);
-            if let Some(a) = entry_row(ui, fs, e, selected, playing) {
-              act = Some(a);
-            }
-          }
-        },
-      );
-    }
-
-    if h.more {
-      ui.row(Style::new().w(grow()).align(Align::Center, Align::Center), |ui| {
-        if Button::new("Show More").show(ui.id("more")).clicked {
-          h.pages += 1;
-        }
-      });
-    }
+    let titles: Vec<String> = h.days.iter().map(|(day, ..)| day_title(*day, now)).collect();
+    let groups: Vec<(&str, usize)> =
+      titles.iter().zip(&h.days).map(|(t, (_, r, _))| (t.as_str(), r.len())).collect();
+    let (entries, days) = (&h.entries, &h.days);
+    let entry = |g: usize, i: usize| &entries[days[g].1.start + i];
+    let key = |g, i| entry(g, i).id as u64;
+    let note = |ui: &mut Ui, g: usize| {
+      let (_, r, ms) = &days[g];
+      ui.text(day_note((r.len(), *ms)), fs.note);
+    };
+    let row = |ui: &mut Ui, g, i| {
+      let e = entry(g, i);
+      let selected = h.selected == Some(e.id);
+      let playing = h.playing.as_ref().is_some_and(|(id, _)| *id == e.id);
+      if let Some(a) = entry_row(ui, fs, e, selected, playing) {
+        act = Some(a);
+      }
+    };
+    ui.id("history-list").form_list(fs, &groups, two_line_h(fs), &key, note, row);
 
     self.history_act(ui, act);
   }
@@ -1663,9 +1652,8 @@ fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, selected: bool, playing: bo
     fs.row = fs.row.bg(ui.theme().ghost).radius(fs.group.radii[0]);
   }
 
-  // A row's controls go on its first line: they are centred in the whole row instead, the line,
-  // the details and nimbo's 2 points between them.
-  let row_h = 2.0 * fs.pad_y + fs.label.line_h + 2.0 + fs.caption.line_h;
+  // A row's controls go on its first line: they are centred in the whole row instead.
+  let row_h = two_line_h(&fs);
   let text = Id::of(("text", e.id));
   let (mut act, mut on_text) = (None, false);
   let cover = |ui: &mut Ui| {
@@ -1753,9 +1741,8 @@ impl Prefs {
 
     // Denser than a setting's rows: six of them.
     let fs = &FormStyle { caption: fs.caption.ellipsis(), pad_y: 5.0, ..*fs };
-    // A row's controls go on its name's line: the ↗ is centred in the whole row instead, the
-    // name, its line and nimbo's 2 points between them.
-    let row_h = 2.0 * fs.pad_y + fs.label.line_h + 2.0 + fs.caption.line_h;
+    // A row's controls go on its name's line: the ↗ is centred in the whole row instead.
+    let row_h = two_line_h(fs);
     ui.form_section(fs, "Acknowledgements", |ui| {
       for (name, what, url) in ACKS {
         ui.form_row(fs, FormRow::new(name).caption(what), |ui| {
@@ -2291,6 +2278,21 @@ mod tests {
   fn numbers_read_in_thousands() {
     let got: Vec<_> = [0, 7, 999, 1_000, 86_286, 1_234_567].map(thousands).into();
     assert_eq!(got, ["0", "7", "999", "1,000", "86,286", "1,234,567"]);
+  }
+
+  /// The whole history loads at once; the list builds only the rows it shows.
+  #[test]
+  fn the_history_builds_only_the_rows_it_shows() {
+    let home = Home::new("window-long", &TWO);
+    let texts: Vec<String> = (0..300).map(|i| format!("Dictation {i}")).collect();
+    let items: Vec<(&str, i64)> = (0..300).map(|i| (texts[i].as_str(), 300 - i as i64)).collect();
+    let ids = home.dictations(&items);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::History);
+    assert!(h.rect(Id::of(("text", ids[299]))).is_some(), "the newest, at the top");
+    assert!(h.rect(Id::of(("text", ids[0]))).is_none(), "the oldest, far below, not built");
+    assert!(h.text(Id::of("history-total")).unwrap().starts_with("300 dictations"));
   }
 
   /// The first launch: a row for each permission missing, with Allow, gone once given and the

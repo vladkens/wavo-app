@@ -750,6 +750,7 @@ impl window::Shell for MacShell {
 
     let (home, state) = (self.home.clone(), self.export.clone());
     spawn("export", move || {
+      let _awake = nimbo::activity::begin("Exporting the history");
       user_initiated();
       let started = Instant::now();
       let result = transfer::export(&home, &file, progress(&state));
@@ -781,6 +782,7 @@ impl window::Shell for MacShell {
 
     let (home, handle, state) = (self.home.clone(), self.handle.clone(), self.import.clone());
     spawn("import", move || {
+      let _awake = nimbo::activity::begin("Importing a history");
       user_initiated();
       let started = Instant::now();
       let end = match transfer::import(&home, &file, progress(&state)) {
@@ -809,7 +811,8 @@ impl window::Shell for MacShell {
 }
 
 /// The calling thread runs as the person's own action, not as background work: macOS gives it
-/// the disk and the cores a background thread waits for.
+/// the disk and the cores a background thread waits for. The process's side, no App Nap while
+/// Wavo is out of view, is nimbo's activity the transfer holds.
 fn user_initiated() {
   // SAFETY: it sets the calling thread's own class.
   unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0) };
