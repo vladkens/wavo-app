@@ -116,17 +116,17 @@ mod unix {
 // MARK: Windows
 
 /// A named pipe, `\\.\pipe\wavo-<hash of the home>`, of one instance that serves one client at a
-/// time, local clients only, with the default security (this user, administrators, the system).
-/// A client waits until the instance hangs up: it has read the command then.
+/// time, local clients only, open to this user and the system alone. A client waits until the
+/// instance hangs up: it has read the command then.
 #[cfg(windows)]
 mod windows {
   use std::fs::File;
-  use std::io::{self, Read, Write};
+  use std::io::{self, Write};
   use std::os::windows::ffi::OsStrExt;
   use std::os::windows::fs::OpenOptionsExt;
   use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
   use std::path::{Path, PathBuf};
-  use std::ptr::{null, null_mut};
+  use std::ptr::null_mut;
   use std::sync::Arc;
   use std::sync::atomic::{AtomicBool, Ordering};
   use std::thread::{self, JoinHandle};
@@ -134,8 +134,12 @@ mod windows {
 
   use tracing::warn;
   use windows_sys::Win32::Foundation::{
-    ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
+    ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
   };
+  use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+  };
+  use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
   use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX, ReadFile, SECURITY_IDENTIFICATION,
   };
@@ -152,6 +156,9 @@ mod windows {
   const POLL: Duration = Duration::from_millis(5);
   // The longest command read.
   const MAX_LINE: usize = 256;
+  // Full access for the pipe's owner (this user) and the system, none for anyone else: the default
+  // security lets every local user read, and so hold the one instance.
+  const SDDL: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)";
 
   pub fn lock_file(home: &Path) -> io::Result<File> {
     // Write access: LockFileEx refuses an append-only handle.
@@ -192,10 +199,31 @@ mod windows {
       let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
       let mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
       let open = PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE;
-      // SAFETY: a NUL-terminated name, the default security.
-      let pipe = unsafe { CreateNamedPipeW(name.as_ptr(), open, mode, 1, 0, 0, 0, null()) };
-      if pipe == INVALID_HANDLE_VALUE {
+      let sddl: Vec<u16> = SDDL.encode_utf16().chain(Some(0)).collect();
+      let mut sd = null_mut();
+      // SAFETY: a NUL-terminated string; the descriptor is freed below.
+      let made = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          sddl.as_ptr(),
+          SDDL_REVISION_1,
+          &mut sd,
+          null_mut(),
+        )
+      };
+      if made == 0 {
         return Err(io::Error::last_os_error());
+      }
+
+      let size = size_of::<SECURITY_ATTRIBUTES>() as u32;
+      let security =
+        SECURITY_ATTRIBUTES { nLength: size, lpSecurityDescriptor: sd, bInheritHandle: 0 };
+      // SAFETY: a NUL-terminated name and a valid descriptor, which the pipe copies.
+      let pipe = unsafe { CreateNamedPipeW(name.as_ptr(), open, mode, 1, 0, 0, 0, &security) };
+      let error = io::Error::last_os_error();
+      // SAFETY: the descriptor made above, used no more.
+      unsafe { LocalFree(sd) };
+      if pipe == INVALID_HANDLE_VALUE {
+        return Err(error);
       }
 
       // SAFETY: the handle just made, owned from here.
@@ -239,14 +267,7 @@ mod windows {
   fn read_line(pipe: HANDLE) -> Option<String> {
     let (deadline, mut line) = (Instant::now() + READ_TIMEOUT, Vec::new());
     while !line.contains(&b'\n') && line.len() < MAX_LINE {
-      let mut available = 0;
-      // SAFETY: our pipe; only the count is asked for.
-      let ok =
-        unsafe { PeekNamedPipe(pipe, null_mut(), 0, null_mut(), &mut available, null_mut()) };
-      if ok == 0 {
-        break; // the client is gone
-      }
-
+      let Some(available) = available(pipe) else { break };
       if available == 0 {
         if Instant::now() >= deadline {
           return None;
@@ -267,6 +288,14 @@ mod windows {
     }
 
     String::from_utf8(line).ok()
+  }
+
+  /// The bytes waiting in `pipe`; `None` once the other end is gone.
+  fn available(pipe: HANDLE) -> Option<u32> {
+    let mut available = 0;
+    // SAFETY: a pipe; only the count is asked for.
+    let ok = unsafe { PeekNamedPipe(pipe, null_mut(), 0, null_mut(), &mut available, null_mut()) };
+    (ok != 0).then_some(available)
   }
 
   /// One pipe per home, by its path's FNV-1a hash (the same in every build), so a test's WAVO_HOME
@@ -306,8 +335,16 @@ mod windows {
 
     let mut pipe = client(&pipe_path(home))?;
     pipe.write_all(format!("{cmd}\n").as_bytes())?;
-    // The instance hangs up once it has the line: the read ends then, with an error.
-    let _ = pipe.read_to_end(&mut Vec::new());
+    // The instance hangs up once it has the line, within its READ_TIMEOUT.
+    let deadline = Instant::now() + BUSY_WAIT;
+    while available(pipe.as_raw_handle()).is_some() {
+      if Instant::now() >= deadline {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, "Wavo did not take the command"));
+      }
+
+      thread::sleep(POLL);
+    }
+
     Ok(())
   }
 }
