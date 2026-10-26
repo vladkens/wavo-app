@@ -1495,6 +1495,11 @@ pub fn no_text(tried_model: Option<&str>) -> String {
   }
 }
 
+/// A row's line ([first_line]); one being recorded or transcribed has no text yet, not "no text".
+fn row_line(e: &Entry, working: bool) -> String {
+  if working && e.text.is_empty() { "Transcribing…".into() } else { first_line(e) }
+}
+
 /// A row's line: the text on one line, else [no_text].
 fn first_line(e: &Entry) -> String {
   if e.text.is_empty() {
@@ -1569,7 +1574,7 @@ impl Prefs {
     let titles: Vec<String> = h.days.iter().map(|(day, ..)| day_title(*day, now)).collect();
     let groups: Vec<(&str, usize)> =
       titles.iter().zip(&h.days).map(|(t, (_, r, _))| (t.as_str(), r.len())).collect();
-    let (entries, days) = (&h.entries, &h.days);
+    let (entries, days, status) = (&h.entries, &h.days, &self.status);
     let entry = |g: usize, i: usize| &entries[days[g].1.start + i];
     let key = |g, i| entry(g, i).id as u64;
     let note = |ui: &mut Ui, g: usize| {
@@ -1580,7 +1585,8 @@ impl Prefs {
       let e = entry(g, i);
       let selected = h.selected == Some(e.id);
       let playing = h.playing.as_ref().is_some_and(|(id, _)| *id == e.id);
-      if let Some(a) = entry_row(ui, fs, e, selected, playing) {
+      let working = status.current == Some(e.id) || status.retranscribing.contains(&e.id);
+      if let Some(a) = entry_row(ui, fs, e, selected, playing, working) {
         act = Some(a);
       }
     };
@@ -1714,10 +1720,18 @@ impl Prefs {
   }
 }
 
-/// A dictation's row, all of one height: its text on a line and the details under it, Play and
-/// Copy centred at its right. A click on it selects it (tinted), for the panel under the list.
-fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, selected: bool, playing: bool) -> Option<Act> {
-  let line = first_line(e);
+/// A dictation's row (`working`: being recorded or transcribed now), all of one height: its text on
+/// a line and the details under it, Play and Copy centred at its right. A click on it selects it
+/// (tinted), for the panel under the list.
+fn entry_row(
+  ui: &mut Ui,
+  fs: &FormStyle,
+  e: &Entry,
+  selected: bool,
+  playing: bool,
+  working: bool,
+) -> Option<Act> {
+  let line = row_line(e, working);
   let caption = details(e);
   let mut fs = *fs;
   fs.row = fs.row.hit();
@@ -2048,6 +2062,19 @@ mod tests {
     assert!(h.rect(Id::of(CONFIRM).key("card")).is_some(), "the dialog");
     h.wait(Duration::from_millis(200));
     click(h, Id::of(CONFIRM).key("action"));
+  }
+
+  /// The dictation in progress shows as being transcribed, not as one without text.
+  #[test]
+  fn the_dictation_in_progress_is_transcribing() {
+    let e = |text: &str| Entry {
+      text: text.into(),
+      tried_model: Some("parakeet-ultra-Q8_0".into()),
+      ..Entry::default()
+    };
+    assert_eq!(row_line(&e(""), true), "Transcribing…");
+    assert!(row_line(&e(""), false).starts_with("no text"));
+    assert_eq!(row_line(&e("Hi."), true), "Hi.");
   }
 
   /// GNOME's save panel adds no extension: Import's filter would hide the archive.

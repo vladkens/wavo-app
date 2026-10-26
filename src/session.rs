@@ -295,6 +295,8 @@ pub struct Status {
   pub recording: Option<RecordingStatus>,
   pub engine: EngineStatus,
   pub last: Option<Last>,
+  /// The entry of the dictation in progress, recording or transcribing.
+  pub current: Option<i64>,
   /// Entries being transcribed again.
   pub retranscribing: Vec<i64>,
   /// Entries transcribed again in this run, whose first text a restore puts back.
@@ -1303,6 +1305,7 @@ impl<O: TextOutput> Controller<O> {
       }),
       engine,
       last: self.last.clone(),
+      current: d.and_then(|d| d.last.entry),
       retranscribing: self.retranscribing.iter().map(|r| r.entry).collect(),
       restorable: self.originals.keys().copied().collect(),
       error: self.error.clone(),
