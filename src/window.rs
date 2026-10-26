@@ -18,8 +18,8 @@ use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
 use nimbo::{
   Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
-  FormStyle, Hotkey, Icon, Id, Key, NamedKey, Select, Style, TextStyle, Tile, Ui, Weight, grow,
-  open, paths, px,
+  FormStyle, Hotkey, Icon, Id, Key, NamedKey, PopUp, Select, Style, TextStyle, Tile, Ui, Weight,
+  grow, open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -358,6 +358,9 @@ impl App for Prefs {
   }
 }
 
+// The microphone's pop-up at its widest, in points.
+const MIC_WIDTH: f32 = 320.0;
+
 /// A pop-up of `labels`, item `at` the current one: the item picked, when it is another.
 fn pick(ui: &mut Ui, id: &str, labels: &[String], at: usize, lines: &[usize]) -> Option<usize> {
   let items: Vec<(usize, &str)> = labels.iter().map(String::as_str).enumerate().collect();
@@ -403,10 +406,13 @@ impl Prefs {
     // By what matters most: the microphone, the model and its language, then the shortcut.
     ui.form_section(fs, "Dictation", |ui| {
       let (mics, at) = microphones(&self.devices, self.settings.microphone.as_ref());
-      let labels: Vec<String> = mics.iter().map(|m| crate::menu::short(&m.0)).collect();
+      let labels: Vec<&str> = mics.iter().map(|m| m.0.as_str()).collect();
       ui.form_row(fs, FormRow::new("Microphone"), |ui| {
-        if let Some(i) = pick(ui, "mic", &labels, at, &[0]) {
-          let choice = mics[i].1.clone();
+        // ALSA's names run past 60 characters: a longer one ends in "…" beside its label.
+        let mut cur = at;
+        let pop = PopUp::new(&mut cur, &labels).separators(&[0]).max_width(MIC_WIDTH);
+        if pop.show(ui.id("mic")).changed {
+          let choice = mics[cur].1.clone();
           self.edit(move |s| s.microphone = choice.clone());
         }
       });
