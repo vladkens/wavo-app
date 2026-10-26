@@ -62,6 +62,11 @@ pub fn reset(dry_run: bool, yes: bool) -> Result<()> {
     let defaults = std::process::Command::new("defaults").args(["delete", INFO.id]).output();
     let done = defaults.is_ok_and(|o| o.status.success());
     println!("defaults: {}", if done { "removed" } else { "none" });
+    // cfprefsd leaves the file behind, empty.
+    if let Some(home) = std::env::var_os("HOME") {
+      let plist = PathBuf::from(home).join(format!("Library/Preferences/{}.plist", INFO.id));
+      let _ = fs::remove_file(plist);
+    }
   }
 
   for path in &paths {
