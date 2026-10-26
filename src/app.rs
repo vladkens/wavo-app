@@ -455,10 +455,11 @@ impl App {
       Phase::Transcribing => Show::Transcribing(status.engine.progress),
       Phase::Idle => {
         let before = self.update.as_ref().map(|u| &u.status);
-        match hud::after(status, before, update.settings.auto_paste) {
+        let (paste, took) = (update.settings.auto_paste, update.settings.show_transcription_time);
+        match hud::after(status, before, paste, took) {
           Some(show) => show,
-          // An error shown stays for its time.
-          None if shown == Mode::Error => return self.keep(update),
+          // An error or the time shown stays for its time.
+          None if matches!(shown, Mode::Error | Mode::Done) => return self.keep(update),
           None => Show::Collapse,
         }
       }

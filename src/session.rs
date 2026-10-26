@@ -369,6 +369,8 @@ pub struct Last {
   pub error: Option<String>,
   pub pasted: bool,
   pub not_pasted: Option<String>,
+  /// From the stop to the text, pasted or not.
+  pub took_ms: Option<u64>,
 }
 
 /// What a platform shell shows, sent to the [`Observer`] after every change.
@@ -1135,7 +1137,8 @@ impl<O: TextOutput> Controller<O> {
 
   /// The dictation becomes the last one, and the retention runs.
   fn complete(&mut self) {
-    let d = self.dictation.take().unwrap();
+    let mut d = self.dictation.take().unwrap();
+    d.last.took_ms = d.stopped.map(|s| s.elapsed().as_millis() as u64);
     if d.prewarmed
       && let Some(loaded) = &self.engine
     {

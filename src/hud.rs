@@ -44,6 +44,8 @@ const SETTLE: Duration = ms(180);
 const RESIZE: Duration = ms(200);
 const COLLAPSE: Duration = ms(260);
 const ERROR_HOLD: Duration = ms(4000);
+// The time a dictation took, when shown (Advanced), before the collapse.
+const DONE_HOLD: Duration = ms(1000);
 const METER_TICK: Duration = ms(33);
 const WAVE_HALF: Duration = ms(600);
 const WAVE_STAGGER: Duration = ms(75);
@@ -72,8 +74,14 @@ pub fn config(position: HudPosition) -> Config {
 // MARK: What it says
 
 /// What came of a dictation that ended since `before`, or a new error of a recording that did not
-/// start; `None` is no news. With `auto_paste` a refused paste is an error.
-pub fn after(status: &Status, before: Option<&Status>, auto_paste: bool) -> Option<Show> {
+/// start; `None` is no news. With `auto_paste` a refused paste is an error; with `took` a dictation
+/// without one says how long its text took.
+pub fn after(
+  status: &Status,
+  before: Option<&Status>,
+  auto_paste: bool,
+  took: bool,
+) -> Option<Show> {
   let take = |s: &Status| s.last.as_ref().map(|l| l.take);
   let Some(last) = status.last.as_ref().filter(|l| Some(l.take) != before.and_then(take)) else {
     let shown = before.and_then(|s| s.error.as_deref());
@@ -97,7 +105,20 @@ pub fn after(status: &Status, before: Option<&Status>, auto_paste: bool) -> Opti
     Outcome::Failed => Some(short(last.error.as_deref().unwrap_or("failed"))),
   };
 
-  Some(error.map_or(Show::Collapse, Show::Error))
+  let done = last.took_ms.filter(|_| took && last.outcome == Outcome::Done).map(took_text);
+  Some(match (error, done) {
+    (Some(error), _) => Show::Error(error),
+    (None, Some(done)) => Show::Done(done),
+    (None, None) => Show::Collapse,
+  })
+}
+
+/// `0.42 s`, `12.3 s`.
+fn took_text(ms: u64) -> String {
+  match ms {
+    ..10_000 => format!("{:.2} s", ms as f64 / 1000.0),
+    _ => format!("{:.1} s", ms as f64 / 1000.0),
+  }
 }
 
 /// The warning while recording when no model can transcribe: the recording is kept for later.
@@ -157,6 +178,8 @@ pub enum Show {
   },
   Transcribing(Option<(usize, usize)>),
   Error(String),
+  /// The dictation's text came this long after the stop.
+  Done(String),
   Collapse,
 }
 
@@ -166,6 +189,7 @@ pub enum Mode {
   Recording,
   Transcribing,
   Error,
+  Done,
   Closing,
 }
 
@@ -229,8 +253,11 @@ impl Hud {
     self.pending.iter().fold(self.mode, |mode, show| match (show, mode) {
       (Show::Recording { .. }, _) => Mode::Recording,
       (Show::Error(_), _) => Mode::Error,
+      (Show::Done(_), _) => Mode::Done,
       (Show::Transcribing(_), Mode::Recording) => Mode::Transcribing,
-      (Show::Collapse, Mode::Recording | Mode::Transcribing | Mode::Error) => Mode::Closing,
+      (Show::Collapse, Mode::Recording | Mode::Transcribing | Mode::Error | Mode::Done) => {
+        Mode::Closing
+      }
       (_, mode) => mode,
     })
   }
@@ -290,6 +317,12 @@ impl Hud {
         self.text = Some(reason);
         self.width = (from, to, now);
       }
+      Show::Done(took) => {
+        let from = if self.mode == Mode::Hidden { WIDTH } else { self.width_at(now) };
+        self.enter(Mode::Done, now);
+        self.text = Some(took);
+        self.width = (from, WIDTH, now);
+      }
       Show::Collapse => self.collapse(now),
     }
   }
@@ -334,6 +367,7 @@ impl Hud {
         self.ticked = now;
       }
       Mode::Error if t >= ERROR_HOLD => self.collapse(now),
+      Mode::Done if t >= DONE_HOLD => self.collapse(now),
       Mode::Closing if t >= COLLAPSE => self.mode = Mode::Hidden,
       _ => {}
     }
@@ -394,6 +428,14 @@ impl Hud {
         icon::draw(f, MARK, glyph, fade(th.menu, a), 2.2);
         let y = baseline(f, FONT);
         f.text(x + REASON_X, y, text, FONT, fade(th.text, a));
+      }
+      // The check and the time, centred.
+      (Mode::Done, Some(took)) => {
+        let start = x + (WIDTH - GLYPH - 6.0 - f.measure(took, TIME)) / 2.0;
+        let glyph = Rect::new(start, mid - GLYPH / 2.0, GLYPH, GLYPH);
+        icon::draw(f, Icon::CHECK, glyph, fade(th.success, a), 2.2);
+        let y = baseline(f, TIME);
+        f.text(start + GLYPH + 6.0, y, took, TIME, fade(th.text, a));
       }
       (Mode::Recording, None) => {
         dot(f, a);
@@ -528,7 +570,7 @@ mod tests {
   use crate::session::{Last, NotPasted};
 
   fn said(status: &Status, before: Option<&Status>, auto_paste: bool) -> Option<String> {
-    match after(status, before, auto_paste)? {
+    match after(status, before, auto_paste, false)? {
       Show::Error(reason) => Some(reason),
       _ => Some("collapse".into()),
     }
@@ -625,6 +667,46 @@ mod tests {
     h.wait(COLLAPSE + ms(100));
     assert_eq!((h.app().mode(), hidden.get()), (Mode::Hidden, 1));
     assert!(!h.rt.needs_frame(), "no frames once hidden");
+  }
+
+  /// With the setting, a dictation's time to text shows instead of the plain collapse; an error
+  /// still wins.
+  #[test]
+  fn the_time_to_text_shows_only_when_asked() {
+    let done = |took_ms, pasted| Status {
+      last: Some(Last { take: 1, outcome: Outcome::Done, pasted, took_ms, ..Last::default() }),
+      ..Status::default()
+    };
+    let shown = |s: &Status, took| after(s, None, true, took);
+    assert!(matches!(shown(&done(Some(420), true), false), Some(Show::Collapse)));
+    assert!(matches!(shown(&done(Some(420), true), true), Some(Show::Done(t)) if t == "0.42 s"));
+    assert!(matches!(shown(&done(Some(12_340), true), true), Some(Show::Done(t)) if t == "12.3 s"));
+    let refused = Status {
+      last: Some(Last {
+        not_pasted: Some("focus moved".into()),
+        ..done(Some(420), false).last.unwrap()
+      }),
+      ..Status::default()
+    };
+    assert!(matches!(shown(&refused, true), Some(Show::Error(_))), "an error wins");
+  }
+
+  #[test]
+  fn the_time_holds_a_second_then_hides() {
+    let (mut h, hidden) = hud();
+    h.app_mut().show(Show::Done("0.42 s".into()));
+    h.wait(ms(300));
+    assert_eq!(h.app().mode(), Mode::Done);
+    let img = h.render();
+    let mid = MARGIN + HEIGHT / 2.0;
+    let green = (0..400).any(|x| {
+      let [r, g, b, _] = img.pixel(x as f32, mid);
+      g > 120 && g > r + 40 && g > b + 20
+    });
+    assert!(green, "the check");
+    h.wait(DONE_HOLD);
+    h.wait(COLLAPSE + ms(200));
+    assert_eq!((h.app().mode(), hidden.get()), (Mode::Hidden, 1));
   }
 
   #[test]

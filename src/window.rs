@@ -598,6 +598,8 @@ impl Prefs {
 
 // MARK: Advanced
 
+const TOOK_HELP: &str = "After each dictation the HUD shows for a second how long the text took after \
+  the stop.";
 const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle this long. The next \
   dictation loads it again, which takes a moment.";
 const ANE_HELP: &str = "Parakeet and GigaAM run on the Neural Engine: as fast as on the GPU at a \
@@ -638,6 +640,13 @@ impl Prefs {
         let mut cur = self.settings.hud_position;
         if ui.id("hud").select(&mut cur, &HUDS).changed {
           self.edit(move |s| s.hud_position = cur);
+        }
+      });
+
+      ui.form_row(fs, FormRow::new("Show the transcription time").info(TOOK_HELP), |ui| {
+        let mut on = self.settings.show_transcription_time;
+        if ui.id("took").toggle(&mut on, "").changed {
+          self.edit(move |s| s.show_transcription_time = on);
         }
       });
 
