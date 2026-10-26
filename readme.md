@@ -28,6 +28,19 @@ Export the history with its recordings on the old Mac with Advanced › Data ›
 
 </details>
 
+<details>
+<summary>Moving from Handy</summary>
+
+The history of [Handy](https://github.com/cjpais/Handy), with its recordings, comes over through an archive; Handy itself is only read. Quit Handy, then run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/vladkens/wavo-app/main/scripts/handy.py | python3 -
+```
+
+It writes `~/Downloads/handy-export.zip`: bring it in with Advanced › Data › Import…. Dictations Wavo already has are left, so importing twice adds nothing. `HANDY_DIR=<folder>` before `python3` reads Handy's data from another folder.
+
+</details>
+
 ## 📝 License
 
 MIT
