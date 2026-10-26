@@ -88,6 +88,9 @@ struct App {
   /// session's.
   history: Option<Rc<History>>,
   accessibility: bool,
+  // The hotkey listener may start: everywhere but where it asks the person ([portal_asks]) before
+  // they chose the menu's Allow the Hotkey… once.
+  may_listen: bool,
   microphone: Access,
   asked_microphone: bool,
   // The paste may read the clipboard to restore it.
@@ -152,6 +155,8 @@ fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> R
     _ => warn!("unknown command {cmd:?}"),
   })?;
 
+  // The session has not told its settings yet: they are read from the file.
+  let saved = Settings::load(&home.join(settings::FILE)).0;
   let tray = Tray::new(Icon::Idle.tray(), Icon::Idle.description());
   tray.on_open(|_, _| _ = with_app(App::menu_opening));
   tray.on_item(|main, _, id| chosen(main, id));
@@ -176,6 +181,7 @@ fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> R
     recent: Vec::new(),
     history,
     accessibility: false,
+    may_listen: !portal_asks() || saved.hotkey_portal,
     microphone: permissions::microphone(),
     asked_microphone: false,
     clipboard: SystemClipboard.readable(),
@@ -186,9 +192,7 @@ fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> R
   app.check_access();
   app.read_models();
 
-  // Nothing is asked at launch: General's buttons ask. Never at a launch at login. The session has
-  // not told its settings yet: a model chosen by its path is read from the file.
-  let saved = Settings::load(&app.home.join(settings::FILE)).0;
+  // Nothing is asked at launch: General's buttons ask. Never at a launch at login.
   let pick = Pick::new(&app.hub, saved.model.as_deref(), &app.found);
   let no_model = pick.active.is_none() && pick.other.as_ref().is_none_or(|(_, on)| !on);
   let missing = !app.accessibility || app.mic() != Access::Granted || no_model;
@@ -255,6 +259,7 @@ fn chosen(main: &mut Main, id: &str) {
       open_window(main, Some(Page::General))
     }
     "warn:clipboard" => allow(Pane::Pasteboard),
+    "warn:hotkey-portal" => _ = with_app(App::allow_portal),
     _ => {}
   }
 }
@@ -487,6 +492,7 @@ impl App {
     self.accessibility = permissions::accessibility(false);
     // The tap starts in the background: how it went shows at the next poll.
     if self.accessibility
+      && self.may_listen
       && self.hotkeys.status().listener != Listener::Active
       && let Err(e) = self.hotkeys.start()
     {
@@ -497,6 +503,13 @@ impl App {
     if cfg!(target_os = "macos") && waiting {
       proxy().after(ACCESS_POLL, |_| _ = with_app(App::poll_access));
     }
+  }
+
+  /// The menu's Allow the Hotkey…: the listener starts, and the desktop's portal asks the person.
+  fn allow_portal(&mut self) {
+    self.may_listen = true;
+    self.check_access();
+    self.refresh();
   }
 
   fn poll_access(&mut self) {
@@ -585,9 +598,14 @@ impl App {
 
   fn warnings(&self, update: &Update) -> Vec<Warning> {
     let hotkeys = self.hotkeys.status();
+    // A listener that failed with nothing else holding the hotkey leaves it dead (Windows' hook,
+    // X11's grab); the portal's refusal shows as Allow the Hotkey… again.
+    let listening = matches!(hotkeys.listener, Listener::Starting | Listener::Active);
+    let dead = hotkeys.listener == Listener::Failed && !hotkeys.fallback && !portal_asks();
     let system = menu::System {
       accessibility: self.accessibility,
-      hotkey_error: hotkeys.error,
+      hotkey_error: hotkeys.error.or(hotkeys.listener_error.filter(|_| dead)),
+      hotkey_portal: portal_asks() && !listening,
       no_microphone: self.mic() != Access::Granted,
       clipboard_unread: update.settings.restores_clipboard() && !self.clipboard,
       secure_input: hotkeys.secure_input,
@@ -598,6 +616,14 @@ impl App {
   /// The icon and the menu.
   fn refresh(&mut self) {
     let Some(update) = &self.update else { return };
+    // The portal took the hotkey: later launches bind it without a click.
+    if portal_asks()
+      && !update.settings.hotkey_portal
+      && self.hotkeys.status().listener == Listener::Active
+    {
+      self.handle.edit_settings(|s| s.hotkey_portal = true);
+    }
+
     let warnings = self.warnings(update);
     let icon = menu::icon(&update.status, &warnings);
     if icon != self.icon {
@@ -995,6 +1021,16 @@ fn check_focus(target: &Focused) -> Result<(), NotPasted> {
 /// Wayland shows no app where another types (nimbo's focus is none there): the paste goes to
 /// whatever has the focus, unchecked.
 fn focus_hidden() -> bool {
+  wayland()
+}
+
+/// The hotkey listener asks the person when it starts: Wayland's GlobalShortcuts portal shows its
+/// dialog. So it starts only from the menu, or at a launch after the portal took the hotkey once.
+fn portal_asks() -> bool {
+  wayland()
+}
+
+fn wayland() -> bool {
   cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
