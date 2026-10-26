@@ -16,6 +16,10 @@ use crate::audio::Choice;
 use crate::history::Retention;
 
 pub const FILE: &str = "settings.json";
+// Option-Space on macOS, as dictation apps there have it; Ctrl+Alt+Space elsewhere, where Alt+Space
+// opens a window's menu.
+const DEFAULT_HOTKEY: &str =
+  if cfg!(target_os = "macos") { "option+space" } else { "ctrl+alt+space" };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -65,7 +69,7 @@ impl Default for Settings {
   fn default() -> Self {
     Self {
       schema_version: 1,
-      hotkey: "option+space".into(),
+      hotkey: DEFAULT_HOTKEY.into(),
       activation: Activation::HoldOrToggle,
       microphone: None,
       language: "auto".into(),

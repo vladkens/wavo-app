@@ -28,7 +28,7 @@ jobs:
       - run: make check
       - run: make test
 
-  # The macOS shell builds only there: its clippy and tests, the rest's again.
+  # Each OS's own code: clippy and the tests on macOS and Windows too.
   macos:
     runs-on: macos-latest
     timeout-minutes: 20
@@ -40,7 +40,6 @@ jobs:
       - run: cargo clippy --release --all-targets -- -D warnings
       - run: make test
 
-  # Windows: its clippy and tests. The shell is macOS's only so far: dead code is checked there.
   windows:
     runs-on: windows-latest
     timeout-minutes: 30
@@ -49,7 +48,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
-      - run: cargo clippy --release --locked --all-targets -- -D warnings -A dead_code
+      - run: cargo clippy --release --locked --all-targets -- -D warnings
       - run: cargo test --release --locked
 
   build:

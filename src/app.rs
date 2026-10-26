@@ -275,7 +275,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
   }
 
   let Some((shell, update, hub, home, history)) = with_app(|app| {
-    let shell = MacShell {
+    let shell = AppShell {
       home: app.home.clone(),
       handle: app.handle.clone(),
       hub: app.hub.clone(),
@@ -626,7 +626,7 @@ impl App {
 /// The settings window's way to the app. What may wait (the system's login items, a deletion, an
 /// export) runs on a thread of its own: the window keeps drawing. A download's, the export's and
 /// the import's state are the app's: a window opened again shows them.
-struct MacShell {
+struct AppShell {
   home: PathBuf,
   handle: Handle,
   hub: Hub,
@@ -635,7 +635,7 @@ struct MacShell {
   import: Arc<Mutex<Option<Import>>>,
 }
 
-impl window::Shell for MacShell {
+impl window::Shell for AppShell {
   fn edit(&self, edit: Box<dyn FnOnce(&mut Settings) + Send>) {
     self.handle.edit_settings(edit);
   }
@@ -812,10 +812,14 @@ impl window::Shell for MacShell {
 
 /// The calling thread runs as the person's own action, not as background work: macOS gives it
 /// the disk and the cores a background thread waits for. The process's side, no App Nap while
-/// Wavo is out of view, is nimbo's activity the transfer holds.
+/// Wavo is out of view, is nimbo's activity the transfer holds. Other systems don't tell them
+/// apart.
 fn user_initiated() {
   // SAFETY: it sets the calling thread's own class.
-  unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0) };
+  #[cfg(target_os = "macos")]
+  unsafe {
+    libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0)
+  };
 }
 
 /// `16.0 GB in 52.3 s, 306 MB/s` since `started`.
@@ -850,12 +854,16 @@ fn progress<T>(state: &Mutex<Option<Transfer<T>>>) -> impl FnMut(u64, u64) {
 
 // MARK: Paste
 
-// The text goes on the clipboard as an offer that says when it is read, ⌘V goes to the app in
-// focus, and the clipboard the person had comes back RESTORE after the read (some apps read more
-// than once), or CAP after ⌘V when nothing reads it; only while the clipboard still holds the
-// text: what the person copied meanwhile stays.
+// The text goes on the clipboard as an offer that says when it is read, the paste shortcut (⌘V,
+// elsewhere Ctrl+V) goes to the app in focus, and the clipboard the person had comes back RESTORE
+// after the read (some apps read more than once), or CAP after the shortcut when nothing reads it;
+// only while the clipboard still holds the text: what the person copied meanwhile stays.
 const RESTORE: Duration = Duration::from_millis(500);
 const CAP: Duration = Duration::from_secs(8);
+const PASTE: Shortcut = Shortcut {
+  key: Key::Char('v'),
+  mods: if cfg!(target_os = "macos") { Modifiers::META } else { Modifiers::CONTROL },
+};
 
 struct Pending {
   id: u64,
@@ -877,12 +885,14 @@ impl TextOutput for GuiOutput {
   }
 
   fn paste(&mut self, text: &str, target: &Option<Focused>, keep: bool) -> Result<(), NotPasted> {
-    let Some(target) = target.clone() else {
+    if target.is_none() && !focus_hidden() {
       return Err(NotPasted::Failed("the app in focus at the start is unknown".into()));
-    };
+    }
+
+    let target = target.clone();
 
     if !permissions::accessibility(false) {
-      return Err(NotPasted::Failed("no Accessibility access: ⌘V cannot be sent".into()));
+      return Err(NotPasted::Failed("no Accessibility access: ⌘V can't be sent".into()));
     }
 
     // Given up after MAIN_WAIT: when the main thread gets to it, it is not pasted any more.
@@ -914,7 +924,7 @@ impl TextOutput for GuiOutput {
 }
 
 /// On the main thread.
-fn paste(text: &str, keep: bool, target: &Focused) -> Result<(), NotPasted> {
+fn paste(text: &str, keep: bool, target: &Option<Focused>) -> Result<(), NotPasted> {
   static NEXT: AtomicU64 = AtomicU64::new(1);
   let clipboard = SystemClipboard;
   let unreachable = || NotPasted::Failed("the clipboard can't be reached".into());
@@ -926,28 +936,8 @@ fn paste(text: &str, keep: bool, target: &Focused) -> Result<(), NotPasted> {
   let snapshot = snapshot.filter(|s| !s.unreadable());
 
   // Right before the paste: the snapshot may take a while.
-  let now = focus::current().ok_or_else(|| NotPasted::Failed("no app is in front".into()))?;
-  if target.moved(&now) {
-    info!("not pasted: the focus moved from {} to {}", target.name, now.name);
-    return Err(NotPasted::FocusChanged);
-  }
-
-  // The app told its window at the start: it must tell it now too.
-  let known = target.window.is_ok();
-  if known && let Err(e) = &now.window {
-    return Err(NotPasted::Failed(format!("{} did not tell its focused window ({e})", now.name)));
-  }
-
-  match &now.secure {
-    Ok(true) => return Err(NotPasted::SecureField),
-    Ok(false) => {}
-    // An app that answers at all must answer this too; one that never did can't be checked, unless
-    // Secure Input is on: then it may well be a password field.
-    Err(e) if known || permissions::secure_input() => {
-      let why = format!("{} did not tell its focused element ({e})", now.name);
-      return Err(NotPasted::Failed(why));
-    }
-    Err(_) => {}
+  if let Some(target) = target {
+    check_focus(target)?;
   }
 
   let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -963,13 +953,46 @@ fn paste(text: &str, keep: bool, target: &Focused) -> Result<(), NotPasted> {
     None => _ = clipboard.offer(text, None).ok_or_else(unreachable)?,
   }
 
-  if let Err(e) = nimbo::keys::post(Shortcut { key: Key::Char('v'), mods: Modifiers::META }) {
+  if let Err(e) = nimbo::keys::post(PASTE) {
     settle(id);
-    return Err(NotPasted::Failed(format!("⌘V was not sent: {e}")));
+    return Err(NotPasted::Failed(format!("{} was not sent: {e}", PASTE.label())));
   }
 
-  info!("paste: ⌘V, {} chars", text.chars().count());
+  info!("paste: {}, {} chars", PASTE.label(), text.chars().count());
   Ok(())
+}
+
+/// Whether the paste may go where `target` was: the focus is still there and not in a password
+/// field.
+fn check_focus(target: &Focused) -> Result<(), NotPasted> {
+  let now = focus::current().ok_or_else(|| NotPasted::Failed("no app is in front".into()))?;
+  if target.moved(&now) {
+    info!("not pasted: the focus moved from {} to {}", target.name, now.name);
+    return Err(NotPasted::FocusChanged);
+  }
+
+  // The app told its window at the start: it must tell it now too.
+  let known = target.window.is_ok();
+  if known && let Err(e) = &now.window {
+    return Err(NotPasted::Failed(format!("{} did not tell its focused window ({e})", now.name)));
+  }
+
+  match &now.secure {
+    Ok(true) => Err(NotPasted::SecureField),
+    Ok(false) => Ok(()),
+    // An app that answers at all must answer this too; one that never did can't be checked, unless
+    // Secure Input is on: then it may well be a password field.
+    Err(e) if known || permissions::secure_input() => {
+      Err(NotPasted::Failed(format!("{} did not tell its focused element ({e})", now.name)))
+    }
+    Err(_) => Ok(()),
+  }
+}
+
+/// Wayland shows no app where another types (nimbo's focus is none there): the paste goes to
+/// whatever has the focus, unchecked.
+fn focus_hidden() -> bool {
+  cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 fn settle(id: u64) {

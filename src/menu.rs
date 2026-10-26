@@ -190,9 +190,10 @@ pub fn menu(
 /// The longest microphone or model in the menu.
 const NAME: usize = 32;
 
-/// A microphone or a model as the menu and its submenus name it: as Settings does, a longer one
-/// shortened at a word, inside its brackets when it has some: `System Default (MacBook Pro…)`.
-fn short(name: &str) -> String {
+/// A microphone or a model as the menu, its submenus and Settings name it: a longer one shortened
+/// at a word, inside its brackets when it has some: `System Default (MacBook Pro…)`. ALSA's names
+/// run past 60 characters.
+pub fn short(name: &str) -> String {
   if name.chars().count() <= NAME {
     return name.to_owned();
   }

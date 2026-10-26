@@ -1,19 +1,17 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! wavo-app: local dictation, a menu bar app; `uninstall` on the command line.
+//! wavo-app: local dictation, a menu bar or tray app; `uninstall` on the command line.
 
-// macOS first, Windows and Linux later (docs/plans/20261023-port.md).
-#[cfg(target_os = "macos")]
+// No console window next to the app on Windows; a command attaches to the one it runs in.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app;
 mod audio;
 mod cli;
 mod ctl;
 mod engine;
 mod history;
-// The macOS app's; elsewhere built for their tests.
-#[cfg(any(test, target_os = "macos"))]
 mod hud;
-#[cfg(any(test, target_os = "macos"))]
 mod menu;
 mod session;
 mod settings;
@@ -34,7 +32,7 @@ const INFO: AppInfo =
   AppInfo { id: "me.vladkens.wavo", name: "Wavo", presence: Presence::Accessory };
 
 #[derive(Parser)]
-#[command(version, about = "Local dictation", subcommand_required = !cfg!(target_os = "macos"))]
+#[command(version, about = "Local dictation")]
 struct Cli {
   #[command(subcommand)]
   command: Option<Command>,
@@ -58,13 +56,12 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+  #[cfg(windows)]
+  attach_console();
   let cli = Cli::parse();
   init_tracing();
   match cli.command {
-    #[cfg(target_os = "macos")]
     None => app::run(),
-    #[cfg(not(target_os = "macos"))]
-    None => unreachable!("clap asks for a command"),
     Some(Command::Uninstall { dry_run, yes }) => cli::uninstall(dry_run, yes),
     Some(Command::Quit) => cli::quit(),
   }
@@ -77,6 +74,16 @@ fn home() -> PathBuf {
     Some(dir) if !dir.is_empty() => PathBuf::from(dir),
     _ => nimbo::paths::data_dir(INFO.id),
   }
+}
+
+/// The console of the command line that started the app, if one did: its output and `--help` go
+/// there (the app itself has none, as a GUI program).
+#[cfg(windows)]
+fn attach_console() {
+  use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+
+  // SAFETY: no preconditions; it fails harmlessly without a parent console.
+  unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
 /// Logs go to stderr, filtered by `WAVO_LOG` (`warn,wavo_app=debug`).
