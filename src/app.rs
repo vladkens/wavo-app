@@ -610,10 +610,9 @@ impl App {
         menu::recent_title(empty.as_deref().unwrap_or(&e.text), e.created_at, now)
       })
       .collect();
-    let (mics, at) = window::microphones(&self.devices, update.settings.microphone.as_ref());
-    let mics: Vec<String> = mics.into_iter().map(|m| m.0).collect();
+    let mics = (&self.devices[..], update.settings.microphone.as_ref());
     let (status, found, pick) = (&update.status, &self.found, &self.pick);
-    let menu = menu::menu(hotkey.as_deref(), status, &warnings, &recent, (&mics, at), found, pick);
+    let menu = menu::menu(hotkey.as_deref(), status, &warnings, &recent, mics, found, pick);
     if menu != self.menu {
       self.tray.set_menu(&menu);
       self.menu = menu;

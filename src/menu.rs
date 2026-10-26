@@ -6,10 +6,11 @@
 
 use nimbo::tray::{Item, Menu, TrayIcon};
 
+use crate::audio::{Choice, Device};
 use crate::engine::Phase as EnginePhase;
 use crate::history::{local_time, shorten};
 use crate::session::{NoModel, Outcome, Phase, Status};
-use crate::window::{Found, Pick, size_text};
+use crate::window::{Found, Pick, microphones as mic_choices, size_text};
 
 pub const RECENT: usize = 10;
 const TITLE: &str = concat!("Wavo ", env!("CARGO_PKG_VERSION"));
@@ -144,13 +145,13 @@ pub fn recent_title(text: &str, created_at: i64, now: i64) -> String {
 }
 
 /// Item ids: `recent:<i>`, `mic:<i>`, `model:<name>`, `warn:…` and fixed ones, as `app::chosen`
-/// handles them. `mics` are [crate::window::microphones]'s labels and the current one.
+/// handles them. `mics`: the devices and the one saved.
 pub fn menu(
   hotkey: Option<&str>,
   status: &Status,
   warnings: &[Warning],
   recent: &[String],
-  mics: (&[String], usize),
+  mics: (&[Device], Option<&Choice>),
   found: &[Found],
   pick: &Pick,
 ) -> Menu {
@@ -174,8 +175,8 @@ pub fn menu(
     Item::new("copy-last", "Copy Last Dictation").enabled(last),
     Item::new("recent", "Recent").enabled(!recent.is_empty()).submenu(Menu::new(recent)),
     Item::separator(),
-    Item::new("mic", &mic).submenu(mics),
-    Item::new("model", &model).submenu(models),
+    Item::new("mic", &fit(&mic, NAME)).submenu(mics),
+    Item::new("model", &fit(&model, NAME)).submenu(models),
     Item::new("unload", "Unload Model").enabled(loaded),
     Item::separator(),
     Item::new("history", "History…"),
@@ -186,17 +187,34 @@ pub fn menu(
   Menu::new(items)
 }
 
-/// The microphone in use, and the submenu: the system default, then the devices, the one in use
-/// checked. Short: the default's device is in the list under it.
-fn microphones((labels, at): (&[String], usize)) -> (String, Menu) {
-  let label = |i: usize| if i == 0 { "System Default" } else { labels[i].as_str() };
+/// The longest name of a microphone or a model in the menu itself.
+const NAME: usize = 24;
+
+/// `text` in `max` characters at most, its middle cut: `Elgato Wave…ophone Array`.
+fn fit(text: &str, max: usize) -> String {
+  let chars: Vec<char> = text.chars().collect();
+  if chars.len() <= max {
+    return text.to_owned();
+  }
+
+  let head = (max - 1) / 2;
+  let tail = &chars[chars.len() - (max - 1 - head)..];
+  chars[..head].iter().chain(&['…']).chain(tail).collect()
+}
+
+/// The device in use (the default's own), and the submenu: System Default, then the devices, the
+/// one in use checked.
+fn microphones((devices, saved): (&[Device], Option<&Choice>)) -> (String, Menu) {
+  let (mics, at) = mic_choices(devices, saved);
+  let label = |i: usize| if i == 0 { "System Default" } else { mics[i].0.as_str() };
   let mut items: Vec<Item> =
-    (0..labels.len()).map(|i| Item::new(&format!("mic:{i}"), label(i)).checked(i == at)).collect();
+    (0..mics.len()).map(|i| Item::new(&format!("mic:{i}"), label(i)).checked(i == at)).collect();
   if items.len() > 1 {
     items.insert(1, Item::separator());
   }
 
-  let title = if at == 0 { "Default Microphone" } else { label(at) };
+  let default = devices.iter().find(|d| d.default).map_or("System Default", |d| &d.name);
+  let title = if at == 0 { default } else { label(at) };
   (title.to_owned(), Menu::new(items))
 }
 
@@ -288,21 +306,30 @@ mod tests {
     s.state = Phase::Recording;
     assert_eq!(icon(&s, &list), Icon::Recording, "the phase first");
 
-    let mics = ["System Default (MacBook Pro Microphone)".to_owned(), "USB Mic".to_owned()];
-    let items = menu(Some("⌥Space"), &s, &list, &[], (&mics, 1), &[], &Pick::default()).items;
+    let device = |name: &str, default| Device { id: Some(name.into()), name: name.into(), default };
+    let devices =
+      [device("MacBook Pro Microphone", true), device("Elgato Wave:3 Microphone Array", false)];
+    let wave = Choice { id: devices[1].id.clone(), name: devices[1].name.clone() };
+    let mics = (&devices[..], Some(&wave));
+    let items = menu(Some("⌥Space"), &s, &list, &[], mics, &[], &Pick::default()).items;
     assert!(items[0].label.ends_with("⌥Space · Recording…"), "{}", items[0].label);
     assert_eq!(
       (items[1].label.as_str(), items[6].label.as_str()),
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")
     );
     assert!(items[1].enabled && !items[2].enabled);
+    // The menu's own name cut in its middle; the submenu's whole.
     let mic = items.iter().find(|i| i.id == "mic").unwrap();
-    assert_eq!(mic.label, "USB Mic");
+    assert_eq!(mic.label, "Elgato Wave…ophone Array");
     let sub = &mic.submenu.as_ref().unwrap().items;
     let got: Vec<_> = sub.iter().map(|i| (i.label.as_str(), i.checked)).collect();
-    assert_eq!(got, [("System Default", false), ("", false), ("USB Mic", true)]);
-    let items = menu(None, &s, &list, &[], (&mics, 0), &[], &Pick::default()).items;
+    let want = [("System Default", false), ("", false), ("MacBook Pro Microphone", false)];
+    assert_eq!(got[..3], want);
+    assert_eq!(got[3], ("Elgato Wave:3 Microphone Array", true));
+
+    // The default: its device's name.
+    let items = menu(None, &s, &list, &[], (&devices[..], None), &[], &Pick::default()).items;
     let mic = items.iter().find(|i| i.id == "mic").unwrap();
-    assert_eq!(mic.label, "Default Microphone");
+    assert_eq!(mic.label, "MacBook Pro Microphone");
   }
 }
