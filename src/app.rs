@@ -934,7 +934,8 @@ impl TextOutput for GuiOutput {
     let target = target.clone();
 
     if !permissions::accessibility(false) {
-      return Err(NotPasted::Failed("no Accessibility access: ⌘V can't be sent".into()));
+      let why = format!("no Accessibility access: {} can't be sent", PASTE.label());
+      return Err(NotPasted::Failed(why));
     }
 
     // Given up after MAIN_WAIT (PORTAL_WAIT on Wayland): when the main thread gets to it, it is not
@@ -1051,8 +1052,10 @@ fn hud_takes_focus() -> bool {
   wayland() && std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("GNOME"))
 }
 
+/// The desktop session is Wayland's (`XDG_SESSION_TYPE`, which the login manager sets), as nimbo
+/// tells it: an X11 app under XWayland (`GDK_BACKEND=x11`) still has Wayland's portals and focus.
 fn wayland() -> bool {
-  cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
+  cfg!(target_os = "linux") && std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland")
 }
 
 fn settle(id: u64) {
