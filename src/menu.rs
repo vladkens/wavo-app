@@ -187,16 +187,17 @@ pub fn menu(
 }
 
 /// The microphone in use, and the submenu: the system default, then the devices, the one in use
-/// checked.
+/// checked. Short: the default's device is in the list under it.
 fn microphones((labels, at): (&[String], usize)) -> (String, Menu) {
-  let mut items: Vec<Item> = (labels.iter().enumerate())
-    .map(|(i, label)| Item::new(&format!("mic:{i}"), label).checked(i == at))
-    .collect();
+  let label = |i: usize| if i == 0 { "System Default" } else { labels[i].as_str() };
+  let mut items: Vec<Item> =
+    (0..labels.len()).map(|i| Item::new(&format!("mic:{i}"), label(i)).checked(i == at)).collect();
   if items.len() > 1 {
     items.insert(1, Item::separator());
   }
 
-  (labels.get(at).cloned().unwrap_or_default(), Menu::new(items))
+  let title = if at == 0 { "Default Microphone" } else { label(at) };
+  (title.to_owned(), Menu::new(items))
 }
 
 /// The model in use, and the submenu: the models downloaded with the one that transcribes checked,
@@ -297,7 +298,11 @@ mod tests {
     assert!(items[1].enabled && !items[2].enabled);
     let mic = items.iter().find(|i| i.id == "mic").unwrap();
     assert_eq!(mic.label, "USB Mic");
-    let checked: Vec<_> = mic.submenu.as_ref().unwrap().items.iter().map(|i| i.checked).collect();
-    assert_eq!(checked, [false, false, true], "the default, a separator, then USB Mic");
+    let sub = &mic.submenu.as_ref().unwrap().items;
+    let got: Vec<_> = sub.iter().map(|i| (i.label.as_str(), i.checked)).collect();
+    assert_eq!(got, [("System Default", false), ("", false), ("USB Mic", true)]);
+    let items = menu(None, &s, &list, &[], (&mics, 0), &[], &Pick::default()).items;
+    let mic = items.iter().find(|i| i.id == "mic").unwrap();
+    assert_eq!(mic.label, "Default Microphone");
   }
 }
