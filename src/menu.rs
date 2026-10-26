@@ -102,7 +102,7 @@ pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> 
   }
 
   if system.paste_portal {
-    add("warn:paste-portal", "Allow Pasting…".into(), true);
+    add("warn:paste-portal", "Allow Paste…".into(), true);
   }
 
   if system.no_microphone {

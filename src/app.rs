@@ -271,9 +271,9 @@ fn chosen(main: &mut Main, id: &str) {
   }
 }
 
-/// The menu's Allow Pasting…: the desktop's RemoteDesktop portal asks the person now, not at the
-/// first paste. Its session starts with the first look at the clipboard, which waits for the answer
-/// in a nested main loop: outside the app's borrow.
+/// The menu's Allow Paste… on Wayland: the desktop's RemoteDesktop portal asks the person now, not
+/// at the first paste. Its session starts with the first look at the clipboard, which waits for the
+/// answer in a nested main loop: outside the app's borrow.
 fn allow_paste() {
   let _ = SystemClipboard.snapshot();
   with_app(App::refresh);
