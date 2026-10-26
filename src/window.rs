@@ -1423,15 +1423,16 @@ impl HistoryPage {
   }
 }
 
-/// `file`, with `.zip` added unless it ends in it.
+/// `file`, with `.zip` added unless it ends in it; added, to a name not taken, as the panel asked
+/// about replacing `file` only: `backup.zip`, else `backup 2.zip`.
 fn with_zip(file: &Path) -> PathBuf {
   if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
     return file.to_owned();
   }
 
-  let mut name = file.file_name().unwrap_or_default().to_owned();
-  name.push(".zip");
-  file.with_file_name(name)
+  let name = file.file_name().unwrap_or_default().to_string_lossy();
+  let numbered = |n| if n == 1 { format!("{name}.zip") } else { format!("{name} {n}.zip") };
+  (1..).map(|n| file.with_file_name(numbered(n))).find(|p| !p.exists()).unwrap()
 }
 
 /// The days of `entries`, newest first: each one's entries and their duration in ms.
@@ -2058,9 +2059,6 @@ mod tests {
     click(h, Id::of(CONFIRM).key("action"));
   }
 
-  /// Every page in both looks, as high as its content or [SCROLLING] high; with `WAVO_SHOTS` set
-  /// (`make shots`), written there: also Models asking before a delete and General at the first
-  /// launch.
   /// GNOME's save panel adds no extension: Import's filter would hide the archive.
   #[test]
   fn an_export_ends_in_zip() {
@@ -2069,8 +2067,16 @@ mod tests {
     {
       assert_eq!(with_zip(Path::new(picked)), PathBuf::from(file));
     }
+
+    // Never over an archive the panel didn't ask about.
+    let dir = TempDir::new("export-zip");
+    std::fs::write(dir.path().join("backup.zip"), "").unwrap();
+    assert_eq!(with_zip(&dir.path().join("backup")), dir.path().join("backup 2.zip"));
   }
 
+  /// Every page in both looks, as high as its content or [SCROLLING] high; with `WAVO_SHOTS` set
+  /// (`make shots`), written there: also Models asking before a delete and General at the first
+  /// launch.
   #[test]
   fn every_page_renders_in_both_looks() {
     let home =

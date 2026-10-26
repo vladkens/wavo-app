@@ -69,7 +69,8 @@ fn inputs(host: &cpal::Host) -> Vec<Input> {
   host.input_devices().map(|ds| ds.filter_map(Input::new).collect()).unwrap_or_default()
 }
 
-/// The inputs the settings list: ALSA's (Linux) one per sound card ([cards]), other systems' all.
+/// The inputs the settings list: ALSA's (Linux) one per capture device ([cards]), other systems'
+/// all.
 fn listed(all: Vec<Input>) -> Vec<Input> {
   // cpal's ALSA IDs are `alsa:<PCM>`.
   let pcms: Vec<&str> = all.iter().filter_map(|x| x.id.as_deref()?.strip_prefix("alsa:")).collect();
@@ -88,32 +89,36 @@ const CARD_PCMS: [&str; 3] = ["sysdefault", "front", "plughw"];
 
 /// ALSA lists every PCM it has, by name (`pcms`): virtual ones (`null` records silence; `default`,
 /// which the System Default item is, and `pipewire` and `pulse`, which it goes through; `jack`,
-/// `oss`, the rate converters) and each card 3 to 5 times (`sysdefault:`, `front:`, `dsnoop:`,
-/// `hw:`, `plughw:`, and cpal's own `hw:` and `plughw:` by card index). The ones listed, by index:
-/// one per card, the first of [CARD_PCMS] it has.
+/// `oss`, the rate converters) and each card's device 3 to 5 times (`sysdefault:`, `front:`,
+/// `dsnoop:`, `hw:`, `plughw:`, and cpal's own `hw:` and `plughw:` by card index). The ones listed,
+/// by index: one per card's capture device, the first of [CARD_PCMS] it has (a laptop's built-in
+/// microphones are often a card's device 6 or 7, beside its jack's 0: only `plughw:` has those).
 fn cards(pcms: &[&str]) -> Vec<usize> {
-  /// `sysdefault:CARD=PCH`, `plughw:CARD=PCH,DEV=0`: `PCH` and the rank; `plughw:0,0`: `0`.
-  fn card(pcm: &str) -> Option<(&str, usize)> {
+  /// `sysdefault:CARD=PCH` (its device 0), `plughw:CARD=PCH,DEV=6`, `plughw:0,6`: the card, the
+  /// device and the rank.
+  fn device(pcm: &str) -> Option<(&str, &str, usize)> {
     let (kind, args) = pcm.split_once(':')?;
     let rank = CARD_PCMS.iter().position(|&k| k == kind)?;
-    let card = args.split(',').next()?;
-    Some((card.strip_prefix("CARD=").unwrap_or(card), rank))
+    let mut args = args.split(',');
+    let card = args.next()?;
+    let dev = args.next().map_or("0", |d| d.strip_prefix("DEV=").unwrap_or(d));
+    Some((card.strip_prefix("CARD=").unwrap_or(card), dev, rank))
   }
 
   // A card by index (cpal's) is one ALSA lists by ID too, unless it lists none.
   let index = |card: &str| card.bytes().all(|b| b.is_ascii_digit());
-  let named = pcms.iter().filter_map(|p| card(p)).any(|(c, _)| !index(c));
-  let mut best: Vec<(&str, usize, usize)> = Vec::new();
+  let named = pcms.iter().filter_map(|p| device(p)).any(|(c, _, _)| !index(c));
+  let mut best: Vec<((&str, &str), usize, usize)> = Vec::new();
   for (i, pcm) in pcms.iter().enumerate() {
-    let Some((card, rank)) = card(pcm) else { continue };
+    let Some((card, dev, rank)) = device(pcm) else { continue };
     if named && index(card) {
       continue;
     }
 
-    match best.iter_mut().find(|b| b.0 == card) {
+    match best.iter_mut().find(|b| b.0 == (card, dev)) {
       Some(b) if rank < b.1 => (b.1, b.2) = (rank, i),
       Some(_) => {}
-      None => best.push((card, rank, i)),
+      None => best.push(((card, dev), rank, i)),
     }
   }
 
@@ -991,6 +996,9 @@ fn output<T: SizedSample + FromSample<f32>>(
   play: Arc<Play>,
 ) -> Result<cpal::Stream> {
   let channels = config.channels as usize;
+  // Written is not heard yet: it ends a quarter second of silence later, so that stopping it then
+  // cuts nothing the device still has queued.
+  let end = pcm.len() + config.sample_rate as usize / 4;
   let failed = play.clone();
   let mut at = 0;
   let stream = device.build_output_stream(
@@ -1001,7 +1009,7 @@ fn output<T: SizedSample + FromSample<f32>>(
         at += 1;
       }
 
-      if at >= pcm.len() {
+      if at >= end {
         play.end(None);
       }
     },
@@ -1052,7 +1060,7 @@ mod tests {
   }
 
   #[test]
-  fn alsa_lists_one_pcm_per_card() {
+  fn alsa_lists_one_pcm_per_capture_device() {
     fn listed<'a>(pcms: &[&'a str]) -> Vec<&'a str> {
       cards(pcms).into_iter().map(|i| pcms[i]).collect()
     }
@@ -1073,6 +1081,8 @@ mod tests {
       "default",
       "hw:CARD=PCH,DEV=0",
       "plughw:CARD=PCH,DEV=0",
+      "hw:CARD=PCH,DEV=6",
+      "plughw:CARD=PCH,DEV=6",
       "sysdefault:CARD=PCH",
       "front:CARD=PCH,DEV=0",
       "dsnoop:CARD=PCH,DEV=0",
@@ -1093,14 +1103,18 @@ mod tests {
       "hw:CARD=1,DEV=0",
       "plughw:CARD=1,DEV=0",
     ];
+    // The built-in microphones on the card's device 6 stay: only `plughw:` has them.
     let cards = ["PCH", "Webcam", "Device", "Device_1"].map(|c| format!("sysdefault:CARD={c}"));
-    assert_eq!(listed(&pcms), cards);
+    let mut expected = cards.to_vec();
+    expected.insert(0, "plughw:CARD=PCH,DEV=6".into());
+    assert_eq!(listed(&pcms), expected);
 
     // No default for a card, no hints at all: its front, else its plug by index.
     let pcms = ["null", "plughw:CARD=Mic,DEV=0", "front:CARD=Mic,DEV=0", "dsnoop:CARD=Mic,DEV=0"];
     assert_eq!(listed(&pcms), ["front:CARD=Mic,DEV=0"]);
     let pcms = ["hw:CARD=0,DEV=0", "plughw:CARD=0,DEV=0", "plughw:CARD=0,DEV=2", "plughw:1,0"];
-    assert_eq!(listed(&pcms), ["plughw:CARD=0,DEV=0", "plughw:1,0"]);
+    let devices = ["plughw:CARD=0,DEV=0", "plughw:CARD=0,DEV=2", "plughw:1,0"];
+    assert_eq!(listed(&pcms), devices);
     assert!(listed(&["null", "default", "pipewire", "pulse", "jack", "oss", ""]).is_empty());
   }
 
