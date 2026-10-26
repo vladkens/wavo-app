@@ -140,10 +140,12 @@ pub fn run() -> Result<()> {
 fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> Result<()> {
   let _ = PROXY.set(main.proxy());
   // Linux only: the dock, Wayland's window icon and the portals' dialogs find the app by it.
-  match nimbo::desktop::install(&INFO, &crate::LAUNCHER) {
-    Ok(true) => info!("the launcher entry written"),
-    Ok(false) => {}
-    Err(e) => warn!("the launcher entry: {e}"),
+  if installed() {
+    match nimbo::desktop::install(&INFO, &crate::LAUNCHER) {
+      Ok(true) => info!("the launcher entry written"),
+      Ok(false) => {}
+      Err(e) => warn!("the launcher entry: {e}"),
+    }
   }
 
   let fake_mic = config.fake_mic.is_some();
@@ -167,6 +169,17 @@ fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> R
     "toggle" => toggle.input(session::Input::Toggle),
     _ => warn!("unknown command {cmd:?}"),
   })?;
+
+  // Windows and Linux start the program their entry names: after an update or a move that is the
+  // old one, or none, while General still says On. The entry is written again for this one.
+  if !cfg!(target_os = "macos") && installed() {
+    spawn("autostart", || {
+      let wanted = autostart::state(&INFO).is_ok_and(|s| s.wanted());
+      if wanted && let Err(e) = autostart::set(&INFO, true) {
+        warn!("launch at login: {e}");
+      }
+    });
+  }
 
   // The session has not told its settings yet: they are read from the file.
   let saved = Settings::load(&home.join(settings::FILE)).0;
@@ -370,6 +383,12 @@ fn request_microphone() {
   });
 }
 
+/// The person's Wavo, not a test or a build run with its own `WAVO_HOME`: only it writes the
+/// desktop's entries for the app (launcher, login), which a build would take over.
+fn installed() -> bool {
+  std::env::var_os("WAVO_HOME").is_none()
+}
+
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
   std::thread::Builder::new().name(name.into()).spawn(f).unwrap();
 }
@@ -531,6 +550,19 @@ impl App {
     let waiting = !self.accessibility || self.hotkeys.status().listener != Listener::Active;
     if cfg!(target_os = "macos") && waiting {
       proxy().after(ACCESS_POLL, |_| _ = with_app(App::poll_access));
+    }
+
+    if !cfg!(target_os = "macos") {
+      self.watch_listener();
+    }
+  }
+
+  /// Off macOS the listener starts once, in the background (Windows' hook, the portal's answer):
+  /// only watched until it settles, so the tray tells how it went.
+  fn watch_listener(&mut self) {
+    match self.hotkeys.status().listener {
+      Listener::Starting => proxy().after(ACCESS_POLL, |_| _ = with_app(App::watch_listener)),
+      _ => self.refresh(),
     }
   }
 
@@ -753,6 +785,7 @@ impl window::Shell for AppShell {
     spawn("history", move || {
       if let Err(e) = handle.request(req) {
         warn!("{req:?}: {e}");
+        with_window(move |prefs| prefs.history_failed(req, &e));
       }
     });
   }
@@ -925,6 +958,41 @@ const PASTE: Shortcut = Shortcut {
   mods: if cfg!(target_os = "macos") { Modifiers::META } else { Modifiers::CONTROL },
 };
 
+/// Linux terminals that paste with Ctrl+Shift+V (Ctrl+V is the shell's quoted insert there), by
+/// `/proc/<pid>/comm`, which keeps 15 bytes: gnome-terminal-server is `gnome-terminal-`. Only
+/// where the app in focus is known (X11): Wayland tells no app another's.
+const TERMINALS: [&str; 20] = [
+  "gnome-terminal-",
+  "kgx",
+  "ptyxis",
+  "konsole",
+  "kitty",
+  "alacritty",
+  "wezterm-gui",
+  "ghostty",
+  "terminator",
+  "tilix",
+  "xfce4-terminal",
+  "mate-terminal",
+  "lxterminal",
+  "qterminal",
+  "foot",
+  "terminology",
+  "guake",
+  "tilda",
+  "blackbox",
+  "st",
+];
+
+/// The shortcut that pastes into `target`.
+fn paste_key(target: &Option<Focused>) -> Shortcut {
+  let terminal = target.as_ref().is_some_and(|t| TERMINALS.contains(&t.name.as_str()));
+  match cfg!(target_os = "linux") && terminal {
+    true => Shortcut { mods: PASTE.mods | Modifiers::SHIFT, ..PASTE },
+    false => PASTE,
+  }
+}
+
 struct Pending {
   id: u64,
   offer: Offer,
@@ -1016,12 +1084,13 @@ fn paste(text: &str, keep: bool, target: &Option<Focused>) -> Result<(), NotPast
     None => _ = clipboard.offer(text, None).ok_or_else(unreachable)?,
   }
 
-  if let Err(e) = nimbo::keys::post(PASTE) {
+  let key = paste_key(target);
+  if let Err(e) = nimbo::keys::post(key) {
     settle(id);
-    return Err(NotPasted::Failed(format!("{} was not sent: {e}", PASTE.label())));
+    return Err(NotPasted::Failed(format!("{} was not sent: {e}", key.label())));
   }
 
-  info!("paste: {}, {} chars", PASTE.label(), text.chars().count());
+  info!("paste: {}, {} chars", key.label(), text.chars().count());
   Ok(())
 }
 
@@ -1091,5 +1160,23 @@ fn restore(p: Pending) {
     info!("paste: clipboard restored");
   } else {
     warn!("paste: the clipboard could not be restored");
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn terminals_paste_with_shift_on_linux() {
+    let app = |name: &str| {
+      let name = name.into();
+      Some(Focused { pid: 1, name, window: Ok(None), secure: Ok(false) })
+    };
+    let shift = cfg!(target_os = "linux");
+    assert_eq!(paste_key(&app("gnome-terminal-")).mods.contains(Modifiers::SHIFT), shift);
+    assert_eq!(paste_key(&app("konsole")).mods.contains(Modifiers::SHIFT), shift);
+    assert_eq!(paste_key(&app("firefox")), PASTE);
+    assert_eq!(paste_key(&None), PASTE);
   }
 }

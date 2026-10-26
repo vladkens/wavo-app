@@ -764,6 +764,17 @@ impl Prefs {
   }
 
   /// [Shell::set_autostart] to `on` ended: the system's state after it, or why not.
+  /// A history request the session refused: said under the panel.
+  pub fn history_failed(&mut self, req: Request, error: &str) {
+    let what = match req {
+      Request::Delete(_) => "Could not delete the dictation",
+      Request::Retranscribe(_) => "Could not transcribe it again",
+      Request::Restore(_) => "Could not put the previous text back",
+      Request::Unload | Request::Imported => return,
+    };
+    self.history.said = Some(format!("{what}: {error}"));
+  }
+
   pub fn autostart_set(&mut self, on: bool, result: Result<Autostart, String>) {
     self.login.busy = None;
     match result {
@@ -1365,6 +1376,8 @@ struct HistoryPage {
   /// What the line under the panel says for [NOTE_TIME], and since when ([Ui::now]): an error,
   /// "Copied".
   note: Option<(String, Duration)>,
+  /// A note from outside a frame (a request that failed on its thread), stamped at the next one.
+  said: Option<String>,
 }
 
 impl HistoryPage {
@@ -1532,6 +1545,10 @@ impl Prefs {
   /// The dictations, newest first, in a plate a day, a page at a time.
   fn history(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let h = &mut self.history;
+    if let Some(said) = h.said.take() {
+      h.note = Some((said, ui.now()));
+    }
+
     if let Some((_, p)) = h.playing.take_if(|(_, p)| !p.playing())
       && let Some(e) = p.error()
     {
