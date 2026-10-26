@@ -41,6 +41,10 @@ use crate::{INFO, audio, transfer};
 const ACCESS_POLL: Duration = Duration::from_secs(2);
 // How long the session waits for the main thread to paste or copy.
 const MAIN_WAIT: Duration = Duration::from_secs(3);
+// On Wayland the first paste starts the RemoteDesktop portal's session, whose dialog waits for the
+// person's answer (nimbo gives it 60 s): the paste waits with it, as the first recording waits for
+// the microphone's prompt on macOS.
+const PORTAL_WAIT: Duration = Duration::from_secs(65);
 
 thread_local! {
   static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -933,14 +937,16 @@ impl TextOutput for GuiOutput {
       return Err(NotPasted::Failed("no Accessibility access: ⌘V can't be sent".into()));
     }
 
-    // Given up after MAIN_WAIT: when the main thread gets to it, it is not pasted any more.
+    // Given up after MAIN_WAIT (PORTAL_WAIT on Wayland): when the main thread gets to it, it is not
+    // pasted any more.
     let (text, late) = (text.to_owned(), Arc::new(AtomicBool::new(false)));
     let gave_up = late.clone();
     let paste = move |_: &mut Main| match gave_up.load(Ordering::Acquire) {
       true => Err(NotPasted::Failed("too late".into())),
       false => paste(&text, keep, &target),
     };
-    proxy().call(paste, MAIN_WAIT).unwrap_or_else(|| {
+    let wait = if wayland() { PORTAL_WAIT } else { MAIN_WAIT };
+    proxy().call(paste, wait).unwrap_or_else(|| {
       late.store(true, Ordering::Release);
       Err(NotPasted::Failed("the app was too busy to paste".into()))
     })
