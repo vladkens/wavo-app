@@ -1029,7 +1029,7 @@ impl Prefs {
     self.edit(move |s| s.model = Some(name.to_owned()));
   }
 
-  /// Use (or "✓ In use"), the bin and ⓘ: the model to ask about deleting.
+  /// Use (or "✓ In use"), the bin and ↗: the model to ask about deleting.
   fn downloaded_row(
     &mut self,
     ui: &mut Ui,
@@ -1103,7 +1103,8 @@ impl Prefs {
         }
       } else {
         let r = ui.id(("cancel", m.name)).icon_button(Icon::X);
-        ui.tooltip(r.id, "Cancel the download");
+        let preparing = matches!(state, Some(Download::Preparing));
+        ui.tooltip(r.id, if preparing { "Cancel" } else { "Cancel the download" });
         if r.clicked {
           self.shell.cancel_download(m.name);
         }
@@ -1113,10 +1114,11 @@ impl Prefs {
     });
   }
 
-  /// A model's ⓘ, last in its row: its card.
+  /// A model's ↗, last in its row: its card (license, languages, benchmarks) in the browser, the
+  /// sign About's links have too.
   fn card(&self, ui: &mut Ui, m: &ModelInfo) {
-    let r = ui.id(("info", m.name)).info_button();
-    ui.tooltip(r.id, "The model’s card: its license, languages and benchmarks");
+    let r = ui.id(("card", m.name)).icon_button(Icon::EXTERNAL);
+    ui.tooltip(r.id, "Open the model’s page on Hugging Face");
     if r.clicked {
       self.shell.open_url(m.card);
     }
@@ -2321,7 +2323,7 @@ mod tests {
     h.frame();
     h.frame();
     let shown: Vec<&str> = (hub::MODELS.iter())
-      .filter(|m| h.rect(Id::of(("info", m.name))).is_some())
+      .filter(|m| h.rect(Id::of(("card", m.name))).is_some())
       .map(|m| m.name)
       .collect();
     assert_eq!(shown, [TWO[1], "moonshine-tiny", "moonshine-base"]);
