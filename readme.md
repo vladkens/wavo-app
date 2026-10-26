@@ -14,6 +14,10 @@
 
 **Hold a hotkey, speak, release**, and the text lands where you were typing: a chat, an editor, a terminal, any app. Speech is recognized **on your computer** by [wavo](https://github.com/vladkens/wavo), on the GPU or a Mac's Neural Engine: no account, no subscription, and your voice never leaves the machine. Wavo lives in the menu bar or the tray, and its windows are drawn by [nimbo](https://github.com/vladkens/nimbo).
 
+<p align="center">
+  <a href="https://github.com/user-attachments/assets/1826b949-3c28-47e8-a6f4-9affad10cc09"><img src="https://github.com/vladkens/wavo-app/blob/assets/wavo-greeting.webp?raw=true" width="640" alt="A dictation typed into TextEdit, then found in Wavo's history; click for the video with sound" /></a>
+</p>
+
 ## 🌟 Features
 
 - 🎙️ **Hold to talk**: hold the hotkey and speak, or tap it to start and stop; Esc cancels
@@ -24,10 +28,6 @@
 - 💊 **A quiet HUD**: a small pill shows the level while you speak and never takes the focus
 - 📜 **History**: every dictation with its recording, searchable; play it back or transcribe it again
 - 🖥️ **Every desktop**: macOS, Windows and Linux on X11 and Wayland, in a 6 MB download
-
-<p align="center">
-  <a href="https://github.com/user-attachments/assets/1826b949-3c28-47e8-a6f4-9affad10cc09"><img src="https://github.com/vladkens/wavo-app/blob/assets/wavo-greeting.webp?raw=true" width="640" alt="A dictation typed into TextEdit, then found in Wavo's history; click for the video with sound" /></a>
-</p>
 
 ## 🚀 Usage
 
