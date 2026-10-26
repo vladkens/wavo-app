@@ -69,11 +69,65 @@ fn inputs(host: &cpal::Host) -> Vec<Input> {
   host.input_devices().map(|ds| ds.filter_map(Input::new).collect()).unwrap_or_default()
 }
 
-/// Input devices in system order, the system default marked.
+/// The inputs the settings list: ALSA's (Linux) one per sound card ([cards]), other systems' all.
+fn listed(all: Vec<Input>) -> Vec<Input> {
+  // cpal's ALSA IDs are `alsa:<PCM>`.
+  let pcms: Vec<&str> = all.iter().filter_map(|x| x.id.as_deref()?.strip_prefix("alsa:")).collect();
+  if pcms.len() != all.len() {
+    return all;
+  }
+
+  let keep = cards(&pcms);
+  let all = all.into_iter().enumerate();
+  all.filter(|(i, _)| keep.contains(i)).map(|(_, x)| x).collect()
+}
+
+/// A card's PCMs, the best first: its default (with conversions, shared with other apps where the
+/// card allows), its front, its plug.
+const CARD_PCMS: [&str; 3] = ["sysdefault", "front", "plughw"];
+
+/// ALSA lists every PCM it has, by name (`pcms`): virtual ones (`null` records silence; `default`,
+/// which the System Default item is, and `pipewire` and `pulse`, which it goes through; `jack`,
+/// `oss`, the rate converters) and each card 3 to 5 times (`sysdefault:`, `front:`, `dsnoop:`,
+/// `hw:`, `plughw:`, and cpal's own `hw:` and `plughw:` by card index). The ones listed, by index:
+/// one per card, the first of [CARD_PCMS] it has.
+fn cards(pcms: &[&str]) -> Vec<usize> {
+  /// `sysdefault:CARD=PCH`, `plughw:CARD=PCH,DEV=0`: `PCH` and the rank; `plughw:0,0`: `0`.
+  fn card(pcm: &str) -> Option<(&str, usize)> {
+    let (kind, args) = pcm.split_once(':')?;
+    let rank = CARD_PCMS.iter().position(|&k| k == kind)?;
+    let card = args.split(',').next()?;
+    Some((card.strip_prefix("CARD=").unwrap_or(card), rank))
+  }
+
+  // A card by index (cpal's) is one ALSA lists by ID too, unless it lists none.
+  let index = |card: &str| card.bytes().all(|b| b.is_ascii_digit());
+  let named = pcms.iter().filter_map(|p| card(p)).any(|(c, _)| !index(c));
+  let mut best: Vec<(&str, usize, usize)> = Vec::new();
+  for (i, pcm) in pcms.iter().enumerate() {
+    let Some((card, rank)) = card(pcm) else { continue };
+    if named && index(card) {
+      continue;
+    }
+
+    match best.iter_mut().find(|b| b.0 == card) {
+      Some(b) if rank < b.1 => (b.1, b.2) = (rank, i),
+      Some(_) => {}
+      None => best.push((card, rank, i)),
+    }
+  }
+
+  let mut keep: Vec<usize> = best.into_iter().map(|b| b.2).collect();
+  keep.sort_unstable();
+  keep
+}
+
+/// Input devices in system order, the system default marked. ALSA's `default` is no device and is
+/// not listed: on Linux the System Default item names none.
 pub fn devices() -> Vec<Device> {
   let host = cpal::default_host();
   let default = host.default_input_device();
-  let inputs = inputs(&host).into_iter();
+  let inputs = listed(inputs(&host)).into_iter();
   inputs
     .map(|x| Device { default: default.as_ref() == Some(&x.device), id: x.id, name: x.name })
     .collect()
@@ -94,10 +148,14 @@ fn open_device<T>(
     let found = match &default {
       Some(d) if d.is(choice) => Some((d.device.clone(), d.name.clone())),
       _ => {
-        let all = inputs(&host);
-        let by_id = all.iter().position(|x| x.id.is_some() && x.id == choice.id);
-        let at = by_id.or_else(|| all.iter().position(|x| x.name == choice.name));
-        at.map(|i| (all[i].device.clone(), all[i].name.clone()))
+        // By ID among all, an unlisted one too; by name among the listed: ALSA names a card's PCMs
+        // after the card, and the one listed is the best.
+        let mut all = inputs(&host);
+        let found = match all.iter().position(|x| x.id.is_some() && x.id == choice.id) {
+          Some(i) => Some(all.swap_remove(i)),
+          None => listed(all).into_iter().find(|x| x.name == choice.name),
+        };
+        found.map(|x| (x.device, x.name))
       }
     };
 
@@ -991,6 +1049,59 @@ mod tests {
       let peak = mid.iter().fold(0.0f32, |m, s| m.max(s.abs()));
       assert!((peak - 0.5).abs() < 0.02, "{from} → {to} Hz: peak {peak}");
     }
+  }
+
+  #[test]
+  fn alsa_lists_one_pcm_per_card() {
+    fn listed<'a>(pcms: &[&'a str]) -> Vec<&'a str> {
+      cards(pcms).into_iter().map(|i| pcms[i]).collect()
+    }
+
+    // A laptop with PipeWire, a webcam and two of the same USB microphone: ALSA's hints for
+    // capture (`arecord -L`), then cpal's own by index.
+    let pcms = [
+      "null",
+      "lavrate",
+      "samplerate",
+      "speexrate",
+      "jack",
+      "oss",
+      "pipewire",
+      "pulse",
+      "upmix",
+      "vdownmix",
+      "default",
+      "hw:CARD=PCH,DEV=0",
+      "plughw:CARD=PCH,DEV=0",
+      "sysdefault:CARD=PCH",
+      "front:CARD=PCH,DEV=0",
+      "dsnoop:CARD=PCH,DEV=0",
+      "hw:CARD=Webcam,DEV=0",
+      "plughw:CARD=Webcam,DEV=0",
+      "sysdefault:CARD=Webcam",
+      "front:CARD=Webcam,DEV=0",
+      "dsnoop:CARD=Webcam,DEV=0",
+      "usbstream:CARD=Webcam",
+      "plughw:CARD=Device,DEV=0",
+      "sysdefault:CARD=Device",
+      "dsnoop:CARD=Device,DEV=0",
+      "plughw:CARD=Device_1,DEV=0",
+      "sysdefault:CARD=Device_1",
+      "front:CARD=Device_1,DEV=0",
+      "hw:CARD=0,DEV=0",
+      "plughw:CARD=0,DEV=0",
+      "hw:CARD=1,DEV=0",
+      "plughw:CARD=1,DEV=0",
+    ];
+    let cards = ["PCH", "Webcam", "Device", "Device_1"].map(|c| format!("sysdefault:CARD={c}"));
+    assert_eq!(listed(&pcms), cards);
+
+    // No default for a card, no hints at all: its front, else its plug by index.
+    let pcms = ["null", "plughw:CARD=Mic,DEV=0", "front:CARD=Mic,DEV=0", "dsnoop:CARD=Mic,DEV=0"];
+    assert_eq!(listed(&pcms), ["front:CARD=Mic,DEV=0"]);
+    let pcms = ["hw:CARD=0,DEV=0", "plughw:CARD=0,DEV=0", "plughw:CARD=0,DEV=2", "plughw:1,0"];
+    assert_eq!(listed(&pcms), ["plughw:CARD=0,DEV=0", "plughw:1,0"]);
+    assert!(listed(&["null", "default", "pipewire", "pulse", "jack", "oss", ""]).is_empty());
   }
 
   #[test]
