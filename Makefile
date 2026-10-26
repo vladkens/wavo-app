@@ -37,10 +37,8 @@ bundle: # target/Wavo.app from the release profile, or PROFILE
 	cargo build --locked --profile $(PROFILE)
 	python3 scripts/bundle.py target/$(PROFILE)/wavo-app assets/icon.png $(APP)
 
-dist: # target/distrib/Wavo-dev.zip from the dist profile, the release file for CI (vladkens/actions/rust-build)
-	$(MAKE) bundle PROFILE=dist
-	mkdir -p target/distrib
-	ditto -c -k --keepParent $(APP) target/distrib/Wavo-dev.zip
+dist: # this OS's release file in target/distrib from the dist profile, for CI (vladkens/actions/rust-build)
+	python3 scripts/dist.py
 
 # scripts/run.py: Wavo's permissions are reset first when the bundle's signature is not the one
 # they were granted to.

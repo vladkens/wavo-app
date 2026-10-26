@@ -51,17 +51,40 @@ jobs:
       - run: cargo clippy --release --locked --all-targets -- -D warnings
       - run: cargo test --release --locked
 
+  # The release files (scripts/dist.py), one job per OS and arch, each its own artifact. Linux
+  # builds on the oldest LTS runner: the AppImage needs its glibc or newer.
   build:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, name: macos, dist: make dist }
+          - { os: windows-latest, name: windows-x64, dist: python scripts/dist.py }
+          - { os: windows-11-arm, name: windows-arm64, dist: python scripts/dist.py }
+          - { os: ubuntu-22.04, name: linux-x86_64, dist: make dist }
+          - { os: ubuntu-22.04-arm, name: linux-aarch64, dist: make dist }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      # Windows on Arm's image may have no Rust.
+      - if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          command -v cargo && exit 0
+          arch=$([ "$RUNNER_ARCH" = ARM64 ] && echo aarch64 || echo x86_64)
+          curl -sSfLo rustup-init.exe "https://static.rust-lang.org/rustup/dist/$arch-pc-windows-msvc/rustup-init.exe"
+          ./rustup-init.exe -y --profile minimal
+          echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
       - uses: vladkens/actions/rust-build@v1
         with:
           name: Wavo
-          dist: make dist
+          dist: ${{ matrix.dist }}
           dev: true
           crates: false
+          artifact: release-${{ matrix.name }}
 
   publish:
     if: github.ref == 'refs/heads/main'
@@ -73,6 +96,11 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
+      # One artifact for rust-publish, from the build jobs' own.
+      - uses: actions/upload-artifact/merge@v7
+        with:
+          name: release
+          pattern: release-*
       - uses: vladkens/actions/rust-publish@v1
         with:
           name: Wavo
