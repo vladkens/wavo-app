@@ -9,14 +9,13 @@ is kept in Wavo's data home; when the bundle's differs (another identity, or the
 script), Wavo's permissions are reset first, so System Settings has no stale Wavo whose switch is
 on but counts for no build of it any more.
 
-The running Wavo (any copy) is asked to quit (`wavo-app quit`; one from before nimbo's instance
-on its own socket), so it finishes what it is doing; one still running after 10 s is killed. With a dest the bundle replaces the one there. The
+The running Wavo (any copy) is asked to quit (`wavo-app quit`), so it finishes what it is
+doing; one still running after 10 s is killed. With a dest the bundle replaces the one there. The
 app opens with its log in $WAVO_LOG_FILE (/tmp/wavo.log by default).
 """
 
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -25,24 +24,11 @@ from pathlib import Path
 ID = "me.vladkens.wavo"
 RUNNING = "Wavo.app/Contents/MacOS/wavo-app"
 # In the data home, which `wavo-app uninstall` deletes along with the permissions.
-HOME = Path.home() / "Library/Application Support" / ID
-GRANTED = HOME / "permissions-requirement"
+GRANTED = Path.home() / "Library/Application Support" / ID / "permissions-requirement"
 
 
 def running() -> bool:
     return subprocess.run(["pgrep", "-f", RUNNING], capture_output=True).returncode == 0
-
-
-def quit_legacy() -> None:
-    """`quit` to a Wavo from before nimbo's instance, on its socket: /tmp, by the home's device and
-    inode (its src/ctl.rs)."""
-    try:
-        st = HOME.stat()
-        with socket.socket(socket.AF_UNIX) as s:
-            s.connect(f"/tmp/wavo-{os.getuid()}-{st.st_dev:x}-{st.st_ino:x}.sock")
-            s.sendall(b"quit\n")
-    except OSError:
-        pass
 
 
 def requirement(app: Path) -> str:
@@ -62,10 +48,7 @@ def main() -> int:
     dr = requirement(app)
 
     if running():
-        asked = subprocess.run([app / "Contents/MacOS/wavo-app", "quit"], capture_output=True)
-        if asked.returncode != 0:
-            quit_legacy()
-
+        subprocess.run([app / "Contents/MacOS/wavo-app", "quit"], capture_output=True)
         for _ in range(50):
             if not running():
                 break

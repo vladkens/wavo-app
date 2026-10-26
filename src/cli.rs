@@ -155,11 +155,6 @@ fn quit_and_wait(home: &Path) -> Result<()> {
     bail!("quit Wavo first");
   }
 
-  // Once this version quit, which holds it too: one from before nimbo's instance.
-  if crate::app::legacy_lock(home)?.is_none() {
-    bail!("quit Wavo first: an older version runs");
-  }
-
   if running {
     println!("Wavo quit");
   }

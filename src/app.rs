@@ -10,8 +10,6 @@
 //! thread never waits for the session: what needs its answer runs on a thread of its own.
 
 use std::cell::RefCell;
-use std::fs::{File, TryLockError};
-use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,8 +98,6 @@ struct App {
   clipboard: bool,
   fake_mic: bool,
   session: Session,
-  /// [legacy_lock]'s, for the run.
-  _legacy: File,
 }
 
 /// Returns at once when another instance runs for the same home (it opens its settings), else when
@@ -119,11 +115,6 @@ pub fn run() -> Result<()> {
       return Ok(());
     }
   };
-  let legacy = legacy_lock(&home).with_context(|| format!("lock {}", home.display()))?;
-  let Some(legacy) = legacy else {
-    eprintln!("an older Wavo is running for {}: quit it first", home.display());
-    return Ok(());
-  };
 
   if config.fake_mic.is_none() {
     audio::warm_up();
@@ -134,7 +125,7 @@ pub fn run() -> Result<()> {
   nimbo::app(INFO, |main| {
     // Also on a quit the system asks for (logout), after which `nimbo::app` does not return.
     main.on_quit(|_| shutdown());
-    if let Err(e) = start(main, config, instance, legacy) {
+    if let Err(e) = start(main, config, instance) {
       error!("Wavo could not start: {e:#}");
       started = Err(e);
       main.quit();
@@ -143,20 +134,7 @@ pub fn run() -> Result<()> {
   started
 }
 
-/// The lock a Wavo from before nimbo's instance takes, `wavo.lock` in the same home: held by this
-/// one for its whole run too, so an older one started meanwhile finds it running; `None` while an
-/// older one runs. Write access: Windows locks no append-only handle.
-pub fn legacy_lock(home: &Path) -> io::Result<Option<File>> {
-  let file =
-    File::options().create(true).write(true).truncate(false).open(home.join("wavo.lock"))?;
-  match file.try_lock() {
-    Ok(()) => Ok(Some(file)),
-    Err(TryLockError::WouldBlock) => Ok(None),
-    Err(TryLockError::Error(e)) => Err(e),
-  }
-}
-
-fn start(main: &mut Main, config: session::Config, instance: Instance, legacy: File) -> Result<()> {
+fn start(main: &mut Main, config: session::Config, instance: Instance) -> Result<()> {
   let _ = PROXY.set(main.proxy());
   // Linux only: the dock, Wayland's window icon and the portals' dialogs find the app by it.
   if installed() {
@@ -232,7 +210,6 @@ fn start(main: &mut Main, config: session::Config, instance: Instance, legacy: F
     clipboard: SystemClipboard.readable(),
     fake_mic,
     session,
-    _legacy: legacy,
   };
   app.check_access();
   app.read_models();
