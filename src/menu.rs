@@ -14,7 +14,6 @@ use crate::session::{NoModel, Outcome, Phase, Status};
 use crate::window::{Found, Pick, microphones as mic_choices};
 
 pub const RECENT: usize = 10;
-const TITLE: &str = concat!("Wavo ", env!("CARGO_PKG_VERSION"));
 
 // MARK: Icon
 
@@ -174,7 +173,8 @@ pub fn menu(
   found: &[Found],
   pick: &Pick,
 ) -> Menu {
-  let header = [Some(TITLE), hotkey, state(status)].into_iter().flatten();
+  let title = format!("Wavo {}", crate::VERSION);
+  let header = [Some(title.as_str()), hotkey, state(status)].into_iter().flatten();
   let header = header.collect::<Vec<_>>().join(" · ");
   // Labels fit the menu's width by themselves (nimbo's Item::new).
   let mut items = vec![Item::new("header", &header).enabled(false)];

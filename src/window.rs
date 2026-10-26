@@ -1822,7 +1822,7 @@ impl Prefs {
       ui.el(Style::new().h(px(10.0)));
       ui.text("Wavo", TextStyle::new(Font { size: 20.0, ..t.bold }, t.text).ellipsis());
       ui.el(Style::new().h(px(2.0)));
-      ui.text(concat!("Version ", env!("CARGO_PKG_VERSION")), fs.note);
+      ui.text(format!("Version {}", crate::VERSION), fs.note);
       ui.el(Style::new().h(px(8.0)));
       ui.text("Local dictation: hold a key, speak, and the text lands where you type.", t.label());
       ui.el(Style::new().h(px(14.0)));

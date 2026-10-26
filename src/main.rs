@@ -33,6 +33,9 @@ use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
+/// The build, as the app shows it: `v0.1.0-12-g3672a1b` (build.rs's `WAVO_VERSION`).
+const VERSION: &str = concat!("v", env!("WAVO_VERSION"));
+
 const INFO: AppInfo =
   AppInfo { id: "me.vladkens.wavo", name: "Wavo", presence: Presence::Accessory };
 
@@ -61,7 +64,7 @@ fn with_icon(cfg: Config) -> Config {
 }
 
 #[derive(Parser)]
-#[command(version, about = "Local dictation")]
+#[command(version = VERSION, about = "Local dictation")]
 struct Cli {
   #[command(subcommand)]
   command: Option<Command>,

@@ -5,9 +5,12 @@
 //! - `about-icon.rgba`: 128 px (64 points at 2x), the About page's ([nimbo::Ui::rgba_image]);
 //! - `window-icon.rgba`: 256 px, the windows' off macOS ([nimbo::Config::icon]);
 //! - for Windows, `wavo.ico` linked into the exe as its icon, the one Explorer shows.
+//!
+//! And the version the app shows, `WAVO_VERSION` ([version]).
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const ICON: &str = "assets/icon.png";
 /// The sizes in the exe's icon: Explorer's views and the taskbar at 100–200% scale.
@@ -15,6 +18,7 @@ const ICO: [usize; 6] = [16, 24, 32, 48, 64, 256];
 
 fn main() {
   println!("cargo:rerun-if-changed={ICON}");
+  println!("cargo:rustc-env=WAVO_VERSION={}", version());
   let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
   let (w, h, rgba) = decode(ICON);
   write(&out.join("about-icon.rgba"), &resized(w, h, &rgba, 128));
@@ -22,6 +26,55 @@ fn main() {
 
   if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
     exe_icon(&out, w, h, &rgba);
+  }
+}
+
+/// The version the build shows, as CI's dev builds have it (vladkens/actions dev-version): Cargo's
+/// when CI stamped it already (a pre-release part); else `git describe` against the last vX.Y.Z
+/// tag, `0.9.0-12-g3672a1b` after one, `0.1.0-g3672a1b` before any, the plain version on its tag;
+/// `-dirty` with uncommitted changes; Cargo's without git (a crate build).
+fn version() -> String {
+  let pkg = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
+  if pkg.contains('-') {
+    return pkg;
+  }
+
+  let Some(sha) = git(&["rev-parse", "--short", "HEAD"]) else { return pkg };
+  rerun_on_git();
+  let described = git(&["describe", "--tags", "--match", "v[0-9]*.[0-9]*.[0-9]*"]);
+  let version = match described {
+    Some(d) => d.trim_start_matches('v').to_owned(),
+    None => format!("{pkg}-g{sha}"),
+  };
+
+  let dirty =
+    git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
+  if dirty { format!("{version}-dirty") } else { version }
+}
+
+/// `git` in the package's folder: its trimmed output, `None` when it fails or there is no git.
+fn git(args: &[&str]) -> Option<String> {
+  let out = Command::new("git").args(args).output().ok().filter(|o| o.status.success())?;
+  Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// The version again when HEAD moves, a tag comes or the tree changes: HEAD and the index (in a
+/// worktree's own git dir), the ref HEAD names and the tags (in the shared one), and the sources.
+fn rerun_on_git() {
+  let dir = |arg| git(&["rev-parse", arg]).map(PathBuf::from);
+  let (Some(own), Some(shared)) = (dir("--absolute-git-dir"), dir("--git-common-dir")) else {
+    return;
+  };
+
+  let shared = std::env::current_dir().map(|cwd| cwd.join(&shared)).unwrap_or(shared);
+  let head = git(&["rev-parse", "--symbolic-full-name", "HEAD"]).filter(|r| r.starts_with("refs/"));
+  let mut paths = vec![own.join("HEAD"), own.join("index"), shared.join("packed-refs")];
+  paths.push(shared.join("refs/tags"));
+  paths.extend(head.map(|r| shared.join(r)));
+  paths.extend(["src", "Cargo.toml", "Cargo.lock"].map(PathBuf::from));
+  // A path that isn't there would run this every build.
+  for path in paths.iter().filter(|p| p.exists()) {
+    println!("cargo:rerun-if-changed={}", path.display());
   }
 }
 

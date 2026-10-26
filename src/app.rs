@@ -120,7 +120,7 @@ pub fn run() -> Result<()> {
     audio::warm_up();
   }
 
-  info!("wavo-app for {}", home.display());
+  info!("wavo-app {} for {}", crate::VERSION, home.display());
   let mut started = Ok(());
   nimbo::app(INFO, |main| {
     // Also on a quit the system asks for (logout), after which `nimbo::app` does not return.
