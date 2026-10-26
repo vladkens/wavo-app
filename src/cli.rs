@@ -150,13 +150,14 @@ fn quit_and_wait(home: &Path) -> Result<()> {
     return Ok(());
   }
 
-  if crate::app::legacy_running(home) {
-    bail!("quit Wavo first: an older version runs");
-  }
-
   let running = matches!(instance::claim_in(home)?, Claim::Running);
   if instance::quit_and_wait_in(home, Duration::from_secs(5)).is_err() {
     bail!("quit Wavo first");
+  }
+
+  // Once this version quit, which holds it too: one from before nimbo's instance.
+  if crate::app::legacy_lock(home)?.is_none() {
+    bail!("quit Wavo first: an older version runs");
   }
 
   if running {
