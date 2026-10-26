@@ -78,8 +78,13 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+  // Windows: only for arguments (a command, `--help`, a mistake), which print. Attached, the app
+  // would print its logs after the prompt, and closing that console would end it without its quit
+  // hook.
   #[cfg(windows)]
-  attach_console();
+  if std::env::args_os().len() > 1 {
+    attach_console();
+  }
 
   let cli = Cli::parse();
   init_tracing();
