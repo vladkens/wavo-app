@@ -574,7 +574,6 @@ const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle thi
 const ANE_HELP: &str = "Parakeet and GigaAM run on the Neural Engine: as fast as on the GPU at a \
   fraction of the energy. Each new version of Wavo prepares the model once, in the background \
   (10–30 s); meanwhile it runs on the GPU. Whisper always runs on the GPU.";
-const NO_ANE: &str = "Needs Apple silicon and macOS 15 or later.";
 const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another Mac: the dictations this \
   history does not have are added with their recordings; the settings stay as they are.";
 const EXPORT_HELP: &str = "The history, its recordings and the settings, into a .zip archive: \
@@ -620,15 +619,15 @@ impl Prefs {
         }
       });
 
-      let has = self.shell.has_neural_engine();
-      let help = if has { ANE_HELP.to_owned() } else { format!("{NO_ANE}\n\n{ANE_HELP}") };
-      let row = FormRow::new("Use the Neural Engine").info(&help).disabled(!has);
-      ui.form_row(fs, row, |ui| {
-        let mut on = self.settings.neural_engine && has;
-        if ui.id("ane").toggle(&mut on, "").changed {
-          self.edit(move |s| s.neural_engine = on);
-        }
-      });
+      // Only where there is one: Apple silicon with macOS 15 or later.
+      if self.shell.has_neural_engine() {
+        ui.form_row(fs, FormRow::new("Use the Neural Engine").info(ANE_HELP), |ui| {
+          let mut on = self.settings.neural_engine;
+          if ui.id("ane").toggle(&mut on, "").changed {
+            self.edit(move |s| s.neural_engine = on);
+          }
+        });
+      }
 
       ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
         let mut cur = self.settings.history_retention;

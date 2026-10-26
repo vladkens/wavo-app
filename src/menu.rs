@@ -10,7 +10,7 @@ use crate::audio::{Choice, Device};
 use crate::engine::Phase as EnginePhase;
 use crate::history::{local_time, shorten};
 use crate::session::{NoModel, Outcome, Phase, Status};
-use crate::window::{Found, Pick, microphones as mic_choices, size_text};
+use crate::window::{Found, Pick, microphones as mic_choices};
 
 pub const RECENT: usize = 10;
 const TITLE: &str = concat!("Wavo ", env!("CARGO_PKG_VERSION"));
@@ -176,7 +176,7 @@ pub fn menu(
     Item::new("recent", "Recent").enabled(!recent.is_empty()).submenu(Menu::new(recent)),
     Item::separator(),
     Item::new("mic", &mic).submenu(mics),
-    Item::new("model", &shorten(&model, NAME - 1)).submenu(models),
+    Item::new("model", &model).submenu(models),
     Item::new("unload", "Unload Model").enabled(loaded),
     Item::separator(),
     Item::new("history", "History…"),
@@ -187,27 +187,36 @@ pub fn menu(
   Menu::new(items)
 }
 
-/// The longest microphone or model in the menu itself; a longer one is shortened at a word.
+/// The longest microphone or model in the menu.
 const NAME: usize = 32;
 
-/// The microphone in use and the submenu of them all, the one in use checked, named as Settings
-/// names them; in the menu itself the default's device is shortened: `System Default (MacBook
-/// Pro…)`.
+/// A microphone or a model as the menu and its submenus name it: as Settings does, a longer one
+/// shortened at a word, inside its brackets when it has some: `System Default (MacBook Pro…)`.
+fn short(name: &str) -> String {
+  if name.chars().count() <= NAME {
+    return name.to_owned();
+  }
+
+  match name.strip_suffix(')').and_then(|n| n.split_once(" (")) {
+    Some((head, inner)) if head.chars().count() + 12 <= NAME => {
+      format!("{head} ({})", shorten(inner, NAME - head.chars().count() - 4))
+    }
+    _ => shorten(name, NAME - 1),
+  }
+}
+
+/// The microphone in use, and the submenu: the system default, then the devices, the one in use
+/// checked.
 fn microphones((devices, saved): (&[Device], Option<&Choice>)) -> (String, Menu) {
   let (mics, at) = mic_choices(devices, saved);
   let mut items: Vec<Item> = (mics.iter().enumerate())
-    .map(|(i, (label, _))| Item::new(&format!("mic:{i}"), label).checked(i == at))
+    .map(|(i, (label, _))| Item::new(&format!("mic:{i}"), &short(label)).checked(i == at))
     .collect();
   if items.len() > 1 {
     items.insert(1, Item::separator());
   }
 
-  let room = NAME - "System Default (…)".chars().count();
-  let title = match (at, devices.iter().find(|d| d.default)) {
-    (0, Some(d)) => format!("System Default ({})", shorten(&d.name, room)),
-    (i, _) => shorten(&mics[i].0, NAME - 1),
-  };
-  (title, Menu::new(items))
+  (short(&mics[at].0), Menu::new(items))
 }
 
 /// The model in use, and the submenu: the models downloaded with the one that transcribes checked,
@@ -216,7 +225,7 @@ fn models(found: &[Found], pick: &Pick) -> (String, Menu) {
   let only = pick.other.is_none();
   let mut items: Vec<Item> = (found.iter().enumerate())
     .map(|(i, (m, _))| {
-      let label = format!("{} — {}", m.full_name, size_text(m.size));
+      let label = short(m.full_name);
       Item::new(&format!("model:{}", m.name), &label).checked(only && pick.active == Some(i))
     })
     .collect();
@@ -225,12 +234,12 @@ fn models(found: &[Found], pick: &Pick) -> (String, Menu) {
     false => format!("{name} (not on disk)"),
   });
   let title = match (&other, pick.active) {
-    (Some(other), _) => other.clone(),
-    (None, Some(i)) => found[i].0.full_name.to_owned(),
+    (Some(other), _) => short(other),
+    (None, Some(i)) => short(found[i].0.full_name),
     (None, None) => "No Model".to_owned(),
   };
   if let Some(other) = other {
-    items.push(Item::new("model-chosen", &other).checked(pick.gone().is_none()));
+    items.push(Item::new("model-chosen", &short(&other)).checked(pick.gone().is_none()));
   }
 
   if items.is_empty() {
@@ -310,14 +319,15 @@ mod tests {
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")
     );
     assert!(items[1].enabled && !items[2].enabled);
-    // Named as Settings names them; in the menu itself the default's device shortened.
+    // One name in the menu and its submenu, a long one shortened.
     let mic = items.iter().find(|i| i.id == "mic").unwrap();
     assert_eq!(mic.label, "Elgato Wave:3 Microphone Array");
     let sub = &mic.submenu.as_ref().unwrap().items;
     let got: Vec<_> = sub.iter().map(|i| (i.label.as_str(), i.checked)).collect();
-    assert_eq!(got[0], ("System Default (MacBook Pro Microphone)", false));
+    assert_eq!(got[0], ("System Default (MacBook Pro…)", false));
     let devices_got = &got[2..];
     assert_eq!(devices_got, [("MacBook Pro Microphone", false), (devices[1].name.as_str(), true)]);
+    assert_eq!(short("a-very-long-model-name-for-the-menu-q8"), "a-very-long-model-name-for-the…");
 
     let items = menu(None, &s, &list, &[], (&devices[..], None), &[], &Pick::default()).items;
     let mic = items.iter().find(|i| i.id == "mic").unwrap();
