@@ -28,7 +28,7 @@ clean:
 	cargo clean
 
 # wavo-app
-.PHONY: bundle dist run install reset shots fixtures test-models
+.PHONY: bundle dist run install uninstall shots fixtures test-models
 
 APP := target/Wavo.app
 PROFILE := release
@@ -58,8 +58,8 @@ install: # the same, installed into /Applications
 # The installed app's binary, else the release build's; ARGS go to it (--dry-run, --yes).
 INSTALLED := /Applications/Wavo.app/Contents/MacOS/wavo-app
 
-reset: # delete Wavo's data and permissions: a clean install to test
-	$(or $(wildcard $(INSTALLED)),target/release/wavo-app) reset $(ARGS)
+uninstall: # remove Wavo and all it left (data, models, permissions, the app): then a clean install
+	$(or $(wildcard $(INSTALLED)),target/release/wavo-app) uninstall $(ARGS)
 
 shots: # the settings window's pages, headless, into target/shots/
 	WAVO_SHOTS=$(CURDIR)/target/shots cargo test $(CARGO_FLAGS) every_page_renders

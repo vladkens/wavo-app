@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! wavo-app: local dictation, a menu bar app; `reset` on the command line.
+//! wavo-app: local dictation, a menu bar app; `uninstall` on the command line.
 
 // macOS first, Windows and Linux later (docs/plans/20261023-port.md).
 #[cfg(target_os = "macos")]
@@ -42,9 +42,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-  /// Quit Wavo, turn launch at login off, reset its permissions and defaults, delete its data and
-  /// caches
-  Reset {
+  /// Remove Wavo and all it left: its data, caches, defaults, permissions, the models it downloaded
+  /// and the app
+  Uninstall {
     /// Say what it would do, change nothing
     #[arg(long)]
     dry_run: bool,
@@ -65,7 +65,7 @@ fn main() -> Result<()> {
     None => app::run(),
     #[cfg(not(target_os = "macos"))]
     None => unreachable!("clap asks for a command"),
-    Some(Command::Reset { dry_run, yes }) => cli::reset(dry_run, yes),
+    Some(Command::Uninstall { dry_run, yes }) => cli::uninstall(dry_run, yes),
     Some(Command::Quit) => cli::quit(),
   }
 }

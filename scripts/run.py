@@ -23,7 +23,7 @@ from pathlib import Path
 
 ID = "me.vladkens.wavo"
 RUNNING = "Wavo.app/Contents/MacOS/wavo-app"
-# In the data home, which `wavo-app reset` deletes along with the permissions.
+# In the data home, which `wavo-app uninstall` deletes along with the permissions.
 GRANTED = Path.home() / "Library/Application Support" / ID / "permissions-requirement"
 
 
