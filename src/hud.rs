@@ -117,6 +117,9 @@ fn short(error: &str) -> String {
   let known = [
     (&["no speech model", "no model"][..], "download a model"),
     (&["microphone access", "not authorized", "permission"][..], "no microphone access"),
+    // audio.rs's: none plugged in, or the chosen one gone with no default to fall back to.
+    (&["no microphone found", "no default microphone"][..], "no microphone"),
+    (&["could not open the microphone"][..], "microphone failed"),
     (&["password", "secure"][..], "password field"),
     (&["focus moved"][..], "focus moved"),
     (&["crash", "died", "panicked"][..], "engine crashed"),
@@ -539,6 +542,22 @@ mod tests {
       Status { error: Some("could not start recording: no input".into()), ..done.clone() };
     assert_eq!(said(&failed, Some(&done), true).as_deref(), Some("could not start recording"));
     assert_eq!(said(&failed, Some(&failed), true), None);
+    let errors = [
+      ("could not start recording: no microphone found", "no microphone"),
+      (
+        "could not start recording: the microphone \"USB Mic\" is not connected, and there is no \
+         default microphone",
+        "no microphone",
+      ),
+      (
+        "could not start recording: could not open the microphone \"USB Mic\": busy",
+        "microphone failed",
+      ),
+    ];
+    for (error, expected) in errors {
+      let failed = Status { error: Some(error.into()), ..done.clone() };
+      assert_eq!(said(&failed, Some(&done), true).as_deref(), Some(expected), "{error}");
+    }
   }
 
   /// The HUD in the harness, transparent as an overlay is, and how often it asked to be hidden.
