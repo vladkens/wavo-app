@@ -749,9 +749,14 @@ impl window::Shell for MacShell {
 
     let (home, state) = (self.home.clone(), self.export.clone());
     spawn("export", move || {
+      user_initiated();
+      let started = Instant::now();
       let result = transfer::export(&home, &file, progress(&state));
       let end = match result {
-        Ok(done) => Transfer::Done((file, done.bytes)),
+        Ok(done) => {
+          info!("exported {}: {}", file.display(), rate(done.bytes, started));
+          Transfer::Done((file, done.bytes))
+        }
         Err(e) => {
           warn!("export to {}: {e:#}", file.display());
           Transfer::Failed(format!("{e:#}"))
@@ -775,9 +780,12 @@ impl window::Shell for MacShell {
 
     let (home, handle, state) = (self.home.clone(), self.handle.clone(), self.import.clone());
     spawn("import", move || {
+      user_initiated();
+      let started = Instant::now();
       let end = match transfer::import(&home, &file, progress(&state)) {
         Ok(done) => {
-          info!("imported {}: {done:?}", file.display());
+          let bytes = std::fs::metadata(&file).map_or(0, |m| m.len());
+          info!("imported {}: {done:?}, {}", file.display(), rate(bytes, started));
           Transfer::Done(done)
         }
         Err(e) => {
@@ -797,6 +805,20 @@ impl window::Shell for MacShell {
   fn import_state(&self) -> Option<Import> {
     self.import.lock().unwrap().clone()
   }
+}
+
+/// The calling thread runs as the person's own action, not as background work: macOS gives it
+/// the disk and the cores a background thread waits for.
+fn user_initiated() {
+  // SAFETY: it sets the calling thread's own class.
+  unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0) };
+}
+
+/// `16.0 GB in 52.3 s, 306 MB/s` since `started`.
+fn rate(bytes: u64, started: Instant) -> String {
+  let secs = started.elapsed().as_secs_f64();
+  let mbs = bytes as f64 / 1e6 / secs.max(0.001);
+  format!("{} in {secs:.1} s, {mbs:.0} MB/s", window::size_text(bytes))
 }
 
 /// Marks a transfer running, unless one is: one at a time.
