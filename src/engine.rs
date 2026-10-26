@@ -103,6 +103,9 @@ fn prepare(path: &Path, done: Box<dyn FnOnce() + Send>) {
   });
 }
 
+/// Parakeet's pieces on the GPU, short of the 60–70 s where it loses speech.
+const PARAKEET_WINDOW_MS: u32 = 25_000;
+
 impl SpeechModel for wavo::Model {
   fn device(&self) -> String {
     wavo::Model::device(self).to_string()
@@ -122,6 +125,13 @@ impl SpeechModel for wavo::Model {
       (_, Some(code)) if self.takes_language() => options.language = Some(code.clone()),
       (Some(code), _) => warn!("language {code} not sent: the model cannot be told it"),
       (None, _) => {}
+    }
+
+    // Parakeet on the GPU has no window of its own: wavo cuts it at 60 s, where it silently drops
+    // seconds of speech (https://github.com/handy-computer/transcribe.cpp/issues/71). On the
+    // Neural Engine its pieces stay within 15 s anyway.
+    if self.max_audio_ms().is_none() {
+      options.window_ms = Some(PARAKEET_WINDOW_MS);
     }
 
     let transcript = self.transcribe_long(pcm, &options, |p| on_piece(p.index, p.count))?;
