@@ -22,12 +22,14 @@ use crossbeam_channel::{
   Receiver, RecvTimeoutError, Sender, after, bounded, never, select, unbounded,
 };
 use tracing::{debug, info, warn};
+use wavo::Backend;
 
 // MARK: Models
 
 pub trait Loader: Send + Sync {
-  /// `ane`: on the Neural Engine when the file is prepared for it, else on the GPU.
-  fn load(&self, path: &Path, ane: bool) -> Result<Model>;
+  /// `backend`: [Backend::Auto] takes the Neural Engine when the file is prepared for it, else the
+  /// GPU; [Backend::NeuralEngine] fails without it.
+  fn load(&self, path: &Path, backend: Backend) -> Result<Model>;
 
   /// The file is prepared for the Neural Engine of this Mac: its load goes on a thread of its own.
   fn ane_ready(&self, _path: &Path) -> bool {
@@ -58,8 +60,7 @@ pub type Model = Box<dyn SpeechModel + Send>;
 pub struct Wavo;
 
 impl Loader for Wavo {
-  fn load(&self, path: &Path, ane: bool) -> Result<Model> {
-    let backend = if ane { wavo::Backend::Auto } else { wavo::Backend::Gpu };
+  fn load(&self, path: &Path, backend: Backend) -> Result<Model> {
     Ok(Box::new(wavo::Model::load_with(path, backend)?))
   }
 
@@ -428,7 +429,8 @@ impl Worker {
   fn load_here(&mut self, ane: bool, stand_in: bool) -> Result<(), String> {
     self.set(|s| s.phase = Phase::Loading);
     let started = Instant::now();
-    match guarded(|| self.loader.load(&self.path, ane)) {
+    let backend = if ane { Backend::Auto } else { Backend::Gpu };
+    match guarded(|| self.loader.load(&self.path, backend)) {
       Ok(model) => {
         self.install(model, started.elapsed(), stand_in);
         Ok(())
@@ -455,7 +457,8 @@ impl Worker {
     let (loader, path) = (self.loader.clone(), self.path.clone());
     let load = move || {
       let started = Instant::now();
-      let model = guarded(|| loader.load(&path, true));
+      // Strictly the Neural Engine: Auto would load a second GPU model when Core ML fails.
+      let model = guarded(|| loader.load(&path, Backend::NeuralEngine));
       // Unloaded meanwhile: the model goes with this thread.
       let _ = tx.send((model, started.elapsed()));
     };
@@ -481,7 +484,8 @@ impl Worker {
       }
       Err(e) => {
         warn!("engine could not load {} for the Neural Engine: {e}", self.path.display());
-        self.ane = false;
+        // The GPU's stand-in, if any, stays for good.
+        (self.ane, self.stand_in) = (false, false);
         if self.model.is_none() {
           self.set(|s| (s.phase, s.load_error) = (Phase::Stopped, Some(e)));
         }
@@ -799,6 +803,23 @@ mod tests {
     f.wait(Phase::Stopped);
     assert_eq!(f.run(2, SECOND).unwrap(), "text");
     assert_eq!((models.ane_loads(), models.jobs_on_ane()), (vec![true; 2], vec![true; 2]));
+  }
+
+  /// A Neural Engine load that fails (Core ML refuses the program) leaves the jobs to the GPU for
+  /// good: no second GPU model, no further Neural Engine load.
+  #[test]
+  fn a_failed_neural_engine_load_keeps_the_gpu() {
+    let models = FakeModels::new("text").on_ane(Duration::from_millis(500));
+    models.ane_load_fails();
+    let f = Fake::start_on("engine-ane-failed", &models, true, None);
+    f.engine.prewarm();
+    assert_eq!(f.run(1, SECOND).unwrap(), "text");
+    poll("the Neural Engine's load to fail", Duration::from_secs(10), || {
+      (models.ane_loads().len() == 2).then_some(())
+    });
+    assert_eq!(f.run(2, SECOND).unwrap(), "text");
+    assert_eq!((models.ane_loads(), models.jobs_on_ane()), (vec![true, false], vec![false; 2]));
+    assert_eq!((models.loads(), models.live()), (1, 1));
   }
 
   /// An unload while the Neural Engine's model loads drops the GPU's at once, and the Neural

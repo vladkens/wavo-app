@@ -13,6 +13,7 @@ use std::{env, fs, thread};
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use rusqlite::Connection;
+use wavo::Backend;
 
 use crate::audio::{Clip, SAMPLE_RATE, WavSink, read_wav};
 use crate::engine::{Loader, Model, SpeechModel};
@@ -162,7 +163,9 @@ pub struct FakeModels {
   panic_next: Arc<AtomicBool>,
   /// Runs of a model loaded for the Neural Engine fail, as Core ML may.
   ane_fails: Arc<AtomicBool>,
-  /// `ane` of each load, in order.
+  /// Loads for the Neural Engine fail, as when Core ML refuses the program.
+  ane_load_fails: Arc<AtomicBool>,
+  /// Whether each load (tried) was for the Neural Engine, in order.
   ane_loads: Arc<Mutex<Vec<bool>>>,
   /// Prepared for the Neural Engine ([Loader::ane_ready]), and how long its load takes.
   ane_ready: bool,
@@ -182,6 +185,7 @@ impl FakeModels {
       runs: Arc::default(),
       panic_next: Arc::default(),
       ane_fails: Arc::default(),
+      ane_load_fails: Arc::default(),
       ane_loads: Arc::default(),
       ane_ready: false,
       ane_load: Arc::default(),
@@ -226,6 +230,10 @@ impl FakeModels {
     self.ane_fails.store(true, Ordering::SeqCst);
   }
 
+  pub fn ane_load_fails(&self) {
+    self.ane_load_fails.store(true, Ordering::SeqCst);
+  }
+
   pub fn ane_loads(&self) -> Vec<bool> {
     self.ane_loads.lock().unwrap().clone()
   }
@@ -239,18 +247,24 @@ impl FakeModels {
 }
 
 impl Loader for FakeModels {
-  fn load(&self, path: &Path, ane: bool) -> anyhow::Result<Model> {
+  fn load(&self, path: &Path, backend: Backend) -> anyhow::Result<Model> {
     if fs::read(path)?.starts_with(b"BROKEN") {
       anyhow::bail!("not a speech model");
     }
 
+    // A load for the Neural Engine is noted as it starts; a prepared one takes its time.
+    let ane = backend != Backend::Gpu;
+    self.ane_loads.lock().unwrap().push(ane);
     if ane && self.ane_ready {
       thread::sleep(*self.ane_load.lock().unwrap());
     }
 
+    if backend == Backend::NeuralEngine && self.ane_load_fails.load(Ordering::SeqCst) {
+      anyhow::bail!("Core ML could not load the program");
+    }
+
     self.loads.fetch_add(1, Ordering::SeqCst);
     self.live.fetch_add(1, Ordering::SeqCst);
-    self.ane_loads.lock().unwrap().push(ane);
     Ok(Box::new(FakeModel(self.clone(), ane)))
   }
 
