@@ -1741,7 +1741,8 @@ impl Prefs {
       });
     });
 
-    let fs = &FormStyle { caption: fs.caption.ellipsis(), ..*fs };
+    // Denser than a setting's rows: six of them.
+    let fs = &FormStyle { caption: fs.caption.ellipsis(), pad_y: 5.0, ..*fs };
     // A row's controls go on its name's line: the ↗ is centred in the whole row instead, the
     // name, its line and nimbo's 2 points between them.
     let row_h = 2.0 * fs.pad_y + fs.label.line_h + 2.0 + fs.caption.line_h;
