@@ -113,12 +113,9 @@ pub fn after(
   })
 }
 
-/// `0.42 s`, `12.3 s`.
+/// `420 ms`: whole milliseconds.
 fn took_text(ms: u64) -> String {
-  match ms {
-    ..10_000 => format!("{:.2} s", ms as f64 / 1000.0),
-    _ => format!("{:.1} s", ms as f64 / 1000.0),
-  }
+  format!("{ms} ms")
 }
 
 /// The warning while recording when no model can transcribe: the recording is kept for later.
@@ -679,8 +676,10 @@ mod tests {
     };
     let shown = |s: &Status, took| after(s, None, true, took);
     assert!(matches!(shown(&done(Some(420), true), false), Some(Show::Collapse)));
-    assert!(matches!(shown(&done(Some(420), true), true), Some(Show::Done(t)) if t == "0.42 s"));
-    assert!(matches!(shown(&done(Some(12_340), true), true), Some(Show::Done(t)) if t == "12.3 s"));
+    assert!(matches!(shown(&done(Some(420), true), true), Some(Show::Done(t)) if t == "420 ms"));
+    assert!(
+      matches!(shown(&done(Some(12_340), true), true), Some(Show::Done(t)) if t == "12340 ms")
+    );
     let refused = Status {
       last: Some(Last {
         not_pasted: Some("focus moved".into()),
@@ -694,7 +693,7 @@ mod tests {
   #[test]
   fn the_time_holds_a_second_then_hides() {
     let (mut h, hidden) = hud();
-    h.app_mut().show(Show::Done("0.42 s".into()));
+    h.app_mut().show(Show::Done("420 ms".into()));
     h.wait(ms(300));
     assert_eq!(h.app().mode(), Mode::Done);
     let img = h.render();
