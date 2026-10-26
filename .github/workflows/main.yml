@@ -51,40 +51,55 @@ jobs:
       - run: cargo clippy --release --locked --all-targets -- -D warnings
       - run: cargo test --release --locked
 
-  # The release files (scripts/dist.py), one job per OS and arch, each its own artifact. Linux
-  # builds on the oldest LTS runner: the AppImage needs its glibc or newer.
+  # The release files (scripts/dist.py), one job per OS, each its own artifact: Windows and Linux
+  # build their aarch64 file on the x86_64 runner too, cross-compiled. Linux builds on the oldest
+  # LTS runner: the AppImage needs its glibc or newer.
   build:
+    name: build ${{ matrix.os }}
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, name: macos, dist: make dist }
-          - { os: windows-latest, name: windows-x64, dist: python scripts/dist.py }
-          - { os: windows-11-arm, name: windows-arm64, dist: python scripts/dist.py }
-          - { os: ubuntu-22.04, name: linux-x86_64, dist: make dist }
-          - { os: ubuntu-22.04-arm, name: linux-aarch64, dist: make dist }
-    runs-on: ${{ matrix.os }}
+          - os: macOS
+            runner: macos-latest
+            dist: make dist
+          - os: Windows
+            runner: windows-latest
+            dist: python scripts/dist.py x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+          - os: Linux
+            runner: ubuntu-22.04
+            dist: python3 scripts/dist.py x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    env:
+      # Linux's aarch64 file: the cross linker and C compiler, and arm64's pkg-config files.
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      PKG_CONFIG_ALLOW_CROSS: 1
+      PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
     steps:
       - uses: actions/checkout@v7
+      # arm64's ALSA beside the runner's own: Ubuntu's ports mirror has arm64, Azure's doesn't.
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
-      # Windows on Arm's image may have no Rust.
-      - if: runner.os == 'Windows'
-        shell: bash
         run: |
-          command -v cargo && exit 0
-          arch=$([ "$RUNNER_ARCH" = ARM64 ] && echo aarch64 || echo x86_64)
-          curl -sSfLo rustup-init.exe "https://static.rust-lang.org/rustup/dist/$arch-pc-windows-msvc/rustup-init.exe"
-          ./rustup-init.exe -y --profile minimal
-          echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+          sudo dpkg --add-architecture arm64
+          sudo rm -f /etc/apt/sources.list.d/*
+          sudo sed -i 's/^deb http/deb [arch=amd64] http/' /etc/apt/sources.list
+          for suite in jammy jammy-updates; do
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $suite main universe"
+          done | sudo tee -a /etc/apt/sources.list
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libasound2-dev:arm64 gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+      - if: runner.os == 'Windows'
+        run: rustup target add aarch64-pc-windows-msvc
       - uses: vladkens/actions/rust-build@v1
         with:
           name: Wavo
           dist: ${{ matrix.dist }}
           dev: true
           crates: false
-          artifact: release-${{ matrix.name }}
+          artifact: release-${{ matrix.os }}
 
   publish:
     if: github.ref == 'refs/heads/main'

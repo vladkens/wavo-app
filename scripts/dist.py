@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Builds this OS's release file into target/distrib, for CI (vladkens/actions/rust-build).
+"""Builds this OS's release files into target/distrib, for CI (vladkens/actions/rust-build).
 
-  scripts/dist.py
+  scripts/dist.py [target...]
 
-The binary comes from the `dist` profile. Named `Wavo-dev-<os>[-<arch>]`, which a release renames
-to `Wavo-vX.Y.Z-…` (vladkens/actions/rust-publish):
+A file for each Rust target given (rustup has to have them; a cross-compiled one, its C
+toolchain and libraries too), else for this machine. The binary comes from the `dist` profile.
+Named `Wavo-dev-<os>[-<arch>]`, which a release renames to `Wavo-vX.Y.Z-…`
+(vladkens/actions/rust-publish):
 
 - macOS: `Wavo-dev-macos.zip`, Wavo.app (scripts/bundle.py) zipped by ditto.
 - Windows: `Wavo-dev-windows-<x64|arm64>.zip`, Wavo.exe with the license.
@@ -59,18 +61,21 @@ def run(*args: str | Path, **kw) -> subprocess.CompletedProcess:
     return subprocess.run([str(a) for a in args], check=True, **kw)
 
 
-def build() -> Path:
-    run("cargo", "build", "--locked", "--profile", "dist", cwd=ROOT)
+def build(target: str | None) -> Path:
+    """The `dist` binary for `target`, or for this machine."""
+    to = ["--target", target] if target else []
+    run("cargo", "build", "--locked", "--profile", "dist", *to, cwd=ROOT)
     exe = ".exe" if sys.platform == "win32" else ""
-    return ROOT / "target" / "dist" / f"wavo-app{exe}"
+    return ROOT / "target" / (target or "") / "dist" / f"wavo-app{exe}"
 
 
-def arch() -> str:
-    machine = platform.machine().lower()
+def arch(target: str | None = None) -> str:
+    """`x86_64` or `aarch64`: the target's, else this machine's."""
+    machine = target.split("-")[0] if target else platform.machine().lower()
     return {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
 
 
-def macos(binary: Path) -> Path:
+def macos(binary: Path, _arch: str) -> Path:
     app = ROOT / "target" / "Wavo.app"
     run(sys.executable, ROOT / "scripts" / "bundle.py", binary, ICON, app)
     out = OUT / "Wavo-dev-macos.zip"
@@ -78,8 +83,8 @@ def macos(binary: Path) -> Path:
     return out
 
 
-def windows(binary: Path) -> Path:
-    name = {"x86_64": "x64", "aarch64": "arm64"}[arch()]
+def windows(binary: Path, a: str) -> Path:
+    name = {"x86_64": "x64", "aarch64": "arm64"}[a]
     out = OUT / f"Wavo-dev-windows-{name}.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(binary, "Wavo/Wavo.exe")
@@ -108,9 +113,10 @@ def fetch(url: str, name: str) -> Path:
     return path
 
 
-def linux(binary: Path) -> Path:
-    a = arch()
-    tool = fetch(APPIMAGETOOL.format(arch=a), f"appimagetool-{a}")
+def linux(binary: Path, a: str) -> Path:
+    # The tool runs here; the runtime is the AppImage's own, of its arch.
+    host = arch()
+    tool = fetch(APPIMAGETOOL.format(arch=host), f"appimagetool-{host}")
     runtime = fetch(RUNTIME.format(arch=a), f"runtime-{a}")
 
     appdir = ROOT / "target" / "Wavo.AppDir"
@@ -130,10 +136,11 @@ def linux(binary: Path) -> Path:
 
 
 def main() -> None:
-    binary = build()
     OUT.mkdir(parents=True, exist_ok=True)
     pack = {"darwin": macos, "win32": windows}.get(sys.platform, linux)
-    print(f"dist: {pack(binary).relative_to(ROOT)}")
+    for target in sys.argv[1:] or [None]:
+        out = pack(build(target), arch(target))
+        print(f"dist: {out.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
