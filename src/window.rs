@@ -1583,9 +1583,10 @@ impl Prefs {
   fn history_total(&self, ui: &mut Ui, fs: &FormStyle) {
     let Some((n, ms, Some(first))) = self.history.total.filter(|t| t.0 > 0) else { return };
     let what = if n == 1 { "dictation" } else { "dictations" };
-    let spoken = match ms / 60_000 {
-      m if m < 60 => format!("{m} min"),
-      m => format!("{} h", m / 60),
+    let spoken = match ms / 1000 {
+      s if s < 60 => format!("{s} s"),
+      s if s < 3600 => format!("{} min", s / 60),
+      s => format!("{} h", s / 3600),
     };
     let since = local_time(first).map(|t| format!("{} {}, {}", t.month_name(), t.day, t.year));
     let mut text = format!("{} {what} · {spoken}", thousands(n));
