@@ -1,9 +1,6 @@
 .PHONY: prepare check test build update clean
 
 CARGO_FLAGS := --release --locked
-# Linux does not build the macOS shell, the only user of parts of the session: dead code is
-# checked on macOS.
-LINTS := -D warnings $(if $(filter Linux,$(shell uname -s)),-A dead_code)
 
 prepare:
 	cargo +nightly fmt
@@ -11,7 +8,7 @@ prepare:
 
 check:
 	cargo +nightly fmt --check
-	cargo clippy $(CARGO_FLAGS) --all-targets -- $(LINTS)
+	cargo clippy $(CARGO_FLAGS) --all-targets -- -D warnings
 
 test:
 	cargo test $(CARGO_FLAGS)

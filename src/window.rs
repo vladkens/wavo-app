@@ -18,8 +18,8 @@ use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
 use nimbo::{
   Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
-  FormStyle, Hotkey, Icon, Id, Key, NamedKey, Select, Style, TextStyle, Tile, Ui, Weight, grow,
-  open, paths, px,
+  FormStyle, Hotkey, Icon, Id, Key, NamedKey, PopUp, Select, Style, TextStyle, Tile, Ui, Weight,
+  grow, open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -358,6 +358,9 @@ impl App for Prefs {
   }
 }
 
+// The microphone's pop-up at its widest, in points.
+const MIC_WIDTH: f32 = 320.0;
+
 /// A pop-up of `labels`, item `at` the current one: the item picked, when it is another.
 fn pick(ui: &mut Ui, id: &str, labels: &[String], at: usize, lines: &[usize]) -> Option<usize> {
   let items: Vec<(usize, &str)> = labels.iter().map(String::as_str).enumerate().collect();
@@ -373,6 +376,12 @@ const SECURE_INPUT_NOTE: &str = "Secure Input is on (a password field, or a term
   Keyboard Entry): the shortcut works through a backup path, and Esc may not cancel.";
 const ACTIVATION_HELP: &str = "How the hotkey records: while you hold it, from one press to the \
   next, or both (a short tap latches the recording on).";
+// Where the person turns launch at login back on, which the system turned off.
+const LOGIN_APPROVAL: &str = if cfg!(windows) {
+  "Turn Wavo on in Task Manager › Startup apps."
+} else {
+  "Allow Wavo in System Settings › General › Login Items."
+};
 const KEEP_HELP: &str = "Off: after the paste the clipboard gets back what it held. On: the \
   dictated text stays on it.";
 const CLIPBOARD_NOTE: &str = "Wavo can’t put the clipboard back after a paste: allow it in System \
@@ -397,10 +406,13 @@ impl Prefs {
     // By what matters most: the microphone, the model and its language, then the shortcut.
     ui.form_section(fs, "Dictation", |ui| {
       let (mics, at) = microphones(&self.devices, self.settings.microphone.as_ref());
-      let labels: Vec<String> = mics.iter().map(|m| m.0.clone()).collect();
+      let labels: Vec<&str> = mics.iter().map(|m| m.0.as_str()).collect();
       ui.form_row(fs, FormRow::new("Microphone"), |ui| {
-        if let Some(i) = pick(ui, "mic", &labels, at, &[0]) {
-          let choice = mics[i].1.clone();
+        // ALSA's names run past 60 characters: a longer one ends in "…" beside its label.
+        let mut cur = at;
+        let pop = PopUp::new(&mut cur, &labels).separators(&[0]).max_width(MIC_WIDTH);
+        if pop.show(ui.id("mic")).changed {
+          let choice = mics[cur].1.clone();
           self.edit(move |s| s.microphone = choice.clone());
         }
       });
@@ -580,10 +592,10 @@ const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle thi
 const ANE_HELP: &str = "Parakeet and GigaAM run on the Neural Engine: as fast as on the GPU at a \
   fraction of the energy. Each new version of Wavo prepares the model once, in the background \
   (10–30 s); meanwhile it runs on the GPU. Whisper always runs on the GPU.";
-const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another Mac: the dictations this \
+const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another computer: the dictations this \
   history does not have are added with their recordings; the settings stay as they are.";
 const EXPORT_HELP: &str = "The history, its recordings and the settings, into a .zip archive: \
-  Import brings it back, here or on another Mac.";
+  Import brings it back, here or on another computer.";
 
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
@@ -726,7 +738,7 @@ impl Prefs {
     let note = match (&login.error, &login.state) {
       (Some(e), _) => Some(e.clone()),
       (None, Ok(Autostart::RequiresApproval)) if login.busy.is_none() => {
-        Some("Allow Wavo in System Settings › General › Login Items.".to_owned())
+        Some(LOGIN_APPROVAL.to_owned())
       }
       (None, Err(why)) if !why.is_empty() => Some(why.clone()),
       _ => None,
@@ -1244,7 +1256,8 @@ fn export_name(ms: i64) -> String {
 
 /// Where the file panels start: Downloads, where archives usually are.
 fn downloads() -> Option<PathBuf> {
-  let dir = PathBuf::from(std::env::var_os("HOME")?).join("Downloads");
+  let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+  let dir = PathBuf::from(home).join("Downloads");
   dir.is_dir().then_some(dir)
 }
 

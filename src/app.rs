@@ -41,6 +41,10 @@ use crate::{INFO, audio, transfer};
 const ACCESS_POLL: Duration = Duration::from_secs(2);
 // How long the session waits for the main thread to paste or copy.
 const MAIN_WAIT: Duration = Duration::from_secs(3);
+// On Wayland the first paste starts the RemoteDesktop portal's session, whose dialog waits for the
+// person's answer (nimbo gives it 60 s): the paste waits with it, as the first recording waits for
+// the microphone's prompt on macOS.
+const PORTAL_WAIT: Duration = Duration::from_secs(65);
 
 thread_local! {
   static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -88,6 +92,9 @@ struct App {
   /// session's.
   history: Option<Rc<History>>,
   accessibility: bool,
+  // The hotkey listener may start: everywhere but where it asks the person ([portal_asks]) before
+  // they chose the menu's Allow the Hotkey… once.
+  may_listen: bool,
   microphone: Access,
   asked_microphone: bool,
   // The paste may read the clipboard to restore it.
@@ -146,12 +153,16 @@ fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> R
     Hotkeys::new(move |edge| handle.input(edge.into()))
   };
 
-  server.serve(|cmd| match cmd {
+  let toggle = handle.clone();
+  server.serve(move |cmd| match cmd {
     "open" => proxy().post(|main| open_window(main, None)),
     "quit" => proxy().post(|main| main.quit()),
+    "toggle" => toggle.input(session::Input::Toggle),
     _ => warn!("unknown command {cmd:?}"),
   })?;
 
+  // The session has not told its settings yet: they are read from the file.
+  let saved = Settings::load(&home.join(settings::FILE)).0;
   let tray = Tray::new(Icon::Idle.tray(), Icon::Idle.description());
   tray.on_open(|_, _| _ = with_app(App::menu_opening));
   tray.on_item(|main, _, id| chosen(main, id));
@@ -176,6 +187,7 @@ fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> R
     recent: Vec::new(),
     history,
     accessibility: false,
+    may_listen: !portal_asks() || saved.hotkey_portal,
     microphone: permissions::microphone(),
     asked_microphone: false,
     clipboard: SystemClipboard.readable(),
@@ -186,9 +198,7 @@ fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> R
   app.check_access();
   app.read_models();
 
-  // Nothing is asked at launch: General's buttons ask. Never at a launch at login. The session has
-  // not told its settings yet: a model chosen by its path is read from the file.
-  let saved = Settings::load(&app.home.join(settings::FILE)).0;
+  // Nothing is asked at launch: General's buttons ask. Never at a launch at login.
   let pick = Pick::new(&app.hub, saved.model.as_deref(), &app.found);
   let no_model = pick.active.is_none() && pick.other.as_ref().is_none_or(|(_, on)| !on);
   let missing = !app.accessibility || app.mic() != Access::Granted || no_model;
@@ -255,6 +265,7 @@ fn chosen(main: &mut Main, id: &str) {
       open_window(main, Some(Page::General))
     }
     "warn:clipboard" => allow(Pane::Pasteboard),
+    "warn:hotkey-portal" => _ = with_app(App::allow_portal),
     _ => {}
   }
 }
@@ -275,7 +286,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
   }
 
   let Some((shell, update, hub, home, history)) = with_app(|app| {
-    let shell = MacShell {
+    let shell = AppShell {
       home: app.home.clone(),
       handle: app.handle.clone(),
       hub: app.hub.clone(),
@@ -438,8 +449,14 @@ impl App {
     self.refresh();
   }
 
-  /// From hidden only a recording or an error shows, on the screen with the pointer.
+  /// From hidden only a recording or an error shows, on the screen with the pointer. Never where
+  /// the overlay would take the keyboard focus ([hud_takes_focus]): the person's window would lose
+  /// it, and the paste would go into the HUD. The menu bar icon tells the state there too.
   fn show(&mut self, main: &mut Main, shown: Mode, show: Show, position: HudPosition) {
+    if hud_takes_focus() {
+      return;
+    }
+
     let hidden = shown == Mode::Hidden;
     if hidden && !matches!(show, Show::Recording { .. } | Show::Error(_)) {
       return;
@@ -480,20 +497,31 @@ impl App {
   }
 
   /// Without Accessibility the event tap cannot start (chords still work through Carbon, pasting
-  /// does not): it is checked again until the tap runs. It never asks: the menu's warning does.
+  /// does not): on macOS it is checked again until the tap runs. It never asks: the menu's warning
+  /// does. Elsewhere the listener starts once: on Linux it may be the GlobalShortcuts portal, whose
+  /// dialog a retry would bring back after the person cancelled it.
   fn check_access(&mut self) {
     self.accessibility = permissions::accessibility(false);
     // The tap starts in the background: how it went shows at the next poll.
     if self.accessibility
+      && self.may_listen
       && self.hotkeys.status().listener != Listener::Active
       && let Err(e) = self.hotkeys.start()
     {
-      warn!("the event tap: {e}");
+      warn!("the hotkey listener: {e}");
     }
 
-    if !self.accessibility || self.hotkeys.status().listener != Listener::Active {
+    let waiting = !self.accessibility || self.hotkeys.status().listener != Listener::Active;
+    if cfg!(target_os = "macos") && waiting {
       proxy().after(ACCESS_POLL, |_| _ = with_app(App::poll_access));
     }
+  }
+
+  /// The menu's Allow the Hotkey…: the listener starts, and the desktop's portal asks the person.
+  fn allow_portal(&mut self) {
+    self.may_listen = true;
+    self.check_access();
+    self.refresh();
   }
 
   fn poll_access(&mut self) {
@@ -582,9 +610,15 @@ impl App {
 
   fn warnings(&self, update: &Update) -> Vec<Warning> {
     let hotkeys = self.hotkeys.status();
+    // A listener that failed with nothing else holding the hotkey leaves it dead (Windows' hook,
+    // X11's grab, the portal missing or refused): why shows, and with the portal Allow the
+    // Hotkey… again.
+    let listening = matches!(hotkeys.listener, Listener::Starting | Listener::Active);
+    let dead = hotkeys.listener == Listener::Failed && !hotkeys.fallback;
     let system = menu::System {
       accessibility: self.accessibility,
-      hotkey_error: hotkeys.error,
+      hotkey_error: hotkeys.error.or(hotkeys.listener_error.filter(|_| dead)),
+      hotkey_portal: portal_asks() && !listening,
       no_microphone: self.mic() != Access::Granted,
       clipboard_unread: update.settings.restores_clipboard() && !self.clipboard,
       secure_input: hotkeys.secure_input,
@@ -595,6 +629,14 @@ impl App {
   /// The icon and the menu.
   fn refresh(&mut self) {
     let Some(update) = &self.update else { return };
+    // The portal took the hotkey: later launches bind it without a click.
+    if portal_asks()
+      && !update.settings.hotkey_portal
+      && self.hotkeys.status().listener == Listener::Active
+    {
+      self.handle.edit_settings(|s| s.hotkey_portal = true);
+    }
+
     let warnings = self.warnings(update);
     let icon = menu::icon(&update.status, &warnings);
     if icon != self.icon {
@@ -626,7 +668,7 @@ impl App {
 /// The settings window's way to the app. What may wait (the system's login items, a deletion, an
 /// export) runs on a thread of its own: the window keeps drawing. A download's, the export's and
 /// the import's state are the app's: a window opened again shows them.
-struct MacShell {
+struct AppShell {
   home: PathBuf,
   handle: Handle,
   hub: Hub,
@@ -635,7 +677,7 @@ struct MacShell {
   import: Arc<Mutex<Option<Import>>>,
 }
 
-impl window::Shell for MacShell {
+impl window::Shell for AppShell {
   fn edit(&self, edit: Box<dyn FnOnce(&mut Settings) + Send>) {
     self.handle.edit_settings(edit);
   }
@@ -812,10 +854,14 @@ impl window::Shell for MacShell {
 
 /// The calling thread runs as the person's own action, not as background work: macOS gives it
 /// the disk and the cores a background thread waits for. The process's side, no App Nap while
-/// Wavo is out of view, is nimbo's activity the transfer holds.
+/// Wavo is out of view, is nimbo's activity the transfer holds. Other systems don't tell them
+/// apart.
 fn user_initiated() {
   // SAFETY: it sets the calling thread's own class.
-  unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0) };
+  #[cfg(target_os = "macos")]
+  unsafe {
+    libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0)
+  };
 }
 
 /// `16.0 GB in 52.3 s, 306 MB/s` since `started`.
@@ -850,12 +896,16 @@ fn progress<T>(state: &Mutex<Option<Transfer<T>>>) -> impl FnMut(u64, u64) {
 
 // MARK: Paste
 
-// The text goes on the clipboard as an offer that says when it is read, ⌘V goes to the app in
-// focus, and the clipboard the person had comes back RESTORE after the read (some apps read more
-// than once), or CAP after ⌘V when nothing reads it; only while the clipboard still holds the
-// text: what the person copied meanwhile stays.
+// The text goes on the clipboard as an offer that says when it is read, the paste shortcut (⌘V,
+// elsewhere Ctrl+V) goes to the app in focus, and the clipboard the person had comes back RESTORE
+// after the read (some apps read more than once), or CAP after the shortcut when nothing reads it;
+// only while the clipboard still holds the text: what the person copied meanwhile stays.
 const RESTORE: Duration = Duration::from_millis(500);
 const CAP: Duration = Duration::from_secs(8);
+const PASTE: Shortcut = Shortcut {
+  key: Key::Char('v'),
+  mods: if cfg!(target_os = "macos") { Modifiers::META } else { Modifiers::CONTROL },
+};
 
 struct Pending {
   id: u64,
@@ -877,22 +927,26 @@ impl TextOutput for GuiOutput {
   }
 
   fn paste(&mut self, text: &str, target: &Option<Focused>, keep: bool) -> Result<(), NotPasted> {
-    let Some(target) = target.clone() else {
+    if target.is_none() && !focus_hidden() {
       return Err(NotPasted::Failed("the app in focus at the start is unknown".into()));
-    };
-
-    if !permissions::accessibility(false) {
-      return Err(NotPasted::Failed("no Accessibility access: ⌘V cannot be sent".into()));
     }
 
-    // Given up after MAIN_WAIT: when the main thread gets to it, it is not pasted any more.
+    let target = target.clone();
+
+    if !permissions::accessibility(false) {
+      return Err(NotPasted::Failed("no Accessibility access: ⌘V can't be sent".into()));
+    }
+
+    // Given up after MAIN_WAIT (PORTAL_WAIT on Wayland): when the main thread gets to it, it is not
+    // pasted any more.
     let (text, late) = (text.to_owned(), Arc::new(AtomicBool::new(false)));
     let gave_up = late.clone();
     let paste = move |_: &mut Main| match gave_up.load(Ordering::Acquire) {
       true => Err(NotPasted::Failed("too late".into())),
       false => paste(&text, keep, &target),
     };
-    proxy().call(paste, MAIN_WAIT).unwrap_or_else(|| {
+    let wait = if wayland() { PORTAL_WAIT } else { MAIN_WAIT };
+    proxy().call(paste, wait).unwrap_or_else(|| {
       late.store(true, Ordering::Release);
       Err(NotPasted::Failed("the app was too busy to paste".into()))
     })
@@ -914,7 +968,7 @@ impl TextOutput for GuiOutput {
 }
 
 /// On the main thread.
-fn paste(text: &str, keep: bool, target: &Focused) -> Result<(), NotPasted> {
+fn paste(text: &str, keep: bool, target: &Option<Focused>) -> Result<(), NotPasted> {
   static NEXT: AtomicU64 = AtomicU64::new(1);
   let clipboard = SystemClipboard;
   let unreachable = || NotPasted::Failed("the clipboard can't be reached".into());
@@ -926,28 +980,8 @@ fn paste(text: &str, keep: bool, target: &Focused) -> Result<(), NotPasted> {
   let snapshot = snapshot.filter(|s| !s.unreadable());
 
   // Right before the paste: the snapshot may take a while.
-  let now = focus::current().ok_or_else(|| NotPasted::Failed("no app is in front".into()))?;
-  if target.moved(&now) {
-    info!("not pasted: the focus moved from {} to {}", target.name, now.name);
-    return Err(NotPasted::FocusChanged);
-  }
-
-  // The app told its window at the start: it must tell it now too.
-  let known = target.window.is_ok();
-  if known && let Err(e) = &now.window {
-    return Err(NotPasted::Failed(format!("{} did not tell its focused window ({e})", now.name)));
-  }
-
-  match &now.secure {
-    Ok(true) => return Err(NotPasted::SecureField),
-    Ok(false) => {}
-    // An app that answers at all must answer this too; one that never did can't be checked, unless
-    // Secure Input is on: then it may well be a password field.
-    Err(e) if known || permissions::secure_input() => {
-      let why = format!("{} did not tell its focused element ({e})", now.name);
-      return Err(NotPasted::Failed(why));
-    }
-    Err(_) => {}
+  if let Some(target) = target {
+    check_focus(target)?;
   }
 
   let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -963,13 +997,62 @@ fn paste(text: &str, keep: bool, target: &Focused) -> Result<(), NotPasted> {
     None => _ = clipboard.offer(text, None).ok_or_else(unreachable)?,
   }
 
-  if let Err(e) = nimbo::keys::post(Shortcut { key: Key::Char('v'), mods: Modifiers::META }) {
+  if let Err(e) = nimbo::keys::post(PASTE) {
     settle(id);
-    return Err(NotPasted::Failed(format!("⌘V was not sent: {e}")));
+    return Err(NotPasted::Failed(format!("{} was not sent: {e}", PASTE.label())));
   }
 
-  info!("paste: ⌘V, {} chars", text.chars().count());
+  info!("paste: {}, {} chars", PASTE.label(), text.chars().count());
   Ok(())
+}
+
+/// Whether the paste may go where `target` was: the focus is still there and not in a password
+/// field.
+fn check_focus(target: &Focused) -> Result<(), NotPasted> {
+  let now = focus::current().ok_or_else(|| NotPasted::Failed("no app is in front".into()))?;
+  if target.moved(&now) {
+    info!("not pasted: the focus moved from {} to {}", target.name, now.name);
+    return Err(NotPasted::FocusChanged);
+  }
+
+  // The app told its window at the start: it must tell it now too.
+  let known = target.window.is_ok();
+  if known && let Err(e) = &now.window {
+    return Err(NotPasted::Failed(format!("{} did not tell its focused window ({e})", now.name)));
+  }
+
+  match &now.secure {
+    Ok(true) => Err(NotPasted::SecureField),
+    Ok(false) => Ok(()),
+    // An app that answers at all must answer this too; one that never did can't be checked, unless
+    // Secure Input is on: then it may well be a password field.
+    Err(e) if known || permissions::secure_input() => {
+      Err(NotPasted::Failed(format!("{} did not tell its focused element ({e})", now.name)))
+    }
+    Err(_) => Ok(()),
+  }
+}
+
+/// Wayland shows no app where another types (nimbo's focus is none there): the paste goes to
+/// whatever has the focus, unchecked.
+fn focus_hidden() -> bool {
+  wayland()
+}
+
+/// The hotkey listener asks the person when it starts: Wayland's GlobalShortcuts portal shows its
+/// dialog. So it starts only from the menu, or at a launch after the portal took the hotkey once.
+fn portal_asks() -> bool {
+  wayland()
+}
+
+/// GNOME on Wayland has no layer shell: nimbo's overlay is a window there, which mutter gives the
+/// keyboard focus when it shows.
+fn hud_takes_focus() -> bool {
+  wayland() && std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("GNOME"))
+}
+
+fn wayland() -> bool {
+  cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 fn settle(id: u64) {

@@ -16,6 +16,10 @@ use crate::audio::Choice;
 use crate::history::Retention;
 
 pub const FILE: &str = "settings.json";
+// Option-Space on macOS, as dictation apps there have it; Ctrl+Alt+Space elsewhere, where Alt+Space
+// opens a window's menu.
+const DEFAULT_HOTKEY: &str =
+  if cfg!(target_os = "macos") { "option+space" } else { "ctrl+alt+space" };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -41,6 +45,9 @@ pub struct Settings {
   /// Launch at login.
   pub autostart: bool,
   pub hud_position: HudPosition,
+  /// Wayland's GlobalShortcuts portal took the hotkey once: later launches bind it without a click
+  /// (the desktop remembers the person's answer).
+  pub hotkey_portal: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -65,7 +72,7 @@ impl Default for Settings {
   fn default() -> Self {
     Self {
       schema_version: 1,
-      hotkey: "option+space".into(),
+      hotkey: DEFAULT_HOTKEY.into(),
       activation: Activation::HoldOrToggle,
       microphone: None,
       language: "auto".into(),
@@ -77,6 +84,7 @@ impl Default for Settings {
       history_retention: Retention::Unlimited,
       autostart: false,
       hud_position: HudPosition::Bottom,
+      hotkey_portal: false,
     }
   }
 }

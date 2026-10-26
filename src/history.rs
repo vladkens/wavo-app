@@ -82,7 +82,14 @@ pub fn local_time(ms: i64) -> Option<Local> {
   let time = ms.div_euclid(1000) as libc::time_t;
   // SAFETY: `tm` is plain data, and `localtime_r` writes only to it.
   let mut tm: libc::tm = unsafe { mem::zeroed() };
+  #[cfg(unix)]
   if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
+    return None;
+  }
+
+  // SAFETY: as above, Windows' C runtime's own.
+  #[cfg(windows)]
+  if unsafe { libc::localtime_s(&mut tm, &time) } != 0 {
     return None;
   }
 

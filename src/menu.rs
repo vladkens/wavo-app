@@ -68,6 +68,8 @@ pub struct System {
   pub accessibility: bool,
   /// The hotkey does not parse, or the OS refused it.
   pub hotkey_error: Option<String>,
+  /// The hotkey waits for the person to let the desktop's portal ask them (Wayland).
+  pub hotkey_portal: bool,
   pub no_microphone: bool,
   /// The paste restores the clipboard, which the app may not read (Paste from Other Apps).
   pub clipboard_unread: bool,
@@ -91,6 +93,10 @@ pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> 
 
   if let Some(e) = &system.hotkey_error {
     add("warn:hotkey", format!("The hotkey “{hotkey}” does not work: {e}"), false);
+  }
+
+  if system.hotkey_portal {
+    add("warn:hotkey-portal", "Allow the Hotkey…".into(), true);
   }
 
   if system.no_microphone {
@@ -190,8 +196,8 @@ pub fn menu(
 /// The longest microphone or model in the menu.
 const NAME: usize = 32;
 
-/// A microphone or a model as the menu and its submenus name it: as Settings does, a longer one
-/// shortened at a word, inside its brackets when it has some: `System Default (MacBook Pro…)`.
+/// A microphone or a model as the menu and its submenus name it: a longer one shortened at a word,
+/// inside its brackets when it has some: `System Default (MacBook Pro…)`.
 fn short(name: &str) -> String {
   if name.chars().count() <= NAME {
     return name.to_owned();
@@ -283,6 +289,7 @@ mod tests {
 
     let system = System {
       hotkey_error: Some("taken".into()),
+      hotkey_portal: true,
       no_microphone: true,
       clipboard_unread: true,
       secure_input: true,
@@ -295,6 +302,7 @@ mod tests {
     let expected = [
       ("warn:accessibility", true),
       ("warn:hotkey", false),
+      ("warn:hotkey-portal", true),
       ("warn:microphone", true),
       ("warn:clipboard", true),
       ("warn:secure-input", true),
@@ -302,7 +310,7 @@ mod tests {
       ("warn:status", false),
     ];
     assert_eq!(ids, expected);
-    assert_eq!(list[6].text, "No sound from USB Mic");
+    assert_eq!(list[7].text, "No sound from USB Mic");
     assert_eq!(icon(&s, &list), Icon::Warning);
     s.state = Phase::Recording;
     assert_eq!(icon(&s, &list), Icon::Recording, "the phase first");
@@ -315,7 +323,7 @@ mod tests {
     let items = menu(Some("⌥Space"), &s, &list, &[], mics, &[], &Pick::default()).items;
     assert!(items[0].label.ends_with("⌥Space · Recording…"), "{}", items[0].label);
     assert_eq!(
-      (items[1].label.as_str(), items[6].label.as_str()),
+      (items[1].label.as_str(), items[7].label.as_str()),
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")
     );
     assert!(items[1].enabled && !items[2].enabled);
