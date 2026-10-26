@@ -787,9 +787,14 @@ impl Prefs {
 /// A downloaded model: wavo's, and its file.
 pub type Found = (&'static ModelInfo, PathBuf);
 
+/// `740 MB`, `16.0 GB`; `48 KB` under a megabyte (an empty history's archive).
 pub fn size_text(bytes: u64) -> String {
   let mb = bytes as f64 / 1e6;
-  if mb >= 1000.0 { format!("{:.1} GB", mb / 1000.0) } else { format!("{mb:.0} MB") }
+  match mb {
+    _ if mb >= 1000.0 => format!("{:.1} GB", mb / 1000.0),
+    _ if mb >= 1.0 => format!("{mb:.0} MB"),
+    _ => format!("{} KB", bytes.div_ceil(1000)),
+  }
 }
 
 /// The share done and `42% · 114 of 272 MB`.
