@@ -330,8 +330,9 @@ impl Drop for Scratch {
 mod tests {
   use std::io::Write;
 
+  use nimbo::instance::{Claim, claim_in};
+
   use super::*;
-  use crate::ctl::{self, Claim};
   use crate::testing::{TempDir, entry_ids, tone, wav_count, write_wav};
 
   /// 2026-10-09 00:00 UTC.
@@ -367,7 +368,7 @@ mod tests {
 
     // Beside the app, which holds the lock.
     add(&History::open(to.path()).unwrap(), NOW - 1, "theirs", Some(0.1));
-    let Claim::Server(_app) = ctl::claim(to.path()).unwrap() else { panic!("taken") };
+    let Claim::Primary(_app) = claim_in(to.path()).unwrap() else { panic!("taken") };
     let mut last = (0, 0);
     let done = import(to.path(), &file, |done, total| last = (done, total)).unwrap();
     assert_eq!(done, Imported { entries: 3, added: 3, copied: 2, failed: 0 });

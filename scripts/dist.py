@@ -50,6 +50,7 @@ Comment=Local dictation: hold a hotkey, speak, and the text lands where you were
 Exec=wavo-app
 Icon={ID}
 StartupWMClass={ID}
+StartupNotify=true
 Categories=Utility;Accessibility;
 Terminal=false
 """
