@@ -29,8 +29,14 @@ use crate::engine::{self, Engine, EngineError, Loader, Wavo};
 use crate::history::{Entry, History, now_ms};
 use crate::settings::{self, Activation, Settings, language_name};
 
-/// The microphone stays open this long after the stop, for the end of a word the key-up cut.
+/// The microphone stays open at least this long after the stop, for the end of a word the key-up
+/// cut.
 const POST_ROLL: Duration = Duration::from_millis(200);
+/// While the voice goes on after the stop, the microphone stays open until it pauses this long
+/// ([tail_end]).
+const TAIL_PAUSE: Duration = Duration::from_millis(300);
+/// The microphone closes this long after the stop at the latest.
+const TAIL_MAX: Duration = Duration::from_millis(1500);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 // MARK: Machine
@@ -530,6 +536,14 @@ struct Retranscription {
   auto: bool,
 }
 
+/// When a recording stopped at `stopped` closes, its voice pausing for `pause` at `now`: once the
+/// pause reaches [TAIL_PAUSE], but not before [POST_ROLL] nor after [TAIL_MAX] from the stop. A
+/// word the person finishes after the release is kept; silence costs only the post-roll.
+fn tail_end(stopped: Instant, now: Instant, pause: Duration) -> Instant {
+  let quiet = now + TAIL_PAUSE.saturating_sub(pause);
+  quiet.clamp(stopped + POST_ROLL, stopped + TAIL_MAX)
+}
+
 struct Dictation<T> {
   /// How it ends, as it goes.
   last: Last,
@@ -538,7 +552,7 @@ struct Dictation<T> {
   created_at: i64,
   audio: String,
   started: Instant,
-  /// The post-roll runs from then until the recorder closes.
+  /// The tail ([tail_end]) runs from then until the recorder closes.
   stopped: Option<Instant>,
   recorder: Option<Recorder>,
   /// The engine loads the model for it.
@@ -595,8 +609,8 @@ impl<O: TextOutput> Controller<O> {
     loop {
       let recorder = self.dictation.as_ref().and_then(|d| Some((d.recorder.as_ref()?, d.stopped)));
       let failures = recorder.map_or_else(never, |(r, _)| r.failures().clone());
-      let post_roll = match recorder {
-        Some((_, Some(stopped))) => at(stopped + POST_ROLL),
+      let tail = match recorder {
+        Some((r, Some(stopped))) => at(tail_end(stopped, Instant::now(), r.meter().pause())),
         _ => never(),
       };
 
@@ -606,7 +620,7 @@ impl<O: TextOutput> Controller<O> {
           Ok(msg) => self.on_msg(msg),
         },
         recv(failures) -> failure => self.on_mic_failure(failure.unwrap_or_default()),
-        recv(post_roll) -> _ => self.transcribe(),
+        recv(tail) -> _ => self.on_tail(),
         recv(events) -> event => self.on_engine(event.unwrap()),
       }
 
@@ -929,6 +943,16 @@ impl<O: TextOutput> Controller<O> {
     let d = self.dictation.as_mut().unwrap();
     d.stopped = Some(Instant::now());
     if d.recorder.as_ref().is_some_and(Recorder::failed) {
+      self.transcribe();
+    }
+  }
+
+  /// The tail's timer: the recording ends once [tail_end] is due, else the timer is set again.
+  fn on_tail(&mut self) {
+    let d = self.dictation.as_ref().unwrap();
+    let (Some(recorder), Some(stopped)) = (&d.recorder, d.stopped) else { return };
+    let now = Instant::now();
+    if tail_end(stopped, now, recorder.meter().pause()) <= now {
       self.transcribe();
     }
   }
@@ -1725,6 +1749,68 @@ mod tests {
     drop(gate);
     assert_eq!(s.dictate(3).text, "hello there");
     assert_eq!((s.recordings(), s.models.loads(), s.output.log().pasted.len()), (1, 1, 1));
+  }
+
+  #[test]
+  fn the_tail_waits_for_a_pause() {
+    let (stop, ms) = (Instant::now(), Duration::from_millis);
+    assert_eq!(tail_end(stop, stop, ms(500)), stop + POST_ROLL, "silent at the stop");
+    assert_eq!(tail_end(stop, stop + ms(400), ms(0)), stop + ms(700), "speaking: a pause on");
+    assert_eq!(tail_end(stop, stop + ms(600), ms(100)), stop + ms(800));
+    assert_eq!(tail_end(stop, stop + ms(1400), ms(0)), stop + TAIL_MAX, "at most");
+  }
+
+  /// A dictation of `voice` seconds of speech and then silence, stopped `stop` seconds after it
+  /// started: how long its recording is.
+  fn recorded(name: &str, voice: f64, stop: f64) -> Duration {
+    let mut pcm = loud(voice);
+    pcm.extend(tone(5.0, 0.0));
+    let s = InProcess::start(name, &Settings::default(), Some(&pcm), "hi", &["parakeet-v3"]);
+    s.press();
+    let started = Instant::now();
+    s.update_where("recording", |u| u.status.state == Phase::Recording);
+    thread::sleep(Duration::from_secs_f64(stop).saturating_sub(started.elapsed()));
+    s.press();
+    let last = s.finished(1).last.unwrap();
+    Duration::from_millis(s.kept(&last).duration_ms as u64)
+  }
+
+  /// `got` within `-early..late` of `want`: the fake microphone starts a little after the press,
+  /// and the VAD scores a little behind the audio.
+  fn about(got: Duration, want: Duration, what: &str) {
+    let (early, late) = (Duration::from_millis(150), Duration::from_millis(350));
+    assert!(got + early >= want && got <= want + late, "{what}: {got:?}, not about {want:?}");
+  }
+
+  /// A word finished after the stop is kept: the recording goes on until the voice pauses.
+  #[test]
+  fn the_recording_goes_on_while_the_voice_does() {
+    let got = recorded("session-tail-voice", 1.6, 1.0);
+    about(got, Duration::from_secs_f64(1.6) + TAIL_PAUSE, "speech 600 ms past the stop");
+  }
+
+  #[test]
+  fn a_silent_stop_ends_after_the_post_roll() {
+    let got = recorded("session-tail-silent", 0.5, 1.0);
+    about(got, Duration::from_secs(1) + POST_ROLL, "silent at the stop");
+  }
+
+  #[test]
+  fn the_tail_ends_at_its_cap() {
+    let got = recorded("session-tail-cap", 5.0, 1.0);
+    about(got, Duration::from_secs(1) + TAIL_MAX, "speech past the cap");
+  }
+
+  /// Escape gets no tail.
+  #[test]
+  fn escape_ends_at_once() {
+    let pcm = loud(10.0);
+    let s = InProcess::start("session-tail-esc", &Settings::default(), Some(&pcm), "", &[]);
+    s.record(0.3);
+    let pressed = Instant::now();
+    s.handle.input(Input::Escape);
+    assert_eq!(s.finished(1).last.unwrap().outcome, Outcome::Cancelled);
+    assert!(pressed.elapsed() < POST_ROLL, "{:?}", pressed.elapsed());
   }
 
   /// No model: said from the start; the recording is kept without text and transcribed by itself
