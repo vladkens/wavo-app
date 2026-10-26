@@ -58,6 +58,7 @@ enum Command {
 fn main() -> Result<()> {
   #[cfg(windows)]
   attach_console();
+
   let cli = Cli::parse();
   init_tracing();
   match cli.command {
