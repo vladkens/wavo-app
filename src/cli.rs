@@ -14,8 +14,9 @@ use wavo::hub::Hub;
 use crate::INFO;
 use crate::ctl::{self, Claim};
 
-pub fn quit() -> Result<()> {
-  if ctl::send(&crate::home(), "quit").is_err() {
+/// `cmd` to the running app.
+pub fn send(cmd: &str) -> Result<()> {
+  if ctl::send(&crate::home(), cmd).is_err() {
     bail!("Wavo is not running");
   }
 

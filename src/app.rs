@@ -149,9 +149,11 @@ fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> R
     Hotkeys::new(move |edge| handle.input(edge.into()))
   };
 
-  server.serve(|cmd| match cmd {
+  let toggle = handle.clone();
+  server.serve(move |cmd| match cmd {
     "open" => proxy().post(|main| open_window(main, None)),
     "quit" => proxy().post(|main| main.quit()),
+    "toggle" => toggle.input(session::Input::Toggle),
     _ => warn!("unknown command {cmd:?}"),
   })?;
 
@@ -443,8 +445,14 @@ impl App {
     self.refresh();
   }
 
-  /// From hidden only a recording or an error shows, on the screen with the pointer.
+  /// From hidden only a recording or an error shows, on the screen with the pointer. Never where
+  /// the overlay would take the keyboard focus ([hud_takes_focus]): the person's window would lose
+  /// it, and the paste would go into the HUD. The menu bar icon tells the state there too.
   fn show(&mut self, main: &mut Main, shown: Mode, show: Show, position: HudPosition) {
+    if hud_takes_focus() {
+      return;
+    }
+
     let hidden = shown == Mode::Hidden;
     if hidden && !matches!(show, Show::Recording { .. } | Show::Error(_)) {
       return;
@@ -1029,6 +1037,12 @@ fn focus_hidden() -> bool {
 /// dialog. So it starts only from the menu, or at a launch after the portal took the hotkey once.
 fn portal_asks() -> bool {
   wayland()
+}
+
+/// GNOME on Wayland has no layer shell: nimbo's overlay is a window there, which mutter gives the
+/// keyboard focus when it shows.
+fn hud_takes_focus() -> bool {
+  wayland() && std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("GNOME"))
 }
 
 fn wayland() -> bool {

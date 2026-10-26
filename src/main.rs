@@ -50,6 +50,9 @@ enum Command {
     #[arg(short, long)]
     yes: bool,
   },
+  /// Start or stop a dictation in the running app: for a shortcut in the desktop's own settings
+  /// where Wavo's hotkey can't be (GNOME before 48 on Wayland)
+  Toggle,
   /// Quit the running app
   #[command(hide = true)]
   Quit,
@@ -64,7 +67,8 @@ fn main() -> Result<()> {
   match cli.command {
     None => app::run(),
     Some(Command::Uninstall { dry_run, yes }) => cli::uninstall(dry_run, yes),
-    Some(Command::Quit) => cli::quit(),
+    Some(Command::Toggle) => cli::send("toggle"),
+    Some(Command::Quit) => cli::send("quit"),
   }
 }
 

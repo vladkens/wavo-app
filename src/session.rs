@@ -75,6 +75,9 @@ pub enum Input {
   KeyAborted,
   /// Cancels a recording or its transcription.
   Escape,
+  /// Starts a recording that runs until the next one, or stops it: `wavo-app toggle`, for a
+  /// desktop's own shortcut where Wavo's hotkey can't be (GNOME before 48 on Wayland).
+  Toggle,
   /// The microphone did not open.
   RecordingFailed {
     take: Take,
@@ -155,6 +158,14 @@ impl Machine {
         self.stop(take)
       }
       (_, Input::KeyDown { .. } | Input::KeyUp { .. }) => None,
+
+      (Idle, Input::Toggle) => {
+        self.last_take += 1;
+        self.state = Recording { take: self.last_take, hold: Hold::Latched };
+        Some(Effect::StartRecording(self.last_take))
+      }
+      (Recording { take, .. }, Input::Toggle) => self.stop(take),
+      (Transcribing { .. }, Input::Toggle) => None,
 
       (Recording { take, .. }, Input::KeyAborted) if self.pressed == Some(take) => {
         (self.state, self.pressed) = (Idle, None);
@@ -1382,6 +1393,22 @@ mod tests {
     assert_eq!(d.up(2_000), None, "a long hold changes nothing");
     assert_eq!(d.down(5_000), Some(StopRecording(1)));
     assert_eq!(d.down(5_100), None, "transcribing ignores the hotkey");
+  }
+
+  /// Whatever the activation, a toggle starts and the next one stops; the hotkey stops it too.
+  #[test]
+  fn a_toggle_latches_in_every_activation() {
+    for activation in [Activation::HoldOrToggle, Activation::PushToTalk, Activation::Toggle] {
+      let mut d = Drive::new(activation);
+      assert_eq!(d.m.handle(Input::Toggle), Some(StartRecording(1)), "{activation:?}");
+      assert!(d.latched());
+      assert_eq!(d.m.handle(Input::Toggle), Some(StopRecording(1)));
+      assert_eq!(d.m.handle(Input::Toggle), None, "transcribing ignores it");
+    }
+
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    d.m.handle(Input::Toggle);
+    assert_eq!(d.down(1_000), Some(StopRecording(1)));
   }
 
   #[test]
