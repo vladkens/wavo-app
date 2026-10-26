@@ -75,8 +75,7 @@ enum Command {
     /// Say what it would do, change nothing
     #[arg(long)]
     dry_run: bool,
-    /// Do not ask first
-    #[arg(short, long)]
+    #[arg(short, long, help = cli::YES)]
     yes: bool,
   },
   /// Start or stop a dictation in the running app: for a shortcut in the desktop's own settings

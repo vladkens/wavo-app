@@ -41,6 +41,13 @@ pub const UNINSTALL: &str = match () {
   }
 };
 
+/// `uninstall --yes`'s help. Windows: cmd and PowerShell do not wait for a GUI program such as this
+/// one, so a question would come while the shell reads the next command; it is not asked there.
+pub const YES: &str = match cfg!(windows) {
+  true => "Do it; without, only say what it would do",
+  false => "Do not ask first",
+};
+
 /// What `uninstall` does on this OS besides removing files.
 const STEPS: &str = match () {
   _ if cfg!(target_os = "macos") => {
@@ -75,10 +82,15 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
     paths.iter().for_each(|p| println!("{}", p.display()));
     models.iter().for_each(|(m, _)| println!("the model {} in {hub}", m.name));
   };
-  if dry_run {
+  // Windows: never asked ([YES]).
+  if dry_run || (cfg!(windows) && !yes) {
     println!("would {STEPS}, and remove:");
     list();
     left.iter().for_each(|l| println!("{l}"));
+    if !dry_run {
+      println!("nothing changed: again with --yes to uninstall");
+    }
+
     return Ok(());
   }
 
