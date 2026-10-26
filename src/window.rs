@@ -63,9 +63,10 @@ impl Page {
   }
 }
 
+/// A macOS preferences window: the title over the tabs, under one background.
 pub fn config(page: Page) -> Config {
   let h = if page.scrolls() { SCROLLING } else { 500.0 };
-  Config::new("Wavo", WIDTH, h).fixed()
+  Config::new("Wavo", WIDTH, h).fixed().unified()
 }
 
 /// What the system allows the app.
@@ -280,8 +281,10 @@ impl App for Prefs {
     }
 
     self.focused = focused;
+    // The title bar is part of the window's content.
+    let bar = ui.titlebar().map_or(0.0, |(h, _)| h);
     match self.page.scrolls() {
-      true => ui.set_window_size(WIDTH, SCROLLING),
+      true => ui.set_window_size(WIDTH, SCROLLING + bar),
       false => ui.fit_window_height(WIDTH, 200.0, 800.0),
     }
 
@@ -1892,7 +1895,10 @@ mod tests {
       fake.log().settings = settings.clone();
       let shell = Box::new(fake.clone());
       let prefs = Prefs::new(shell, settings, self.hub.clone(), self.dir.path());
-      let mut h = Harness::new(prefs, config(Page::General).size, 2.0);
+      let cfg = config(Page::General);
+      let mut h = Harness::new(prefs, cfg.size, 2.0);
+      // As high as macOS 26's, as nimbo's own shots draw it.
+      h.rt.set_titlebar(Some((32.0, cfg.title)));
       h.event(Event::Appearance(Appearance::LIGHT));
       h.frame();
       h.frame();
@@ -2000,7 +2006,7 @@ mod tests {
         let size = h.rt.size;
         let sc = h.rt.ui.scroll(Id::of(("page", page as u8))).expect("the page's scroll area");
         match page.scrolls() {
-          true => assert_eq!(size, Size::new(WIDTH, SCROLLING), "{name}"),
+          true => assert_eq!(size, Size::new(WIDTH, SCROLLING + 32.0), "{name}: and the title bar"),
           false => {
             let blank = sc.viewport.h - sc.content.h;
             assert!((-0.5..=1.0).contains(&blank) && size.w == WIDTH, "{name} fits: {sc:?}");
