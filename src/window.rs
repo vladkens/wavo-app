@@ -1334,6 +1334,8 @@ fn imported_text(r: &Imported) -> String {
 /// How long a search stays the same before the history is read for it: a whole read takes 0.1 s,
 /// too long for each key typed.
 const SEARCH_WAIT: Duration = Duration::from_millis(150);
+/// How long a note stands in the line under the panel, in place of the totals.
+const NOTE_TIME: Duration = Duration::from_secs(4);
 
 /// A calendar day: year, month, day.
 type Day = (i32, u32, u32);
@@ -1357,8 +1359,9 @@ struct HistoryPage {
   playing: Option<(i64, Playback)>,
   /// The entry the panel under the list shows.
   selected: Option<i64>,
-  /// What the search row says: an error, "Copied".
-  note: Option<String>,
+  /// What the line under the panel says for [NOTE_TIME], and since when ([Ui::now]): an error,
+  /// "Copied".
+  note: Option<(String, Duration)>,
 }
 
 impl HistoryPage {
@@ -1385,7 +1388,7 @@ impl HistoryPage {
     let moved = self.loaded.as_ref().is_some_and(|k| k.1 != key.1);
     self.loaded = Some(key.clone());
     let Some(history) = &self.db else {
-      self.note = Some("Could not open the history: see the log".into());
+      self.note = Some(("Could not open the history: see the log".into(), now));
       return None;
     };
 
@@ -1397,7 +1400,7 @@ impl HistoryPage {
     // All of them: 86k entries read in about 0.1 s.
     match db.get_page(&key.0, i64::MAX as usize) {
       Ok(entries) => (self.days, self.entries) = (days(&entries), entries),
-      Err(e) => self.note = Some(format!("Could not read the history: {e:#}")),
+      Err(e) => self.note = Some((format!("Could not read the history: {e:#}"), now)),
     }
 
     None
@@ -1508,15 +1511,8 @@ const TOTAL_H: f32 = 30.0;
 
 impl Prefs {
   fn history_head(&mut self, ui: &mut Ui, s: Style) {
-    let t = ui.theme();
-    let h = &mut self.history;
-    ui.row(s, |ui| {
-      ui.id("history-search").search(&mut h.search, "Search dictations");
-
-      if let Some(note) = &h.note {
-        ui.text(note, TextStyle::new(t.small, t.muted).nowrap());
-      }
-    });
+    let search = &mut self.history.search;
+    ui.row(s, |ui| _ = ui.id("history-search").search(search, "Search dictations"));
   }
 
   /// The dictations, newest first, in a plate a day, a page at a time.
@@ -1525,7 +1521,7 @@ impl Prefs {
     if let Some((_, p)) = h.playing.take_if(|(_, p)| !p.playing())
       && let Some(e) = p.error()
     {
-      h.note = Some(format!("Could not play the recording: {e}"));
+      h.note = Some((format!("Could not play the recording: {e}"), ui.now()));
     }
 
     if let Some(wait) = h.load(ui.now()) {
@@ -1618,9 +1614,30 @@ impl Prefs {
     self.history_act(ui, act);
   }
 
-  /// Under the panel, the whole history: `86,286 dictations · 312 h · since March 14, 2026`.
+  /// Under the panel, the whole history: `86,286 dictations · 312 h · since March 14, 2026`; for
+  /// [NOTE_TIME] after a note, the note.
   fn history_total(&self, ui: &mut Ui, fs: &FormStyle) {
-    let Some((n, ms, Some(first))) = self.history.total.filter(|t| t.0 > 0) else { return };
+    let now = ui.now();
+    let note = self.history.note.as_ref().filter(|(_, at)| now < *at + NOTE_TIME);
+    let text = match note {
+      Some((note, at)) => {
+        ui.request_frame_in(*at + NOTE_TIME - now);
+        note.clone()
+      }
+      None => match self.total_text() {
+        Some(text) => text,
+        None => return,
+      },
+    };
+
+    ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
+    ui.row(Style::new().w(grow()).h(px(TOTAL_H)).align(Align::Center, Align::Center), |ui| {
+      ui.id("history-total").text(&text, fs.note.nowrap());
+    });
+  }
+
+  fn total_text(&self) -> Option<String> {
+    let (n, ms, Some(first)) = self.history.total.filter(|t| t.0 > 0)? else { return None };
     let what = if n == 1 { "dictation" } else { "dictations" };
     let spoken = match ms / 1000 {
       s if s < 60 => format!("{s} s"),
@@ -1633,10 +1650,7 @@ impl Prefs {
       text += &format!(" · since {since}");
     }
 
-    ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
-    ui.row(Style::new().w(grow()).h(px(TOTAL_H)).align(Align::Center, Align::Center), |ui| {
-      ui.id("history-total").text(&text, fs.note);
-    });
+    Some(text)
   }
 
   fn history_act(&mut self, ui: &mut Ui, act: Option<Act>) {
@@ -1646,19 +1660,19 @@ impl Prefs {
       Some(Act::Select(id)) => h.selected = (h.selected != Some(id)).then_some(id),
       Some(Act::Copy(text)) => {
         ui.clipboard().write(&text);
-        h.note = Some("Copied to the clipboard".into());
+        h.note = Some(("Copied to the clipboard".into(), ui.now()));
       }
       Some(Act::Play(id)) => {
         let e = h.entries.iter().find(|e| e.id == id).unwrap();
         let Some(path) = h.db.as_ref().unwrap().audio_file(e) else {
-          h.note = Some("The recording is gone".into());
+          h.note = Some(("The recording is gone".into(), ui.now()));
           return;
         };
 
         let waker = ui.waker().clone();
         match Playback::start(&path, move || waker.wake()) {
           Ok(p) => h.playing = Some((id, p)),
-          Err(e) => h.note = Some(format!("Could not play the recording: {e:#}")),
+          Err(e) => h.note = Some((format!("Could not play the recording: {e:#}"), ui.now())),
         }
       }
       Some(Act::Stop) => h.playing = None,
@@ -2262,6 +2276,11 @@ mod tests {
     tab(&mut h, Page::History);
     click(&mut h, Id::of(("copy", ids[1])));
     assert_eq!(h.rt.clipboard().read().as_deref(), Some("Send the invoice to Anna."));
+    // Said under the panel for a while, the search keeping its width; then the totals again.
+    assert_eq!(h.text(Id::of("history-total")), Some("Copied to the clipboard"));
+    let search = h.rect(Id::of("history-search")).unwrap();
+    h.wait(NOTE_TIME);
+    assert_eq!(h.rect(Id::of("history-search")), Some(search));
 
     // Nothing selected: the panel under the list has no actions; a click on a row selects it.
     assert!(h.rect(Id::of(("retranscribe", ids[0]))).is_none());
