@@ -175,8 +175,8 @@ pub fn menu(
     Item::new("copy-last", "Copy Last Dictation").enabled(last),
     Item::new("recent", "Recent").enabled(!recent.is_empty()).submenu(Menu::new(recent)),
     Item::separator(),
-    Item::new("mic", &fit(&mic, NAME)).submenu(mics),
-    Item::new("model", &fit(&model, NAME)).submenu(models),
+    Item::new("mic", &mic).submenu(mics),
+    Item::new("model", &shorten(&model, NAME - 1)).submenu(models),
     Item::new("unload", "Unload Model").enabled(loaded),
     Item::separator(),
     Item::new("history", "History…"),
@@ -187,23 +187,11 @@ pub fn menu(
   Menu::new(items)
 }
 
-/// The longest name of a microphone or a model in the menu itself.
-const NAME: usize = 24;
+/// The longest microphone or model in the menu itself; a longer one is shortened at a word.
+const NAME: usize = 28;
 
-/// `text` in `max` characters at most, its middle cut: `Elgato Wave…ophone Array`.
-fn fit(text: &str, max: usize) -> String {
-  let chars: Vec<char> = text.chars().collect();
-  if chars.len() <= max {
-    return text.to_owned();
-  }
-
-  let head = (max - 1) / 2;
-  let tail = &chars[chars.len() - (max - 1 - head)..];
-  chars[..head].iter().chain(&['…']).chain(tail).collect()
-}
-
-/// The device in use (the default's own), and the submenu: System Default, then the devices, the
-/// one in use checked.
+/// The device in use, `System (MacBook Pro…)` for the default, and the submenu: System Default,
+/// then the devices, the one in use checked.
 fn microphones((devices, saved): (&[Device], Option<&Choice>)) -> (String, Menu) {
   let (mics, at) = mic_choices(devices, saved);
   let label = |i: usize| if i == 0 { "System Default" } else { mics[i].0.as_str() };
@@ -213,9 +201,12 @@ fn microphones((devices, saved): (&[Device], Option<&Choice>)) -> (String, Menu)
     items.insert(1, Item::separator());
   }
 
-  let default = devices.iter().find(|d| d.default).map_or("System Default", |d| &d.name);
-  let title = if at == 0 { default } else { label(at) };
-  (title.to_owned(), Menu::new(items))
+  let title = match (at, devices.iter().find(|d| d.default)) {
+    (0, Some(d)) => format!("System ({})", shorten(&d.name, NAME - "System (…)".chars().count())),
+    (0, None) => "System".to_owned(),
+    (i, _) => shorten(label(i), NAME - 1),
+  };
+  (title, Menu::new(items))
 }
 
 /// The model in use, and the submenu: the models downloaded with the one that transcribes checked,
@@ -318,18 +309,18 @@ mod tests {
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")
     );
     assert!(items[1].enabled && !items[2].enabled);
-    // The menu's own name cut in its middle; the submenu's whole.
+    // The menu's own name shortened at a word; the submenu's whole.
     let mic = items.iter().find(|i| i.id == "mic").unwrap();
-    assert_eq!(mic.label, "Elgato Wave…ophone Array");
+    assert_eq!(mic.label, "Elgato Wave:3 Microphone…");
     let sub = &mic.submenu.as_ref().unwrap().items;
     let got: Vec<_> = sub.iter().map(|i| (i.label.as_str(), i.checked)).collect();
     let want = [("System Default", false), ("", false), ("MacBook Pro Microphone", false)];
     assert_eq!(got[..3], want);
     assert_eq!(got[3], ("Elgato Wave:3 Microphone Array", true));
 
-    // The default: its device's name.
+    // The default: System, and its device.
     let items = menu(None, &s, &list, &[], (&devices[..], None), &[], &Pick::default()).items;
     let mic = items.iter().find(|i| i.id == "mic").unwrap();
-    assert_eq!(mic.label, "MacBook Pro Microphone");
+    assert_eq!(mic.label, "System (MacBook Pro…)");
   }
 }
