@@ -12,6 +12,8 @@
 
 </div>
 
+https://github.com/user-attachments/assets/d1f6ebf4-fabc-48cb-80da-3c8930db2eac
+
 **Hold a hotkey, speak, release**, and the text lands where you were typing: a chat, an editor, a terminal, any app. Speech is recognized **on your computer** by [wavo](https://github.com/vladkens/wavo), on the GPU or a Mac's Neural Engine: no account, no subscription, and your voice never leaves the machine. Wavo lives in the menu bar or the tray, and its windows are drawn by [nimbo](https://github.com/vladkens/nimbo).
 
 ## 🌟 Features
