@@ -13,8 +13,9 @@
 //! An import adds the entries the history does not have: one is there when an entry there started
 //! at the same Unix ms, so importing twice adds nothing. Entries without text come only with a
 //! recording. The new entries go in first, in one transaction, naming the recordings they will
-//! have; the recordings are copied after, each through a `.part` file, so the next import finishes
-//! one cut short. The command holds the app's single-instance lock: it refuses while Wavo runs.
+//! have, and busy: the running app's session leaves them alone. The recordings are copied after,
+//! each through a `.part` file, so the next import finishes one cut short; then the entries are
+//! idle. The command holds the app's single-instance lock: it refuses while Wavo runs.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -259,7 +260,8 @@ fn import_into(
   }
 
   // In the archive's order, read front to back.
-  let mut copies = plan.add(history.as_ref().unwrap(), &starts)?;
+  let history = history.as_ref().unwrap();
+  let (ids, mut copies) = plan.add(history, &starts)?;
   let (prefix, len) = (format!("{RECORDINGS_DIR}/"), fs::metadata(file)?.len());
   for i in 0..archive.len() {
     let dst = match archive.name_for_index(i) {
@@ -284,6 +286,7 @@ fn import_into(
   }
 
   done.failed += copies.len(); // named by the entries, not in the archive
+  history.db.mark_idle_entries(&ids)?;
 
   if let Some(bytes) = settings.filter(|_| take_settings) {
     fs::write(home.join(settings::FILE), bytes)?;
@@ -319,7 +322,7 @@ impl Plan {
 
       plan.entries += 1;
       match (starts.get(&e.created_at), audio) {
-        (None, audio) => plan.new.push((Entry { busy: false, ..e }, audio)),
+        (None, audio) => plan.new.push((Entry { busy: true, ..e }, audio)),
         (Some(Some(name)), Some(audio)) if !on_disk.contains(name) => {
           plan.missing.push((audio, name.clone()))
         }
@@ -330,13 +333,13 @@ impl Plan {
     plan
   }
 
-  /// Adds the new entries in one transaction; returns the recordings to copy, by their names in
-  /// the archive, with the paths they go to.
+  /// Adds the new entries, busy, in one transaction; returns their ids and the recordings to copy,
+  /// by their names in the archive, with the paths they go to.
   fn add(
     self,
     h: &History,
     starts: &HashMap<i64, Option<String>>,
-  ) -> Result<HashMap<String, PathBuf>> {
+  ) -> Result<(Vec<i64>, HashMap<String, PathBuf>)> {
     // Names the entries hold whose files are not there yet (an import cut short) are taken too.
     let mut taken: HashSet<String> = starts.values().flatten().cloned().collect();
     let mut copies = HashMap::new();
@@ -352,12 +355,12 @@ impl Plan {
       entries.push(e);
     }
 
-    h.db.insert(&entries)?;
+    let ids = h.db.insert(&entries)?;
     for (audio, name) in self.missing {
       copies.extend(h.recordings.path(&name).map(|path| (audio, path)));
     }
 
-    Ok(copies)
+    Ok((ids, copies))
   }
 }
 
@@ -520,6 +523,8 @@ mod tests {
     let done = import_in_app(to.path(), &file, |done, total| last = (done, total)).unwrap();
     assert_eq!((done.added, done.copied), (1, 1));
     assert!(last.0 > 0 && last.0 <= last.1, "{last:?}");
+    let entries = History::open(to.path()).unwrap().db.get_entries().unwrap();
+    assert!(!entries[0].busy, "busy only until its recording is in");
   }
 
   #[test]

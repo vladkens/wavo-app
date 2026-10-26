@@ -427,6 +427,11 @@ impl Db {
     Ok(self.db.execute("UPDATE entries SET busy = 0 WHERE busy = 1;", [])?)
   }
 
+  /// Entries an import added, once their recordings are in.
+  pub fn mark_idle_entries(&self, ids: &[i64]) -> Result<()> {
+    self.update_all("UPDATE entries SET busy = 0 WHERE id = ?1;", ids)
+  }
+
   pub fn delete_entries(&self, ids: &[i64]) -> Result<()> {
     self.update_all("DELETE FROM entries WHERE id = ?1;", ids)
   }
