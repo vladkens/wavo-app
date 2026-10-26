@@ -131,11 +131,8 @@ def archive(src: Path, out: Path) -> tuple[int, int]:
             "entries": len(entries),
             "recordings": len(files),
         }
-        data = Path(tmp) / "wavo-export.json"
-        data.write_text(json.dumps(manifest, indent=2))
-
         with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as z:
-            z.write(data, "wavo-export.json")
+            z.writestr("wavo-export.json", json.dumps(manifest, indent=2))
             z.write(history, "history.db")
             for file in files:
                 z.write(src / "recordings" / file, f"recordings/{file}")

@@ -1,7 +1,8 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Moving the history between computers: `wavo-app export` writes an archive, `import <file>`
-//! takes one (scripts/handy.py makes one of Handy's history). A zip, stored without compression
+//! Moving the history between computers: Export in the settings window or `wavo-app export`
+//! writes an archive; Import or `wavo-app import <file>` takes one (scripts/handy.py makes one of
+//! Handy's history). A zip, stored without compression
 //! (recordings do not compress), in this order:
 //!
 //! - `wavo-export.json`, the manifest: an archive without it is refused;
@@ -13,11 +14,11 @@
 //! at the same Unix ms, so importing twice adds nothing. Entries without text come only with a
 //! recording. The new entries go in first, in one transaction, naming the recordings they will
 //! have; the recordings are copied after, each through a `.part` file, so the next import finishes
-//! one cut short. It holds the app's single-instance lock: it refuses while Wavo runs.
+//! one cut short. The command holds the app's single-instance lock: it refuses while Wavo runs.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -117,7 +118,8 @@ pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
   let settings = home.join(settings::FILE);
   let size = |path: &Path| fs::metadata(path).map_or(0, |m| m.len());
   let sizes: Vec<u64> = names.iter().map(|name| size(&dir.join(name))).collect();
-  let total = size(&settings) + size(&copy) + sizes.iter().sum::<u64>();
+  let head = size(&settings) + size(&copy);
+  let total = head + sizes.iter().sum::<u64>();
   let mut recordings = 0;
   via_part(file, |part| {
     let out = File::create(part).with_context(|| format!("create {}", part.display()))?;
@@ -129,12 +131,12 @@ pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
     serde_json::to_writer_pretty(&mut zip, &manifest)?;
     if settings.is_file() {
       zip.start_file(settings::FILE, stored)?;
-      zip.write_all(&fs::read(&settings)?)?;
+      io::copy(&mut File::open(&settings)?, &mut zip)?;
     }
 
     zip.start_file(DB_FILE, stored)?;
     io::copy(&mut File::open(&copy)?, &mut zip)?;
-    let mut done = size(&settings) + size(&copy);
+    let mut done = head;
     progress(done, total);
     for (name, bytes) in names.iter().zip(sizes) {
       // One deleted since the listing is left out: an import counts it as not copied.
@@ -217,8 +219,7 @@ fn import_into(
 
   let reader = File::open(file).with_context(|| format!("open {}", file.display()))?;
   let not_ours = || format!("{} is not an archive of `wavo-app export`", file.display());
-  let mut archive =
-    ZipArchive::new(BufReader::with_capacity(BUFFER, reader)).with_context(not_ours)?;
+  let mut archive = ZipArchive::new(BufReader::new(reader)).with_context(not_ours)?;
   let manifest = archive.by_name(MANIFEST).with_context(not_ours)?;
   let manifest: Manifest = serde_json::from_reader(manifest).with_context(not_ours)?;
   if manifest.format > FORMAT {
@@ -360,15 +361,11 @@ impl Plan {
   }
 }
 
-/// Copies a recording out of the archive through `<dst>.part`: fewer bytes than the archive says
-/// (an archive cut short) are an error, not a recording.
+/// Copies a recording out of the archive through `<dst>.part`: one that does not match its CRC
+/// (zip checks it) is an error, not a recording.
 fn write_recording(dst: &Path, src: &mut ZipFile<'_, impl Read>) -> Result<()> {
-  let len = src.size();
   fs::create_dir_all(dst.parent().unwrap())?;
-  via_part(dst, |part| match io::copy(src, &mut File::create(part)?)? {
-    n if n == len => Ok(()),
-    n => bail!("{n} of {len} bytes"),
-  })
+  via_part(dst, |part| Ok(io::copy(src, &mut File::create(part)?).map(|_| ())?))
 }
 
 // MARK: Files
@@ -419,6 +416,8 @@ impl Drop for Scratch {
 
 #[cfg(test)]
 mod tests {
+  use std::io::Write;
+
   use super::*;
   use crate::testing::{TempDir, entry_ids, tone, wav_count, write_wav};
 

@@ -23,7 +23,9 @@ use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
 use crate::audio::{self, Choice, Playback};
-use crate::history::{Entry, History, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms};
+use crate::history::{
+  Entry, History, Local, RECORDINGS_DIR, Retention, day_of, fold, local_time, now_ms,
+};
 use crate::session::{NoModel, Request, Status, label};
 use crate::settings::{Activation, HudPosition, Settings, language_name};
 use crate::transfer::Imported;
@@ -571,7 +573,7 @@ const NO_ANE: &str = "Needs Apple silicon and macOS 15 or later.";
 const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another Mac: the dictations this \
   history does not have are added with their recordings; the settings stay as they are.";
 const EXPORT_HELP: &str = "The history, its recordings and the settings, into Downloads as a .zip \
-  archive. To bring one back on another Mac, quit Wavo and run: wavo-app import <file>";
+  archive: Import brings it back, here or on another Mac.";
 
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
@@ -676,7 +678,7 @@ impl Prefs {
     let shown = shown(&state, "export", "Copying the history…", ended);
     let running = shown.progress.is_some();
     let row = FormRow::new("Export the history").info(EXPORT_HELP).tile(Tile::Icon(Icon::DOC));
-    data_row(ui, fs, "export-row", row, &shown, |ui| {
+    data_row(ui, fs, Id::of("export-row"), row, &shown, |ui| {
       if let Some(Transfer::Done((file, _))) = &state
         && ui.disabled(!file.is_file()).id("export-show").button(show).clicked
       {
@@ -695,7 +697,7 @@ impl Prefs {
     let shown = shown(&state, "import", "Reading the archive…", imported_text);
     let running = shown.progress.is_some();
     let row = FormRow::new("Import a history").info(IMPORT_HELP).tile(Tile::Icon(Icon::DOWNLOAD));
-    data_row(ui, fs, "import-row", row, &shown, |ui| {
+    data_row(ui, fs, Id::of("import-row"), row, &shown, |ui| {
       if ui.disabled(running).id("import").button("Import…").clicked {
         ui.file_dialog(FileDialog::open("Import").types(&["zip"]));
       }
@@ -986,16 +988,10 @@ impl Prefs {
     };
 
     let failed = matches!(state, Some(Download::Failed(_)));
-    let danger = FormStyle { caption: fs.caption.color(ui.theme().danger), ..*fs };
-    let id = Id::of(("model", m.name));
-    let below = |ui: &mut Ui| {
-      if let Some((k, text)) = &progress {
-        progress_line(ui, fs, *k, text);
-      }
-    };
-    let row = model_row(m, caption.as_deref());
-    ui.with_id(id).form_row_with(if failed { &danger } else { fs }, row, below, |ui| {
-      if progress.is_none() {
+    let shown = Shown { caption, progress, failed };
+    let row = model_row(m, None);
+    data_row(ui, fs, Id::of(("model", m.name)), row, &shown, |ui| {
+      if shown.progress.is_none() {
         let label = if failed { "Retry" } else { "Download" };
         if ui.id(("download", m.name)).button(label).clicked {
           self.shell.download(m);
@@ -1010,11 +1006,6 @@ impl Prefs {
 
       self.card(ui, m);
     });
-
-    // An error cut short shows whole in its tooltip.
-    if let Some(caption) = caption.filter(|_| failed) {
-      ui.tooltip(id.key("caption"), &caption);
-    }
   }
 
   /// A model's ⓘ, last in its row: its card.
@@ -1196,13 +1187,12 @@ fn shown<T>(
 fn data_row<'a>(
   ui: &mut Ui,
   fs: &FormStyle,
-  id: &str,
+  id: Id,
   row: FormRow<'a>,
   shown: &'a Shown,
   controls: impl FnOnce(&mut Ui),
 ) {
   let danger = FormStyle { caption: fs.caption.color(ui.theme().danger), ..*fs };
-  let id = Id::of(id);
   let row = match &shown.caption {
     Some(caption) => row.caption(caption),
     None => row,
@@ -1283,16 +1273,14 @@ impl HistoryPage {
 
     let db = &self.db.as_ref().unwrap().db;
     let limit = (self.pages + 1) * PAGE_SIZE;
-    let page = db.get_page(&key.0, limit + 1).and_then(|entries| {
-      let since = entries[..entries.len().min(limit)].last().map_or(i64::MAX, |e| e.created_at);
-      Ok((db.get_days(&key.0, since)?, entries))
+    let page = db.get_page(&key.0, limit + 1).and_then(|mut entries| {
+      let more = entries.len() > limit;
+      entries.truncate(limit);
+      let since = entries.last().map_or(i64::MAX, |e| e.created_at);
+      Ok((entries, db.get_days(&key.0, since)?, more))
     });
     match page {
-      Ok((days, mut entries)) => {
-        self.more = entries.len() > limit;
-        entries.truncate(limit);
-        (self.entries, self.days) = (entries, days);
-      }
+      Ok((entries, days, more)) => (self.entries, self.days, self.more) = (entries, days, more),
       Err(e) => self.note = Some(format!("Could not read the history: {e:#}")),
     }
   }
@@ -1429,9 +1417,8 @@ impl Prefs {
     let (now, mut act) = (now_ms(), None);
     let fs = &FormStyle { caption: fs.caption.ellipsis(), pad_y: fs.pad_y + 4.0, ..*fs };
     for (day, entries) in &days {
-      let (y, m, d) = *day;
-      let note =
-        day_note(h.days.get(&format!("{y:04}-{m:02}-{d:02}")).copied().unwrap_or_default());
+      let key = day_of(entries[0].created_at).unwrap_or_default();
+      let note = day_note(h.days.get(&key).copied().unwrap_or_default());
       ui.form_section_with(
         fs,
         &day_title(*day, now),
