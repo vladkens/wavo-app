@@ -898,7 +898,7 @@ dependencies = [
 [[package]]
 name = "nimbo"
 version = "0.0.1"
-source = "git+https://github.com/vladkens/nimbo?branch=main#22d942167aca146c2500f82260d8624a5a0dd52c"
+source = "git+https://github.com/vladkens/nimbo?branch=main#dd1e4e9f1783a575599546087c23d719a5e93ecc"
 dependencies = [
  "block2",
  "dispatch2",
@@ -2130,7 +2130,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wavo",
- "windows-sys 0.61.2",
  "zip",
 ]
 

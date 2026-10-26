@@ -12,21 +12,21 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use nimbo::clipboard::{Offer, Snapshot};
 use nimbo::focus::{self, Focused};
 use nimbo::hotkey::{Hotkeys, Listener};
+use nimbo::instance::{self, Claim, Instance};
+use nimbo::paste::{self, PORTAL_WAIT, Paste};
 use nimbo::permissions::{self, Access, Pane};
 use nimbo::tray::{Menu, Tray};
-use nimbo::{Clipboard, Key, Main, Modifiers, Proxy, Shortcut, SystemClipboard, Window, autostart};
+use nimbo::{Clipboard, Main, Proxy, SystemClipboard, Window, autostart};
 use tracing::{error, info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
-use crate::ctl::{self, Claim};
 use crate::history::{self, Entry, History};
 use crate::hud::{self, Hud, Mode, Show};
 use crate::menu::{self, Icon, Warning};
@@ -39,12 +39,9 @@ use crate::{INFO, audio, transfer};
 
 // How often Accessibility is checked while it is missing or the event tap is not running.
 const ACCESS_POLL: Duration = Duration::from_secs(2);
-// How long the session waits for the main thread to paste or copy.
+// How long the session waits for the main thread to paste or copy; on Wayland nimbo's PORTAL_WAIT,
+// as the first paste waits for the desktop's dialog there.
 const MAIN_WAIT: Duration = Duration::from_secs(3);
-// On Wayland the first paste starts the RemoteDesktop portal's session, whose dialog waits for the
-// person's answer (nimbo gives it 60 s): the paste waits with it, as the first recording waits for
-// the microphone's prompt on macOS.
-const PORTAL_WAIT: Duration = Duration::from_secs(65);
 
 thread_local! {
   static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -92,8 +89,8 @@ struct App {
   /// session's.
   history: Option<Rc<History>>,
   accessibility: bool,
-  // The hotkey listener may start: everywhere but where it asks the person ([portal_asks]) before
-  // they chose the menu's Allow the Hotkey… once.
+  // The hotkey listener may start: everywhere but where it asks the person
+  // ([nimbo::hotkey::start_asks]) before they chose the menu's Allow the Hotkey… once.
   may_listen: bool,
   microphone: Access,
   asked_microphone: bool,
@@ -101,7 +98,6 @@ struct App {
   clipboard: bool,
   fake_mic: bool,
   session: Session,
-  server: ctl::Server,
 }
 
 /// Returns at once when another instance runs for the same home (it opens its settings), else when
@@ -110,10 +106,11 @@ pub fn run() -> Result<()> {
   let config = session::Config::from_env();
   let home = config.home.clone();
   std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
-  let server = match ctl::claim(&home).with_context(|| format!("claim {}", home.display()))? {
-    Claim::Server(server) => server,
+  let claim = instance::claim_in(&home).with_context(|| format!("claim {}", home.display()))?;
+  let instance = match claim {
+    Claim::Primary(instance) => instance,
     Claim::Running => {
-      let opened = ctl::send(&home, "open").is_ok();
+      let opened = instance::send_in(&home, instance::OPEN).is_ok();
       eprintln!("Wavo is already running for {} (settings opened: {opened})", home.display());
       return Ok(());
     }
@@ -128,7 +125,7 @@ pub fn run() -> Result<()> {
   nimbo::app(INFO, |main| {
     // Also on a quit the system asks for (logout), after which `nimbo::app` does not return.
     main.on_quit(|_| shutdown());
-    if let Err(e) = start(main, config, server) {
+    if let Err(e) = start(main, config, instance) {
       error!("Wavo could not start: {e:#}");
       started = Err(e);
       main.quit();
@@ -137,7 +134,7 @@ pub fn run() -> Result<()> {
   started
 }
 
-fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> Result<()> {
+fn start(main: &mut Main, config: session::Config, instance: Instance) -> Result<()> {
   let _ = PROXY.set(main.proxy());
   // Linux only: the dock, Wayland's window icon and the portals' dialogs find the app by it.
   if installed() {
@@ -162,12 +159,12 @@ fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> R
     Hotkeys::new(move |edge| handle.input(edge.into()))
   };
 
+  // `open` shows the settings (the reopen hook below) and `quit` quits: nimbo's.
   let toggle = handle.clone();
-  server.serve(move |cmd| match cmd {
-    "open" => proxy().post(|main| open_window(main, None)),
-    "quit" => proxy().post(|main| main.quit()),
+  main.serve(instance, move |_, cmd| match cmd.name.as_str() {
+    instance::OPEN | instance::QUIT => {}
     "toggle" => toggle.input(session::Input::Toggle),
-    _ => warn!("unknown command {cmd:?}"),
+    other => warn!("unknown command {other:?}"),
   })?;
 
   // Windows and Linux start the program their entry names: after an update or a move that is the
@@ -207,13 +204,12 @@ fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> R
     recent: Vec::new(),
     history,
     accessibility: false,
-    may_listen: !portal_asks() || saved.hotkey_portal,
+    may_listen: !nimbo::hotkey::start_asks() || saved.hotkey_portal,
     microphone: permissions::microphone(),
     asked_microphone: false,
     clipboard: SystemClipboard.readable(),
     fake_mic,
     session,
-    server,
   };
   app.check_access();
   app.read_models();
@@ -242,14 +238,13 @@ fn open_hud(main: &mut Main, position: HudPosition) -> Window<Hud> {
   main.open(&hud::config(position), Hud::new(hidden))
 }
 
-/// The clipboard a paste holds comes back; the session keeps a recording in progress; then the
-/// lock goes, so the next instance does not find this one's dictation unfinished.
+/// The session keeps a recording in progress; nimbo then lets the instance's lock go as the loop
+/// ends, so the next instance does not find this one's dictation unfinished, and puts back the
+/// clipboard a paste holds.
 fn shutdown() {
   let Some(app) = APP.with(|cell| cell.borrow_mut().take()) else { return };
   info!("wavo-app: quit");
-  restore_pending();
   drop(app.session);
-  drop(app.server);
 }
 
 fn chosen(main: &mut Main, id: &str) {
@@ -667,8 +662,8 @@ impl App {
     let system = menu::System {
       accessibility: self.accessibility,
       hotkey_error: hotkeys.error.or(hotkeys.listener_error.filter(|_| dead)),
-      hotkey_portal: portal_asks() && !listening,
-      paste_portal: wayland() && !nimbo::keys::ready(),
+      hotkey_portal: nimbo::hotkey::start_asks() && !listening,
+      paste_portal: focus::hidden() && !nimbo::keys::ready(),
       no_microphone: self.mic() != Access::Granted,
       clipboard_unread: update.settings.restores_clipboard() && !self.clipboard,
       secure_input: hotkeys.secure_input,
@@ -680,7 +675,7 @@ impl App {
   fn refresh(&mut self) {
     let Some(update) = &self.update else { return };
     // The portal took the hotkey: later launches bind it without a click.
-    if portal_asks()
+    if nimbo::hotkey::start_asks()
       && !update.settings.hotkey_portal
       && self.hotkeys.status().listener == Listener::Active
     {
@@ -947,62 +942,6 @@ fn progress<T>(state: &Mutex<Option<Transfer<T>>>) -> impl FnMut(u64, u64) {
 
 // MARK: Paste
 
-// The text goes on the clipboard as an offer that says when it is read, the paste shortcut (⌘V,
-// elsewhere Ctrl+V) goes to the app in focus, and the clipboard the person had comes back RESTORE
-// after the read (some apps read more than once), or CAP after the shortcut when nothing reads it;
-// only while the clipboard still holds the text: what the person copied meanwhile stays.
-const RESTORE: Duration = Duration::from_millis(500);
-const CAP: Duration = Duration::from_secs(8);
-const PASTE: Shortcut = Shortcut {
-  key: Key::Char('v'),
-  mods: if cfg!(target_os = "macos") { Modifiers::META } else { Modifiers::CONTROL },
-};
-
-/// Linux terminals that paste with Ctrl+Shift+V (Ctrl+V is the shell's quoted insert there), by
-/// `/proc/<pid>/comm`, which keeps 15 bytes: gnome-terminal-server is `gnome-terminal-`. Only
-/// where the app in focus is known (X11): Wayland tells no app another's.
-const TERMINALS: [&str; 20] = [
-  "gnome-terminal-",
-  "kgx",
-  "ptyxis",
-  "konsole",
-  "kitty",
-  "alacritty",
-  "wezterm-gui",
-  "ghostty",
-  "terminator",
-  "tilix",
-  "xfce4-terminal",
-  "mate-terminal",
-  "lxterminal",
-  "qterminal",
-  "foot",
-  "terminology",
-  "guake",
-  "tilda",
-  "blackbox",
-  "st",
-];
-
-/// The shortcut that pastes into `target`.
-fn paste_key(target: &Option<Focused>) -> Shortcut {
-  let terminal = target.as_ref().is_some_and(|t| TERMINALS.contains(&t.name.as_str()));
-  match cfg!(target_os = "linux") && terminal {
-    true => Shortcut { mods: PASTE.mods | Modifiers::SHIFT, ..PASTE },
-    false => PASTE,
-  }
-}
-
-struct Pending {
-  id: u64,
-  offer: Offer,
-  snapshot: Snapshot,
-}
-
-thread_local! {
-  static PENDING: RefCell<Option<Pending>> = const { RefCell::new(None) };
-}
-
 struct GuiOutput;
 
 impl TextOutput for GuiOutput {
@@ -1012,27 +951,24 @@ impl TextOutput for GuiOutput {
     focus::current()
   }
 
+  /// nimbo's paste, on the main thread (see [nimbo::paste]): refused when the focus moved from
+  /// `target` or sits in a password field; `keep` leaves the text on the clipboard.
   fn paste(&mut self, text: &str, target: &Option<Focused>, keep: bool) -> Result<(), NotPasted> {
-    if target.is_none() && !focus_hidden() {
-      return Err(NotPasted::Failed("the app in focus at the start is unknown".into()));
-    }
-
-    let target = target.clone();
-
-    if !permissions::accessibility(false) {
-      let why = format!("no Accessibility access: {} can't be sent", PASTE.label());
-      return Err(NotPasted::Failed(why));
-    }
-
     // Given up after MAIN_WAIT (PORTAL_WAIT on Wayland): when the main thread gets to it, it is not
     // pasted any more.
+    let opts = Paste { restore: !keep, target: target.clone() };
     let (text, late) = (text.to_owned(), Arc::new(AtomicBool::new(false)));
     let gave_up = late.clone();
-    let paste = move |_: &mut Main| match gave_up.load(Ordering::Acquire) {
-      true => Err(NotPasted::Failed("too late".into())),
-      false => paste(&text, keep, &target),
+    let paste = move |_: &mut Main| {
+      if gave_up.load(Ordering::Acquire) {
+        return Err(NotPasted::Failed("too late".into()));
+      }
+
+      paste::text(&text, opts).map_err(not_pasted)?;
+      info!("paste: {} chars", text.chars().count());
+      Ok(())
     };
-    let wait = if wayland() { PORTAL_WAIT } else { MAIN_WAIT };
+    let wait = if focus::hidden() { PORTAL_WAIT } else { MAIN_WAIT };
     proxy().call(paste, wait).unwrap_or_else(|| {
       late.store(true, Ordering::Release);
       Err(NotPasted::Failed("the app was too busy to paste".into()))
@@ -1054,129 +990,14 @@ impl TextOutput for GuiOutput {
   }
 }
 
-/// On the main thread.
-fn paste(text: &str, keep: bool, target: &Option<Focused>) -> Result<(), NotPasted> {
-  static NEXT: AtomicU64 = AtomicU64::new(1);
-  let clipboard = SystemClipboard;
-  let unreachable = || NotPasted::Failed("the clipboard can't be reached".into());
-
-  // The person's clipboard, not the text of a paste still waiting for its restore.
-  restore_pending();
-  // Nothing of it could be read (Paste from Other Apps not allowed): a restore would empty it.
-  let snapshot = (!keep && clipboard.readable()).then(|| clipboard.snapshot()).flatten();
-  let snapshot = snapshot.filter(|s| !s.unreadable());
-
-  // Right before the paste: the snapshot may take a while.
-  if let Some(target) = target {
-    check_focus(target)?;
-  }
-
-  let id = NEXT.fetch_add(1, Ordering::Relaxed);
-  match snapshot {
-    Some(snapshot) => {
-      let read = move || proxy().after(RESTORE, move |_| settle(id));
-      let offer = clipboard.offer(text, Some(Box::new(read))).ok_or_else(unreachable)?;
-      PENDING.set(Some(Pending { id, offer, snapshot }));
-      proxy().after(CAP, move |_| settle(id));
+/// nimbo's reason as the session keeps it: the moved focus and a password field have their own.
+fn not_pasted(e: paste::NotPasted) -> NotPasted {
+  match e {
+    paste::NotPasted::FocusMoved { from, to } => {
+      info!("not pasted: the focus moved from {from} to {to}");
+      NotPasted::FocusChanged
     }
-    None if keep => SystemClipboard.write(text),
-    // Nothing to restore: the text stays, marked for clipboard managers to skip.
-    None => _ = clipboard.offer(text, None).ok_or_else(unreachable)?,
-  }
-
-  let key = paste_key(target);
-  if let Err(e) = nimbo::keys::post(key) {
-    settle(id);
-    return Err(NotPasted::Failed(format!("{} was not sent: {e}", key.label())));
-  }
-
-  info!("paste: {}, {} chars", key.label(), text.chars().count());
-  Ok(())
-}
-
-/// Whether the paste may go where `target` was: the focus is still there and not in a password
-/// field.
-fn check_focus(target: &Focused) -> Result<(), NotPasted> {
-  let now = focus::current().ok_or_else(|| NotPasted::Failed("no app is in front".into()))?;
-  if target.moved(&now) {
-    info!("not pasted: the focus moved from {} to {}", target.name, now.name);
-    return Err(NotPasted::FocusChanged);
-  }
-
-  // The app told its window at the start: it must tell it now too.
-  let known = target.window.is_ok();
-  if known && let Err(e) = &now.window {
-    return Err(NotPasted::Failed(format!("{} did not tell its focused window ({e})", now.name)));
-  }
-
-  match &now.secure {
-    Ok(true) => Err(NotPasted::SecureField),
-    Ok(false) => Ok(()),
-    // An app that answers at all must answer this too; one that never did can't be checked, unless
-    // Secure Input is on: then it may well be a password field.
-    Err(e) if known || permissions::secure_input() => {
-      Err(NotPasted::Failed(format!("{} did not tell its focused element ({e})", now.name)))
-    }
-    Err(_) => Ok(()),
-  }
-}
-
-/// Wayland shows no app where another types (nimbo's focus is none there): the paste goes to
-/// whatever has the focus, unchecked.
-fn focus_hidden() -> bool {
-  wayland()
-}
-
-/// The hotkey listener asks the person when it starts: Wayland's GlobalShortcuts portal shows its
-/// dialog. So it starts only from the menu, or at a launch after the portal took the hotkey once.
-fn portal_asks() -> bool {
-  wayland()
-}
-
-/// The desktop session is Wayland's (`XDG_SESSION_TYPE`, which the login manager sets), as nimbo
-/// tells it: an X11 app under XWayland (`GDK_BACKEND=x11`) still has Wayland's portals and focus.
-fn wayland() -> bool {
-  cfg!(target_os = "linux") && std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland")
-}
-
-fn settle(id: u64) {
-  let pending = PENDING.with_borrow_mut(|p| p.take_if(|p| p.id == id));
-  if let Some(p) = pending {
-    restore(p);
-  }
-}
-
-fn restore_pending() {
-  if let Some(p) = PENDING.take() {
-    restore(p);
-  }
-}
-
-fn restore(p: Pending) {
-  let clipboard = SystemClipboard;
-  if !clipboard.holds(p.offer) {
-    info!("paste: the clipboard changed since: left as it is");
-  } else if clipboard.restore(p.snapshot) {
-    info!("paste: clipboard restored");
-  } else {
-    warn!("paste: the clipboard could not be restored");
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn terminals_paste_with_shift_on_linux() {
-    let app = |name: &str| {
-      let name = name.into();
-      Some(Focused { pid: 1, name, window: Ok(None), secure: Ok(false) })
-    };
-    let shift = cfg!(target_os = "linux");
-    assert_eq!(paste_key(&app("gnome-terminal-")).mods.contains(Modifiers::SHIFT), shift);
-    assert_eq!(paste_key(&app("konsole")).mods.contains(Modifiers::SHIFT), shift);
-    assert_eq!(paste_key(&app("firefox")), PASTE);
-    assert_eq!(paste_key(&None), PASTE);
+    paste::NotPasted::SecureField => NotPasted::SecureField,
+    e => NotPasted::Failed(e.to_string()),
   }
 }

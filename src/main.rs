@@ -8,7 +8,6 @@
 mod app;
 mod audio;
 mod cli;
-mod ctl;
 mod engine;
 mod history;
 mod hud;
@@ -90,9 +89,8 @@ fn main() -> Result<()> {
   // Windows: only for arguments (a command, `--help`, a mistake), which print. Attached, the app
   // would print its logs after the prompt, and closing that console would end it without its quit
   // hook.
-  #[cfg(windows)]
   if std::env::args_os().len() > 1 {
-    attach_console();
+    nimbo::attach_console();
   }
 
   let cli = Cli::parse();
@@ -113,16 +111,6 @@ fn home() -> PathBuf {
     Some(dir) if !dir.is_empty() => PathBuf::from(dir),
     _ => nimbo::paths::data_dir(INFO.id),
   }
-}
-
-/// The console of the command line that started the app, if one did: its output and `--help` go
-/// there (the app itself has none, as a GUI program).
-#[cfg(windows)]
-fn attach_console() {
-  use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
-
-  // SAFETY: no preconditions; it fails harmlessly without a parent console.
-  unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
 /// Logs go to stderr and, given a home, to its [LOG_FILE], filtered by `WAVO_LOG`

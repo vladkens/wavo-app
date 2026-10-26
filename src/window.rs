@@ -505,8 +505,8 @@ impl Prefs {
   /// The recorder and its reset; a cleared value keeps the hotkey: the app needs one.
   fn shortcut(&mut self, ui: &mut Ui) {
     let mut hotkey = Hotkey::parse(&self.settings.hotkey).ok();
-    // Linux's hotkeys are chords: a modifier key alone there would leave no hotkey at all.
-    let alone = |h: &Hotkey| cfg!(target_os = "linux") && matches!(h, Hotkey::Modifier(_));
+    // Where hotkeys are chords only (Linux), a modifier key alone would leave no hotkey at all.
+    let alone = |h: &Hotkey| !nimbo::hotkey::modifier_alone() && matches!(h, Hotkey::Modifier(_));
     if ui.id("hotkey").shortcut(&mut hotkey).changed
       && let Some(hotkey) = hotkey.filter(|h| !alone(h))
     {
@@ -721,7 +721,7 @@ impl Prefs {
       if ui.disabled(running).id("export").button("Export…").clicked {
         let name = export_name(now_ms());
         let panel = FileDialog::save("Export").name(&name).types(&["zip"]);
-        ui.file_dialog(FileDialog { dir: downloads(), ..panel });
+        ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
         self.panel = Some(Panel::Export);
       }
     });
@@ -736,7 +736,7 @@ impl Prefs {
     data_row(ui, fs, Id::of("import-row"), row, &shown, |ui| {
       if ui.disabled(running).id("import").button("Import…").clicked {
         let panel = FileDialog::open("Import").types(&["zip"]);
-        ui.file_dialog(FileDialog { dir: downloads(), ..panel });
+        ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
         self.panel = Some(Panel::Import);
       }
     });
@@ -1274,13 +1274,6 @@ fn export_name(ms: i64) -> String {
   let Some(t) = local_time(ms) else { return "wavo-export.zip".into() };
   let (y, mo, d, h, mi, s) = (t.year, t.month, t.day, t.hour, t.minute, ms / 1000 % 60);
   format!("wavo-export-{y:04}-{mo:02}-{d:02}-{h:02}-{mi:02}-{s:02}.zip")
-}
-
-/// Where the file panels start: Downloads, where archives usually are.
-fn downloads() -> Option<PathBuf> {
-  let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
-  let dir = PathBuf::from(home).join("Downloads");
-  dir.is_dir().then_some(dir)
 }
 
 /// What a Data row shows of a transfer: its caption, else its progress while it runs.
