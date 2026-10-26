@@ -599,9 +599,10 @@ impl App {
   fn warnings(&self, update: &Update) -> Vec<Warning> {
     let hotkeys = self.hotkeys.status();
     // A listener that failed with nothing else holding the hotkey leaves it dead (Windows' hook,
-    // X11's grab); the portal's refusal shows as Allow the Hotkey… again.
+    // X11's grab, the portal missing or refused): why shows, and with the portal Allow the
+    // Hotkey… again.
     let listening = matches!(hotkeys.listener, Listener::Starting | Listener::Active);
-    let dead = hotkeys.listener == Listener::Failed && !hotkeys.fallback && !portal_asks();
+    let dead = hotkeys.listener == Listener::Failed && !hotkeys.fallback;
     let system = menu::System {
       accessibility: self.accessibility,
       hotkey_error: hotkeys.error.or(hotkeys.listener_error.filter(|_| dead)),
