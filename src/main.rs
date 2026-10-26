@@ -42,7 +42,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-  /// Quit Wavo, turn launch at login off, reset its permissions and delete its data and cache
+  /// Quit Wavo, turn launch at login off, reset its permissions and defaults, delete its data and
+  /// caches
   Reset {
     /// Say what it would do, change nothing
     #[arg(long)]
