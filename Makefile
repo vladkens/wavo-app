@@ -1,6 +1,8 @@
 .PHONY: prepare check test build update clean
 
 CARGO_FLAGS := --release --locked
+# The binary's extension: .exe on Windows, where make sees OS=Windows_NT.
+EXE := $(if $(filter Windows_NT,$(OS)),.exe)
 
 prepare:
 	cargo +nightly fmt
@@ -15,7 +17,7 @@ test:
 
 build:
 	cargo build $(CARGO_FLAGS)
-	ls -lh target/release/wavo-app
+	ls -lh target/release/wavo-app$(EXE)
 
 update:
 	cargo upgrade --incompatible
