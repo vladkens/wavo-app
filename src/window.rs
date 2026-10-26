@@ -67,7 +67,7 @@ impl Page {
 /// A macOS preferences window: the title over the tabs, under one background.
 pub fn config(page: Page) -> Config {
   let h = if page.scrolls() { SCROLLING } else { 500.0 };
-  Config::new("Wavo", WIDTH, h).fixed().unified()
+  crate::with_icon(Config::new("Wavo", WIDTH, h).fixed().unified())
 }
 
 /// What the system allows the app.
