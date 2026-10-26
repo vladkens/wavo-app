@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -162,7 +163,14 @@ pub struct Prefs {
 }
 
 impl Prefs {
-  pub fn new(shell: Box<dyn Shell>, settings: Settings, hub: Hub, home: &Path) -> Self {
+  /// `history`: the app's connection, `None` when it could not open.
+  pub fn new(
+    shell: Box<dyn Shell>,
+    settings: Settings,
+    hub: Hub,
+    home: &Path,
+    history: Option<Rc<History>>,
+  ) -> Self {
     let access = shell.access();
     let mut prefs = Self {
       page: Page::General,
@@ -182,7 +190,7 @@ impl Prefs {
       panel: None,
       model_search: String::new(),
       model_lang: 0,
-      history: HistoryPage::default(),
+      history: HistoryPage { db: history, ..HistoryPage::default() },
     };
     prefs.refresh();
     prefs
@@ -1320,7 +1328,7 @@ type Day = (i32, u32, u32);
 
 #[derive(Default)]
 struct HistoryPage {
-  db: Option<History>,
+  db: Option<Rc<History>>,
   /// The session's history changes: a move reloads.
   revision: u64,
   search: String,
@@ -1342,7 +1350,7 @@ struct HistoryPage {
 }
 
 impl HistoryPage {
-  fn load(&mut self, home: &Path) {
+  fn load(&mut self) {
     let key = (self.search.trim().to_owned(), self.pages, self.revision);
     if self.loaded.as_ref() == Some(&key) {
       return;
@@ -1351,17 +1359,12 @@ impl HistoryPage {
     // The history changed, not only the search or the pages shown.
     let moved = self.loaded.as_ref().is_some_and(|k| k.2 != key.2);
     self.loaded = Some(key.clone());
-    if self.db.is_none() {
-      match History::open(home) {
-        Ok(db) => self.db = Some(db),
-        Err(e) => {
-          self.note = Some(format!("Could not open the history: {e:#}"));
-          return;
-        }
-      }
-    }
+    let Some(history) = &self.db else {
+      self.note = Some("Could not open the history: see the log".into());
+      return;
+    };
 
-    let db = &self.db.as_ref().unwrap().db;
+    let db = &history.db;
     if self.total.is_none() || moved {
       self.total = db.get_total().inspect_err(|e| warn!("history: {e:#}")).ok();
     }
@@ -1487,7 +1490,7 @@ impl Prefs {
       h.note = Some(format!("Could not play the recording: {e}"));
     }
 
-    h.load(&self.home);
+    h.load();
     // Deleted, or out of the search.
     if h.selected.is_some_and(|id| !h.entries.iter().any(|e| e.id == id)) {
       h.selected = None;
@@ -1925,7 +1928,8 @@ mod tests {
     fn harness(&self, fake: &Fake, settings: Settings) -> Harness<Prefs> {
       fake.log().settings = settings.clone();
       let shell = Box::new(fake.clone());
-      let prefs = Prefs::new(shell, settings, self.hub.clone(), self.dir.path());
+      let history = History::open(self.dir.path()).ok().map(Rc::new);
+      let prefs = Prefs::new(shell, settings, self.hub.clone(), self.dir.path(), history);
       let cfg = config(Page::General);
       let mut h = Harness::new(prefs, cfg.size, 2.0);
       // As high as macOS 26's, as nimbo's own shots draw it.

@@ -18,7 +18,8 @@ pub enum Claim {
 
 /// The lock and the socket, both let go on drop.
 pub struct Server {
-  listener: UnixListener,
+  /// Until [Server::serve] moves it to its thread: one descriptor for the socket.
+  listener: Option<UnixListener>,
   path: PathBuf,
   _lock: File,
 }
@@ -30,9 +31,9 @@ impl Drop for Server {
 }
 
 impl Server {
-  /// Calls `on` with each command, on a thread of its own.
-  pub fn serve(&self, on: impl Fn(&str) + Send + 'static) -> io::Result<()> {
-    let listener = self.listener.try_clone()?;
+  /// Calls `on` with each command, on a thread of its own; once.
+  pub fn serve(&mut self, on: impl Fn(&str) + Send + 'static) -> io::Result<()> {
+    let Some(listener) = self.listener.take() else { return Ok(()) };
     std::thread::Builder::new().name("ctl".into()).spawn(move || {
       for stream in listener.incoming().flatten() {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
@@ -69,7 +70,7 @@ pub fn claim(home: &Path) -> io::Result<Claim> {
   let _ = fs::remove_file(&path);
   let listener = UnixListener::bind(&path)?;
   fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-  Ok(Claim::Server(Server { listener, path, _lock: lock }))
+  Ok(Claim::Server(Server { listener: Some(listener), path, _lock: lock }))
 }
 
 /// Sends `cmd` to the instance for `home`.
@@ -86,7 +87,9 @@ mod tests {
   use crate::testing::TempDir;
 
   fn serve(home: &Path) -> (Server, mpsc::Receiver<String>) {
-    let Claim::Server(server) = claim(home).unwrap() else { panic!("{} is taken", home.display()) };
+    let Claim::Server(mut server) = claim(home).unwrap() else {
+      panic!("{} is taken", home.display())
+    };
     let (tx, rx) = mpsc::channel();
     server.serve(move |cmd| tx.send(cmd.to_owned()).unwrap()).unwrap();
     (server, rx)

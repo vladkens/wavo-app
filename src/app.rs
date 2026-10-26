@@ -11,6 +11,7 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -83,7 +84,9 @@ struct App {
   pick: Pick,
   devices: Vec<audio::Device>,
   recent: Vec<Entry>,
-  history: Option<History>,
+  /// What the menu's Recent and the window read: one connection on the main thread, besides the
+  /// session's.
+  history: Option<Rc<History>>,
   accessibility: bool,
   microphone: Access,
   asked_microphone: bool,
@@ -127,7 +130,7 @@ pub fn run() -> Result<()> {
   started
 }
 
-fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Result<()> {
+fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> Result<()> {
   let _ = PROXY.set(main.proxy());
   let fake_mic = config.fake_mic.is_some();
   let (home, hub) = (config.home.clone(), config.hub.clone());
@@ -136,6 +139,8 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
   });
   let session = Session::start(config, GuiOutput, observer)?;
   let handle = session.handle();
+  // After the session's: it creates and migrates the history.
+  let history = History::open(&home).inspect_err(|e| warn!("the history: {e:#}")).ok().map(Rc::new);
   let hotkeys = {
     let handle = handle.clone();
     Hotkeys::new(move |edge| handle.input(edge.into()))
@@ -169,7 +174,7 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     pick: Pick::default(),
     devices: audio::devices(),
     recent: Vec::new(),
-    history: None,
+    history,
     accessibility: false,
     microphone: permissions::microphone(),
     asked_microphone: false,
@@ -269,7 +274,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
     return;
   }
 
-  let Some((shell, update, hub, home)) = with_app(|app| {
+  let Some((shell, update, hub, home, history)) = with_app(|app| {
     let shell = MacShell {
       home: app.home.clone(),
       handle: app.handle.clone(),
@@ -278,7 +283,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
       export: app.export.clone(),
       import: app.import.clone(),
     };
-    (shell, app.update.clone(), app.hub.clone(), app.home.clone())
+    (shell, app.update.clone(), app.hub.clone(), app.home.clone(), app.history.clone())
   }) else {
     return;
   };
@@ -288,7 +293,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
     Some(u) => u.settings.clone(),
     None => Settings::load(&home.join(settings::FILE)).0,
   };
-  let mut prefs = Prefs::new(Box::new(shell), settings, hub, &home);
+  let mut prefs = Prefs::new(Box::new(shell), settings, hub, &home, history);
   if let Some(u) = &update {
     prefs.update(&u.settings, &u.status, u.history);
   }
@@ -547,10 +552,6 @@ impl App {
   }
 
   fn read_recent(&mut self) {
-    if self.history.is_none() {
-      self.history = History::open(&self.home).inspect_err(|e| warn!("the history: {e:#}")).ok();
-    }
-
     let Some(history) = &self.history else { return };
     let entries = history.db.get_page("", menu::RECENT);
     self.recent =
