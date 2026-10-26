@@ -119,9 +119,7 @@ fn remove_dir(dir: &Path) -> io::Result<()> {
 }
 
 fn confirm() -> Result<bool> {
-  print!(
-    "Quit Wavo, turn launch at login off, reset its permissions and defaults, remove the above? [y/N] "
-  );
+  print!("Uninstall Wavo? [y/N] ");
   io::stdout().flush()?;
   let mut answer = String::new();
   io::stdin().read_line(&mut answer)?;

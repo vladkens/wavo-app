@@ -106,15 +106,15 @@ pub fn during(status: &Status) -> Option<String> {
 }
 
 fn no_model(load: bool) -> String {
-  let what = if load { "model failed to load" } else { "no model" };
-  format!("{what} · open models")
+  let what = if load { "model failed to load" } else { "download a model" };
+  what.to_owned()
 }
 
 /// The known causes in a few words, else the first clause, lowercase.
 fn short(error: &str) -> String {
   let lower = error.to_lowercase();
   let known = [
-    (&["no speech model", "no model"][..], "no model"),
+    (&["no speech model", "no model"][..], "download a model"),
     (&["microphone access", "not authorized", "permission"][..], "no microphone access"),
     (&["password", "secure"][..], "password field"),
     (&["focus moved"][..], "focus moved"),
@@ -524,7 +524,7 @@ mod tests {
       (refused(NotPasted::SecureField), true, "not pasted: password field"),
       (refused(NotPasted::Failed("x".into())), false, "collapse"),
       (ended(Outcome::NoText, None, None), false, "nothing recognized"),
-      (ended(Outcome::NoModel, Some("x is not on disk"), None), true, "no model · open models"),
+      (ended(Outcome::NoModel, Some("x is not on disk"), None), true, "download a model"),
       (ended(Outcome::Failed, Some("the engine panicked"), None), true, "engine crashed"),
     ];
     for (status, auto_paste, expected) in cases {
@@ -578,7 +578,7 @@ mod tests {
   #[test]
   fn an_error_widens_the_pill_holds_then_hides() {
     let (mut h, hidden) = hud();
-    h.app_mut().show(Show::Error("no model · open models".into()));
+    h.app_mut().show(Show::Error("not pasted: password field".into()));
     h.wait(ms(300));
     let img = h.render();
     let mid = MARGIN + HEIGHT / 2.0;

@@ -34,6 +34,8 @@ use crate::transfer::Imported;
 // MARK: Window
 
 pub const WIDTH: f32 = 560.0;
+/// The model to start with, wavo's own default: first in Available, its Download the blue one.
+const RECOMMENDED: &str = "parakeet-ultra";
 /// The height of the pages that scroll.
 pub const SCROLLING: f32 = 600.0;
 
@@ -438,6 +440,8 @@ impl Prefs {
         }
       });
     });
+
+    ui.form_section(fs, "", |ui| self.login(ui, fs));
   }
 
   /// While the system does not allow them, a row for the microphone and one for Accessibility.
@@ -624,7 +628,6 @@ const RETENTIONS: [(Retention, &str); 7] = [
 impl Prefs {
   fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
     ui.form_section(fs, "App", |ui| {
-      self.login(ui, fs);
       ui.form_row(fs, FormRow::new("Show the HUD at"), |ui| {
         let mut cur = self.settings.hud_position;
         if ui.id("hud").select(&mut cur, &HUDS).changed {
@@ -701,7 +704,7 @@ impl Prefs {
     let ended = |(_, size): &(PathBuf, u64)| format!("Exported · {}", size_text(*size));
     let shown = shown(&state, "export", "Copying the history…", ended);
     let running = shown.progress.is_some();
-    let row = FormRow::new("Export the history").info(EXPORT_HELP).tile(Tile::Icon(Icon::DOC));
+    let row = FormRow::new("Export history").info(EXPORT_HELP).tile(Tile::Icon(Icon::DOC));
     data_row(ui, fs, Id::of("export-row"), row, &shown, |ui| {
       if let Some(Transfer::Done((file, _))) = &state
         && ui.disabled(!file.is_file()).id("export-show").button(show).clicked
@@ -723,7 +726,7 @@ impl Prefs {
     let state = self.shell.import_state();
     let shown = shown(&state, "import", "Reading the archive…", imported_text);
     let running = shown.progress.is_some();
-    let row = FormRow::new("Import a history").info(IMPORT_HELP).tile(Tile::Icon(Icon::DOWNLOAD));
+    let row = FormRow::new("Import history").info(IMPORT_HELP).tile(Tile::Icon(Icon::DOWNLOAD));
     data_row(ui, fs, Id::of("import-row"), row, &shown, |ui| {
       if ui.disabled(running).id("import").button("Import…").clicked {
         let panel = FileDialog::open("Import").types(&["zip"]);
@@ -918,14 +921,16 @@ impl Prefs {
     let on_disk = |m: &ModelInfo| self.found.iter().any(|f| f.0.name == m.name);
     let downloaded: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| on_disk(m) && shown(m)).collect();
-    let remote: Vec<&'static ModelInfo> =
+    // The recommended first.
+    let mut remote: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| !on_disk(m) && shown(m)).collect();
+    remote.sort_by_key(|m| m.name != RECOMMENDED);
     let count = |n: usize| format!("{n} model{}", if n == 1 { "" } else { "s" });
     let mut act = None;
     if self.found.is_empty() {
       ui.form_section(fs, "Downloaded", |ui| {
         let row = FormRow::new("No model yet")
-          .caption("Download one below: dictation starts working once it is here.")
+          .caption("Download the recommended one below to start dictating.")
           .tile(Tile::Icon(Icon::DOWNLOAD));
         ui.form_row(fs, row, |_| {});
       });
@@ -1028,7 +1033,10 @@ impl Prefs {
       }
       Some(Download::Preparing) => (None, Some((None, "Preparing for the Neural Engine…".into()))),
       Some(Download::Failed(e)) => (Some(format!("Could not download: {e}")), None),
-      None => (Some(format!("{} · {}", m.languages, size_text(m.size))), None),
+      None => {
+        let first = if m.name == RECOMMENDED { "Recommended · " } else { "" };
+        (Some(format!("{first}{} · {}", m.languages, size_text(m.size))), None)
+      }
     };
 
     let failed = matches!(state, Some(Download::Failed(_)));
@@ -1037,7 +1045,12 @@ impl Prefs {
     data_row(ui, fs, Id::of(("model", m.name)), row, &shown, |ui| {
       if shown.progress.is_none() {
         let label = if failed { "Retry" } else { "Download" };
-        if ui.id(("download", m.name)).button(label).clicked {
+        let mut button = Button::new(label);
+        if m.name == RECOMMENDED {
+          button = button.primary();
+        }
+
+        if button.show(ui.id(("download", m.name))).clicked {
           self.shell.download(m);
         }
       } else {
@@ -2104,7 +2117,8 @@ mod tests {
     click(&mut h, Id::of("ane"));
     assert!(!fake.log().settings.neural_engine);
 
-    // Launch at login goes to the system, one change at a time; a refusal says why.
+    // Launch at login, on General, goes to the system, one change at a time; a refusal says why.
+    tab(&mut h, Page::General);
     click(&mut h, Id::of("login"));
     click(&mut h, Id::of("login"));
     assert_eq!(fake.log().autostarts, [true]);
