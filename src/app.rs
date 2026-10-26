@@ -755,7 +755,7 @@ impl window::Shell for MacShell {
 
     let (home, handle, state) = (self.home.clone(), self.handle.clone(), self.import.clone());
     spawn("import", move || {
-      let end = match transfer::import_in_app(&home, &file, progress(&state)) {
+      let end = match transfer::import(&home, &file, progress(&state)) {
         Ok(done) => {
           info!("imported {}: {done:?}", file.display());
           Transfer::Done(done)

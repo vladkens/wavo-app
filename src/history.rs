@@ -289,6 +289,13 @@ impl Db {
     self.get_all(qs, params![fold(search), limit as i64])
   }
 
+  /// Every entry: their count, their duration in ms and the first one's start (Unix ms).
+  pub fn get_total(&self) -> Result<(usize, i64, Option<i64>)> {
+    let qs = "SELECT COUNT(*), COALESCE(SUM(duration_ms), 0), MIN(created_at) FROM entries;";
+    let total = |r: &Row| Ok((r.get::<_, i64>(0)? as usize, r.get(1)?, r.get(2)?));
+    Ok(self.db.prepare_cached(qs)?.query_row([], total)?)
+  }
+
   /// The local days (`YYYY-MM-DD`, as [day_of]) from the one of `since` (Unix ms) on, with the
   /// count and the duration in ms of their entries that [Db::get_page] finds for `search`.
   pub fn get_days(&self, search: &str, since: i64) -> Result<HashMap<String, (usize, i64)>> {

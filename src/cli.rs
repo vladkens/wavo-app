@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! The command line: `export`, `import`, `reset` and `quit`; without a command the app runs.
+//! The command line: `reset` and `quit`; without a command the app runs.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -10,40 +10,8 @@ use std::{fs, thread};
 use anyhow::{Result, bail};
 use nimbo::autostart;
 
+use crate::INFO;
 use crate::ctl::{self, Claim};
-use crate::window::size_text;
-use crate::{INFO, transfer};
-
-pub fn export(file: &Path) -> Result<()> {
-  if file.exists() {
-    bail!("{} exists", file.display());
-  }
-
-  let done = transfer::export(&crate::home(), file, |_, _| {})?;
-  let size = size_text(done.bytes);
-  println!("{}: {} entries, {} recordings, {size}", file.display(), done.entries, done.recordings);
-  Ok(())
-}
-
-pub fn import(source: &Path, take_settings: bool, dry_run: bool) -> Result<()> {
-  let would = if dry_run { "would be " } else { "" };
-  let done = transfer::import(&crate::home(), source, take_settings, dry_run)?;
-  let r = &done;
-  let there = r.entries - r.added;
-  println!("{} entries: {} {would}added, {there} there already", r.entries, r.added);
-  println!("{} recordings {would}copied", r.copied);
-  if r.failed > 0 {
-    println!("{} recordings could not be copied: an import again copies them", r.failed);
-  }
-
-  match (done.settings, take_settings) {
-    (true, _) => println!("settings {would}replaced with the archive's"),
-    (false, true) => println!("no settings in the archive: these stay"),
-    (false, false) => {}
-  }
-
-  Ok(())
-}
 
 pub fn quit() -> Result<()> {
   if ctl::send(&crate::home(), "quit").is_err() {

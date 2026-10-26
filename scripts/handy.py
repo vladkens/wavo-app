@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Moves the history of Handy (https://github.com/cjpais/Handy), another local dictation app, into
-Wavo's, once: quit Wavo, then
+Wavo's, once:
 
-  python3 scripts/handy.py [--dry-run]
+  python3 scripts/handy.py
 
 Handy is not touched: its database is opened read-only, its recordings are only read. The script
-writes them into a temporary Wavo archive and has the installed Wavo import it (its `import`
-command, as for an archive from another computer); entries Wavo has already are left, so running
-it twice adds nothing. $HANDY_DIR is Handy's data dir, $WAVO_APP the Wavo binary
-(/Applications/Wavo.app/Contents/MacOS/wavo-app); $WAVO_HOME goes to it as it does to the app.
+writes them into a Wavo archive, ~/Downloads/handy-export.zip, for Wavo's Advanced › Data ›
+Import… (as an archive from another computer); entries Wavo has already are left, so importing it
+twice adds nothing. $HANDY_DIR is Handy's data dir.
 
 Handy's data dir is ~/Library/Application Support/com.pais.handy by default. It holds `history.db`
 and `recordings/`. As of Handy commit 5a9451e70aedc90648ce2befd9d7e0304746f9c1
@@ -34,7 +33,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import time
@@ -42,7 +40,7 @@ import zipfile
 from pathlib import Path
 
 DEFAULT_DIR = Path.home() / "Library/Application Support/com.pais.handy"
-DEFAULT_APP = Path("/Applications/Wavo.app/Contents/MacOS/wavo-app")
+OUT = Path.home() / "Downloads/handy-export.zip"
 MODEL = "handy"
 # Handy's recordings: a 44-byte header, then 16 kHz mono 16-bit samples, 32 bytes a ms.
 WAV_HEADER = 44
@@ -141,22 +139,14 @@ def archive(src: Path, out: Path) -> tuple[int, int]:
 
 
 def main() -> int:
-    args = sys.argv[1:]
-    if args not in ([], ["--dry-run"]):
-        sys.exit("usage: python3 scripts/handy.py [--dry-run]")
+    if sys.argv[1:]:
+        sys.exit("usage: python3 scripts/handy.py")
 
     src = Path(os.environ.get("HANDY_DIR") or DEFAULT_DIR)
-    wavo = Path(os.environ.get("WAVO_APP") or DEFAULT_APP)
-    if not wavo.is_file():
-        sys.exit(f"no Wavo at {wavo}: install it (make install) or set WAVO_APP")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        out = Path(tmp) / "handy.zip"
-        entries, recordings = archive(src, out)
-        print(f"Handy in {src}: {entries} entries, {recordings} recordings", flush=True)
-        done = subprocess.run([wavo, "import", out, *args])
-
-    return done.returncode
+    entries, recordings = archive(src, OUT)
+    print(f"Handy in {src}: {entries} entries, {recordings} recordings")
+    print(f"{OUT}: import it in Wavo, Advanced › Data › Import…")
+    return 0
 
 
 if __name__ == "__main__":

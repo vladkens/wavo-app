@@ -17,7 +17,8 @@ use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
 use nimbo::{
   Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
-  FormStyle, Hotkey, Icon, Id, Select, Style, TextStyle, Tile, Ui, Weight, grow, open, paths, px,
+  FormStyle, Hotkey, Icon, Id, Key, NamedKey, Select, Style, TextStyle, Tile, Ui, Weight, grow,
+  open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -307,6 +308,7 @@ impl App for Prefs {
 
       if self.page == Page::History {
         self.history_foot(ui, &fs);
+        self.history_total(ui, &fs);
       }
     });
     self.confirm(ui);
@@ -319,16 +321,29 @@ impl App for Prefs {
     }
   }
 
-  /// The file Export's or Import's panel picked.
-  fn event(&mut self, _cx: &mut Cx, ev: &Event) -> bool {
-    let Event::FileDialog(answer) = ev else { return false };
-    match (self.panel.take(), answer) {
-      (Some(Panel::Export), Some(file)) => self.shell.export(file.clone()),
-      (Some(Panel::Import), Some(file)) => self.shell.import(file.clone()),
-      _ => {}
-    }
+  /// The file Export's or Import's panel picked; Esc, or a click on nothing above the panel
+  /// under the history, unselects its dictation.
+  fn event(&mut self, cx: &mut Cx, ev: &Event) -> bool {
+    let history = self.page == Page::History;
+    match ev {
+      Event::FileDialog(answer) => {
+        match (self.panel.take(), answer) {
+          (Some(Panel::Export), Some(file)) => self.shell.export(file.clone()),
+          (Some(Panel::Import), Some(file)) => self.shell.import(file.clone()),
+          _ => {}
+        }
 
-    true
+        true
+      }
+      Event::KeyDown(k) if history && k.key == Key::Named(NamedKey::Escape) => {
+        self.history.selected.take().is_some()
+      }
+      Event::MouseDown { pos, .. } if history && cx.target().is_none() => {
+        let above = pos.y < cx.size.h - FOOT_H - TOTAL_H;
+        above && self.history.selected.take().is_some()
+      }
+      _ => false,
+    }
   }
 }
 
@@ -784,6 +799,21 @@ fn progress_line(ui: &mut Ui, fs: &FormStyle, k: Option<f32>, text: &str) {
     ui.col(Style::new().w(px(120.0)), |ui| ui.progress(k));
     ui.text(text, fs.caption.nowrap());
   });
+}
+
+/// `86,286`.
+fn thousands(n: usize) -> String {
+  let digits = n.to_string();
+  let mut s = String::new();
+  for (i, c) in digits.chars().enumerate() {
+    if i > 0 && (digits.len() - i).is_multiple_of(3) {
+      s.push(',');
+    }
+
+    s.push(c);
+  }
+
+  s
 }
 
 /// `114 of 272 MB`, `0.4 of 1.7 GB`.
@@ -1265,6 +1295,8 @@ struct HistoryPage {
   entries: Vec<Entry>,
   /// The count and duration of each day shown, all its entries, not only those loaded.
   days: HashMap<String, (usize, i64)>,
+  /// The whole history's ([Db::get_total]), read again when it changes.
+  total: Option<(usize, i64, Option<i64>)>,
   /// Show More clicked so many times.
   pages: usize,
   more: bool,
@@ -1284,6 +1316,8 @@ impl HistoryPage {
       return;
     }
 
+    // The history changed, not only the search or the pages shown.
+    let moved = self.loaded.as_ref().is_some_and(|k| k.2 != key.2);
     self.loaded = Some(key.clone());
     if self.db.is_none() {
       match History::open(home) {
@@ -1296,6 +1330,10 @@ impl HistoryPage {
     }
 
     let db = &self.db.as_ref().unwrap().db;
+    if self.total.is_none() || moved {
+      self.total = db.get_total().inspect_err(|e| warn!("history: {e:#}")).ok();
+    }
+
     let limit = (self.pages + 1) * PAGE_SIZE;
     let page = db.get_page(&key.0, limit + 1).and_then(|mut entries| {
       let more = entries.len() > limit;
@@ -1390,6 +1428,8 @@ enum Act {
 
 /// The panel under the list, with the selected dictation's whole text and its actions.
 const FOOT_H: f32 = 150.0;
+/// The line under it with the whole history.
+const TOTAL_H: f32 = 30.0;
 
 impl Prefs {
   fn history_head(&mut self, ui: &mut Ui, s: Style) {
@@ -1518,10 +1558,31 @@ impl Prefs {
     self.history_act(ui, act);
   }
 
+  /// Under the panel, the whole history: `86,286 dictations · 312 h · since March 14, 2026`.
+  fn history_total(&self, ui: &mut Ui, fs: &FormStyle) {
+    let Some((n, ms, Some(first))) = self.history.total.filter(|t| t.0 > 0) else { return };
+    let what = if n == 1 { "dictation" } else { "dictations" };
+    let spoken = match ms / 60_000 {
+      m if m < 60 => format!("{m} min"),
+      m => format!("{} h", m / 60),
+    };
+    let since = local_time(first).map(|t| format!("{} {}, {}", t.month_name(), t.day, t.year));
+    let mut text = format!("{} {what} · {spoken}", thousands(n));
+    if let Some(since) = since {
+      text += &format!(" · since {since}");
+    }
+
+    ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
+    ui.row(Style::new().w(grow()).h(px(TOTAL_H)).align(Align::Center, Align::Center), |ui| {
+      ui.id("history-total").text(&text, fs.note);
+    });
+  }
+
   fn history_act(&mut self, ui: &mut Ui, act: Option<Act>) {
     let h = &mut self.history;
     match act {
-      Some(Act::Select(id)) => h.selected = Some(id),
+      // Clicked again, it is unselected.
+      Some(Act::Select(id)) => h.selected = (h.selected != Some(id)).then_some(id),
       Some(Act::Copy(text)) => {
         ui.clipboard().write(&text);
         h.note = Some("Copied to the clipboard".into());
@@ -2141,6 +2202,20 @@ mod tests {
     assert!(h.rect(Id::of(("retranscribe", ids[0]))).is_none());
     click(&mut h, Id::of(("text", ids[0])));
     assert_eq!(h.app().history.selected, Some(ids[0]));
+    let total = h.text(Id::of("history-total")).unwrap();
+    assert!(total.starts_with("2 dictations · ") && total.contains(" · since "), "{total}");
+
+    // Unselected by a click on it again, by Esc, and by a click on nothing above the panel.
+    click(&mut h, Id::of(("text", ids[0])));
+    assert_eq!(h.app().history.selected, None);
+    click(&mut h, Id::of(("text", ids[0])));
+    h.key(NamedKey::Escape, Modifiers::empty());
+    assert_eq!(h.app().history.selected, None);
+    click(&mut h, Id::of(("text", ids[0])));
+    let last = h.rect(Id::of(("text", ids[1]))).unwrap();
+    h.click(last.x, last.y + last.h + 60.0);
+    assert_eq!(h.app().history.selected, None);
+    click(&mut h, Id::of(("text", ids[0])));
 
     // Transcribed again from the panel: its new text came, and the one before comes back.
     click(&mut h, Id::of(("retranscribe", ids[0])));
@@ -2168,6 +2243,12 @@ mod tests {
     assert!(
       h.rect(Id::of(("copy", ids[1]))).is_some() && h.rect(Id::of(("copy", ids[0]))).is_none()
     );
+  }
+
+  #[test]
+  fn numbers_read_in_thousands() {
+    let got: Vec<_> = [0, 7, 999, 1_000, 86_286, 1_234_567].map(thousands).into();
+    assert_eq!(got, ["0", "7", "999", "1,000", "86,286", "1,234,567"]);
   }
 
   /// The first launch: a row for each permission missing, with Allow, gone once given and the

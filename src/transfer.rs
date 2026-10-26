@@ -1,12 +1,10 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! Moving the history between computers: Export in the settings window or `wavo-app export`
-//! writes an archive; Import or `wavo-app import <file>` takes one (scripts/handy.py makes one of
-//! Handy's history). A zip, stored without compression
+//! Moving the history between computers: Export in the settings window writes an archive, Import
+//! takes one (scripts/handy.py makes one of Handy's history). A zip, stored without compression
 //! (recordings do not compress), in this order:
 //!
 //! - `wavo-export.json`, the manifest: an archive without it is refused;
-//! - `settings.json`, if there are settings;
 //! - `history.db`, a consistent copy of the history (`VACUUM INTO`, while the app may run);
 //! - `recordings/<name>`, the recordings of its entries, as they name them.
 //!
@@ -15,7 +13,7 @@
 //! recording. The new entries go in first, in one transaction, naming the recordings they will
 //! have, and busy: the running app's session leaves them alone. The recordings are copied after,
 //! each through a `.part` file, so the next import finishes one cut short; then the entries are
-//! idle. The command holds the app's single-instance lock: it refuses while Wavo runs.
+//! idle.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -27,13 +25,10 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use zip::read::ZipFile;
-use zip::result::ZipError;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::ctl::{self, Claim};
 use crate::history::{DB_FILE, Db, Entry, History, RECORDINGS_DIR, Recordings, now_ms};
-use crate::settings;
 
 /// The archive's layout; one from a newer Wavo is refused.
 const FORMAT: u32 = 1;
@@ -58,7 +53,7 @@ pub struct Exported {
   pub bytes: u64,
 }
 
-/// What an import did, or would do in a dry run.
+/// What an import did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Imported {
   /// Entries in the archive: with a recording or text.
@@ -69,14 +64,12 @@ pub struct Imported {
   pub copied: usize,
   /// Recordings that could not be copied or were not in the archive; an import again copies them.
   pub failed: usize,
-  /// The archive's settings replaced these.
-  pub settings: bool,
 }
 
 // MARK: Export
 
-/// Writes the settings, the history and its recordings in `home` into the archive `file`, replacing
-/// it; `progress` hears the bytes of them written of the total after each file.
+/// Writes the history in `home` and its recordings into the archive `file`, replacing it;
+/// `progress` hears the bytes of them written of the total after each file.
 pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> Result<Exported> {
   let db = home.join(DB_FILE);
   if !db.is_file() {
@@ -112,11 +105,9 @@ pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
   let manifest =
     Manifest { format: FORMAT, version: env!("CARGO_PKG_VERSION").into(), created_at: now_ms() };
   let dir = home.join(RECORDINGS_DIR);
-  let settings = home.join(settings::FILE);
   let size = |path: &Path| fs::metadata(path).map_or(0, |m| m.len());
   let sizes: Vec<u64> = names.iter().map(|name| size(&dir.join(name))).collect();
-  let head = size(&settings) + size(&copy);
-  let total = head + sizes.iter().sum::<u64>();
+  let total = size(&copy) + sizes.iter().sum::<u64>();
   let mut recordings = 0;
   via_part(file, |part| {
     let out = File::create(part).with_context(|| format!("create {}", part.display()))?;
@@ -126,14 +117,9 @@ pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
     let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     zip.start_file(MANIFEST, stored)?;
     serde_json::to_writer_pretty(&mut zip, &manifest)?;
-    if settings.is_file() {
-      zip.start_file(settings::FILE, stored)?;
-      io::copy(&mut File::open(&settings)?, &mut zip)?;
-    }
-
     zip.start_file(DB_FILE, stored)?;
     io::copy(&mut File::open(&copy)?, &mut zip)?;
-    let mut done = head;
+    let mut done = size(&copy);
     progress(done, total);
     for (name, bytes) in names.iter().zip(sizes) {
       // One deleted since the listing is left out: an import counts it as not copied.
@@ -161,83 +147,18 @@ pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
 
 // MARK: Import
 
-/// Imports the archive `file` into `home`, unless Wavo runs for it (the app imports with
-/// [import_in_app]); `take_settings` replaces the settings with the archive's. A dry run says what
-/// it would do and writes nothing.
-pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> Result<Imported> {
-  let _lock = match dry_run {
-    true => None,
-    false => {
-      fs::create_dir_all(home).with_context(|| format!("create {}", home.display()))?;
-      match ctl::claim(home)? {
-        Claim::Server(lock) => Some(lock),
-        Claim::Running => bail!("Wavo is running for {}: quit it first", home.display()),
-      }
-    }
-  };
-
-  import_into(home, file, take_settings, dry_run, |_, _| {})
-}
-
-/// [import] by the app, which holds the lock: the history without the settings; `progress` hears
-/// how far through the archive its recordings are, in bytes.
-pub fn import_in_app(home: &Path, file: &Path, progress: impl FnMut(u64, u64)) -> Result<Imported> {
-  import_into(home, file, false, false, progress)
-}
-
-fn import_into(
-  home: &Path,
-  file: &Path,
-  take_settings: bool,
-  dry_run: bool,
-  mut progress: impl FnMut(u64, u64),
-) -> Result<Imported> {
-  // A dry run reads a copy of the history and lists the recordings: nothing of the home is
-  // created or migrated.
-  let history = if dry_run { None } else { Some(History::open(home)?) };
-  let ours = match &history {
-    Some(h) => h.db.get_entries()?,
-    None if home.join(DB_FILE).is_file() => {
-      let scratch = Scratch::new()?;
-      let copy = scratch.0.join(DB_FILE);
-      snapshot(&home.join(DB_FILE), &copy)?;
-      Db::open(&copy)?.get_entries()?
-    }
-    None => Vec::new(),
-  };
-  let starts: HashMap<i64, Option<String>> =
-    ours.into_iter().map(|e| (e.created_at, e.audio_path)).collect();
-  let on_disk = match &history {
-    Some(h) => h.recordings.list()?,
-    None if home.join(RECORDINGS_DIR).is_dir() => Recordings::open(home)?.list()?,
-    None => Vec::new(),
-  };
-  let on_disk: HashSet<String> = on_disk.into_iter().collect();
-
+/// Adds the dictations of the archive `file` the history in `home` does not have, beside the
+/// running app; `progress` hears how far through the archive its recordings are, in bytes.
+pub fn import(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> Result<Imported> {
+  // The archive is checked before the history is opened.
   let reader = File::open(file).with_context(|| format!("open {}", file.display()))?;
-  let not_ours = || format!("{} is not an archive of `wavo-app export`", file.display());
+  let not_ours = || format!("{} is not an archive of Wavo's Export", file.display());
   let mut archive = ZipArchive::new(BufReader::new(reader)).with_context(not_ours)?;
   let manifest = archive.by_name(MANIFEST).with_context(not_ours)?;
   let manifest: Manifest = serde_json::from_reader(manifest).with_context(not_ours)?;
   if manifest.format > FORMAT {
     bail!("{} is from a newer Wavo ({}): update this one first", file.display(), manifest.version);
   }
-
-  let settings = match archive.by_name(settings::FILE) {
-    Ok(mut item) => {
-      let mut bytes = Vec::new();
-      item.read_to_end(&mut bytes)?;
-      // Checked before anything is written; values this Wavo does not know come along.
-      let object = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes);
-      if take_settings && object.is_err() {
-        bail!("the archive's settings are not readable: import without --settings");
-      }
-
-      Some(bytes)
-    }
-    Err(ZipError::FileNotFound) => None,
-    Err(e) => return Err(e).with_context(not_ours),
-  };
 
   let scratch = Scratch::new()?;
   let path = scratch.0.join(DB_FILE);
@@ -246,20 +167,17 @@ fn import_into(
   io::copy(&mut db, &mut File::create(&path)?)?;
   drop(db);
 
+  let history = History::open(home)?;
+  let starts: HashMap<i64, Option<String>> =
+    history.db.get_entries()?.into_iter().map(|e| (e.created_at, e.audio_path)).collect();
+  let on_disk: HashSet<String> = history.recordings.list()?.into_iter().collect();
   let plan = Plan::new(&starts, &on_disk, Db::open(&path)?.get_entries()?);
   let mut done = Imported { entries: plan.entries, added: plan.new.len(), ..Imported::default() };
-  if dry_run {
-    done.copied = plan.new.iter().filter(|(_, audio)| audio.is_some()).count();
-    done.copied += plan.missing.len();
-    done.settings = take_settings && settings.is_some();
-    return Ok(done);
-  }
 
-  // In the archive's order, read front to back.
-  // Nothing fails between adding the entries and marking them idle.
+  // In the archive's order, read front to back. Nothing fails between adding the entries and
+  // marking them idle.
   let (prefix, len) = (format!("{RECORDINGS_DIR}/"), fs::metadata(file)?.len());
-  let history = history.as_ref().unwrap();
-  let (ids, mut copies) = plan.add(history, &starts)?;
+  let (ids, mut copies) = plan.add(&history, &starts)?;
   for i in 0..archive.len() {
     let dst = match archive.name_for_index(i) {
       Some(Ok(name)) => name.strip_prefix(&prefix).and_then(|rec| copies.remove(rec)),
@@ -284,12 +202,6 @@ fn import_into(
 
   done.failed += copies.len(); // named by the entries, not in the archive
   history.db.mark_idle_entries(&ids)?;
-
-  if let Some(bytes) = settings.filter(|_| take_settings) {
-    fs::write(home.join(settings::FILE), bytes)?;
-    done.settings = true;
-  }
-
   Ok(done)
 }
 
@@ -419,6 +331,7 @@ mod tests {
   use std::io::Write;
 
   use super::*;
+  use crate::ctl::{self, Claim};
   use crate::testing::{TempDir, entry_ids, tone, wav_count, write_wav};
 
   /// 2026-10-09 00:00 UTC.
@@ -437,14 +350,9 @@ mod tests {
     path
   }
 
-  fn hotkey(home: &Path) -> String {
-    settings::Settings::load(&home.join(settings::FILE)).0.hotkey
-  }
-
   #[test]
   fn moves_the_history_to_another_home() {
     let (from, to, out) = (TempDir::new("tr-from"), TempDir::new("tr-to"), TempDir::new("tr-out"));
-    fs::write(from.path().join(settings::FILE), r#"{"hotkey": "ctrl+x", "newer": 1}"#).unwrap();
     let h = History::open(from.path()).unwrap();
     let wav = add(&h, NOW, "hello", Some(0.5));
     add(&h, NOW + 1_000, "", Some(0.25)); // no text yet: comes with its recording
@@ -457,29 +365,27 @@ mod tests {
     assert_eq!((exported.entries, exported.recordings), (3, 2));
     assert!(last.1 > 0 && last.0 == last.1, "progress ends at the total: {last:?}");
 
+    // Beside the app, which holds the lock.
     add(&History::open(to.path()).unwrap(), NOW - 1, "theirs", Some(0.1));
-    let expected = Imported { entries: 3, added: 3, copied: 2, failed: 0, settings: true };
-    assert_eq!(import(to.path(), &file, true, true).unwrap(), expected, "a dry run");
-    assert_eq!(entry_ids(to.path()).len(), 1);
+    let Claim::Server(_app) = ctl::claim(to.path()).unwrap() else { panic!("taken") };
+    let mut last = (0, 0);
+    let done = import(to.path(), &file, |done, total| last = (done, total)).unwrap();
+    assert_eq!(done, Imported { entries: 3, added: 3, copied: 2, failed: 0 });
+    assert!(last.0 > 0 && last.0 <= last.1, "{last:?}");
 
-    let done = import(to.path(), &file, false, false).unwrap();
-    assert_eq!(done, Imported { settings: false, ..expected });
     let h = History::open(to.path()).unwrap();
     let entries = h.db.get_entries().unwrap();
-    let got: Vec<_> = entries.iter().map(|e| (e.created_at, e.text.as_str())).collect();
-    assert_eq!(
-      got,
-      [(NOW - 1, "theirs"), (NOW, "hello"), (NOW + 1_000, ""), (NOW + 2_000, "gone")]
-    );
+    let got: Vec<_> = entries.iter().map(|e| (e.created_at, e.text.as_str(), e.busy)).collect();
+    let want = [(NOW - 1, "theirs"), (NOW, "hello"), (NOW + 1_000, ""), (NOW + 2_000, "gone")];
+    assert_eq!(got, want.map(|(at, text)| (at, text, false)), "busy only until copied");
     assert_eq!(fs::read(h.audio_file(&entries[1]).unwrap()).unwrap(), fs::read(wav).unwrap());
     assert_eq!(entries[3].audio_path, None);
     assert_eq!(wav_count(&to.path().join(RECORDINGS_DIR)), 3);
 
-    // Again, with the settings as they are: no entry twice.
-    let again = import(to.path(), &file, true, false).unwrap();
-    assert_eq!(again, Imported { entries: 3, settings: true, ..Imported::default() });
-    assert_eq!((entry_ids(to.path()).len(), hotkey(to.path())), (4, "ctrl+x".into()));
-    assert!(fs::read_to_string(to.path().join(settings::FILE)).unwrap().contains("newer"));
+    // Again: no entry twice.
+    let again = import(to.path(), &file, |_, _| {}).unwrap();
+    assert_eq!(again, Imported { entries: 3, ..Imported::default() });
+    assert_eq!(entry_ids(to.path()).len(), 4);
   }
 
   /// An archive cut short is refused whole; a recording an import cut short did not copy comes
@@ -494,37 +400,20 @@ mod tests {
     export(from.path(), &file, |_, _| {}).unwrap();
     let bytes = fs::read(&file).unwrap();
     fs::write(&cut, &bytes[..bytes.len() - 100]).unwrap(); // its index, at the end
-    assert!(import(to.path(), &cut, false, false).is_err());
-    assert!(entry_ids(to.path()).is_empty());
+    assert!(import(to.path(), &cut, |_, _| {}).is_err());
+    assert!(!to.path().join(DB_FILE).exists(), "refused before the history is opened");
 
-    import(to.path(), &file, false, false).unwrap();
+    import(to.path(), &file, |_, _| {}).unwrap();
     let h = History::open(to.path()).unwrap();
     let entries = h.db.get_entries().unwrap();
     fs::remove_file(h.audio_file(&entries[1]).unwrap()).unwrap();
-    let done = import(to.path(), &file, false, false).unwrap();
+    let done = import(to.path(), &file, |_, _| {}).unwrap();
     assert_eq!((done.added, done.copied), (0, 1));
     assert!(h.audio_file(&entries[1]).is_some());
   }
 
-  /// The app imports beside the lock it holds, its progress going through the archive.
   #[test]
-  fn the_app_imports_while_it_runs() {
-    let (from, to, out) = (TempDir::new("app-from"), TempDir::new("app-to"), TempDir::new("app"));
-    add(&History::open(from.path()).unwrap(), NOW, "one", Some(0.5));
-    let file = out.path().join("wavo.zip");
-    export(from.path(), &file, |_, _| {}).unwrap();
-
-    let Claim::Server(_app) = ctl::claim(to.path()).unwrap() else { panic!("taken") };
-    let mut last = (0, 0);
-    let done = import_in_app(to.path(), &file, |done, total| last = (done, total)).unwrap();
-    assert_eq!((done.added, done.copied), (1, 1));
-    assert!(last.0 > 0 && last.0 <= last.1, "{last:?}");
-    let entries = History::open(to.path()).unwrap().db.get_entries().unwrap();
-    assert!(!entries[0].busy, "busy only until its recording is in");
-  }
-
-  #[test]
-  fn refuses_a_newer_archive_and_a_running_wavo() {
+  fn refuses_a_newer_archive() {
     let (home, out) = (TempDir::new("tr-refuse"), TempDir::new("tr-refuse-out"));
     let path = out.path().join("newer.zip");
     let mut zip = ZipWriter::new(File::create(&path).unwrap());
@@ -532,12 +421,8 @@ mod tests {
     zip.write_all(br#"{"format": 2, "version": "9.0", "created_at": 0}"#).unwrap();
     zip.finish().unwrap();
 
-    let err = format!("{:#}", import(home.path(), &path, false, true).unwrap_err());
+    let err = format!("{:#}", import(home.path(), &path, |_, _| {}).unwrap_err());
     assert!(err.contains("newer Wavo"), "{err}");
-    assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0, "a dry run writes nothing");
-
-    let Claim::Server(_app) = ctl::claim(home.path()).unwrap() else { panic!("taken") };
-    let err = import(home.path(), &path, false, false).unwrap_err().to_string();
-    assert!(err.contains("running"), "{err}");
+    assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0, "nothing written");
   }
 }
