@@ -1318,6 +1318,10 @@ fn imported_text(r: &Imported) -> String {
 
 // MARK: History
 
+/// How long a search stays the same before the history is read for it: a whole read takes 0.1 s,
+/// too long for each key typed.
+const SEARCH_WAIT: Duration = Duration::from_millis(150);
+
 /// A calendar day: year, month, day.
 type Day = (i32, u32, u32);
 
@@ -1335,6 +1339,8 @@ struct HistoryPage {
   total: Option<(usize, i64, Option<i64>)>,
   /// What the entries were loaded for: the search and the revision.
   loaded: Option<(String, u64)>,
+  /// The search as typed last, and when ([Ui::now]).
+  typed: Option<(String, Duration)>,
   playing: Option<(i64, Playback)>,
   /// The entry the panel under the list shows.
   selected: Option<i64>,
@@ -1343,10 +1349,23 @@ struct HistoryPage {
 }
 
 impl HistoryPage {
-  fn load(&mut self) {
-    let key = (self.search.trim().to_owned(), self.revision);
+  /// Reads the history again when it or the search changed; a search being typed keeps the last
+  /// result until it stays the same for [SEARCH_WAIT]. Returns how long it still waits.
+  fn load(&mut self, now: Duration) -> Option<Duration> {
+    let search = self.search.trim().to_owned();
+    if self.typed.as_ref().is_none_or(|(s, _)| *s != search) {
+      self.typed = Some((search.clone(), now));
+    }
+
+    let since = self.typed.as_ref().map_or(SEARCH_WAIT, |(_, at)| now.saturating_sub(*at));
+    let other = self.loaded.as_ref().is_some_and(|(s, _)| *s != search);
+    if other && since < SEARCH_WAIT {
+      return Some(SEARCH_WAIT - since);
+    }
+
+    let key = (search, self.revision);
     if self.loaded.as_ref() == Some(&key) {
-      return;
+      return None;
     }
 
     // The history changed, not only the search.
@@ -1354,7 +1373,7 @@ impl HistoryPage {
     self.loaded = Some(key.clone());
     let Some(history) = &self.db else {
       self.note = Some("Could not open the history: see the log".into());
-      return;
+      return None;
     };
 
     let db = &history.db;
@@ -1367,6 +1386,8 @@ impl HistoryPage {
       Ok(entries) => (self.days, self.entries) = (days(&entries), entries),
       Err(e) => self.note = Some(format!("Could not read the history: {e:#}")),
     }
+
+    None
   }
 }
 
@@ -1494,7 +1515,9 @@ impl Prefs {
       h.note = Some(format!("Could not play the recording: {e}"));
     }
 
-    h.load();
+    if let Some(wait) = h.load(ui.now()) {
+      ui.request_frame_in(wait);
+    }
     // Deleted, or out of the search.
     if h.selected.is_some_and(|id| !h.entries.iter().any(|e| e.id == id)) {
       h.selected = None;
@@ -2264,10 +2287,12 @@ mod tests {
     let want = [Request::Retranscribe(ids[0]), Request::Restore(ids[0]), Request::Delete(ids[0])];
     assert_eq!(fake.log().requests, want);
 
-    // The search finds by text, in any case.
+    // The search finds by text, in any case, once it is typed: meanwhile the last result stays.
     click(&mut h, Id::of("history-search"));
     h.type_text("INVOICE");
     h.frame();
+    assert!(h.rect(Id::of(("copy", ids[0]))).is_some(), "the last result while it is typed");
+    h.wait(SEARCH_WAIT);
     h.frame();
     assert!(
       h.rect(Id::of(("copy", ids[1]))).is_some() && h.rect(Id::of(("copy", ids[0]))).is_none()
