@@ -173,11 +173,11 @@ pub fn menu(
 ) -> Menu {
   let header = [Some(TITLE), hotkey, state(status)].into_iter().flatten();
   let header = header.collect::<Vec<_>>().join(" · ");
-  let mut items = vec![Item::new("header", &header).enabled(false)];
+  let mut items = vec![Item::new("header", &fit(&header, LABEL)).enabled(false)];
   for w in warnings {
     // Downloading a first model is a step of the setup, not a problem.
     let mark = if w.id == "warn:download" { "" } else { "⚠︎ " };
-    items.push(Item::new(w.id, &format!("{mark}{}", w.text)).enabled(w.action));
+    items.push(Item::new(w.id, &format!("{mark}{}", fit(&w.text, LABEL))).enabled(w.action));
   }
 
   let last = status.last.as_ref().is_some_and(|l| !l.text.is_empty());
@@ -207,24 +207,40 @@ pub fn menu(
 
 /// The longest microphone or model in the menu.
 const NAME: usize = 32;
+/// The longest of any other label: a warning, the header.
+const LABEL: usize = 48;
 
 fn with_key(item: Item, key: &str) -> Item {
   if cfg!(target_os = "macos") { item.key(key) } else { item }
 }
 
-/// A microphone or a model as the menu and its submenus name it: a longer one shortened at a word,
-/// inside its brackets when it has some: `System Default (MacBook Pro…)`.
+/// A microphone or a model as the menu and its submenus name it ([fit] to [NAME]).
 fn short(name: &str) -> String {
-  if name.chars().count() <= NAME {
-    return name.to_owned();
+  fit(name, NAME)
+}
+
+/// `text` in at most `max` characters, as every menu label: the part in brackets shortened first
+/// (`System Default (MacBook Pro…)`), or left out when too little of it would show (`No sound from
+/// Line In: check the microphone`); else cut at a word, with "…".
+fn fit(text: &str, max: usize) -> String {
+  let len = |s: &str| s.chars().count();
+  if len(text) <= max {
+    return text.to_owned();
   }
 
-  match name.strip_suffix(')').and_then(|n| n.split_once(" (")) {
-    Some((head, inner)) if head.chars().count() + 12 <= NAME => {
-      format!("{head} ({})", shorten(inner, NAME - head.chars().count() - 4))
+  if let Some((head, rest)) = text.split_once(" (")
+    && let Some((inner, tail)) = rest.split_once(')')
+  {
+    // " (", "…)" around what shows of it.
+    let room = max.saturating_sub(len(head) + len(tail) + 4);
+    if room >= 8 {
+      return format!("{head} ({}){tail}", shorten(inner, room));
     }
-    _ => shorten(name, NAME - 1),
+
+    return fit(&format!("{head}{tail}"), max);
   }
+
+  shorten(text, max - 1)
 }
 
 /// The microphone in use, and the submenu: the system default, then the devices, the one in use
@@ -356,6 +372,13 @@ mod tests {
     let devices_got = &got[2..];
     assert_eq!(devices_got, [("MacBook Pro Microphone", false), (devices[1].name.as_str(), true)]);
     assert_eq!(short("a-very-long-model-name-for-the-menu-q8"), "a-very-long-model-name-for-the…");
+    // Any label: a device in the middle of a warning goes when too little of it would show.
+    let warning = "No sound from Line In (High Definition Audio Device): check the microphone";
+    assert_eq!(fit(warning, LABEL), "No sound from Line In: check the microphone");
+    let warning = "No sound from USB Mic (Elgato Wave:3 Microphone Array): check the microphone";
+    assert_eq!(fit(warning, 60), "No sound from USB Mic (Elgato Wave:3…): check the microphone");
+    let error = "The last dictation failed: the engine did not answer in time and was restarted";
+    assert!(fit(error, LABEL).ends_with('…') && fit(error, LABEL).chars().count() <= LABEL);
 
     let items = menu(None, &s, &list, &[], (&devices[..], None), &[], &Pick::default()).items;
     let mic = items.iter().find(|i| i.id == "mic").unwrap();
