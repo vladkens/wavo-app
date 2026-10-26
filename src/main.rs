@@ -24,6 +24,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use nimbo::desktop::Launcher;
 use nimbo::{AppInfo, Config, Presence};
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::prelude::*;
@@ -31,11 +32,20 @@ use tracing_subscriber::prelude::*;
 const INFO: AppInfo =
   AppInfo { id: "me.vladkens.wavo", name: "Wavo", presence: Presence::Accessory };
 
-/// `cfg` with the app's icon in the title bar and taskbar, `assets/icon.png` at 256 px from
-/// build.rs; macOS shows the bundle's.
+/// `assets/icon.png` at 256 px from build.rs, raw RGBA.
+const ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/window-icon.rgba"));
+
+/// The launcher entry on Linux, as the AppImage's .desktop has it (scripts/dist.py).
+const LAUNCHER: Launcher = Launcher {
+  comment: "Local dictation: hold a hotkey, speak, and the text lands where you were typing",
+  categories: &["Utility", "Accessibility"],
+  icon: (256, ICON),
+};
+
+/// `cfg` with the app's icon in the title bar and taskbar; macOS shows the bundle's.
 fn with_icon(cfg: Config) -> Config {
   #[cfg(not(target_os = "macos"))]
-  let cfg = cfg.icon(256, include_bytes!(concat!(env!("OUT_DIR"), "/window-icon.rgba")));
+  let cfg = cfg.icon(256, ICON);
 
   cfg
 }

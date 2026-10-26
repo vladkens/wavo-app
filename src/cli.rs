@@ -25,9 +25,10 @@ pub fn send(cmd: &str) -> Result<()> {
 
 // MARK: Uninstall
 
-/// Removes Wavo and all it left: quits it, turns launch at login off, resets its permissions and
-/// macOS defaults, deletes its data, its caches (wavo's, the models built for the Neural Engine,
-/// too), the models it downloaded into the Hugging Face cache, and the app it runs from.
+/// Removes Wavo and all it left: quits it, turns launch at login off, removes its launcher entry
+/// (Linux), resets its permissions and macOS defaults, deletes its data, its caches (wavo's, the
+/// models built for the Neural Engine, too), the models it downloaded into the Hugging Face cache,
+/// and the app it runs from.
 pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
   let home = crate::home();
   let hub = Hub::new();
@@ -40,7 +41,9 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
     models.iter().for_each(|(m, _)| println!("the model {} in {hub}", m.name));
   };
   if dry_run {
-    println!("would quit Wavo, turn launch at login off, reset its permissions and defaults");
+    println!(
+      "would quit Wavo, turn launch at login off, remove its launcher entry, reset its permissions and defaults"
+    );
     list();
     return Ok(());
   }
@@ -60,6 +63,13 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
   match off {
     Ok(_) => println!("launch at login off"),
     Err(e) => println!("launch at login: {e}"),
+  }
+
+  if cfg!(target_os = "linux") {
+    match nimbo::desktop::uninstall(&INFO) {
+      Ok(()) => println!("the launcher entry removed"),
+      Err(e) => println!("the launcher entry: {e}"),
+    }
   }
 
   if cfg!(target_os = "macos") {
