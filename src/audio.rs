@@ -414,6 +414,8 @@ struct Live {
   /// RMS of the last window as `f32` bits.
   level: AtomicU32,
   silent: AtomicBool,
+  /// VAD frames since the last that was not a pause ([PAUSE]).
+  pause: AtomicU32,
 }
 
 /// The recording's level and whether the microphone sends any sound, for another thread.
@@ -429,6 +431,12 @@ impl Meter {
   /// No sound for a while; `false` again as soon as sound comes.
   pub fn silent(&self) -> bool {
     self.0.silent.load(Ordering::Relaxed)
+  }
+
+  /// How long the voice has paused, as the VAD scored the audio so far: zero while it speaks.
+  pub fn pause(&self) -> Duration {
+    let frames = self.0.pause.load(Ordering::Relaxed);
+    Duration::from_millis(u64::from(frames) * FRAME as u64 * 1000 / u64::from(SAMPLE_RATE))
   }
 }
 
@@ -601,6 +609,7 @@ impl Processor {
     self.live.level.store(self.level.rms.to_bits(), Ordering::Relaxed);
     self.live.silent.store(self.level.faint >= NO_SOUND, Ordering::Relaxed);
     self.vad.push(&self.out);
+    self.live.pause.store(self.vad.pause as u32, Ordering::Relaxed);
     self.pcm.extend_from_slice(&self.out);
   }
 
@@ -763,11 +772,14 @@ struct Vad {
   detector: Box<Detector>,
   pending: Vec<f32>,
   scores: Vec<f32>,
+  /// Frames since the last that was not a pause: speech, or between speech and pause.
+  pause: usize,
 }
 
 impl Default for Vad {
   fn default() -> Self {
-    Self { detector: Detector::default_boxed(), pending: Vec::new(), scores: Vec::new() }
+    let (pending, scores) = (Vec::new(), Vec::new());
+    Self { detector: Detector::default_boxed(), pending, scores, pause: 0 }
   }
 }
 
@@ -797,7 +809,9 @@ impl Vad {
   fn score(&mut self) {
     // Earshot wants [-1, 1]; resampling can overshoot a full-scale signal a little.
     self.pending.iter_mut().for_each(|s| *s = s.clamp(-1.0, 1.0));
-    self.scores.push(self.detector.predict_f32(&self.pending));
+    let score = self.detector.predict_f32(&self.pending);
+    self.pause = if score < PAUSE { self.pause + 1 } else { 0 };
+    self.scores.push(score);
     self.pending.clear();
   }
 }
