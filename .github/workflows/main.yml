@@ -51,9 +51,7 @@ jobs:
       - run: cargo clippy --release --locked --all-targets -- -D warnings
       - run: cargo test --release --locked
 
-  # The release files (scripts/dist.py), one job per OS, each its own artifact: Windows and Linux
-  # build their aarch64 file on the x86_64 runner too, cross-compiled. Linux builds on the oldest
-  # LTS runner: the AppImage needs its glibc or newer.
+  # Release files, a job per OS; aarch64 cross-compiled. Linux on the oldest LTS for its glibc.
   build:
     name: build ${{ matrix.os }}
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
@@ -72,19 +70,19 @@ jobs:
             dist: python3 scripts/dist.py x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     env:
-      # Linux's aarch64 file: the cross linker and C compiler, and arm64's pkg-config files.
+      # Linux aarch64 cross-build.
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
       PKG_CONFIG_ALLOW_CROSS: 1
       PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
     steps:
       - uses: actions/checkout@v7
-      # arm64's ALSA beside the runner's own: Ubuntu's ports mirror has arm64, Azure's doesn't.
+      # arm64 ALSA from Ubuntu's ports mirror.
       - if: runner.os == 'Linux'
         run: |
           sudo dpkg --add-architecture arm64
           sudo rm -f /etc/apt/sources.list.d/*
-          sudo sed -i 's/^deb http/deb [arch=amd64] http/' /etc/apt/sources.list
+          sudo sed -i -E 's/^deb ([^[])/deb [arch=amd64] \1/' /etc/apt/sources.list
           for suite in jammy jammy-updates; do
             echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $suite main universe"
           done | sudo tee -a /etc/apt/sources.list

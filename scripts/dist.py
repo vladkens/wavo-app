@@ -3,10 +3,8 @@
 
   scripts/dist.py [target...]
 
-A file for each Rust target given (rustup has to have them; a cross-compiled one, its C
-toolchain and libraries too), else for this machine. The binary comes from the `dist` profile.
-Named `Wavo-dev-<os>[-<arch>]`, which a release renames to `Wavo-vX.Y.Z-…`
-(vladkens/actions/rust-publish):
+A file per Rust target given, else for this machine; the `dist` profile. Named
+`Wavo-dev-<os>[-<arch>]`, renamed `Wavo-vX.Y.Z-…` by a release:
 
 - macOS: `Wavo-dev-macos.zip`, Wavo.app (scripts/bundle.py) zipped by ditto.
 - Windows: `Wavo-dev-windows-<x64|arm64>.zip`, Wavo.exe with the license.
