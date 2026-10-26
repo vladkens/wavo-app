@@ -8,6 +8,8 @@ follow real dictations (median ~4 s, p99 ~27 s): nothing is longer than ~30 s. N
 `say` voices Milena (ru), Samantha and Daniel (en), and ffmpeg.
 """
 
+from __future__ import annotations
+
 import shutil
 import subprocess
 import sys

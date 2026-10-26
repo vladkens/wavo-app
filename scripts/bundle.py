@@ -20,6 +20,8 @@ pages given back at once): otherwise malloc keeps the large blocks a model frees
 unload. It applies when LaunchServices starts the app.
 """
 
+from __future__ import annotations
+
 import os
 import shutil
 import subprocess
