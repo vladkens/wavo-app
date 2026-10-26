@@ -388,7 +388,17 @@ const ACTIVATIONS: [(Activation, &str); 3] = [
 impl Prefs {
   fn general(&mut self, ui: &mut Ui, fs: &FormStyle) {
     self.permissions(ui, fs);
+    // By what matters most: the microphone, the model and its language, then the shortcut.
     ui.form_section(fs, "Dictation", |ui| {
+      let (mics, at) = microphones(&self.devices, self.settings.microphone.as_ref());
+      let labels: Vec<String> = mics.iter().map(|m| m.0.clone()).collect();
+      ui.form_row(fs, FormRow::new("Microphone"), |ui| {
+        if let Some(i) = pick(ui, "mic", &labels, at, &[0]) {
+          let choice = mics[i].1.clone();
+          self.edit(move |s| s.microphone = choice.clone());
+        }
+      });
+
       self.model_rows(ui, fs);
       let note = match (self.access.secure_input, self.settings.hotkey == "fn") {
         (true, _) => Some(SECURE_INPUT_NOTE),
@@ -405,15 +415,6 @@ impl Prefs {
         let mut cur = self.settings.activation;
         if ui.id("activation").select(&mut cur, &ACTIVATIONS).changed {
           self.edit(move |s| s.activation = cur);
-        }
-      });
-
-      let (mics, at) = self.microphones();
-      let labels: Vec<String> = mics.iter().map(|m| m.0.clone()).collect();
-      ui.form_row(fs, FormRow::new("Microphone"), |ui| {
-        if let Some(i) = pick(ui, "mic", &labels, at, &[0]) {
-          let choice = mics[i].1.clone();
-          self.edit(move |s| s.microphone = choice.clone());
         }
       });
     });
@@ -441,7 +442,7 @@ impl Prefs {
       });
     });
 
-    ui.form_section(fs, "", |ui| self.login(ui, fs));
+    ui.form_section(fs, "Startup", |ui| self.login(ui, fs));
   }
 
   /// While the system does not allow them, a row for the microphone and one for Accessibility.
@@ -492,29 +493,6 @@ impl Prefs {
     if r.clicked {
       self.edit(move |s| s.hotkey = default.clone());
     }
-  }
-
-  /// The system default, the devices, and the saved one when it is not connected; the index of
-  /// the current one.
-  fn microphones(&self) -> (Vec<(String, Option<Choice>)>, usize) {
-    let default = match self.devices.iter().find(|d| d.default) {
-      Some(d) => format!("System Default ({})", d.name),
-      None => "System Default".to_owned(),
-    };
-    let mut items = vec![(default, None)];
-    for d in &self.devices {
-      items.push((d.name.clone(), Some(Choice { id: d.id.clone(), name: d.name.clone() })));
-    }
-
-    let Some(saved) = &self.settings.microphone else { return (items, 0) };
-    let by_id = self.devices.iter().position(|d| saved.id.is_some() && d.id == saved.id);
-    if let Some(i) = by_id.or_else(|| self.devices.iter().position(|d| d.name == saved.name)) {
-      return (items, i + 1);
-    }
-
-    items.push((format!("{} (not connected)", saved.name), Some(saved.clone())));
-    let at = items.len() - 1;
-    (items, at)
   }
 
   /// The downloaded models, the chosen one when it is none of them, then "Download more…".
@@ -786,6 +764,32 @@ impl Prefs {
 
 /// A downloaded model: wavo's, and its file.
 pub type Found = (&'static ModelInfo, PathBuf);
+
+/// The system default, the `devices`, and the `saved` one when it is not connected; the index of
+/// the current one. Here and in the menu.
+pub fn microphones(
+  devices: &[audio::Device],
+  saved: Option<&Choice>,
+) -> (Vec<(String, Option<Choice>)>, usize) {
+  let default = match devices.iter().find(|d| d.default) {
+    Some(d) => format!("System Default ({})", d.name),
+    None => "System Default".to_owned(),
+  };
+  let mut items = vec![(default, None)];
+  for d in devices {
+    items.push((d.name.clone(), Some(Choice { id: d.id.clone(), name: d.name.clone() })));
+  }
+
+  let Some(saved) = saved else { return (items, 0) };
+  let by_id = devices.iter().position(|d| saved.id.is_some() && d.id == saved.id);
+  if let Some(i) = by_id.or_else(|| devices.iter().position(|d| d.name == saved.name)) {
+    return (items, i + 1);
+  }
+
+  items.push((format!("{} (not connected)", saved.name), Some(saved.clone())));
+  let at = items.len() - 1;
+  (items, at)
+}
 
 /// `740 MB`, `16.0 GB`; `48 KB` under a megabyte (an empty history's archive).
 pub fn size_text(bytes: u64) -> String {

@@ -143,12 +143,14 @@ pub fn recent_title(text: &str, created_at: i64, now: i64) -> String {
   format!("{when} · {preview}")
 }
 
-/// Item ids: `recent:<i>`, `model:<name>`, `warn:…` and fixed ones, as `app::chosen` handles them.
+/// Item ids: `recent:<i>`, `mic:<i>`, `model:<name>`, `warn:…` and fixed ones, as `app::chosen`
+/// handles them. `mics` are [crate::window::microphones]'s labels and the current one.
 pub fn menu(
   hotkey: Option<&str>,
   status: &Status,
   warnings: &[Warning],
   recent: &[String],
+  mics: (&[String], usize),
   found: &[Found],
   pick: &Pick,
 ) -> Menu {
@@ -165,12 +167,14 @@ pub fn menu(
   let loaded = status.engine.phase != EnginePhase::Stopped && status.state == Phase::Idle;
   let recent: Vec<Item> =
     recent.iter().enumerate().map(|(i, title)| Item::new(&format!("recent:{i}"), title)).collect();
+  let (mic, mics) = microphones(mics);
   let (model, models) = models(found, pick);
   items.extend([
     Item::separator(),
     Item::new("copy-last", "Copy Last Dictation").enabled(last),
     Item::new("recent", "Recent").enabled(!recent.is_empty()).submenu(Menu::new(recent)),
     Item::separator(),
+    Item::new("mic", &mic).submenu(mics),
     Item::new("model", &model).submenu(models),
     Item::new("unload", "Unload Model").enabled(loaded),
     Item::separator(),
@@ -180,6 +184,19 @@ pub fn menu(
     Item::new("quit", "Quit Wavo").key("cmd+q"),
   ]);
   Menu::new(items)
+}
+
+/// The microphone in use, and the submenu: the system default, then the devices, the one in use
+/// checked.
+fn microphones((labels, at): (&[String], usize)) -> (String, Menu) {
+  let mut items: Vec<Item> = (labels.iter().enumerate())
+    .map(|(i, label)| Item::new(&format!("mic:{i}"), label).checked(i == at))
+    .collect();
+  if items.len() > 1 {
+    items.insert(1, Item::separator());
+  }
+
+  (labels.get(at).cloned().unwrap_or_default(), Menu::new(items))
 }
 
 /// The model in use, and the submenu: the models downloaded with the one that transcribes checked,
@@ -270,12 +287,17 @@ mod tests {
     s.state = Phase::Recording;
     assert_eq!(icon(&s, &list), Icon::Recording, "the phase first");
 
-    let items = menu(Some("⌥Space"), &s, &list, &[], &[], &Pick::default()).items;
+    let mics = ["System Default (MacBook Pro Microphone)".to_owned(), "USB Mic".to_owned()];
+    let items = menu(Some("⌥Space"), &s, &list, &[], (&mics, 1), &[], &Pick::default()).items;
     assert!(items[0].label.ends_with("⌥Space · Recording…"), "{}", items[0].label);
     assert_eq!(
       (items[1].label.as_str(), items[6].label.as_str()),
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")
     );
     assert!(items[1].enabled && !items[2].enabled);
+    let mic = items.iter().find(|i| i.id == "mic").unwrap();
+    assert_eq!(mic.label, "USB Mic");
+    let checked: Vec<_> = mic.submenu.as_ref().unwrap().items.iter().map(|i| i.checked).collect();
+    assert_eq!(checked, [false, false, true], "the default, a separator, then USB Mic");
   }
 }

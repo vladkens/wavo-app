@@ -81,6 +81,7 @@ struct App {
   // The models downloaded and the recent dictations, as the menu last opened.
   found: Vec<Found>,
   pick: Pick,
+  devices: Vec<audio::Device>,
   recent: Vec<Entry>,
   history: Option<History>,
   accessibility: bool,
@@ -166,6 +167,7 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     import: Arc::default(),
     found: Vec::new(),
     pick: Pick::default(),
+    devices: audio::devices(),
     recent: Vec::new(),
     history: None,
     accessibility: false,
@@ -222,6 +224,11 @@ fn chosen(main: &mut Main, id: &str) {
       open_window(main, Some(Page::History));
     }
 
+    return;
+  }
+
+  if let Some(i) = id.strip_prefix("mic:").and_then(|i| i.parse().ok()) {
+    with_app(|app| app.choose_mic(i));
     return;
   }
 
@@ -517,9 +524,11 @@ impl App {
     }
   }
 
-  /// What the system does not tell the app is looked at again, and the models and the history.
+  /// What the system does not tell the app is looked at again: the microphones, the models and
+  /// the history.
   fn menu_opening(&mut self) {
     self.microphone = permissions::microphone();
+    self.devices = audio::devices();
     self.clipboard = SystemClipboard.readable();
     self.read_models();
     self.read_recent();
@@ -553,6 +562,16 @@ impl App {
     let Some(e) = self.recent.get(i).filter(|e| !e.text.is_empty()) else { return false };
     SystemClipboard.write(&e.text);
     true
+  }
+
+  /// The menu's microphone `i`, as [App::refresh] listed them.
+  fn choose_mic(&mut self, i: usize) {
+    let saved = self.update.as_ref().and_then(|u| u.settings.microphone.clone());
+    let (mics, _) = window::microphones(&self.devices, saved.as_ref());
+    if let Some((name, choice)) = mics.into_iter().nth(i) {
+      info!("microphone {name} chosen in the menu");
+      self.handle.edit_settings(move |s| s.microphone = choice);
+    }
   }
 
   fn repick(&mut self) {
@@ -591,8 +610,10 @@ impl App {
         menu::recent_title(empty.as_deref().unwrap_or(&e.text), e.created_at, now)
       })
       .collect();
+    let (mics, at) = window::microphones(&self.devices, update.settings.microphone.as_ref());
+    let mics: Vec<String> = mics.into_iter().map(|m| m.0).collect();
     let (status, found, pick) = (&update.status, &self.found, &self.pick);
-    let menu = menu::menu(hotkey.as_deref(), status, &warnings, &recent, found, pick);
+    let menu = menu::menu(hotkey.as_deref(), status, &warnings, &recent, (&mics, at), found, pick);
     if menu != self.menu {
       self.tray.set_menu(&menu);
       self.menu = menu;
