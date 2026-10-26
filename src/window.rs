@@ -690,7 +690,7 @@ impl Prefs {
       }
 
       if ui.disabled(running).id("export").button("Export…").clicked {
-        let name = format!("wavo-export-{}.zip", day_of(now_ms()).unwrap_or_default());
+        let name = export_name(now_ms());
         let panel = FileDialog::save("Export").name(&name).types(&["zip"]);
         ui.file_dialog(FileDialog { dir: downloads(), ..panel });
         self.panel = Some(Panel::Export);
@@ -1226,6 +1226,14 @@ pub type Import = Transfer<Imported>;
 enum Panel {
   Export,
   Import,
+}
+
+/// The archive Export suggests, to the second, so another one the same day keeps its own:
+/// `wavo-export-2026-10-26-03-15-22.zip`.
+fn export_name(ms: i64) -> String {
+  let Some(t) = local_time(ms) else { return "wavo-export.zip".into() };
+  let (y, mo, d, h, mi, s) = (t.year, t.month, t.day, t.hour, t.minute, ms / 1000 % 60);
+  format!("wavo-export-{y:04}-{mo:02}-{d:02}-{h:02}-{mi:02}-{s:02}.zip")
 }
 
 /// Where the file panels start: Downloads, where archives usually are.
