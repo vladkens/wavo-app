@@ -268,7 +268,7 @@ fn chosen(main: &mut Main, id: &str) {
     "history" => open_window(main, Some(Page::History)),
     "settings" => open_window(main, None),
     "quit" => main.quit(),
-    "warn:accessibility" | "warn:microphone" | "warn:secure-input" => {
+    "warn:accessibility" | "warn:microphone" | "warn:secure-input" | "warn:hotkey" => {
       open_window(main, Some(Page::General))
     }
     "warn:clipboard" => allow(Pane::Pasteboard),

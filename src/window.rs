@@ -339,7 +339,8 @@ impl App for Prefs {
     match ev {
       Event::FileDialog(answer) => {
         match (self.panel.take(), answer) {
-          (Some(Panel::Export), Some(file)) => self.shell.export(file.clone()),
+          // GNOME's save panel adds no extension: Import's *.zip would not show it.
+          (Some(Panel::Export), Some(file)) => self.shell.export(with_zip(file)),
           (Some(Panel::Import), Some(file)) => self.shell.import(file.clone()),
           _ => {}
         }
@@ -496,8 +497,10 @@ impl Prefs {
   /// The recorder and its reset; a cleared value keeps the hotkey: the app needs one.
   fn shortcut(&mut self, ui: &mut Ui) {
     let mut hotkey = Hotkey::parse(&self.settings.hotkey).ok();
+    // Linux's hotkeys are chords: a modifier key alone there would leave no hotkey at all.
+    let alone = |h: &Hotkey| cfg!(target_os = "linux") && matches!(h, Hotkey::Modifier(_));
     if ui.id("hotkey").shortcut(&mut hotkey).changed
-      && let Some(hotkey) = hotkey
+      && let Some(hotkey) = hotkey.filter(|h| !alone(h))
     {
       let hotkey = hotkey.to_string();
       info!("settings: hotkey {hotkey}");
@@ -1407,6 +1410,17 @@ impl HistoryPage {
   }
 }
 
+/// `file`, with `.zip` added unless it ends in it.
+fn with_zip(file: &Path) -> PathBuf {
+  if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+    return file.to_owned();
+  }
+
+  let mut name = file.file_name().unwrap_or_default().to_owned();
+  name.push(".zip");
+  file.with_file_name(name)
+}
+
 /// The days of `entries`, newest first: each one's entries and their duration in ms.
 fn days(entries: &[Entry]) -> Vec<(Day, Range<usize>, i64)> {
   let mut days: Vec<(Day, Range<usize>, i64)> = Vec::new();
@@ -2030,6 +2044,16 @@ mod tests {
   /// Every page in both looks, as high as its content or [SCROLLING] high; with `WAVO_SHOTS` set
   /// (`make shots`), written there: also Models asking before a delete and General at the first
   /// launch.
+  /// GNOME's save panel adds no extension: Import's filter would hide the archive.
+  #[test]
+  fn an_export_ends_in_zip() {
+    for (picked, file) in
+      [("a/wavo backup", "a/wavo backup.zip"), ("a/x.ZIP", "a/x.ZIP"), ("x.tar", "x.tar.zip")]
+    {
+      assert_eq!(with_zip(Path::new(picked)), PathBuf::from(file));
+    }
+  }
+
   #[test]
   fn every_page_renders_in_both_looks() {
     let home =
