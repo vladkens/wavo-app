@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! wavo-app: local dictation, a menu bar app; `export`, `import`, `reset` on the command line.
+//! wavo-app: local dictation, a menu bar app; `uninstall` on the command line.
 
 // macOS first, Windows and Linux later (docs/plans/20261023-port.md).
 #[cfg(target_os = "macos")]
@@ -42,20 +42,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-  /// Write the settings, the history and its recordings into one archive (a tar)
-  Export { file: PathBuf },
-  /// Add the entries of an archive the history does not have; Wavo must not be running
-  Import {
-    source: PathBuf,
-    /// Also replace the settings with the archive's
-    #[arg(long)]
-    settings: bool,
-    /// Say what would be imported, write nothing
-    #[arg(long)]
-    dry_run: bool,
-  },
-  /// Quit Wavo, turn launch at login off, reset its permissions and delete its data and cache
-  Reset {
+  /// Remove Wavo and all it left: its data, caches, defaults, permissions, the models it downloaded
+  /// and the app
+  Uninstall {
     /// Say what it would do, change nothing
     #[arg(long)]
     dry_run: bool,
@@ -76,9 +65,7 @@ fn main() -> Result<()> {
     None => app::run(),
     #[cfg(not(target_os = "macos"))]
     None => unreachable!("clap asks for a command"),
-    Some(Command::Export { file }) => cli::export(&file),
-    Some(Command::Import { source, settings, dry_run }) => cli::import(&source, settings, dry_run),
-    Some(Command::Reset { dry_run, yes }) => cli::reset(dry_run, yes),
+    Some(Command::Uninstall { dry_run, yes }) => cli::uninstall(dry_run, yes),
     Some(Command::Quit) => cli::quit(),
   }
 }

@@ -1,8 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
+#!/usr/bin/env python3
 """Speech fixtures for the tests: 16 kHz mono 16-bit WAV plus the reference transcript (.txt).
 
   scripts/fixtures.py [out_dir]    # default: target/fixtures
@@ -11,6 +7,8 @@ Texts live in scripts/fixtures/*.txt; blank lines between paragraphs become 2.5 
 follow real dictations (median ~4 s, p99 ~27 s): nothing is longer than ~30 s. Needs the macOS
 `say` voices Milena (ru), Samantha and Daniel (en), and ffmpeg.
 """
+
+from __future__ import annotations
 
 import shutil
 import subprocess

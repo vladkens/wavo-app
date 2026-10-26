@@ -24,17 +24,20 @@ An ad hoc signature changes with every build, so after an update macOS asks for 
 <details>
 <summary>Moving to another Mac</summary>
 
-Export the history and settings on the old Mac with Advanced › Data › Export, or:
+Export the history with its recordings on the old Mac with Advanced › Data › Export…, and bring it in on the new one with Advanced › Data › Import…: the dictations it does not have yet are added.
+
+</details>
+
+<details>
+<summary>Moving from Handy</summary>
+
+The history of [Handy](https://github.com/cjpais/Handy), with its recordings, comes over through an archive; Handy itself is only read. Quit Handy, then run:
 
 ```sh
-/Applications/Wavo.app/Contents/MacOS/wavo-app export wavo.tar
+curl -fsSL https://raw.githubusercontent.com/vladkens/wavo-app/main/scripts/handy.py | python3 -
 ```
 
-and import them on the new one with Wavo quit (without `--settings` only the history comes):
-
-```sh
-/Applications/Wavo.app/Contents/MacOS/wavo-app import wavo.tar --settings
-```
+It writes `~/Downloads/handy-export.zip`: bring it in with Advanced › Data › Import…. Dictations Wavo already has are left, so importing twice adds nothing. `HANDY_DIR=<folder>` before `python3` reads Handy's data from another folder.
 
 </details>
 

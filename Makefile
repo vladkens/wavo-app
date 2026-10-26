@@ -28,7 +28,7 @@ clean:
 	cargo clean
 
 # wavo-app
-.PHONY: bundle dist run install reset shots fixtures test-models
+.PHONY: bundle dist run install uninstall shots fixtures test-models
 
 APP := target/Wavo.app
 PROFILE := release
@@ -38,7 +38,7 @@ PROFILE := release
 # Built, never opened.
 bundle: # target/Wavo.app from the release profile, or PROFILE
 	cargo build --locked --profile $(PROFILE)
-	uv run scripts/bundle.py target/$(PROFILE)/wavo-app assets/icon.png $(APP)
+	python3 scripts/bundle.py target/$(PROFILE)/wavo-app assets/icon.png $(APP)
 
 dist: # target/distrib/Wavo-dev.zip from the dist profile, the release file for CI (vladkens/actions/rust-build)
 	$(MAKE) bundle PROFILE=dist
@@ -49,17 +49,17 @@ dist: # target/distrib/Wavo-dev.zip from the dist profile, the release file for 
 # they were granted to.
 run: # quit the running Wavo, start target/Wavo.app
 	$(MAKE) bundle
-	uv run scripts/run.py $(APP)
+	python3 scripts/run.py $(APP)
 
 install: # the same, installed into /Applications
 	$(MAKE) bundle
-	uv run scripts/run.py $(APP) /Applications/Wavo.app
+	python3 scripts/run.py $(APP) /Applications/Wavo.app
 
 # The installed app's binary, else the release build's; ARGS go to it (--dry-run, --yes).
 INSTALLED := /Applications/Wavo.app/Contents/MacOS/wavo-app
 
-reset: # delete Wavo's data and permissions: a clean install to test
-	$(or $(wildcard $(INSTALLED)),target/release/wavo-app) reset $(ARGS)
+uninstall: # remove Wavo and all it left (data, models, permissions, the app): then a clean install
+	$(or $(wildcard $(INSTALLED)),target/release/wavo-app) uninstall $(ARGS)
 
 shots: # the settings window's pages, headless, into target/shots/
 	WAVO_SHOTS=$(CURDIR)/target/shots cargo test $(CARGO_FLAGS) every_page_renders
@@ -71,7 +71,7 @@ FIXTURES := target/fixtures/.stamp
 fixtures: $(FIXTURES) # speech fixtures for test-models
 
 $(FIXTURES): scripts/fixtures.py $(wildcard scripts/fixtures/*.txt)
-	uv run scripts/fixtures.py target/fixtures
+	python3 scripts/fixtures.py target/fixtures
 	touch $@
 
 # The ignored tests that need real models from the Hugging Face cache or the fixtures, by module

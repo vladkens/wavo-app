@@ -1,8 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
+#!/usr/bin/env python3
 """Starts a built Wavo.app in place of the running one, optionally installing it first.
 
   scripts/run.py <Wavo.app> [<dest, e.g. /Applications/Wavo.app>]
@@ -27,7 +23,7 @@ from pathlib import Path
 
 ID = "me.vladkens.wavo"
 RUNNING = "Wavo.app/Contents/MacOS/wavo-app"
-# In the data home, which `wavo-app reset` deletes along with the permissions.
+# In the data home, which `wavo-app uninstall` deletes along with the permissions.
 GRANTED = Path.home() / "Library/Application Support" / ID / "permissions-requirement"
 
 

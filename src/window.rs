@@ -16,20 +16,26 @@ use std::time::{Duration, Instant};
 use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
 use nimbo::{
-  Align, Answer, App, Button, Config, Dialog, Float, Font, FormRow, FormStyle, Hotkey, Icon, Id,
-  Select, Style, TextStyle, Tile, Ui, Weight, grow, open, paths, px,
+  Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
+  FormStyle, Hotkey, Icon, Id, Key, NamedKey, Select, Style, TextStyle, Tile, Ui, Weight, grow,
+  open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
 use crate::audio::{self, Choice, Playback};
-use crate::history::{Entry, History, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms};
+use crate::history::{
+  Entry, History, Local, RECORDINGS_DIR, Retention, day_of, fold, local_time, now_ms,
+};
 use crate::session::{NoModel, Request, Status, label};
 use crate::settings::{Activation, HudPosition, Settings, language_name};
+use crate::transfer::Imported;
 
 // MARK: Window
 
 pub const WIDTH: f32 = 560.0;
+/// The model to start with, wavo's own default: first in Available, its Download the blue one.
+const RECOMMENDED: &str = "parakeet-ultra";
 /// The height of the pages that scroll.
 pub const SCROLLING: f32 = 600.0;
 
@@ -59,9 +65,10 @@ impl Page {
   }
 }
 
+/// A macOS preferences window: the title over the tabs, under one background.
 pub fn config(page: Page) -> Config {
   let h = if page.scrolls() { SCROLLING } else { 500.0 };
-  Config::new("Wavo", WIDTH, h).fixed()
+  Config::new("Wavo", WIDTH, h).fixed().unified()
 }
 
 /// What the system allows the app.
@@ -95,8 +102,13 @@ pub trait Shell {
   fn autostart(&self) -> Result<Autostart, String>;
   /// Then [Prefs::autostart_set].
   fn set_autostart(&self, _on: bool) {}
-  /// Writes the history into an archive in Downloads and shows it.
-  fn export(&self) {}
+  /// Writes the history into the archive `file`, replacing it (the save panel asked):
+  /// [Shell::export_state].
+  fn export(&self, _file: PathBuf) {}
+  fn export_state(&self) -> Option<Export>;
+  /// Adds the dictations of the archive `file` the history does not have: [Shell::import_state].
+  fn import(&self, _file: PathBuf) {}
+  fn import_state(&self) -> Option<Import>;
   fn open_url(&self, _url: &str) {}
   fn reveal(&self, _dir: &Path) {}
   /// This Mac has a Neural Engine wavo can use.
@@ -141,6 +153,8 @@ pub struct Prefs {
   recording: bool,
   focused: bool,
   ask: Option<Ask>,
+  /// The file panel open: its answer goes to it.
+  panel: Option<Panel>,
   model_search: String,
   /// An index of [LANGUAGES].
   model_lang: usize,
@@ -165,6 +179,7 @@ impl Prefs {
       recording: false,
       focused: false,
       ask: None,
+      panel: None,
       model_search: String::new(),
       model_lang: 0,
       history: HistoryPage::default(),
@@ -268,8 +283,10 @@ impl App for Prefs {
     }
 
     self.focused = focused;
+    // The title bar is part of the window's content.
+    let bar = ui.titlebar().map_or(0.0, |(h, _)| h);
     match self.page.scrolls() {
-      true => ui.set_window_size(WIDTH, SCROLLING),
+      true => ui.set_window_size(WIDTH, SCROLLING + bar),
       false => ui.fit_window_height(WIDTH, 200.0, 800.0),
     }
 
@@ -296,6 +313,7 @@ impl App for Prefs {
 
       if self.page == Page::History {
         self.history_foot(ui, &fs);
+        self.history_total(ui, &fs);
       }
     });
     self.confirm(ui);
@@ -305,6 +323,31 @@ impl App for Prefs {
     if recording != self.recording {
       self.recording = recording;
       self.shell.pause_hotkey(recording);
+    }
+  }
+
+  /// The file Export's or Import's panel picked; Esc, or a click on nothing above the panel
+  /// under the history, unselects its dictation.
+  fn event(&mut self, cx: &mut Cx, ev: &Event) -> bool {
+    let history = self.page == Page::History;
+    match ev {
+      Event::FileDialog(answer) => {
+        match (self.panel.take(), answer) {
+          (Some(Panel::Export), Some(file)) => self.shell.export(file.clone()),
+          (Some(Panel::Import), Some(file)) => self.shell.import(file.clone()),
+          _ => {}
+        }
+
+        true
+      }
+      Event::KeyDown(k) if history && k.key == Key::Named(NamedKey::Escape) => {
+        self.history.selected.take().is_some()
+      }
+      Event::MouseDown { pos, .. } if history && cx.target().is_none() => {
+        let above = pos.y < cx.size.h - FOOT_H - TOTAL_H;
+        above && self.history.selected.take().is_some()
+      }
+      _ => false,
     }
   }
 }
@@ -345,7 +388,17 @@ const ACTIVATIONS: [(Activation, &str); 3] = [
 impl Prefs {
   fn general(&mut self, ui: &mut Ui, fs: &FormStyle) {
     self.permissions(ui, fs);
+    // By what matters most: the microphone, the model and its language, then the shortcut.
     ui.form_section(fs, "Dictation", |ui| {
+      let (mics, at) = microphones(&self.devices, self.settings.microphone.as_ref());
+      let labels: Vec<String> = mics.iter().map(|m| m.0.clone()).collect();
+      ui.form_row(fs, FormRow::new("Microphone"), |ui| {
+        if let Some(i) = pick(ui, "mic", &labels, at, &[0]) {
+          let choice = mics[i].1.clone();
+          self.edit(move |s| s.microphone = choice.clone());
+        }
+      });
+
       self.model_rows(ui, fs);
       let note = match (self.access.secure_input, self.settings.hotkey == "fn") {
         (true, _) => Some(SECURE_INPUT_NOTE),
@@ -362,15 +415,6 @@ impl Prefs {
         let mut cur = self.settings.activation;
         if ui.id("activation").select(&mut cur, &ACTIVATIONS).changed {
           self.edit(move |s| s.activation = cur);
-        }
-      });
-
-      let (mics, at) = self.microphones();
-      let labels: Vec<String> = mics.iter().map(|m| m.0.clone()).collect();
-      ui.form_row(fs, FormRow::new("Microphone"), |ui| {
-        if let Some(i) = pick(ui, "mic", &labels, at, &[0]) {
-          let choice = mics[i].1.clone();
-          self.edit(move |s| s.microphone = choice.clone());
         }
       });
     });
@@ -397,6 +441,8 @@ impl Prefs {
         }
       });
     });
+
+    ui.form_section(fs, "Startup", |ui| self.login(ui, fs));
   }
 
   /// While the system does not allow them, a row for the microphone and one for Accessibility.
@@ -447,29 +493,6 @@ impl Prefs {
     if r.clicked {
       self.edit(move |s| s.hotkey = default.clone());
     }
-  }
-
-  /// The system default, the devices, and the saved one when it is not connected; the index of
-  /// the current one.
-  fn microphones(&self) -> (Vec<(String, Option<Choice>)>, usize) {
-    let default = match self.devices.iter().find(|d| d.default) {
-      Some(d) => format!("System Default ({})", d.name),
-      None => "System Default".to_owned(),
-    };
-    let mut items = vec![(default, None)];
-    for d in &self.devices {
-      items.push((d.name.clone(), Some(Choice { id: d.id.clone(), name: d.name.clone() })));
-    }
-
-    let Some(saved) = &self.settings.microphone else { return (items, 0) };
-    let by_id = self.devices.iter().position(|d| saved.id.is_some() && d.id == saved.id);
-    if let Some(i) = by_id.or_else(|| self.devices.iter().position(|d| d.name == saved.name)) {
-      return (items, i + 1);
-    }
-
-    items.push((format!("{} (not connected)", saved.name), Some(saved.clone())));
-    let at = items.len() - 1;
-    (items, at)
   }
 
   /// The downloaded models, the chosen one when it is none of them, then "Download more…".
@@ -551,9 +574,10 @@ const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle thi
 const ANE_HELP: &str = "Parakeet and GigaAM run on the Neural Engine: as fast as on the GPU at a \
   fraction of the energy. Each new version of Wavo prepares the model once, in the background \
   (10–30 s); meanwhile it runs on the GPU. Whisper always runs on the GPU.";
-const NO_ANE: &str = "Needs Apple silicon and macOS 15 or later.";
-const EXPORT_HELP: &str = "The history, its recordings and the settings, into Downloads as a .tar \
-  archive. To bring one back on another Mac, quit Wavo and run: wavo-app import <file>";
+const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another Mac: the dictations this \
+  history does not have are added with their recordings; the settings stay as they are.";
+const EXPORT_HELP: &str = "The history, its recordings and the settings, into a .zip archive: \
+  Import brings it back, here or on another Mac.";
 
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
@@ -581,7 +605,6 @@ const RETENTIONS: [(Retention, &str); 7] = [
 impl Prefs {
   fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
     ui.form_section(fs, "App", |ui| {
-      self.login(ui, fs);
       ui.form_row(fs, FormRow::new("Show the HUD at"), |ui| {
         let mut cur = self.settings.hud_position;
         if ui.id("hud").select(&mut cur, &HUDS).changed {
@@ -596,15 +619,15 @@ impl Prefs {
         }
       });
 
-      let has = self.shell.has_neural_engine();
-      let help = if has { ANE_HELP.to_owned() } else { format!("{NO_ANE}\n\n{ANE_HELP}") };
-      let row = FormRow::new("Use the Neural Engine").info(&help).disabled(!has);
-      ui.form_row(fs, row, |ui| {
-        let mut on = self.settings.neural_engine && has;
-        if ui.id("ane").toggle(&mut on, "").changed {
-          self.edit(move |s| s.neural_engine = on);
-        }
-      });
+      // Only where there is one: Apple silicon with macOS 15 or later.
+      if self.shell.has_neural_engine() {
+        ui.form_row(fs, FormRow::new("Use the Neural Engine").info(ANE_HELP), |ui| {
+          let mut on = self.settings.neural_engine;
+          if ui.id("ane").toggle(&mut on, "").changed {
+            self.edit(move |s| s.neural_engine = on);
+          }
+        });
+      }
 
       ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
         let mut cur = self.settings.history_retention;
@@ -646,12 +669,47 @@ impl Prefs {
     });
 
     ui.form_section(fs, "Data", |ui| {
-      let row = FormRow::new("Export the history").info(EXPORT_HELP).tile(Tile::Icon(Icon::DOC));
-      ui.form_row(fs, row, |ui| {
-        if ui.id("export").button("Export").clicked {
-          self.shell.export();
-        }
-      });
+      self.export_row(ui, fs, &show);
+      self.import_row(ui, fs);
+    });
+  }
+
+  /// Export, the system's save panel in Downloads ([Prefs::event]); then the archive's size with
+  /// Show in Finder.
+  fn export_row(&mut self, ui: &mut Ui, fs: &FormStyle, show: &str) {
+    let state = self.shell.export_state();
+    let ended = |(_, size): &(PathBuf, u64)| format!("Exported · {}", size_text(*size));
+    let shown = shown(&state, "export", "Copying the history…", ended);
+    let running = shown.progress.is_some();
+    let row = FormRow::new("Export history").info(EXPORT_HELP).tile(Tile::Icon(Icon::DOC));
+    data_row(ui, fs, Id::of("export-row"), row, &shown, |ui| {
+      if let Some(Transfer::Done((file, _))) = &state
+        && ui.disabled(!file.is_file()).id("export-show").button(show).clicked
+      {
+        self.shell.reveal(file);
+      }
+
+      if ui.disabled(running).id("export").button("Export…").clicked {
+        let name = export_name(now_ms());
+        let panel = FileDialog::save("Export").name(&name).types(&["zip"]);
+        ui.file_dialog(FileDialog { dir: downloads(), ..panel });
+        self.panel = Some(Panel::Export);
+      }
+    });
+  }
+
+  /// Import…, the system's open panel in Downloads ([Prefs::event]); then what it added.
+  fn import_row(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    let state = self.shell.import_state();
+    let shown = shown(&state, "import", "Reading the archive…", imported_text);
+    let running = shown.progress.is_some();
+    let row = FormRow::new("Import history").info(IMPORT_HELP).tile(Tile::Icon(Icon::DOWNLOAD));
+    data_row(ui, fs, Id::of("import-row"), row, &shown, |ui| {
+      if ui.disabled(running).id("import").button("Import…").clicked {
+        let panel = FileDialog::open("Import").types(&["zip"]);
+        ui.file_dialog(FileDialog { dir: downloads(), ..panel });
+        self.panel = Some(Panel::Import);
+      }
     });
   }
 
@@ -706,9 +764,70 @@ impl Prefs {
 /// A downloaded model: wavo's, and its file.
 pub type Found = (&'static ModelInfo, PathBuf);
 
+/// The system default, the `devices`, and the `saved` one when it is not connected; the index of
+/// the current one. Here and in the menu.
+pub fn microphones(
+  devices: &[audio::Device],
+  saved: Option<&Choice>,
+) -> (Vec<(String, Option<Choice>)>, usize) {
+  let default = match devices.iter().find(|d| d.default) {
+    Some(d) => format!("System Default ({})", d.name),
+    None => "System Default".to_owned(),
+  };
+  let mut items = vec![(default, None)];
+  for d in devices {
+    items.push((d.name.clone(), Some(Choice { id: d.id.clone(), name: d.name.clone() })));
+  }
+
+  let Some(saved) = saved else { return (items, 0) };
+  let by_id = devices.iter().position(|d| saved.id.is_some() && d.id == saved.id);
+  if let Some(i) = by_id.or_else(|| devices.iter().position(|d| d.name == saved.name)) {
+    return (items, i + 1);
+  }
+
+  items.push((format!("{} (not connected)", saved.name), Some(saved.clone())));
+  let at = items.len() - 1;
+  (items, at)
+}
+
+/// `740 MB`, `16.0 GB`; `48 KB` under a megabyte (an empty history's archive).
 pub fn size_text(bytes: u64) -> String {
   let mb = bytes as f64 / 1e6;
-  if mb >= 1000.0 { format!("{:.1} GB", mb / 1000.0) } else { format!("{mb:.0} MB") }
+  match mb {
+    _ if mb >= 1000.0 => format!("{:.1} GB", mb / 1000.0),
+    _ if mb >= 1.0 => format!("{mb:.0} MB"),
+    _ => format!("{} KB", bytes.div_ceil(1000)),
+  }
+}
+
+/// The share done and `42% · 114 of 272 MB`.
+fn share(done: u64, total: u64) -> (f32, String) {
+  let k = done as f32 / total.max(1) as f32;
+  (k, format!("{:.0}% · {}", k * 100.0, done_text(done, total)))
+}
+
+/// A progress bar, moving without a share, and its text, as high as a caption's line.
+fn progress_line(ui: &mut Ui, fs: &FormStyle, k: Option<f32>, text: &str) {
+  let line = Style::new().w(grow()).h(px(fs.caption.line_h)).gap(8.0);
+  ui.row(line.align(Align::Start, Align::Center), |ui| {
+    ui.col(Style::new().w(px(120.0)), |ui| ui.progress(k));
+    ui.text(text, fs.caption.nowrap());
+  });
+}
+
+/// `86,286`.
+fn thousands(n: usize) -> String {
+  let digits = n.to_string();
+  let mut s = String::new();
+  for (i, c) in digits.chars().enumerate() {
+    if i > 0 && (digits.len() - i).is_multiple_of(3) {
+      s.push(',');
+    }
+
+    s.push(c);
+  }
+
+  s
 }
 
 /// `114 of 272 MB`, `0.4 of 1.7 GB`.
@@ -810,14 +929,16 @@ impl Prefs {
     let on_disk = |m: &ModelInfo| self.found.iter().any(|f| f.0.name == m.name);
     let downloaded: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| on_disk(m) && shown(m)).collect();
-    let remote: Vec<&'static ModelInfo> =
+    // The recommended first.
+    let mut remote: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| !on_disk(m) && shown(m)).collect();
+    remote.sort_by_key(|m| m.name != RECOMMENDED);
     let count = |n: usize| format!("{n} model{}", if n == 1 { "" } else { "s" });
     let mut act = None;
     if self.found.is_empty() {
       ui.form_section(fs, "Downloaded", |ui| {
         let row = FormRow::new("No model yet")
-          .caption("Download one below: dictation starts working once it is here.")
+          .caption("Download the recommended one below to start dictating.")
           .tile(Tile::Icon(Icon::DOWNLOAD));
         ui.form_row(fs, row, |_| {});
       });
@@ -911,8 +1032,7 @@ impl Prefs {
     let state = self.shell.download_state(m.name);
     let (caption, progress) = match &state {
       Some(Download::Running { done, total, rate }) => {
-        let k = *done as f32 / (*total).max(1) as f32;
-        let mut s = format!("{:.0}% · {}", k * 100.0, done_text(*done, *total));
+        let (k, mut s) = share(*done, *total);
         if let Some(rate) = rate {
           s += &format!(" · {:.1} MB/s", rate / 1e6);
         }
@@ -921,27 +1041,24 @@ impl Prefs {
       }
       Some(Download::Preparing) => (None, Some((None, "Preparing for the Neural Engine…".into()))),
       Some(Download::Failed(e)) => (Some(format!("Could not download: {e}")), None),
-      None => (Some(format!("{} · {}", m.languages, size_text(m.size))), None),
+      None => {
+        let first = if m.name == RECOMMENDED { "Recommended · " } else { "" };
+        (Some(format!("{first}{} · {}", m.languages, size_text(m.size))), None)
+      }
     };
 
     let failed = matches!(state, Some(Download::Failed(_)));
-    let danger = FormStyle { caption: fs.caption.color(ui.theme().danger), ..*fs };
-    let id = Id::of(("model", m.name));
-    let below = |ui: &mut Ui| {
-      if let Some((k, text)) = &progress {
-        // The bar, moving without a share, as high as the caption's line.
-        let line = Style::new().w(grow()).h(px(fs.caption.line_h)).gap(8.0);
-        ui.row(line.align(Align::Start, Align::Center), |ui| {
-          ui.col(Style::new().w(px(120.0)), |ui| ui.progress(*k));
-          ui.text(text, fs.caption.nowrap());
-        });
-      }
-    };
-    let row = model_row(m, caption.as_deref());
-    ui.with_id(id).form_row_with(if failed { &danger } else { fs }, row, below, |ui| {
-      if progress.is_none() {
+    let shown = Shown { caption, progress, failed };
+    let row = model_row(m, None);
+    data_row(ui, fs, Id::of(("model", m.name)), row, &shown, |ui| {
+      if shown.progress.is_none() {
         let label = if failed { "Retry" } else { "Download" };
-        if ui.id(("download", m.name)).button(label).clicked {
+        let mut button = Button::new(label);
+        if m.name == RECOMMENDED {
+          button = button.primary();
+        }
+
+        if button.show(ui.id(("download", m.name))).clicked {
           self.shell.download(m);
         }
       } else {
@@ -954,11 +1071,6 @@ impl Prefs {
 
       self.card(ui, m);
     });
-
-    // An error cut short shows whole in its tooltip.
-    if let Some(caption) = caption.filter(|_| failed) {
-      ui.tooltip(id.key("caption"), &caption);
-    }
   }
 
   /// A model's ⓘ, last in its row: its card.
@@ -1091,6 +1203,113 @@ impl Downloads {
   }
 }
 
+// MARK: Transfers
+
+/// How an export or an import goes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Transfer<T> {
+  /// Bytes done of `total`, 0 while it starts (the history is copied or read first).
+  Running {
+    done: u64,
+    total: u64,
+  },
+  Done(T),
+  Failed(String),
+}
+
+/// The archive and its size.
+pub type Export = Transfer<(PathBuf, u64)>;
+pub type Import = Transfer<Imported>;
+
+/// Which file panel is open.
+#[derive(Clone, Copy)]
+enum Panel {
+  Export,
+  Import,
+}
+
+/// The archive Export suggests, to the second, so another one the same day keeps its own:
+/// `wavo-export-2026-10-26-03-15-22.zip`.
+fn export_name(ms: i64) -> String {
+  let Some(t) = local_time(ms) else { return "wavo-export.zip".into() };
+  let (y, mo, d, h, mi, s) = (t.year, t.month, t.day, t.hour, t.minute, ms / 1000 % 60);
+  format!("wavo-export-{y:04}-{mo:02}-{d:02}-{h:02}-{mi:02}-{s:02}.zip")
+}
+
+/// Where the file panels start: Downloads, where archives usually are.
+fn downloads() -> Option<PathBuf> {
+  let dir = PathBuf::from(std::env::var_os("HOME")?).join("Downloads");
+  dir.is_dir().then_some(dir)
+}
+
+/// What a Data row shows of a transfer: its caption, else its progress while it runs.
+struct Shown {
+  caption: Option<String>,
+  progress: Option<(Option<f32>, String)>,
+  failed: bool,
+}
+
+/// `starting` until it knows its total, `ended` once done; a failure says it could not `what`.
+fn shown<T>(
+  state: &Option<Transfer<T>>,
+  what: &str,
+  starting: &str,
+  ended: impl Fn(&T) -> String,
+) -> Shown {
+  let (caption, progress) = match state {
+    Some(Transfer::Running { total: 0, .. }) => (None, Some((None, starting.to_owned()))),
+    Some(Transfer::Running { done, total }) => {
+      let (k, text) = share(*done, *total);
+      (None, Some((Some(k), text)))
+    }
+    Some(Transfer::Done(t)) => (Some(ended(t)), None),
+    Some(Transfer::Failed(e)) => (Some(format!("Could not {what}: {e}")), None),
+    None => (None, None),
+  };
+  Shown { caption, progress, failed: matches!(state, Some(Transfer::Failed(_))) }
+}
+
+/// A Data row with what it `shown`s: the progress under the title, a failure in red.
+fn data_row<'a>(
+  ui: &mut Ui,
+  fs: &FormStyle,
+  id: Id,
+  row: FormRow<'a>,
+  shown: &'a Shown,
+  controls: impl FnOnce(&mut Ui),
+) {
+  let danger = FormStyle { caption: fs.caption.color(ui.theme().danger), ..*fs };
+  let row = match &shown.caption {
+    Some(caption) => row.caption(caption),
+    None => row,
+  };
+  let below = |ui: &mut Ui| {
+    if let Some((k, text)) = &shown.progress {
+      progress_line(ui, fs, *k, text);
+    }
+  };
+  ui.with_id(id).form_row_with(if shown.failed { &danger } else { fs }, row, below, controls);
+
+  // An error cut short shows whole in its tooltip.
+  if let Some(caption) = shown.caption.as_ref().filter(|_| shown.failed) {
+    ui.tooltip(id.key("caption"), caption);
+  }
+}
+
+/// `Added 120 dictations`, and the recordings that did not come.
+fn imported_text(r: &Imported) -> String {
+  let mut s = match r.added {
+    0 => "Nothing new: all of its dictations are here".to_owned(),
+    1 => "Added 1 dictation".to_owned(),
+    n => format!("Added {n} dictations"),
+  };
+  if r.failed > 0 {
+    s += &format!(" · {} recordings not copied", r.failed);
+  }
+
+  s
+}
+
 // MARK: History
 
 /// Entries a page adds.
@@ -1106,6 +1325,10 @@ struct HistoryPage {
   revision: u64,
   search: String,
   entries: Vec<Entry>,
+  /// The count and duration of each day shown, all its entries, not only those loaded.
+  days: HashMap<String, (usize, i64)>,
+  /// The whole history's ([Db::get_total]), read again when it changes.
+  total: Option<(usize, i64, Option<i64>)>,
   /// Show More clicked so many times.
   pages: usize,
   more: bool,
@@ -1125,6 +1348,8 @@ impl HistoryPage {
       return;
     }
 
+    // The history changed, not only the search or the pages shown.
+    let moved = self.loaded.as_ref().is_some_and(|k| k.2 != key.2);
     self.loaded = Some(key.clone());
     if self.db.is_none() {
       match History::open(home) {
@@ -1136,13 +1361,20 @@ impl HistoryPage {
       }
     }
 
+    let db = &self.db.as_ref().unwrap().db;
+    if self.total.is_none() || moved {
+      self.total = db.get_total().inspect_err(|e| warn!("history: {e:#}")).ok();
+    }
+
     let limit = (self.pages + 1) * PAGE_SIZE;
-    match self.db.as_ref().unwrap().db.get_page(&key.0, limit + 1) {
-      Ok(mut entries) => {
-        self.more = entries.len() > limit;
-        entries.truncate(limit);
-        self.entries = entries;
-      }
+    let page = db.get_page(&key.0, limit + 1).and_then(|mut entries| {
+      let more = entries.len() > limit;
+      entries.truncate(limit);
+      let since = entries.last().map_or(i64::MAX, |e| e.created_at);
+      Ok((entries, db.get_days(&key.0, since)?, more))
+    });
+    match page {
+      Ok((entries, days, more)) => (self.entries, self.days, self.more) = (entries, days, more),
       Err(e) => self.note = Some(format!("Could not read the history: {e:#}")),
     }
   }
@@ -1210,10 +1442,9 @@ fn details(e: &Entry) -> String {
   parts.join(" · ")
 }
 
-/// `3 dictations · 1:15`.
-fn day_note(entries: &[&Entry]) -> String {
-  let n = entries.len();
-  let s = entries.iter().map(|e| e.duration_ms).sum::<i64>() / 1000;
+/// `3 dictations · 1:15`: of the whole day, `(count, ms)`.
+fn day_note((n, ms): (usize, i64)) -> String {
+  let s = ms / 1000;
   let what = if n == 1 { "dictation" } else { "dictations" };
   format!("{n} {what} · {}:{:02}", s / 60, s % 60)
 }
@@ -1229,6 +1460,8 @@ enum Act {
 
 /// The panel under the list, with the selected dictation's whole text and its actions.
 const FOOT_H: f32 = 150.0;
+/// The line under it with the whole history.
+const TOTAL_H: f32 = 30.0;
 
 impl Prefs {
   fn history_head(&mut self, ui: &mut Ui, s: Style) {
@@ -1280,7 +1513,8 @@ impl Prefs {
     let (now, mut act) = (now_ms(), None);
     let fs = &FormStyle { caption: fs.caption.ellipsis(), pad_y: fs.pad_y + 4.0, ..*fs };
     for (day, entries) in &days {
-      let note = day_note(entries);
+      let key = day_of(entries[0].created_at).unwrap_or_default();
+      let note = day_note(h.days.get(&key).copied().unwrap_or_default());
       ui.form_section_with(
         fs,
         &day_title(*day, now),
@@ -1297,8 +1531,12 @@ impl Prefs {
       );
     }
 
-    if h.more && Button::new("Show More").show(ui.id("more")).clicked {
-      h.pages += 1;
+    if h.more {
+      ui.row(Style::new().w(grow()).align(Align::Center, Align::Center), |ui| {
+        if Button::new("Show More").show(ui.id("more")).clicked {
+          h.pages += 1;
+        }
+      });
     }
 
     self.history_act(ui, act);
@@ -1352,10 +1590,32 @@ impl Prefs {
     self.history_act(ui, act);
   }
 
+  /// Under the panel, the whole history: `86,286 dictations · 312 h · since March 14, 2026`.
+  fn history_total(&self, ui: &mut Ui, fs: &FormStyle) {
+    let Some((n, ms, Some(first))) = self.history.total.filter(|t| t.0 > 0) else { return };
+    let what = if n == 1 { "dictation" } else { "dictations" };
+    let spoken = match ms / 1000 {
+      s if s < 60 => format!("{s} s"),
+      s if s < 3600 => format!("{} min", s / 60),
+      s => format!("{} h", s / 3600),
+    };
+    let since = local_time(first).map(|t| format!("{} {}, {}", t.month_name(), t.day, t.year));
+    let mut text = format!("{} {what} · {spoken}", thousands(n));
+    if let Some(since) = since {
+      text += &format!(" · since {since}");
+    }
+
+    ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
+    ui.row(Style::new().w(grow()).h(px(TOTAL_H)).align(Align::Center, Align::Center), |ui| {
+      ui.id("history-total").text(&text, fs.note);
+    });
+  }
+
   fn history_act(&mut self, ui: &mut Ui, act: Option<Act>) {
     let h = &mut self.history;
     match act {
-      Some(Act::Select(id)) => h.selected = Some(id),
+      // Clicked again, it is unselected.
+      Some(Act::Select(id)) => h.selected = (h.selected != Some(id)).then_some(id),
       Some(Act::Copy(text)) => {
         ui.clipboard().write(&text);
         h.note = Some("Copied to the clipboard".into());
@@ -1488,7 +1748,8 @@ impl Prefs {
       });
     });
 
-    let fs = &FormStyle { caption: fs.caption.ellipsis(), ..*fs };
+    // Denser than a setting's rows: six of them.
+    let fs = &FormStyle { caption: fs.caption.ellipsis(), pad_y: 5.0, ..*fs };
     // A row's controls go on its name's line: the ↗ is centred in the whole row instead, the
     // name, its line and nimbo's 2 points between them.
     let row_h = 2.0 * fs.pad_y + fs.label.line_h + 2.0 + fs.caption.line_h;
@@ -1531,6 +1792,11 @@ mod tests {
     deleted: Vec<&'static str>,
     requests: Vec<Request>,
     autostarts: Vec<bool>,
+    export: Option<Export>,
+    exports: Vec<PathBuf>,
+    revealed: Vec<PathBuf>,
+    import: Option<Import>,
+    imports: Vec<PathBuf>,
   }
 
   #[derive(Clone, Default)]
@@ -1612,6 +1878,31 @@ mod tests {
     fn set_autostart(&self, on: bool) {
       self.log().autostarts.push(on);
     }
+
+    /// It runs 37% through until the test says otherwise.
+    fn export(&self, file: PathBuf) {
+      let mut log = self.log();
+      log.exports.push(file);
+      log.export = Some(Transfer::Running { done: 6_000_000_000, total: 16_000_000_000 });
+    }
+
+    fn export_state(&self) -> Option<Export> {
+      self.log().export.clone()
+    }
+
+    fn import(&self, file: PathBuf) {
+      let mut log = self.log();
+      log.imports.push(file);
+      log.import = Some(Transfer::Running { done: 0, total: 0 });
+    }
+
+    fn import_state(&self) -> Option<Import> {
+      self.log().import.clone()
+    }
+
+    fn reveal(&self, dir: &Path) {
+      self.log().revealed.push(dir.to_owned());
+    }
   }
 
   /// A home in a temp dir with a Hugging Face cache in it that has `models`.
@@ -1635,7 +1926,10 @@ mod tests {
       fake.log().settings = settings.clone();
       let shell = Box::new(fake.clone());
       let prefs = Prefs::new(shell, settings, self.hub.clone(), self.dir.path());
-      let mut h = Harness::new(prefs, config(Page::General).size, 2.0);
+      let cfg = config(Page::General);
+      let mut h = Harness::new(prefs, cfg.size, 2.0);
+      // As high as macOS 26's, as nimbo's own shots draw it.
+      h.rt.set_titlebar(Some((32.0, cfg.title)));
       h.event(Event::Appearance(Appearance::LIGHT));
       h.frame();
       h.frame();
@@ -1743,7 +2037,7 @@ mod tests {
         let size = h.rt.size;
         let sc = h.rt.ui.scroll(Id::of(("page", page as u8))).expect("the page's scroll area");
         match page.scrolls() {
-          true => assert_eq!(size, Size::new(WIDTH, SCROLLING), "{name}"),
+          true => assert_eq!(size, Size::new(WIDTH, SCROLLING + 32.0), "{name}: and the title bar"),
           false => {
             let blank = sc.viewport.h - sc.content.h;
             assert!((-0.5..=1.0).contains(&blank) && size.w == WIDTH, "{name} fits: {sc:?}");
@@ -1841,13 +2135,59 @@ mod tests {
     click(&mut h, Id::of("ane"));
     assert!(!fake.log().settings.neural_engine);
 
-    // Launch at login goes to the system, one change at a time; a refusal says why.
+    // Launch at login, on General, goes to the system, one change at a time; a refusal says why.
+    tab(&mut h, Page::General);
     click(&mut h, Id::of("login"));
     click(&mut h, Id::of("login"));
     assert_eq!(fake.log().autostarts, [true]);
     h.app_mut().autostart_set(true, Err("not permitted".into()));
     assert!(!h.app().settings.autostart);
     assert_eq!(h.app().login.error.as_deref(), Some("Couldn't turn it on: not permitted"));
+  }
+
+  /// Export asks the save panel where; it is disabled while it runs; Finder shows the archive only
+  /// on a click.
+  #[test]
+  fn the_export_shows_how_it_goes() {
+    let home = Home::new("window-export", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Advanced);
+    click(&mut h, Id::of("export"));
+    let file = home.dir.path().join("wavo-export.zip");
+    let asked = h.file_dialog(Some(&file)).unwrap();
+    assert!(asked.save && asked.name.unwrap().starts_with("wavo-export-"));
+    h.frame();
+    assert_eq!(fake.log().exports, std::slice::from_ref(&file));
+    assert!(fake.log().imports.is_empty(), "the answer goes to the panel that asked");
+
+    click(&mut h, Id::of("export"));
+    assert!(h.file_dialog(None).is_none(), "disabled while it runs");
+    assert!(h.rect(Id::of("export-show")).is_none());
+
+    std::fs::write(&file, "").unwrap();
+    fake.log().export = Some(Transfer::Done((file.clone(), 16_000_000_000)));
+    h.frame();
+    click(&mut h, Id::of("export-show"));
+    assert_eq!(fake.log().revealed, [file]);
+  }
+
+  /// Import asks the system's panel for a .zip and imports the one picked, one at a time.
+  #[test]
+  fn the_import_takes_the_archive_picked() {
+    let home = Home::new("window-import", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Advanced);
+    click(&mut h, Id::of("import"));
+    let file = home.dir.path().join("wavo-export.zip");
+    assert_eq!(h.file_dialog(Some(&file)).unwrap().types, ["zip"]);
+    h.frame();
+    assert_eq!(fake.log().imports, [file]);
+    assert!(fake.log().exports.is_empty());
+
+    click(&mut h, Id::of("import"));
+    assert!(h.file_dialog(None).is_none(), "disabled while it runs");
   }
 
   #[test]
@@ -1900,6 +2240,20 @@ mod tests {
     assert!(h.rect(Id::of(("retranscribe", ids[0]))).is_none());
     click(&mut h, Id::of(("text", ids[0])));
     assert_eq!(h.app().history.selected, Some(ids[0]));
+    let total = h.text(Id::of("history-total")).unwrap();
+    assert!(total.starts_with("2 dictations · ") && total.contains(" · since "), "{total}");
+
+    // Unselected by a click on it again, by Esc, and by a click on nothing above the panel.
+    click(&mut h, Id::of(("text", ids[0])));
+    assert_eq!(h.app().history.selected, None);
+    click(&mut h, Id::of(("text", ids[0])));
+    h.key(NamedKey::Escape, Modifiers::empty());
+    assert_eq!(h.app().history.selected, None);
+    click(&mut h, Id::of(("text", ids[0])));
+    let last = h.rect(Id::of(("text", ids[1]))).unwrap();
+    h.click(last.x, last.y + last.h + 60.0);
+    assert_eq!(h.app().history.selected, None);
+    click(&mut h, Id::of(("text", ids[0])));
 
     // Transcribed again from the panel: its new text came, and the one before comes back.
     click(&mut h, Id::of(("retranscribe", ids[0])));
@@ -1927,6 +2281,12 @@ mod tests {
     assert!(
       h.rect(Id::of(("copy", ids[1]))).is_some() && h.rect(Id::of(("copy", ids[0]))).is_none()
     );
+  }
+
+  #[test]
+  fn numbers_read_in_thousands() {
+    let got: Vec<_> = [0, 7, 999, 1_000, 86_286, 1_234_567].map(thousands).into();
+    assert_eq!(got, ["0", "7", "999", "1,000", "86,286", "1,234,567"]);
   }
 
   /// The first launch: a row for each permission missing, with Allow, gone once given and the

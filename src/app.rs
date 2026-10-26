@@ -12,8 +12,8 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use nimbo::clipboard::{Offer, Snapshot};
@@ -31,7 +31,9 @@ use crate::hud::{self, Hud, Mode, Show};
 use crate::menu::{self, Icon, Warning};
 use crate::session::{self, Handle, NotPasted, Phase, Request, Session, TextOutput, Update};
 use crate::settings::{self, HudPosition, Settings};
-use crate::window::{self, Download, Downloads, Found, Page, Pick, Prefs, no_text};
+use crate::window::{
+  self, Download, Downloads, Export, Found, Import, Page, Pick, Prefs, Transfer, no_text,
+};
 use crate::{INFO, audio, transfer};
 
 // How often Accessibility is checked while it is missing or the event tap is not running.
@@ -74,9 +76,12 @@ struct App {
   update: Option<Update>,
   window: Option<Window<Prefs>>,
   downloads: Downloads,
+  export: Arc<Mutex<Option<Export>>>,
+  import: Arc<Mutex<Option<Import>>>,
   // The models downloaded and the recent dictations, as the menu last opened.
   found: Vec<Found>,
   pick: Pick,
+  devices: Vec<audio::Device>,
   recent: Vec<Entry>,
   history: Option<History>,
   accessibility: bool,
@@ -158,8 +163,11 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     update: None,
     window: None,
     downloads: Downloads::default(),
+    export: Arc::default(),
+    import: Arc::default(),
     found: Vec::new(),
     pick: Pick::default(),
+    devices: audio::devices(),
     recent: Vec::new(),
     history: None,
     accessibility: false,
@@ -219,6 +227,11 @@ fn chosen(main: &mut Main, id: &str) {
     return;
   }
 
+  if let Some(i) = id.strip_prefix("mic:").and_then(|i| i.parse().ok()) {
+    with_app(|app| app.choose_mic(i));
+    return;
+  }
+
   if let Some(name) = id.strip_prefix("model:") {
     let name = name.to_owned();
     info!("model {name} chosen in the menu");
@@ -262,6 +275,8 @@ fn open_window(main: &mut Main, page: Option<Page>) {
       handle: app.handle.clone(),
       hub: app.hub.clone(),
       downloads: app.downloads.clone(),
+      export: app.export.clone(),
+      import: app.import.clone(),
     };
     (shell, app.update.clone(), app.hub.clone(), app.home.clone())
   }) else {
@@ -325,6 +340,16 @@ fn request_microphone() {
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
   std::thread::Builder::new().name(name.into()).spawn(f).unwrap();
+}
+
+/// Redraws the settings window if it is open, for progress: not retried while the window is busy,
+/// where it piles up.
+fn redraw() {
+  proxy().post(|_| {
+    if let Some(w) = with_app(|app| app.window.clone()).flatten() {
+      w.redraw();
+    }
+  });
 }
 
 /// Runs `f` on the settings window if it is open; while the window is busy further up the stack (a
@@ -499,9 +524,11 @@ impl App {
     }
   }
 
-  /// What the system does not tell the app is looked at again, and the models and the history.
+  /// What the system does not tell the app is looked at again: the microphones, the models and
+  /// the history.
   fn menu_opening(&mut self) {
     self.microphone = permissions::microphone();
+    self.devices = audio::devices();
     self.clipboard = SystemClipboard.readable();
     self.read_models();
     self.read_recent();
@@ -535,6 +562,16 @@ impl App {
     let Some(e) = self.recent.get(i).filter(|e| !e.text.is_empty()) else { return false };
     SystemClipboard.write(&e.text);
     true
+  }
+
+  /// The menu's microphone `i`, as [App::refresh] listed them.
+  fn choose_mic(&mut self, i: usize) {
+    let saved = self.update.as_ref().and_then(|u| u.settings.microphone.clone());
+    let (mics, _) = window::microphones(&self.devices, saved.as_ref());
+    if let Some((name, choice)) = mics.into_iter().nth(i) {
+      info!("microphone {name} chosen in the menu");
+      self.handle.edit_settings(move |s| s.microphone = choice);
+    }
   }
 
   fn repick(&mut self) {
@@ -573,8 +610,9 @@ impl App {
         menu::recent_title(empty.as_deref().unwrap_or(&e.text), e.created_at, now)
       })
       .collect();
+    let mics = (&self.devices[..], update.settings.microphone.as_ref());
     let (status, found, pick) = (&update.status, &self.found, &self.pick);
-    let menu = menu::menu(hotkey.as_deref(), status, &warnings, &recent, found, pick);
+    let menu = menu::menu(hotkey.as_deref(), status, &warnings, &recent, mics, found, pick);
     if menu != self.menu {
       self.tray.set_menu(&menu);
       self.menu = menu;
@@ -585,12 +623,15 @@ impl App {
 // MARK: Shell
 
 /// The settings window's way to the app. What may wait (the system's login items, a deletion, an
-/// export) runs on a thread of its own: the window keeps drawing.
+/// export) runs on a thread of its own: the window keeps drawing. A download's, the export's and
+/// the import's state are the app's: a window opened again shows them.
 struct MacShell {
   home: PathBuf,
   handle: Handle,
   hub: Hub,
   downloads: Downloads,
+  export: Arc<Mutex<Option<Export>>>,
+  import: Arc<Mutex<Option<Import>>>,
 }
 
 impl window::Shell for MacShell {
@@ -611,12 +652,7 @@ impl window::Shell for MacShell {
     let ane = Settings::load(&self.home.join(settings::FILE)).0.neural_engine;
     self.downloads.pull(self.hub.clone().prepare(ane), model, |ended| {
       if !ended {
-        // Progress only redraws: not retried while the window is busy, where it piles up.
-        return proxy().post(|_| {
-          if let Some(w) = with_app(|app| app.window.clone()).flatten() {
-            w.with(|_| ());
-          }
-        });
+        return redraw();
       }
 
       proxy().post(|_| _ = with_app(App::read_models));
@@ -705,39 +741,107 @@ impl window::Shell for MacShell {
     crate::engine::has_neural_engine()
   }
 
-  /// Into a new archive in Downloads (nimbo has no file picker), shown there.
-  /// One at a time: a second click while one runs would pick the same file.
-  fn export(&self) {
-    static EXPORTING: AtomicBool = AtomicBool::new(false);
-    if EXPORTING.swap(true, Ordering::AcqRel) {
-      return info!("export: one is running already");
+  /// Into the archive the save panel picked.
+  fn export(&self, file: PathBuf) {
+    if !begin(&self.export) {
+      return;
     }
 
-    let home = self.home.clone();
+    let (home, state) = (self.home.clone(), self.export.clone());
     spawn("export", move || {
-      let file = export_file();
-      match transfer::export(&home, &file) {
-        Ok(_) => _ = nimbo::open::reveal(&file).inspect_err(|e| warn!("show the archive: {e}")),
-        Err(e) => warn!("export to {}: {e:#}", file.display()),
+      user_initiated();
+      let started = Instant::now();
+      let result = transfer::export(&home, &file, progress(&state));
+      let end = match result {
+        Ok(done) => {
+          info!("exported {}: {}", file.display(), rate(done.bytes, started));
+          Transfer::Done((file, done.bytes))
+        }
+        Err(e) => {
+          warn!("export to {}: {e:#}", file.display());
+          Transfer::Failed(format!("{e:#}"))
+        }
+      };
+      *state.lock().unwrap() = Some(end);
+      with_window(|_| ());
+    });
+  }
+
+  fn export_state(&self) -> Option<Export> {
+    self.export.lock().unwrap().clone()
+  }
+
+  /// Beside the running app, which holds the history's lock; the session hears of it after, so
+  /// the history window and the menu show the new dictations.
+  fn import(&self, file: PathBuf) {
+    if !begin(&self.import) {
+      return;
+    }
+
+    let (home, handle, state) = (self.home.clone(), self.handle.clone(), self.import.clone());
+    spawn("import", move || {
+      user_initiated();
+      let started = Instant::now();
+      let end = match transfer::import(&home, &file, progress(&state)) {
+        Ok(done) => {
+          let bytes = std::fs::metadata(&file).map_or(0, |m| m.len());
+          info!("imported {}: {done:?}, {}", file.display(), rate(bytes, started));
+          Transfer::Done(done)
+        }
+        Err(e) => {
+          warn!("import {}: {e:#}", file.display());
+          Transfer::Failed(format!("{e:#}"))
+        }
+      };
+      *state.lock().unwrap() = Some(end);
+      if let Err(e) = handle.request(Request::Imported) {
+        warn!("import: {e}");
       }
 
-      EXPORTING.store(false, Ordering::Release);
+      with_window(|_| ());
     });
+  }
+
+  fn import_state(&self) -> Option<Import> {
+    self.import.lock().unwrap().clone()
   }
 }
 
-/// `~/Downloads/wavo-export-2026-10-24.tar`, `-2` and so on if taken or being written.
-fn export_file() -> PathBuf {
-  let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-  let day = history::day_of(history::now_ms()).unwrap_or_default();
-  let dir = home.join("Downloads");
-  (1..)
-    .map(|n| match n {
-      1 => dir.join(format!("wavo-export-{day}.tar")),
-      n => dir.join(format!("wavo-export-{day}-{n}.tar")),
-    })
-    .find(|f| !f.exists() && !transfer::part_of(f).exists())
-    .unwrap()
+/// The calling thread runs as the person's own action, not as background work: macOS gives it
+/// the disk and the cores a background thread waits for.
+fn user_initiated() {
+  // SAFETY: it sets the calling thread's own class.
+  unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0) };
+}
+
+/// `16.0 GB in 52.3 s, 306 MB/s` since `started`.
+fn rate(bytes: u64, started: Instant) -> String {
+  let secs = started.elapsed().as_secs_f64();
+  let mbs = bytes as f64 / 1e6 / secs.max(0.001);
+  format!("{} in {secs:.1} s, {mbs:.0} MB/s", window::size_text(bytes))
+}
+
+/// Marks a transfer running, unless one is: one at a time.
+fn begin<T>(state: &Mutex<Option<Transfer<T>>>) -> bool {
+  let mut state = state.lock().unwrap();
+  if matches!(*state, Some(Transfer::Running { .. })) {
+    return false;
+  }
+
+  *state = Some(Transfer::Running { done: 0, total: 0 });
+  true
+}
+
+/// A transfer's progress into `state`, redrawing the window at most every 100 ms.
+fn progress<T>(state: &Mutex<Option<Transfer<T>>>) -> impl FnMut(u64, u64) {
+  let mut told = None::<Instant>;
+  move |done, total| {
+    *state.lock().unwrap() = Some(Transfer::Running { done, total });
+    if told.is_none_or(|t: Instant| t.elapsed() >= Duration::from_millis(100)) {
+      told = Some(Instant::now());
+      redraw();
+    }
+  }
 }
 
 // MARK: Paste

@@ -1,8 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
+#!/usr/bin/env python3
 """Packages the release binary as Wavo.app and signs it.
 
   scripts/bundle.py <binary> <icon.png> <Wavo.app>
@@ -23,6 +19,8 @@ LSEnvironment sets MallocSpaceEfficient=1 (libmalloc's src/malloc.c: no large-bl
 pages given back at once): otherwise malloc keeps the large blocks a model frees after its
 unload. It applies when LaunchServices starts the app.
 """
+
+from __future__ import annotations
 
 import os
 import shutil
