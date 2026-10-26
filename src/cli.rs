@@ -25,10 +25,35 @@ pub fn send(cmd: &str) -> Result<()> {
 
 // MARK: Uninstall
 
+/// `uninstall`'s help: what it removes on this OS.
+pub const UNINSTALL: &str = match () {
+  _ if cfg!(target_os = "macos") => {
+    "Remove Wavo and all it left: its data, caches, defaults, permissions, the models it \
+     downloaded and the app"
+  }
+  _ if cfg!(windows) => {
+    "Remove Wavo and all it left: its data, caches and the models it downloaded; the folder with \
+     Wavo.exe is left to delete by hand, as Windows can't delete a running app"
+  }
+  _ => {
+    "Remove Wavo and all it left: its data, caches, launcher entry, the models it downloaded and \
+     the AppImage it runs from"
+  }
+};
+
+/// What `uninstall` does on this OS besides removing files.
+const STEPS: &str = match () {
+  _ if cfg!(target_os = "macos") => {
+    "quit Wavo, turn launch at login off, reset its permissions and defaults"
+  }
+  _ if cfg!(windows) => "quit Wavo, turn launch at login off",
+  _ => "quit Wavo, turn launch at login off, remove its launcher entry",
+};
+
 /// Removes Wavo and all it left: quits it, turns launch at login off, removes its launcher entry
 /// (Linux), resets its permissions and macOS defaults, deletes its data, its caches (wavo's, the
 /// models built for the Neural Engine, too), the models it downloaded into the Hugging Face cache,
-/// and the app it runs from.
+/// and the app it runs from ([app]).
 pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
   let home = crate::home();
   let hub = Hub::new();
@@ -40,16 +65,20 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
   let caches = [nimbo::paths::cache_dir(INFO.id), nimbo::paths::cache_dir("wavo")];
   let dirs = [home.clone()].into_iter().chain(config).chain(caches).collect();
   let mut paths: Vec<PathBuf> = outermost(dirs).into_iter().filter(|p| p.exists()).collect();
-  paths.extend(app_bundle());
+  paths.extend(app());
+  // Windows can't delete the exe that runs this: its folder is left to the person.
+  let left = std::env::current_exe().ok().filter(|_| cfg!(windows)).and_then(|exe| {
+    let (dir, name) = (exe.parent()?.display(), exe.file_name()?.display());
+    Some(format!("left for you to delete: {dir}, the folder with {name}"))
+  });
   let list = || {
     paths.iter().for_each(|p| println!("{}", p.display()));
     models.iter().for_each(|(m, _)| println!("the model {} in {hub}", m.name));
   };
   if dry_run {
-    println!(
-      "would quit Wavo, turn launch at login off, remove its launcher entry, reset its permissions and defaults"
-    );
+    println!("would {STEPS}, and remove:");
     list();
+    left.iter().for_each(|l| println!("{l}"));
     return Ok(());
   }
 
@@ -101,20 +130,24 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
   }
 
   // The app last: this may run from it. One that can't go is told and left.
-  let mut left = 0;
+  let mut failed = 0;
   for path in &paths {
     match remove(path) {
       Ok(()) => println!("removed {}", path.display()),
       Err(e) if e.kind() == io::ErrorKind::NotFound => {}
       Err(e) => {
         println!("could not remove {}: {e}", path.display());
-        left += 1;
+        failed += 1;
       }
     }
   }
 
-  if left > 0 {
-    bail!("{left} left, remove them by hand");
+  if let Some(left) = &left {
+    println!("{left}");
+  }
+
+  if failed > 0 {
+    bail!("{failed} left, remove them by hand");
   }
 
   Ok(())
@@ -126,11 +159,29 @@ fn outermost(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
   dirs.iter().filter(|p| !inside(p)).cloned().collect()
 }
 
-/// The app this runs from, `/Applications/Wavo.app`; none for a bare binary (a build).
-fn app_bundle() -> Option<PathBuf> {
+/// The app this runs from: macOS's `Wavo.app`, Linux's AppImage; none for a bare binary (a build)
+/// or on Windows, where a running exe can't be deleted.
+fn app() -> Option<PathBuf> {
   let exe = std::env::current_exe().ok()?;
-  let app = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"))?;
-  Some(app.to_owned())
+  if cfg!(target_os = "macos") {
+    return bundle(&exe).map(Path::to_owned);
+  }
+
+  // The AppImage's runtime sets both; one that came from another AppImage (a terminal that is one)
+  // is not where this runs.
+  if cfg!(target_os = "linux") {
+    let var = |k| std::env::var_os(k).map(PathBuf::from);
+    let (image, mount) = (var("APPIMAGE")?, var("APPDIR")?);
+    return (exe.starts_with(mount) && image.is_file()).then_some(image);
+  }
+
+  None
+}
+
+/// The bundle `exe` is the binary of, by its layout: `<name>.app/Contents/MacOS/<exe>`.
+fn bundle(exe: &Path) -> Option<&Path> {
+  let app = exe.parent().filter(|p| p.ends_with("Contents/MacOS"))?.parent()?.parent()?;
+  app.extension().is_some_and(|e| e == "app").then_some(app)
 }
 
 /// Deletes `path`, a folder with all in it or a file; again, for up to 5 s, while an error may
@@ -209,6 +260,16 @@ mod tests {
     let p = PathBuf::from;
     let dirs = vec![p("/data/wavo"), p("/data/wavo2"), p("/data/wavo/cache"), p("/cache/wavo")];
     assert_eq!(outermost(dirs), [p("/data/wavo"), p("/data/wavo2"), p("/cache/wavo")]);
+  }
+
+  #[test]
+  fn a_bundle_by_its_layout() {
+    let got = |exe: &str| bundle(Path::new(exe)).map(|p| p.to_str().unwrap().to_owned());
+    let app = Some("/Applications/Wavo.app".to_owned());
+    assert_eq!(got("/Applications/Wavo.app/Contents/MacOS/wavo-app"), app);
+    assert_eq!(got("/src/foo.app/target/release/wavo-app"), None, "a build in a .app folder");
+    assert_eq!(got("/Wavo.app/Contents/Resources/wavo-app"), None);
+    assert_eq!(got("/src/Contents/MacOS/wavo-app"), None);
   }
 
   #[test]

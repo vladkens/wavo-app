@@ -70,8 +70,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-  /// Remove Wavo and all it left: its data, caches, defaults, permissions, the models it downloaded
-  /// and the app
+  #[command(about = cli::UNINSTALL)]
   Uninstall {
     /// Say what it would do, change nothing
     #[arg(long)]
