@@ -162,8 +162,9 @@ pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
 
 // MARK: Import
 
-/// Imports the archive `file` into `home`; `take_settings` replaces the settings with the
-/// archive's. A dry run says what it would do and writes nothing.
+/// Imports the archive `file` into `home`, unless Wavo runs for it (the app imports with
+/// [import_in_app]); `take_settings` replaces the settings with the archive's. A dry run says what
+/// it would do and writes nothing.
 pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> Result<Imported> {
   let _lock = match dry_run {
     true => None,
@@ -176,6 +177,22 @@ pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> R
     }
   };
 
+  import_into(home, file, take_settings, dry_run, |_, _| {})
+}
+
+/// [import] by the app, which holds the lock: the history without the settings; `progress` hears
+/// how far through the archive its recordings are, in bytes.
+pub fn import_in_app(home: &Path, file: &Path, progress: impl FnMut(u64, u64)) -> Result<Imported> {
+  import_into(home, file, false, false, progress)
+}
+
+fn import_into(
+  home: &Path,
+  file: &Path,
+  take_settings: bool,
+  dry_run: bool,
+  mut progress: impl FnMut(u64, u64),
+) -> Result<Imported> {
   // A dry run reads a copy of the history and lists the recordings: nothing of the home is
   // created or migrated.
   let history = if dry_run { None } else { Some(History::open(home)?) };
@@ -242,16 +259,22 @@ pub fn import(home: &Path, file: &Path, take_settings: bool, dry_run: bool) -> R
 
   // In the archive's order, read front to back.
   let mut copies = plan.add(history.as_ref().unwrap(), &starts)?;
-  let prefix = format!("{RECORDINGS_DIR}/");
+  let (prefix, len) = (format!("{RECORDINGS_DIR}/"), fs::metadata(file)?.len());
   for i in 0..archive.len() {
     let dst = match archive.name_for_index(i) {
       Some(Ok(name)) => name.strip_prefix(&prefix).and_then(|rec| copies.remove(rec)),
       _ => None,
     };
     let Some(dst) = dst else { continue };
-    let copied = archive.by_index(i).map_err(anyhow::Error::from);
-    match copied.and_then(|mut item| write_recording(&dst, &mut item)) {
-      Ok(()) => done.copied += 1,
+    let copied = archive.by_index(i).map_err(anyhow::Error::from).and_then(|mut item| {
+      write_recording(&dst, &mut item)?;
+      Ok(item.header_start() + item.compressed_size())
+    });
+    match copied {
+      Ok(end) => {
+        done.copied += 1;
+        progress(end, len);
+      }
       Err(e) => {
         warn!("{}: {e:#}", dst.display());
         done.failed += 1;
@@ -483,6 +506,21 @@ mod tests {
     let done = import(to.path(), &file, false, false).unwrap();
     assert_eq!((done.added, done.copied), (0, 1));
     assert!(h.audio_file(&entries[1]).is_some());
+  }
+
+  /// The app imports beside the lock it holds, its progress going through the archive.
+  #[test]
+  fn the_app_imports_while_it_runs() {
+    let (from, to, out) = (TempDir::new("app-from"), TempDir::new("app-to"), TempDir::new("app"));
+    add(&History::open(from.path()).unwrap(), NOW, "one", Some(0.5));
+    let file = out.path().join("wavo.zip");
+    export(from.path(), &file, |_, _| {}).unwrap();
+
+    let Claim::Server(_app) = ctl::claim(to.path()).unwrap() else { panic!("taken") };
+    let mut last = (0, 0);
+    let done = import_in_app(to.path(), &file, |done, total| last = (done, total)).unwrap();
+    assert_eq!((done.added, done.copied), (1, 1));
+    assert!(last.0 > 0 && last.0 <= last.1, "{last:?}");
   }
 
   #[test]

@@ -387,6 +387,8 @@ pub enum Request {
   Delete(i64),
   /// Free the model's memory, after the job in progress.
   Unload,
+  /// An import added dictations: the update after it carries the history's change.
+  Imported,
 }
 
 enum Msg {
@@ -696,6 +698,7 @@ impl<O: TextOutput> Controller<O> {
 
         Ok(())
       }
+      Request::Imported => Ok(()),
     }
   }
 

@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
 use nimbo::{
-  Align, Answer, App, Button, Config, Dialog, Float, Font, FormRow, FormStyle, Hotkey, Icon, Id,
-  Select, Style, TextStyle, Tile, Ui, Weight, grow, open, paths, px,
+  Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
+  FormStyle, Hotkey, Icon, Id, Select, Style, TextStyle, Tile, Ui, Weight, grow, open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -26,6 +26,7 @@ use crate::audio::{self, Choice, Playback};
 use crate::history::{Entry, History, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms};
 use crate::session::{NoModel, Request, Status, label};
 use crate::settings::{Activation, HudPosition, Settings, language_name};
+use crate::transfer::Imported;
 
 // MARK: Window
 
@@ -98,6 +99,9 @@ pub trait Shell {
   /// Writes the history into an archive in Downloads: [Shell::export_state].
   fn export(&self) {}
   fn export_state(&self) -> Option<Export>;
+  /// Adds the dictations of the archive `file` the history does not have: [Shell::import_state].
+  fn import(&self, _file: PathBuf) {}
+  fn import_state(&self) -> Option<Import>;
   fn open_url(&self, _url: &str) {}
   fn reveal(&self, _dir: &Path) {}
   /// This Mac has a Neural Engine wavo can use.
@@ -306,6 +310,17 @@ impl App for Prefs {
     if recording != self.recording {
       self.recording = recording;
       self.shell.pause_hotkey(recording);
+    }
+  }
+
+  /// The archive Import's panel picked.
+  fn event(&mut self, _cx: &mut Cx, ev: &Event) -> bool {
+    match ev {
+      Event::FileDialog(Some(file)) => {
+        self.shell.import(file.clone());
+        true
+      }
+      _ => false,
     }
   }
 }
@@ -553,6 +568,8 @@ const ANE_HELP: &str = "Parakeet and GigaAM run on the Neural Engine: as fast as
   fraction of the energy. Each new version of Wavo prepares the model once, in the background \
   (10–30 s); meanwhile it runs on the GPU. Whisper always runs on the GPU.";
 const NO_ANE: &str = "Needs Apple silicon and macOS 15 or later.";
+const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another Mac: the dictations this \
+  history does not have are added with their recordings; the settings stay as they are.";
 const EXPORT_HELP: &str = "The history, its recordings and the settings, into Downloads as a .zip \
   archive. To bring one back on another Mac, quit Wavo and run: wavo-app import <file>";
 
@@ -646,54 +663,43 @@ impl Prefs {
       }
     });
 
-    ui.form_section(fs, "Data", |ui| self.export_row(ui, fs, &show));
+    ui.form_section(fs, "Data", |ui| {
+      self.export_row(ui, fs, &show);
+      self.import_row(ui, fs);
+    });
   }
 
-  /// Export, disabled with its progress in place of the caption while it runs; then the archive's
-  /// size with Show in Finder, or why it failed.
+  /// Export; then the archive's size with Show in Finder.
   fn export_row(&self, ui: &mut Ui, fs: &FormStyle, show: &str) {
     let state = self.shell.export_state();
-    let (caption, progress) = match &state {
-      Some(Export::Running { total: 0, .. }) => (None, Some((None, "Copying the history…".into()))),
-      Some(Export::Running { done, total, .. }) => {
-        let (k, text) = share(*done, *total);
-        (None, Some((Some(k), text)))
-      }
-      Some(Export::Done { size, .. }) => (Some(format!("Exported · {}", size_text(*size))), None),
-      Some(Export::Failed(e)) => (Some(format!("Could not export: {e}")), None),
-      None => (None, None),
-    };
-
-    let failed = matches!(state, Some(Export::Failed(_)));
-    let danger = FormStyle { caption: fs.caption.color(ui.theme().danger), ..*fs };
-    let id = Id::of("export-row");
-    let mut row = FormRow::new("Export the history").info(EXPORT_HELP).tile(Tile::Icon(Icon::DOC));
-    if let Some(caption) = &caption {
-      row = row.caption(caption);
-    }
-
-    let below = |ui: &mut Ui| {
-      if let Some((k, text)) = &progress {
-        progress_line(ui, fs, *k, text);
-      }
-    };
-    ui.with_id(id).form_row_with(if failed { &danger } else { fs }, row, below, |ui| {
-      if let Some(Export::Done { file, .. }) = &state {
-        let r = ui.disabled(!file.is_file()).id("export-show").button(show);
-        if r.clicked {
-          self.shell.reveal(file);
-        }
+    let ended = |(_, size): &(PathBuf, u64)| format!("Exported · {}", size_text(*size));
+    let shown = shown(&state, "export", "Copying the history…", ended);
+    let running = shown.progress.is_some();
+    let row = FormRow::new("Export the history").info(EXPORT_HELP).tile(Tile::Icon(Icon::DOC));
+    data_row(ui, fs, "export-row", row, &shown, |ui| {
+      if let Some(Transfer::Done((file, _))) = &state
+        && ui.disabled(!file.is_file()).id("export-show").button(show).clicked
+      {
+        self.shell.reveal(file);
       }
 
-      if ui.disabled(progress.is_some()).id("export").button("Export").clicked {
+      if ui.disabled(running).id("export").button("Export").clicked {
         self.shell.export();
       }
     });
+  }
 
-    // An error cut short shows whole in its tooltip.
-    if let Some(caption) = caption.filter(|_| failed) {
-      ui.tooltip(id.key("caption"), &caption);
-    }
+  /// Import…, the system's panel for the archive ([Prefs::event]); then what it added.
+  fn import_row(&self, ui: &mut Ui, fs: &FormStyle) {
+    let state = self.shell.import_state();
+    let shown = shown(&state, "import", "Reading the archive…", imported_text);
+    let running = shown.progress.is_some();
+    let row = FormRow::new("Import a history").info(IMPORT_HELP).tile(Tile::Icon(Icon::DOWNLOAD));
+    data_row(ui, fs, "import-row", row, &shown, |ui| {
+      if ui.disabled(running).id("import").button("Import…").clicked {
+        ui.file_dialog(FileDialog::open("Import").types(&["zip"]));
+      }
+    });
   }
 
   /// The switch shows the change at once and stays disabled until the system answers
@@ -1141,22 +1147,91 @@ impl Downloads {
   }
 }
 
-// MARK: Export
+// MARK: Transfers
 
-/// How the history's export goes ([Shell::export]).
+/// How an export or an import goes.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Export {
-  /// Into `file`: bytes written of `total`, 0 while the history is copied first.
+pub enum Transfer<T> {
+  /// Bytes done of `total`, 0 while it starts (the history is copied or read first).
   Running {
-    file: PathBuf,
     done: u64,
     total: u64,
   },
-  Done {
-    file: PathBuf,
-    size: u64,
-  },
+  Done(T),
   Failed(String),
+}
+
+/// The archive and its size.
+pub type Export = Transfer<(PathBuf, u64)>;
+pub type Import = Transfer<Imported>;
+
+/// What a Data row shows of a transfer: its caption, else its progress while it runs.
+struct Shown {
+  caption: Option<String>,
+  progress: Option<(Option<f32>, String)>,
+  failed: bool,
+}
+
+/// `starting` until it knows its total, `ended` once done; a failure says it could not `what`.
+fn shown<T>(
+  state: &Option<Transfer<T>>,
+  what: &str,
+  starting: &str,
+  ended: impl Fn(&T) -> String,
+) -> Shown {
+  let (caption, progress) = match state {
+    Some(Transfer::Running { total: 0, .. }) => (None, Some((None, starting.to_owned()))),
+    Some(Transfer::Running { done, total }) => {
+      let (k, text) = share(*done, *total);
+      (None, Some((Some(k), text)))
+    }
+    Some(Transfer::Done(t)) => (Some(ended(t)), None),
+    Some(Transfer::Failed(e)) => (Some(format!("Could not {what}: {e}")), None),
+    None => (None, None),
+  };
+  Shown { caption, progress, failed: matches!(state, Some(Transfer::Failed(_))) }
+}
+
+/// A Data row with what it `shown`s: the progress under the title, a failure in red.
+fn data_row<'a>(
+  ui: &mut Ui,
+  fs: &FormStyle,
+  id: &str,
+  row: FormRow<'a>,
+  shown: &'a Shown,
+  controls: impl FnOnce(&mut Ui),
+) {
+  let danger = FormStyle { caption: fs.caption.color(ui.theme().danger), ..*fs };
+  let id = Id::of(id);
+  let row = match &shown.caption {
+    Some(caption) => row.caption(caption),
+    None => row,
+  };
+  let below = |ui: &mut Ui| {
+    if let Some((k, text)) = &shown.progress {
+      progress_line(ui, fs, *k, text);
+    }
+  };
+  ui.with_id(id).form_row_with(if shown.failed { &danger } else { fs }, row, below, controls);
+
+  // An error cut short shows whole in its tooltip.
+  if let Some(caption) = shown.caption.as_ref().filter(|_| shown.failed) {
+    ui.tooltip(id.key("caption"), caption);
+  }
+}
+
+/// `Added 120 dictations`, and the recordings that did not come.
+fn imported_text(r: &Imported) -> String {
+  let mut s = match r.added {
+    0 => "Nothing new: all of its dictations are here".to_owned(),
+    1 => "Added 1 dictation".to_owned(),
+    n => format!("Added {n} dictations"),
+  };
+  if r.failed > 0 {
+    s += &format!(" · {} recordings not copied", r.failed);
+  }
+
+  s
 }
 
 // MARK: History
@@ -1614,6 +1689,8 @@ mod tests {
     export: Option<Export>,
     exports: usize,
     revealed: Vec<PathBuf>,
+    import: Option<Import>,
+    imports: Vec<PathBuf>,
   }
 
   #[derive(Clone, Default)]
@@ -1700,12 +1777,21 @@ mod tests {
     fn export(&self) {
       let mut log = self.log();
       log.exports += 1;
-      let file = PathBuf::from("/tmp/wavo-export.zip");
-      log.export = Some(Export::Running { file, done: 6_000_000_000, total: 16_000_000_000 });
+      log.export = Some(Transfer::Running { done: 6_000_000_000, total: 16_000_000_000 });
     }
 
     fn export_state(&self) -> Option<Export> {
       self.log().export.clone()
+    }
+
+    fn import(&self, file: PathBuf) {
+      let mut log = self.log();
+      log.imports.push(file);
+      log.import = Some(Transfer::Running { done: 0, total: 0 });
+    }
+
+    fn import_state(&self) -> Option<Import> {
+      self.log().import.clone()
     }
 
     fn reveal(&self, dir: &Path) {
@@ -1963,12 +2049,29 @@ mod tests {
 
     let file = home.dir.path().join("wavo-export.zip");
     std::fs::write(&file, "").unwrap();
-    fake.log().export = Some(Export::Done { file: file.clone(), size: 16_000_000_000 });
+    fake.log().export = Some(Transfer::Done((file.clone(), 16_000_000_000)));
     h.frame();
     click(&mut h, Id::of("export-show"));
     assert_eq!(fake.log().revealed, [file]);
     click(&mut h, Id::of("export"));
     assert_eq!(fake.log().exports, 2);
+  }
+
+  /// Import asks the system's panel for a .zip and imports the one picked, one at a time.
+  #[test]
+  fn the_import_takes_the_archive_picked() {
+    let home = Home::new("window-import", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Advanced);
+    click(&mut h, Id::of("import"));
+    let file = home.dir.path().join("wavo-export.zip");
+    assert_eq!(h.file_dialog(Some(&file)).unwrap().types, ["zip"]);
+    h.frame();
+    assert_eq!(fake.log().imports, [file]);
+
+    click(&mut h, Id::of("import"));
+    assert!(h.file_dialog(None).is_none(), "disabled while it runs");
   }
 
   #[test]

@@ -31,7 +31,9 @@ use crate::hud::{self, Hud, Mode, Show};
 use crate::menu::{self, Icon, Warning};
 use crate::session::{self, Handle, NotPasted, Phase, Request, Session, TextOutput, Update};
 use crate::settings::{self, HudPosition, Settings};
-use crate::window::{self, Download, Downloads, Export, Found, Page, Pick, Prefs, no_text};
+use crate::window::{
+  self, Download, Downloads, Export, Found, Import, Page, Pick, Prefs, Transfer, no_text,
+};
 use crate::{INFO, audio, transfer};
 
 // How often Accessibility is checked while it is missing or the event tap is not running.
@@ -75,6 +77,7 @@ struct App {
   window: Option<Window<Prefs>>,
   downloads: Downloads,
   export: Arc<Mutex<Option<Export>>>,
+  import: Arc<Mutex<Option<Import>>>,
   // The models downloaded and the recent dictations, as the menu last opened.
   found: Vec<Found>,
   pick: Pick,
@@ -160,6 +163,7 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     window: None,
     downloads: Downloads::default(),
     export: Arc::default(),
+    import: Arc::default(),
     found: Vec::new(),
     pick: Pick::default(),
     recent: Vec::new(),
@@ -265,6 +269,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
       hub: app.hub.clone(),
       downloads: app.downloads.clone(),
       export: app.export.clone(),
+      import: app.import.clone(),
     };
     (shell, app.update.clone(), app.hub.clone(), app.home.clone())
   }) else {
@@ -598,14 +603,15 @@ impl App {
 // MARK: Shell
 
 /// The settings window's way to the app. What may wait (the system's login items, a deletion, an
-/// export) runs on a thread of its own: the window keeps drawing. A download's and the export's
-/// state are the app's: a window opened again shows them.
+/// export) runs on a thread of its own: the window keeps drawing. A download's, the export's and
+/// the import's state are the app's: a window opened again shows them.
 struct MacShell {
   home: PathBuf,
   handle: Handle,
   hub: Hub,
   downloads: Downloads,
   export: Arc<Mutex<Option<Export>>>,
+  import: Arc<Mutex<Option<Import>>>,
 }
 
 impl window::Shell for MacShell {
@@ -718,33 +724,19 @@ impl window::Shell for MacShell {
   /// Into a new archive in Downloads (nimbo has no file picker). One at a time: a second click
   /// while one runs would pick the same file.
   fn export(&self) {
-    let file = {
-      let mut state = self.export.lock().unwrap();
-      if matches!(*state, Some(Export::Running { .. })) {
-        return;
-      }
-
-      let file = export_file();
-      *state = Some(Export::Running { file: file.clone(), done: 0, total: 0 });
-      file
-    };
+    if !begin(&self.export) {
+      return;
+    }
 
     let (home, state) = (self.home.clone(), self.export.clone());
     spawn("export", move || {
-      let mut told = None::<Instant>;
-      let progress = |done, total| {
-        *state.lock().unwrap() = Some(Export::Running { file: file.clone(), done, total });
-        if told.is_none_or(|t: Instant| t.elapsed() >= Duration::from_millis(100)) {
-          told = Some(Instant::now());
-          redraw();
-        }
-      };
-      let result = transfer::export(&home, &file, progress);
+      let file = export_file();
+      let result = transfer::export(&home, &file, progress(&state));
       let end = match result {
-        Ok(done) => Export::Done { file, size: done.bytes },
+        Ok(done) => Transfer::Done((file, done.bytes)),
         Err(e) => {
           warn!("export to {}: {e:#}", file.display());
-          Export::Failed(format!("{e:#}"))
+          Transfer::Failed(format!("{e:#}"))
         }
       };
       *state.lock().unwrap() = Some(end);
@@ -754,6 +746,62 @@ impl window::Shell for MacShell {
 
   fn export_state(&self) -> Option<Export> {
     self.export.lock().unwrap().clone()
+  }
+
+  /// Beside the running app, which holds the history's lock; the session hears of it after, so
+  /// the history window and the menu show the new dictations.
+  fn import(&self, file: PathBuf) {
+    if !begin(&self.import) {
+      return;
+    }
+
+    let (home, handle, state) = (self.home.clone(), self.handle.clone(), self.import.clone());
+    spawn("import", move || {
+      let end = match transfer::import_in_app(&home, &file, progress(&state)) {
+        Ok(done) => {
+          info!("imported {}: {done:?}", file.display());
+          Transfer::Done(done)
+        }
+        Err(e) => {
+          warn!("import {}: {e:#}", file.display());
+          Transfer::Failed(format!("{e:#}"))
+        }
+      };
+      *state.lock().unwrap() = Some(end);
+      if let Err(e) = handle.request(Request::Imported) {
+        warn!("import: {e}");
+      }
+
+      with_window(|_| ());
+    });
+  }
+
+  fn import_state(&self) -> Option<Import> {
+    self.import.lock().unwrap().clone()
+  }
+}
+
+/// Marks a transfer running, unless one is: one at a time, as a second export would pick the same
+/// file.
+fn begin<T>(state: &Mutex<Option<Transfer<T>>>) -> bool {
+  let mut state = state.lock().unwrap();
+  if matches!(*state, Some(Transfer::Running { .. })) {
+    return false;
+  }
+
+  *state = Some(Transfer::Running { done: 0, total: 0 });
+  true
+}
+
+/// A transfer's progress into `state`, redrawing the window at most every 100 ms.
+fn progress<T>(state: &Mutex<Option<Transfer<T>>>) -> impl FnMut(u64, u64) {
+  let mut told = None::<Instant>;
+  move |done, total| {
+    *state.lock().unwrap() = Some(Transfer::Running { done, total });
+    if told.is_none_or(|t: Instant| t.elapsed() >= Duration::from_millis(100)) {
+      told = Some(Instant::now());
+      redraw();
+    }
   }
 }
 
