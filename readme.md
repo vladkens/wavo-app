@@ -12,7 +12,7 @@ Download the file for your system from the [latest release](https://github.com/v
 - Windows 10 or 11: `Wavo-<version>-windows-x64.zip`, or `-arm64` for Windows on Arm. Unzip it anywhere and run `Wavo.exe`. Its icon is in the notification area, perhaps under the ^ arrow.
 - Linux, x86_64 or aarch64: `Wavo-<version>-linux-<arch>.AppImage`. Make it executable (`chmod +x`) and run it. It works on X11, and on Wayland where the desktop has the GlobalShortcuts and RemoteDesktop portals (KDE Plasma 6, GNOME 48 and later). The tray icon needs a panel that shows StatusNotifierItems (KDE, Xfce, Cinnamon, MATE; GNOME with the AppIndicator extension, which Ubuntu ships).
 
-The hotkey is Option-Space on macOS and Ctrl+Alt+Space elsewhere; Settings changes it.
+The hotkey is Option-Space on macOS and Ctrl+Alt+Space elsewhere; Settings changes it. Where the desktop can't give Wavo a global shortcut (GNOME before 48 on Wayland, as in Ubuntu 24.04), add one in its own keyboard settings that runs Wavo with `toggle` (`/path/to/Wavo-<version>-linux-<arch>.AppImage toggle`): it starts a dictation and the next one stops it.
 
 <details>
 <summary>The first launch</summary>
