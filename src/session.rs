@@ -30,11 +30,12 @@ use crate::history::{Entry, History, now_ms};
 use crate::settings::{self, Activation, Settings, language_name};
 
 /// The microphone stays open at least this long after the stop, for the end of a word the key-up
-/// cut;
+/// cut.
 const POST_ROLL: Duration = Duration::from_millis(200);
-/// longer while the voice goes on, until it pauses this long ([tail_end]);
+/// While the voice goes on after the stop, the microphone stays open until it pauses this long
+/// ([tail_end]).
 const TAIL_PAUSE: Duration = Duration::from_millis(300);
-/// and at most this long after the stop.
+/// The microphone closes this long after the stop at the latest.
 const TAIL_MAX: Duration = Duration::from_millis(1500);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
