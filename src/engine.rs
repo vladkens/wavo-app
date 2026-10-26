@@ -3,6 +3,10 @@
 //! Speech engine: one "engine" thread owns the model. It loads it on demand (or on a prewarm), runs
 //! the jobs one at a time, dictations first, and drops the model when idle. A panic in wavo fails
 //! its job, the model goes, and the next job loads a fresh one; a native crash ends the app.
+//!
+//! A model for the Neural Engine loads on a thread of its own: macOS purges Core ML's compiled
+//! cache when the disk runs low, and the load then compiles again for 10–14 s. A job doesn't wait
+//! for that: it runs on the GPU meanwhile, and the Neural Engine's model takes over between jobs.
 
 use std::any::Any;
 use std::collections::VecDeque;
@@ -14,20 +18,27 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
+use crossbeam_channel::{
+  Receiver, RecvTimeoutError, Sender, after, bounded, never, select, unbounded,
+};
 use tracing::{debug, info, warn};
 
 // MARK: Models
 
 pub trait Loader: Send + Sync {
   /// `ane`: on the Neural Engine when the file is prepared for it, else on the GPU.
-  fn load(&self, path: &Path, ane: bool) -> Result<Box<dyn SpeechModel>>;
+  fn load(&self, path: &Path, ane: bool) -> Result<Model>;
+
+  /// The file is prepared for the Neural Engine of this Mac: its load goes on a thread of its own.
+  fn ane_ready(&self, _path: &Path) -> bool {
+    false
+  }
 
   /// Prepares the file for the Neural Engine in the background; `done` once it is.
   fn prepare(&self, _path: &Path, _done: Box<dyn FnOnce() + Send>) {}
 }
 
-/// Lives and is dropped on the engine thread that loaded it.
+/// Lives on the engine thread; the Neural Engine's is loaded on a thread of its own.
 pub trait SpeechModel {
   /// `Apple M2 (Metal, integrated)`
   fn device(&self) -> String;
@@ -42,12 +53,18 @@ pub trait SpeechModel {
   ) -> Result<String>;
 }
 
+pub type Model = Box<dyn SpeechModel + Send>;
+
 pub struct Wavo;
 
 impl Loader for Wavo {
-  fn load(&self, path: &Path, ane: bool) -> Result<Box<dyn SpeechModel>> {
+  fn load(&self, path: &Path, ane: bool) -> Result<Model> {
     let backend = if ane { wavo::Backend::Auto } else { wavo::Backend::Gpu };
     Ok(Box::new(wavo::Model::load_with(path, backend)?))
+  }
+
+  fn ane_ready(&self, path: &Path) -> bool {
+    has_neural_engine() && wavo::Model::prepared(path) == Some(true)
   }
 
   fn prepare(&self, path: &Path, done: Box<dyn FnOnce() + Send>) {
@@ -205,6 +222,12 @@ struct Job {
 /// A prewarmed model waits this long for its job even with a shorter `unload_after`: the
 /// recording it was loaded for is still going.
 const PREWARM_HOLD: Duration = Duration::from_secs(5 * 60);
+/// A job waits this long for the Neural Engine's load, which takes 0.07–0.15 s from Core ML's
+/// cache, before it runs on the GPU.
+const ANE_GRACE: Duration = Duration::from_millis(300);
+
+/// The Neural Engine's load, from its thread: the model or why not, and how long it took.
+type Loaded = (Result<Model, String>, Duration);
 
 impl Engine {
   pub fn start(
@@ -227,6 +250,8 @@ impl Engine {
         events,
         status: shared,
         model: None,
+        stand_in: false,
+        pending: None,
         queue: VecDeque::new(),
         cancelled: Vec::new(),
         hold: false,
@@ -284,7 +309,11 @@ struct Worker {
   rx: Receiver<Msg>,
   events: Sender<Event>,
   status: Arc<Mutex<Status>>,
-  model: Option<Box<dyn SpeechModel>>,
+  model: Option<Model>,
+  /// The model is the GPU's, standing in while the Neural Engine's loads.
+  stand_in: bool,
+  /// The Neural Engine's model loading on its thread.
+  pending: Option<Receiver<Loaded>>,
   queue: VecDeque<Job>,
   /// Jobs to stop: the one running, or one that has finished already.
   cancelled: Vec<u64>,
@@ -311,7 +340,10 @@ impl Worker {
       }
 
       if std::mem::take(&mut self.prewarm) {
-        let _ = self.load();
+        match self.on_ane() {
+          true => self.start_ane(),
+          false => _ = self.load(),
+        }
       }
 
       let at = self.queue.iter().position(|j| !j.background).unwrap_or(0);
@@ -325,18 +357,18 @@ impl Worker {
         (false, after) => after,
       };
 
-      let msg = match idle {
-        Some(idle) => self.rx.recv_timeout(idle),
-        None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-      };
-
-      match msg {
-        Ok(msg) => self.on_msg(msg),
-        Err(RecvTimeoutError::Timeout) => {
+      let (rx, pending) = (self.rx.clone(), self.pending.clone().unwrap_or_else(never));
+      let timeout = idle.map_or_else(never, after);
+      select! {
+        recv(rx) -> msg => match msg {
+          Ok(msg) => self.on_msg(msg),
+          Err(_) => return None,
+        },
+        recv(pending) -> loaded => self.loaded(loaded.ok()),
+        recv(timeout) -> _ => {
           info!("engine idle, unloading");
           self.drop_model();
         }
-        Err(RecvTimeoutError::Disconnected) => return None,
       }
     }
   }
@@ -361,26 +393,44 @@ impl Worker {
     }
   }
 
+  /// The model loads for the Neural Engine, on a thread of its own.
+  fn on_ane(&self) -> bool {
+    self.ane && self.loader.ane_ready(&self.path)
+  }
+
+  /// A model for the job: the Neural Engine's if it comes within [ANE_GRACE], else the GPU's while
+  /// it goes on loading.
   fn load(&mut self) -> Result<(), String> {
     if self.model.is_some() {
       return Ok(());
     }
 
+    if !self.on_ane() {
+      return self.load_here(self.ane, false);
+    }
+
+    self.start_ane();
+    if let Some(pending) = self.pending.clone() {
+      match pending.recv_timeout(ANE_GRACE) {
+        Ok(loaded) => self.loaded(Some(loaded)),
+        Err(RecvTimeoutError::Timeout) => {}
+        Err(RecvTimeoutError::Disconnected) => self.pending = None,
+      }
+    }
+
+    match self.model {
+      Some(_) => Ok(()),
+      None => self.load_here(false, self.pending.is_some()),
+    }
+  }
+
+  /// Loads on the engine thread.
+  fn load_here(&mut self, ane: bool, stand_in: bool) -> Result<(), String> {
     self.set(|s| s.phase = Phase::Loading);
     let started = Instant::now();
-    let loaded = panic::catch_unwind(AssertUnwindSafe(|| self.loader.load(&self.path, self.ane)));
-    let loaded = match loaded {
-      Ok(Ok(model)) => Ok(model),
-      Ok(Err(e)) => Err(format!("{e:#}")),
-      Err(panic) => Err(format!("panicked: {}", panic_message(&*panic))),
-    };
-
-    match loaded {
+    match guarded(|| self.loader.load(&self.path, ane)) {
       Ok(model) => {
-        let (path, device) = (self.path.display(), model.device());
-        info!("engine loaded {path} on {device} in {:.2?}", started.elapsed());
-        self.model = Some(model);
-        self.set(|s| (s.phase, s.device, s.load_error) = (Phase::Idle, Some(device), None));
+        self.install(model, started.elapsed(), stand_in);
         Ok(())
       }
       Err(e) => {
@@ -391,12 +441,69 @@ impl Worker {
     }
   }
 
+  /// Starts the Neural Engine's load on its thread, unless it runs or loads already.
+  fn start_ane(&mut self) {
+    if self.pending.is_some() || (self.model.is_some() && !self.stand_in) {
+      return;
+    }
+
+    if self.model.is_none() {
+      self.set(|s| s.phase = Phase::Loading);
+    }
+
+    let (tx, rx) = bounded(1);
+    let (loader, path) = (self.loader.clone(), self.path.clone());
+    let load = move || {
+      let started = Instant::now();
+      let model = guarded(|| loader.load(&path, true));
+      // Unloaded meanwhile: the model goes with this thread.
+      let _ = tx.send((model, started.elapsed()));
+    };
+
+    match thread::Builder::new().name("engine-ane".into()).spawn(load) {
+      Ok(_) => self.pending = Some(rx),
+      Err(e) => warn!("the Neural Engine's load did not start: {e}"),
+    }
+  }
+
+  /// The Neural Engine's load ended: its model takes over from a GPU stand-in. After a failure the
+  /// GPU runs the jobs for the rest of the engine's life.
+  fn loaded(&mut self, loaded: Option<Loaded>) {
+    self.pending = None;
+    let Some((model, took)) = loaded else { return };
+    match model {
+      Ok(model) => {
+        if let Some(stand_in) = self.model.take() {
+          discard(stand_in);
+        }
+
+        self.install(model, took, false);
+      }
+      Err(e) => {
+        warn!("engine could not load {} for the Neural Engine: {e}", self.path.display());
+        self.ane = false;
+        if self.model.is_none() {
+          self.set(|s| (s.phase, s.load_error) = (Phase::Stopped, Some(e)));
+        }
+      }
+    }
+  }
+
+  fn install(&mut self, model: Model, took: Duration, stand_in: bool) {
+    let (path, device) = (self.path.display(), model.device());
+    let meanwhile = if stand_in { ", while the Neural Engine's loads" } else { "" };
+    info!("engine loaded {path} on {device} in {took:.2?}{meanwhile}");
+    (self.model, self.stand_in) = (Some(model), stand_in);
+    self.set(|s| (s.phase, s.device, s.load_error) = (Phase::Idle, Some(device), None));
+  }
+
   fn run_job(&mut self, job: Job) {
     if let Err(e) = self.load() {
       return self.done(job.id, Err(EngineError::Load(e)));
     }
 
     let model = self.model.take().unwrap();
+    let device = model.device();
     self.set(|s| s.phase = Phase::Running);
     let started = Instant::now();
     let mut yielded = false;
@@ -418,7 +525,8 @@ impl Worker {
       })
     }));
 
-    debug!(samples = job.pcm.len(), ms = started.elapsed().as_millis() as u64, "run");
+    let (id, took) = (job.id, started.elapsed());
+    info!("job {id} ran on {device} in {took:.2?}, {} samples", job.pcm.len());
     self.model = Some(model);
     self.set(|s| (s.phase, s.progress) = (Phase::Idle, None));
     // After a panic or a lost GPU device the model may not work again.
@@ -437,6 +545,13 @@ impl Worker {
       self.drop_model();
     }
 
+    // The Neural Engine's model, loaded meanwhile, takes over before the next job.
+    if self.stand_in
+      && let Some(loaded) = self.pending.as_ref().and_then(|p| p.try_recv().ok())
+    {
+      self.loaded(Some(loaded));
+    }
+
     let result = match run {
       _ if self.cancelled.contains(&job.id) => Err(EngineError::Cancelled),
       Ok(Err(_)) if yielded => {
@@ -451,12 +566,11 @@ impl Worker {
     self.done(job.id, result);
   }
 
-  /// A model a panicking run left half-way may panic in its destructor too.
+  /// The model goes, and a Neural Engine load still going on ends with its thread.
   fn drop_model(&mut self) {
-    if let Some(model) = self.model.take()
-      && let Err(panic) = panic::catch_unwind(AssertUnwindSafe(move || drop(model)))
-    {
-      warn!("dropping the model panicked: {}", panic_message(&*panic));
+    (self.pending, self.stand_in) = (None, false);
+    if let Some(model) = self.model.take() {
+      discard(model);
     }
 
     self.set(|s| (s.phase, s.device) = (Phase::Stopped, None));
@@ -474,6 +588,22 @@ impl Worker {
       drop(status);
       let _ = self.events.send(Event::Changed);
     }
+  }
+}
+
+/// A load, a panic in it as its error.
+fn guarded(load: impl FnOnce() -> Result<Model>) -> Result<Model, String> {
+  match panic::catch_unwind(AssertUnwindSafe(load)) {
+    Ok(Ok(model)) => Ok(model),
+    Ok(Err(e)) => Err(format!("{e:#}")),
+    Err(panic) => Err(format!("panicked: {}", panic_message(&*panic))),
+  }
+}
+
+/// A model a panicking run left half-way may panic in its destructor too.
+fn discard(model: Model) {
+  if let Err(panic) = panic::catch_unwind(AssertUnwindSafe(move || drop(model))) {
+    warn!("dropping the model panicked: {}", panic_message(&*panic));
   }
 }
 
@@ -638,6 +768,52 @@ mod tests {
     f.engine.release();
     f.wait(Phase::Stopped);
     assert_eq!(models.loads(), 2);
+  }
+
+  /// A Neural Engine load that compiles again runs the job on the GPU; the next one goes to the
+  /// Neural Engine, and the GPU's model is gone.
+  #[test]
+  fn a_slow_neural_engine_load_leaves_the_job_to_the_gpu() {
+    let models = FakeModels::new("text").on_ane(Duration::from_millis(800));
+    let f = Fake::start_on("engine-ane-slow", &models, true, None);
+    f.engine.prewarm();
+    let started = Instant::now();
+    assert_eq!(f.run(1, SECOND).unwrap(), "text");
+    assert!(started.elapsed() < Duration::from_millis(700), "{:?}", started.elapsed());
+    poll("the Neural Engine's model", Duration::from_secs(10), || {
+      (models.loads() == 2 && models.live() == 1).then_some(())
+    });
+    assert_eq!(f.run(2, SECOND).unwrap(), "text");
+    assert_eq!(models.jobs_on_ane(), [false, true]);
+  }
+
+  /// From Core ML's cache the Neural Engine's model comes in time: no GPU model at all, prewarmed
+  /// or not.
+  #[test]
+  fn a_cached_neural_engine_load_needs_no_gpu() {
+    let models = FakeModels::new("text").on_ane(Duration::from_millis(50));
+    let f = Fake::start_on("engine-ane-cached", &models, true, None);
+    f.engine.prewarm();
+    assert_eq!(f.run(1, SECOND).unwrap(), "text");
+    f.engine.unload();
+    f.wait(Phase::Stopped);
+    assert_eq!(f.run(2, SECOND).unwrap(), "text");
+    assert_eq!((models.ane_loads(), models.jobs_on_ane()), (vec![true; 2], vec![true; 2]));
+  }
+
+  /// An unload while the Neural Engine's model loads drops the GPU's at once, and the Neural
+  /// Engine's once its load ends.
+  #[test]
+  fn an_unload_during_a_neural_engine_load_drops_both() {
+    let models = FakeModels::new("text").on_ane(Duration::from_millis(500));
+    let f = Fake::start_on("engine-ane-unload", &models, true, None);
+    assert_eq!(f.run(1, SECOND).unwrap(), "text");
+    f.engine.unload();
+    f.wait(Phase::Stopped);
+    poll("both models gone", Duration::from_secs(10), || {
+      (models.loads() == 2 && models.live() == 0).then_some(())
+    });
+    assert_eq!(f.engine.status().device, None);
   }
 
   // MARK: Real models

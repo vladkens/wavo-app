@@ -15,7 +15,7 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 use rusqlite::Connection;
 
 use crate::audio::{Clip, SAMPLE_RATE, WavSink, read_wav};
-use crate::engine::{Loader, SpeechModel};
+use crate::engine::{Loader, Model, SpeechModel};
 use crate::history::DB_FILE;
 
 /// A fresh directory under the system temp dir, removed on drop.
@@ -164,6 +164,11 @@ pub struct FakeModels {
   ane_fails: Arc<AtomicBool>,
   /// `ane` of each load, in order.
   ane_loads: Arc<Mutex<Vec<bool>>>,
+  /// Prepared for the Neural Engine ([Loader::ane_ready]), and how long its load takes.
+  ane_ready: bool,
+  ane_load: Arc<Mutex<Duration>>,
+  /// Whether each job ran on a model loaded for the Neural Engine, in order.
+  jobs_on_ane: Arc<Mutex<Vec<bool>>>,
   gate: Arc<Mutex<Option<Receiver<()>>>>,
 }
 
@@ -178,12 +183,25 @@ impl FakeModels {
       panic_next: Arc::default(),
       ane_fails: Arc::default(),
       ane_loads: Arc::default(),
+      ane_ready: false,
+      ane_load: Arc::default(),
+      jobs_on_ane: Arc::default(),
       gate: Arc::default(),
     }
   }
 
   pub fn window_ms(self, ms: u32) -> Self {
     Self { window_ms: ms, ..self }
+  }
+
+  /// Prepared for the Neural Engine, whose load takes `took`.
+  pub fn on_ane(self, took: Duration) -> Self {
+    *self.ane_load.lock().unwrap() = took;
+    Self { ane_ready: true, ..self }
+  }
+
+  pub fn jobs_on_ane(&self) -> Vec<bool> {
+    self.jobs_on_ane.lock().unwrap().clone()
   }
 
   pub fn loads(&self) -> usize {
@@ -221,15 +239,23 @@ impl FakeModels {
 }
 
 impl Loader for FakeModels {
-  fn load(&self, path: &Path, ane: bool) -> anyhow::Result<Box<dyn SpeechModel>> {
+  fn load(&self, path: &Path, ane: bool) -> anyhow::Result<Model> {
     if fs::read(path)?.starts_with(b"BROKEN") {
       anyhow::bail!("not a speech model");
+    }
+
+    if ane && self.ane_ready {
+      thread::sleep(*self.ane_load.lock().unwrap());
     }
 
     self.loads.fetch_add(1, Ordering::SeqCst);
     self.live.fetch_add(1, Ordering::SeqCst);
     self.ane_loads.lock().unwrap().push(ane);
     Ok(Box::new(FakeModel(self.clone(), ane)))
+  }
+
+  fn ane_ready(&self, _path: &Path) -> bool {
+    self.ane_ready
   }
 }
 
@@ -247,6 +273,7 @@ impl SpeechModel for FakeModel {
     on_piece: &mut dyn FnMut(usize, usize) -> ControlFlow<()>,
   ) -> anyhow::Result<String> {
     let m = &self.0;
+    m.jobs_on_ane.lock().unwrap().push(self.1);
     assert!(!m.panic_next.swap(false, Ordering::SeqCst), "injected panic in a run");
     if self.1 && m.ane_fails.load(Ordering::SeqCst) {
       return Err(wavo::Error::NeuralEngine("injected".into()).into());
