@@ -5,7 +5,7 @@
 //! downloaded; Unload Model, History…, Settings…, Quit.
 
 use nimbo::Hotkey;
-use nimbo::tray::{Item, Menu, TrayIcon};
+use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
 
 use crate::audio::{Choice, Device};
 use crate::engine::Phase as EnginePhase;
@@ -151,12 +151,15 @@ fn capitalized(text: &str) -> String {
 
 /// A dictation in Recent: the time today, else the day, and its text on one line, shortened.
 pub fn recent_title(text: &str, created_at: i64, now: i64) -> String {
-  let preview = shorten(text, 48);
-  let (Some(t), Some(today)) = (local_time(created_at), local_time(now)) else { return preview };
+  let (Some(t), Some(today)) = (local_time(created_at), local_time(now)) else {
+    return shorten(text, LABEL);
+  };
   let when = match t.date() == today.date() {
     true => t.hm(),
     false => format!("{} {}", &t.month_name()[..3], t.day),
   };
+  // Within the menu's width with its time, so the item isn't cut a second time.
+  let preview = shorten(text, LABEL - when.chars().count() - 3);
   format!("{when} · {preview}")
 }
 
@@ -173,11 +176,12 @@ pub fn menu(
 ) -> Menu {
   let header = [Some(TITLE), hotkey, state(status)].into_iter().flatten();
   let header = header.collect::<Vec<_>>().join(" · ");
-  let mut items = vec![Item::new("header", &fit(&header, LABEL)).enabled(false)];
+  // Labels fit the menu's width by themselves (nimbo's Item::new).
+  let mut items = vec![Item::new("header", &header).enabled(false)];
   for w in warnings {
     // Downloading a first model is a step of the setup, not a problem.
     let mark = if w.id == "warn:download" { "" } else { "⚠︎ " };
-    items.push(Item::new(w.id, &format!("{mark}{}", fit(&w.text, LABEL))).enabled(w.action));
+    items.push(Item::new(w.id, &format!("{mark}{}", w.text)).enabled(w.action));
   }
 
   let last = status.last.as_ref().is_some_and(|l| !l.text.is_empty());
@@ -205,42 +209,8 @@ pub fn menu(
   Menu::new(items)
 }
 
-/// The longest microphone or model in the menu.
-const NAME: usize = 32;
-/// The longest of any other label: a warning, the header.
-const LABEL: usize = 48;
-
 fn with_key(item: Item, key: &str) -> Item {
   if cfg!(target_os = "macos") { item.key(key) } else { item }
-}
-
-/// A microphone or a model as the menu and its submenus name it ([fit] to [NAME]).
-fn short(name: &str) -> String {
-  fit(name, NAME)
-}
-
-/// `text` in at most `max` characters, as every menu label: the part in brackets shortened first
-/// (`System Default (MacBook Pro…)`), or left out when too little of it would show (`No sound from
-/// Line In: check the microphone`); else cut at a word, with "…".
-fn fit(text: &str, max: usize) -> String {
-  let len = |s: &str| s.chars().count();
-  if len(text) <= max {
-    return text.to_owned();
-  }
-
-  if let Some((head, rest)) = text.split_once(" (")
-    && let Some((inner, tail)) = rest.split_once(')')
-  {
-    // " (", "…)" around what shows of it.
-    let room = max.saturating_sub(len(head) + len(tail) + 4);
-    if room >= 8 {
-      return format!("{head} ({}){tail}", shorten(inner, room));
-    }
-
-    return fit(&format!("{head}{tail}"), max);
-  }
-
-  shorten(text, max - 1)
 }
 
 /// The microphone in use, and the submenu: the system default, then the devices, the one in use
@@ -248,13 +218,13 @@ fn fit(text: &str, max: usize) -> String {
 fn microphones((devices, saved): (&[Device], Option<&Choice>)) -> (String, Menu) {
   let (mics, at) = mic_choices(devices, saved);
   let mut items: Vec<Item> = (mics.iter().enumerate())
-    .map(|(i, (label, _))| Item::new(&format!("mic:{i}"), &short(label)).checked(i == at))
+    .map(|(i, (label, _))| Item::new(&format!("mic:{i}"), label).checked(i == at))
     .collect();
   if items.len() > 1 {
     items.insert(1, Item::separator());
   }
 
-  (short(&mics[at].0), Menu::new(items))
+  (mics[at].0.clone(), Menu::new(items))
 }
 
 /// The model in use, and the submenu: the models downloaded with the one that transcribes checked,
@@ -263,8 +233,7 @@ fn models(found: &[Found], pick: &Pick) -> (String, Menu) {
   let only = pick.other.is_none();
   let mut items: Vec<Item> = (found.iter().enumerate())
     .map(|(i, (m, _))| {
-      let label = short(m.full_name);
-      Item::new(&format!("model:{}", m.name), &label).checked(only && pick.active == Some(i))
+      Item::new(&format!("model:{}", m.name), m.full_name).checked(only && pick.active == Some(i))
     })
     .collect();
   let other = pick.other.as_ref().map(|(name, there)| match there {
@@ -272,12 +241,12 @@ fn models(found: &[Found], pick: &Pick) -> (String, Menu) {
     false => format!("{name} (not on disk)"),
   });
   let title = match (&other, pick.active) {
-    (Some(other), _) => short(other),
-    (None, Some(i)) => short(found[i].0.full_name),
+    (Some(other), _) => other.clone(),
+    (None, Some(i)) => found[i].0.full_name.to_owned(),
     (None, None) => "No Model".to_owned(),
   };
   if let Some(other) = other {
-    items.push(Item::new("model-chosen", &short(&other)).checked(pick.gone().is_none()));
+    items.push(Item::new("model-chosen", &other).checked(pick.gone().is_none()));
   }
 
   if items.is_empty() {
@@ -363,25 +332,17 @@ mod tests {
     // The hotkey's warning opens General too, its key as the platform names it.
     assert!(items[1].enabled && items[2].enabled);
     assert!(items[2].label.contains("“F5” does not work"), "{}", items[2].label);
-    // One name in the menu and its submenu, a long one shortened.
+    // One name in the menu and its submenu.
     let mic = items.iter().find(|i| i.id == "mic").unwrap();
     assert_eq!(mic.label, "Elgato Wave:3 Microphone Array");
     let sub = &mic.submenu.as_ref().unwrap().items;
     let got: Vec<_> = sub.iter().map(|i| (i.label.as_str(), i.checked)).collect();
-    assert_eq!(got[0], ("System Default (MacBook Pro…)", false));
+    assert_eq!(got[0], ("System Default (MacBook Pro Microphone)", false));
     let devices_got = &got[2..];
     assert_eq!(devices_got, [("MacBook Pro Microphone", false), (devices[1].name.as_str(), true)]);
-    assert_eq!(short("a-very-long-model-name-for-the-menu-q8"), "a-very-long-model-name-for-the…");
-    // Any label: a device in the middle of a warning goes when too little of it would show.
-    let warning = "No sound from Line In (High Definition Audio Device): check the microphone";
-    assert_eq!(fit(warning, LABEL), "No sound from Line In: check the microphone");
-    let warning = "No sound from USB Mic (Elgato Wave:3 Microphone Array): check the microphone";
-    assert_eq!(fit(warning, 60), "No sound from USB Mic (Elgato Wave:3…): check the microphone");
-    let error = "The last dictation failed: the engine did not answer in time and was restarted";
-    assert!(fit(error, LABEL).ends_with('…') && fit(error, LABEL).chars().count() <= LABEL);
 
     let items = menu(None, &s, &list, &[], (&devices[..], None), &[], &Pick::default()).items;
     let mic = items.iter().find(|i| i.id == "mic").unwrap();
-    assert_eq!(mic.label, "System Default (MacBook Pro…)");
+    assert_eq!(mic.label, "System Default (MacBook Pro Microphone)");
   }
 }
