@@ -139,6 +139,13 @@ pub fn run() -> Result<()> {
 
 fn start(main: &mut Main, config: session::Config, mut server: ctl::Server) -> Result<()> {
   let _ = PROXY.set(main.proxy());
+  // Linux only: the dock, Wayland's window icon and the portals' dialogs find the app by it.
+  match nimbo::desktop::install(&INFO, &crate::LAUNCHER) {
+    Ok(true) => info!("the launcher entry written"),
+    Ok(false) => {}
+    Err(e) => warn!("the launcher entry: {e}"),
+  }
+
   let fake_mic = config.fake_mic.is_some();
   let (home, hub) = (config.home.clone(), config.hub.clone());
   let observer = Box::new(|update: Update| {
@@ -266,8 +273,17 @@ fn chosen(main: &mut Main, id: &str) {
     }
     "warn:clipboard" => allow(Pane::Pasteboard),
     "warn:hotkey-portal" => _ = with_app(App::allow_portal),
+    "warn:paste-portal" => allow_paste(),
     _ => {}
   }
+}
+
+/// The menu's Allow Paste… on Wayland: the desktop's RemoteDesktop portal asks the person now, not
+/// at the first paste. Its session starts with the first look at the clipboard, which waits for the
+/// answer in a nested main loop: outside the app's borrow.
+fn allow_paste() {
+  let _ = SystemClipboard.snapshot();
+  with_app(App::refresh);
 }
 
 /// Opens the settings window on `page` (or where it was), or brings it to the front.
@@ -450,10 +466,11 @@ impl App {
   }
 
   /// From hidden only a recording or an error shows, on the screen with the pointer. Never where
-  /// the overlay would take the keyboard focus ([hud_takes_focus]): the person's window would lose
-  /// it, and the paste would go into the HUD. The menu bar icon tells the state there too.
+  /// the overlay would take the keyboard focus ([Main::overlay_takes_focus]: GNOME on Wayland
+  /// without XWayland): the person's window would lose it, and the paste would go into the HUD.
+  /// The tray icon tells the state there too.
   fn show(&mut self, main: &mut Main, shown: Mode, show: Show, position: HudPosition) {
-    if hud_takes_focus() {
+    if main.overlay_takes_focus() {
       return;
     }
 
@@ -619,6 +636,7 @@ impl App {
       accessibility: self.accessibility,
       hotkey_error: hotkeys.error.or(hotkeys.listener_error.filter(|_| dead)),
       hotkey_portal: portal_asks() && !listening,
+      paste_portal: wayland() && !nimbo::keys::ready(),
       no_microphone: self.mic() != Access::Granted,
       clipboard_unread: update.settings.restores_clipboard() && !self.clipboard,
       secure_input: hotkeys.secure_input,
@@ -1044,12 +1062,6 @@ fn focus_hidden() -> bool {
 /// dialog. So it starts only from the menu, or at a launch after the portal took the hotkey once.
 fn portal_asks() -> bool {
   wayland()
-}
-
-/// GNOME on Wayland has no layer shell: nimbo's overlay is a window there, which mutter gives the
-/// keyboard focus when it shows.
-fn hud_takes_focus() -> bool {
-  wayland() && std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("GNOME"))
 }
 
 /// The desktop session is Wayland's (`XDG_SESSION_TYPE`, which the login manager sets), as nimbo

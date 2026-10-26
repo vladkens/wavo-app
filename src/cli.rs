@@ -25,22 +25,30 @@ pub fn send(cmd: &str) -> Result<()> {
 
 // MARK: Uninstall
 
-/// Removes Wavo and all it left: quits it, turns launch at login off, resets its permissions and
-/// macOS defaults, deletes its data, its caches (wavo's, the models built for the Neural Engine,
-/// too), the models it downloaded into the Hugging Face cache, and the app it runs from.
+/// Removes Wavo and all it left: quits it, turns launch at login off, removes its launcher entry
+/// (Linux), resets its permissions and macOS defaults, deletes its data, its caches (wavo's, the
+/// models built for the Neural Engine, too), the models it downloaded into the Hugging Face cache,
+/// and the app it runs from.
 pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
   let home = crate::home();
   let hub = Hub::new();
   let models = hub.downloaded();
-  let dirs = [home.clone(), nimbo::paths::cache_dir(INFO.id), nimbo::paths::cache_dir("wavo")];
-  let mut paths: Vec<PathBuf> = dirs.into_iter().filter(|p| p.exists()).collect();
+  // nimbo's own files, such as the Wayland paste's portal token, where they are not the data dir:
+  // on macOS both are one, which a `WAVO_HOME` stands in for and must not reach past.
+  let config = nimbo::paths::config_dir(INFO.id);
+  let config = (config != nimbo::paths::data_dir(INFO.id)).then_some(config);
+  let caches = [nimbo::paths::cache_dir(INFO.id), nimbo::paths::cache_dir("wavo")];
+  let dirs = [home.clone()].into_iter().chain(config).chain(caches);
+  let mut paths: Vec<PathBuf> = dirs.filter(|p| p.exists()).collect();
   paths.extend(app_bundle());
   let list = || {
     paths.iter().for_each(|p| println!("{}", p.display()));
     models.iter().for_each(|(m, _)| println!("the model {} in {hub}", m.name));
   };
   if dry_run {
-    println!("would quit Wavo, turn launch at login off, reset its permissions and defaults");
+    println!(
+      "would quit Wavo, turn launch at login off, remove its launcher entry, reset its permissions and defaults"
+    );
     list();
     return Ok(());
   }
@@ -60,6 +68,13 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
   match off {
     Ok(_) => println!("launch at login off"),
     Err(e) => println!("launch at login: {e}"),
+  }
+
+  if cfg!(target_os = "linux") {
+    match nimbo::desktop::uninstall(&INFO) {
+      Ok(()) => println!("the launcher entry removed"),
+      Err(e) => println!("the launcher entry: {e}"),
+    }
   }
 
   if cfg!(target_os = "macos") {

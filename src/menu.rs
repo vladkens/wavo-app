@@ -70,6 +70,8 @@ pub struct System {
   pub hotkey_error: Option<String>,
   /// The hotkey waits for the person to let the desktop's portal ask them (Wayland).
   pub hotkey_portal: bool,
+  /// The paste waits for the person to let the desktop's RemoteDesktop portal ask them (Wayland).
+  pub paste_portal: bool,
   pub no_microphone: bool,
   /// The paste restores the clipboard, which the app may not read (Paste from Other Apps).
   pub clipboard_unread: bool,
@@ -97,6 +99,10 @@ pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> 
 
   if system.hotkey_portal {
     add("warn:hotkey-portal", "Allow the Hotkey…".into(), true);
+  }
+
+  if system.paste_portal {
+    add("warn:paste-portal", "Allow Paste…".into(), true);
   }
 
   if system.no_microphone {
@@ -290,6 +296,7 @@ mod tests {
     let system = System {
       hotkey_error: Some("taken".into()),
       hotkey_portal: true,
+      paste_portal: true,
       no_microphone: true,
       clipboard_unread: true,
       secure_input: true,
@@ -303,6 +310,7 @@ mod tests {
       ("warn:accessibility", true),
       ("warn:hotkey", false),
       ("warn:hotkey-portal", true),
+      ("warn:paste-portal", true),
       ("warn:microphone", true),
       ("warn:clipboard", true),
       ("warn:secure-input", true),
@@ -310,7 +318,7 @@ mod tests {
       ("warn:status", false),
     ];
     assert_eq!(ids, expected);
-    assert_eq!(list[7].text, "No sound from USB Mic");
+    assert_eq!(list[8].text, "No sound from USB Mic");
     assert_eq!(icon(&s, &list), Icon::Warning);
     s.state = Phase::Recording;
     assert_eq!(icon(&s, &list), Icon::Recording, "the phase first");
@@ -323,7 +331,7 @@ mod tests {
     let items = menu(Some("⌥Space"), &s, &list, &[], mics, &[], &Pick::default()).items;
     assert!(items[0].label.ends_with("⌥Space · Recording…"), "{}", items[0].label);
     assert_eq!(
-      (items[1].label.as_str(), items[7].label.as_str()),
+      (items[1].label.as_str(), items[8].label.as_str()),
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")
     );
     assert!(items[1].enabled && !items[2].enabled);
