@@ -75,13 +75,9 @@ pub struct Imported {
 
 // MARK: Export
 
-/// Writes the settings, the history and its recordings in `home` into a new archive `file`;
-/// `progress` hears the bytes of them written of the total after each file.
+/// Writes the settings, the history and its recordings in `home` into the archive `file`, replacing
+/// it; `progress` hears the bytes of them written of the total after each file.
 pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> Result<Exported> {
-  if file.exists() {
-    bail!("{} exists", file.display());
-  }
-
   let db = home.join(DB_FILE);
   if !db.is_file() {
     bail!("no history in {}", home.display());
@@ -460,7 +456,6 @@ mod tests {
     let exported = export(from.path(), &file, |done, total| last = (done, total)).unwrap();
     assert_eq!((exported.entries, exported.recordings), (3, 2));
     assert!(last.1 > 0 && last.0 == last.1, "progress ends at the total: {last:?}");
-    assert!(export(from.path(), &file, |_, _| {}).unwrap_err().to_string().contains("exists"));
 
     add(&History::open(to.path()).unwrap(), NOW - 1, "theirs", Some(0.1));
     let expected = Imported { entries: 3, added: 3, copied: 2, failed: 0, settings: true };

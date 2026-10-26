@@ -15,6 +15,10 @@ use crate::window::size_text;
 use crate::{INFO, transfer};
 
 pub fn export(file: &Path) -> Result<()> {
+  if file.exists() {
+    bail!("{} exists", file.display());
+  }
+
   let done = transfer::export(&crate::home(), file, |_, _| {})?;
   let size = size_text(done.bytes);
   println!("{}: {} entries, {} recordings, {size}", file.display(), done.entries, done.recordings);

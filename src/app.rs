@@ -721,16 +721,14 @@ impl window::Shell for MacShell {
     crate::engine::has_neural_engine()
   }
 
-  /// Into a new archive in Downloads (nimbo has no file picker). One at a time: a second click
-  /// while one runs would pick the same file.
-  fn export(&self) {
+  /// Into the archive the save panel picked.
+  fn export(&self, file: PathBuf) {
     if !begin(&self.export) {
       return;
     }
 
     let (home, state) = (self.home.clone(), self.export.clone());
     spawn("export", move || {
-      let file = export_file();
       let result = transfer::export(&home, &file, progress(&state));
       let end = match result {
         Ok(done) => Transfer::Done((file, done.bytes)),
@@ -781,8 +779,7 @@ impl window::Shell for MacShell {
   }
 }
 
-/// Marks a transfer running, unless one is: one at a time, as a second export would pick the same
-/// file.
+/// Marks a transfer running, unless one is: one at a time.
 fn begin<T>(state: &Mutex<Option<Transfer<T>>>) -> bool {
   let mut state = state.lock().unwrap();
   if matches!(*state, Some(Transfer::Running { .. })) {
@@ -803,20 +800,6 @@ fn progress<T>(state: &Mutex<Option<Transfer<T>>>) -> impl FnMut(u64, u64) {
       redraw();
     }
   }
-}
-
-/// `~/Downloads/wavo-export-2026-10-24.zip`, `-2` and so on if taken or being written.
-fn export_file() -> PathBuf {
-  let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-  let day = history::day_of(history::now_ms()).unwrap_or_default();
-  let dir = home.join("Downloads");
-  (1..)
-    .map(|n| match n {
-      1 => dir.join(format!("wavo-export-{day}.zip")),
-      n => dir.join(format!("wavo-export-{day}-{n}.zip")),
-    })
-    .find(|f| !f.exists() && !transfer::part_of(f).exists())
-    .unwrap()
 }
 
 // MARK: Paste

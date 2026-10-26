@@ -98,8 +98,9 @@ pub trait Shell {
   fn autostart(&self) -> Result<Autostart, String>;
   /// Then [Prefs::autostart_set].
   fn set_autostart(&self, _on: bool) {}
-  /// Writes the history into an archive in Downloads: [Shell::export_state].
-  fn export(&self) {}
+  /// Writes the history into the archive `file`, replacing it (the save panel asked):
+  /// [Shell::export_state].
+  fn export(&self, _file: PathBuf) {}
   fn export_state(&self) -> Option<Export>;
   /// Adds the dictations of the archive `file` the history does not have: [Shell::import_state].
   fn import(&self, _file: PathBuf) {}
@@ -148,6 +149,8 @@ pub struct Prefs {
   recording: bool,
   focused: bool,
   ask: Option<Ask>,
+  /// The file panel open: its answer goes to it.
+  panel: Option<Panel>,
   model_search: String,
   /// An index of [LANGUAGES].
   model_lang: usize,
@@ -172,6 +175,7 @@ impl Prefs {
       recording: false,
       focused: false,
       ask: None,
+      panel: None,
       model_search: String::new(),
       model_lang: 0,
       history: HistoryPage::default(),
@@ -315,15 +319,16 @@ impl App for Prefs {
     }
   }
 
-  /// The archive Import's panel picked.
+  /// The file Export's or Import's panel picked.
   fn event(&mut self, _cx: &mut Cx, ev: &Event) -> bool {
-    match ev {
-      Event::FileDialog(Some(file)) => {
-        self.shell.import(file.clone());
-        true
-      }
-      _ => false,
+    let Event::FileDialog(answer) = ev else { return false };
+    match (self.panel.take(), answer) {
+      (Some(Panel::Export), Some(file)) => self.shell.export(file.clone()),
+      (Some(Panel::Import), Some(file)) => self.shell.import(file.clone()),
+      _ => {}
     }
+
+    true
   }
 }
 
@@ -572,8 +577,8 @@ const ANE_HELP: &str = "Parakeet and GigaAM run on the Neural Engine: as fast as
 const NO_ANE: &str = "Needs Apple silicon and macOS 15 or later.";
 const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another Mac: the dictations this \
   history does not have are added with their recordings; the settings stay as they are.";
-const EXPORT_HELP: &str = "The history, its recordings and the settings, into Downloads as a .zip \
-  archive: Import brings it back, here or on another Mac.";
+const EXPORT_HELP: &str = "The history, its recordings and the settings, into a .zip archive: \
+  Import brings it back, here or on another Mac.";
 
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
@@ -671,8 +676,9 @@ impl Prefs {
     });
   }
 
-  /// Export; then the archive's size with Show in Finder.
-  fn export_row(&self, ui: &mut Ui, fs: &FormStyle, show: &str) {
+  /// Export, the system's save panel in Downloads ([Prefs::event]); then the archive's size with
+  /// Show in Finder.
+  fn export_row(&mut self, ui: &mut Ui, fs: &FormStyle, show: &str) {
     let state = self.shell.export_state();
     let ended = |(_, size): &(PathBuf, u64)| format!("Exported · {}", size_text(*size));
     let shown = shown(&state, "export", "Copying the history…", ended);
@@ -685,21 +691,26 @@ impl Prefs {
         self.shell.reveal(file);
       }
 
-      if ui.disabled(running).id("export").button("Export").clicked {
-        self.shell.export();
+      if ui.disabled(running).id("export").button("Export…").clicked {
+        let name = format!("wavo-export-{}.zip", day_of(now_ms()).unwrap_or_default());
+        let panel = FileDialog::save("Export").name(&name).types(&["zip"]);
+        ui.file_dialog(FileDialog { dir: downloads(), ..panel });
+        self.panel = Some(Panel::Export);
       }
     });
   }
 
-  /// Import…, the system's panel for the archive ([Prefs::event]); then what it added.
-  fn import_row(&self, ui: &mut Ui, fs: &FormStyle) {
+  /// Import…, the system's open panel in Downloads ([Prefs::event]); then what it added.
+  fn import_row(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let state = self.shell.import_state();
     let shown = shown(&state, "import", "Reading the archive…", imported_text);
     let running = shown.progress.is_some();
     let row = FormRow::new("Import a history").info(IMPORT_HELP).tile(Tile::Icon(Icon::DOWNLOAD));
     data_row(ui, fs, Id::of("import-row"), row, &shown, |ui| {
       if ui.disabled(running).id("import").button("Import…").clicked {
-        ui.file_dialog(FileDialog::open("Import").types(&["zip"]));
+        let panel = FileDialog::open("Import").types(&["zip"]);
+        ui.file_dialog(FileDialog { dir: downloads(), ..panel });
+        self.panel = Some(Panel::Import);
       }
     });
   }
@@ -1155,6 +1166,19 @@ pub enum Transfer<T> {
 /// The archive and its size.
 pub type Export = Transfer<(PathBuf, u64)>;
 pub type Import = Transfer<Imported>;
+
+/// Which file panel is open.
+#[derive(Clone, Copy)]
+enum Panel {
+  Export,
+  Import,
+}
+
+/// Where the file panels start: Downloads, where archives usually are.
+fn downloads() -> Option<PathBuf> {
+  let dir = PathBuf::from(std::env::var_os("HOME")?).join("Downloads");
+  dir.is_dir().then_some(dir)
+}
 
 /// What a Data row shows of a transfer: its caption, else its progress while it runs.
 struct Shown {
@@ -1674,7 +1698,7 @@ mod tests {
     requests: Vec<Request>,
     autostarts: Vec<bool>,
     export: Option<Export>,
-    exports: usize,
+    exports: Vec<PathBuf>,
     revealed: Vec<PathBuf>,
     import: Option<Import>,
     imports: Vec<PathBuf>,
@@ -1761,9 +1785,9 @@ mod tests {
     }
 
     /// It runs 37% through until the test says otherwise.
-    fn export(&self) {
+    fn export(&self, file: PathBuf) {
       let mut log = self.log();
-      log.exports += 1;
+      log.exports.push(file);
       log.export = Some(Transfer::Running { done: 6_000_000_000, total: 16_000_000_000 });
     }
 
@@ -2022,7 +2046,8 @@ mod tests {
     assert_eq!(h.app().login.error.as_deref(), Some("Couldn't turn it on: not permitted"));
   }
 
-  /// Export is disabled while it runs; Finder shows the archive only on a click.
+  /// Export asks the save panel where; it is disabled while it runs; Finder shows the archive only
+  /// on a click.
   #[test]
   fn the_export_shows_how_it_goes() {
     let home = Home::new("window-export", &TWO);
@@ -2030,18 +2055,22 @@ mod tests {
     let mut h = home.harness(&fake, Settings::default());
     tab(&mut h, Page::Advanced);
     click(&mut h, Id::of("export"));
+    let file = home.dir.path().join("wavo-export.zip");
+    let asked = h.file_dialog(Some(&file)).unwrap();
+    assert!(asked.save && asked.name.unwrap().starts_with("wavo-export-"));
+    h.frame();
+    assert_eq!(fake.log().exports, std::slice::from_ref(&file));
+    assert!(fake.log().imports.is_empty(), "the answer goes to the panel that asked");
+
     click(&mut h, Id::of("export"));
-    assert_eq!(fake.log().exports, 1);
+    assert!(h.file_dialog(None).is_none(), "disabled while it runs");
     assert!(h.rect(Id::of("export-show")).is_none());
 
-    let file = home.dir.path().join("wavo-export.zip");
     std::fs::write(&file, "").unwrap();
     fake.log().export = Some(Transfer::Done((file.clone(), 16_000_000_000)));
     h.frame();
     click(&mut h, Id::of("export-show"));
     assert_eq!(fake.log().revealed, [file]);
-    click(&mut h, Id::of("export"));
-    assert_eq!(fake.log().exports, 2);
   }
 
   /// Import asks the system's panel for a .zip and imports the one picked, one at a time.
@@ -2056,6 +2085,7 @@ mod tests {
     assert_eq!(h.file_dialog(Some(&file)).unwrap().types, ["zip"]);
     h.frame();
     assert_eq!(fake.log().imports, [file]);
+    assert!(fake.log().exports.is_empty());
 
     click(&mut h, Id::of("import"));
     assert!(h.file_dialog(None).is_none(), "disabled while it runs");
