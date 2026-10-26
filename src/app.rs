@@ -480,7 +480,9 @@ impl App {
   }
 
   /// Without Accessibility the event tap cannot start (chords still work through Carbon, pasting
-  /// does not): it is checked again until the tap runs. It never asks: the menu's warning does.
+  /// does not): on macOS it is checked again until the tap runs. It never asks: the menu's warning
+  /// does. Elsewhere the listener starts once: on Linux it may be the GlobalShortcuts portal, whose
+  /// dialog a retry would bring back after the person cancelled it.
   fn check_access(&mut self) {
     self.accessibility = permissions::accessibility(false);
     // The tap starts in the background: how it went shows at the next poll.
@@ -488,10 +490,11 @@ impl App {
       && self.hotkeys.status().listener != Listener::Active
       && let Err(e) = self.hotkeys.start()
     {
-      warn!("the event tap: {e}");
+      warn!("the hotkey listener: {e}");
     }
 
-    if !self.accessibility || self.hotkeys.status().listener != Listener::Active {
+    let waiting = !self.accessibility || self.hotkeys.status().listener != Listener::Active;
+    if cfg!(target_os = "macos") && waiting {
       proxy().after(ACCESS_POLL, |_| _ = with_app(App::poll_access));
     }
   }
