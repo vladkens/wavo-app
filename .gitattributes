@@ -1,0 +1,3 @@
+# LF on every OS, Windows' checkout too: vladkens/actions/dev-version stamps the version line by line.
+Cargo.toml text eol=lf
+Cargo.lock text eol=lf
