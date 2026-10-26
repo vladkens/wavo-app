@@ -114,9 +114,19 @@ fn no_model(load: bool) -> String {
 /// The known causes in a few words, else the first clause, lowercase.
 fn short(error: &str) -> String {
   let lower = error.to_lowercase();
+  // Refused by macOS's or Windows' privacy settings: a recording's error only, as a folder that
+  // isn't writable says "permission denied" too.
+  let mic = lower.contains("recording") || lower.contains("microphone");
+  let refused = ["microphone access", "not authorized", "permission", "access is denied"];
+  if mic && refused.iter().any(|k| lower.contains(k)) {
+    return "no microphone access".into();
+  }
+
   let known = [
     (&["no speech model", "no model"][..], "download a model"),
-    (&["microphone access", "not authorized", "permission"][..], "no microphone access"),
+    // audio.rs's: none plugged in, or the chosen one gone with no default to fall back to.
+    (&["no microphone found", "no default microphone"][..], "no microphone"),
+    (&["could not open the microphone"][..], "microphone failed"),
     (&["password", "secure"][..], "password field"),
     (&["focus moved"][..], "focus moved"),
     (&["crash", "died", "panicked"][..], "engine crashed"),
@@ -273,6 +283,7 @@ impl Hud {
         }
       }
       Show::Error(reason) => {
+        let reason = fit(f, reason);
         let to = reason_width(f.measure(&reason, FONT));
         let from = if self.mode == Mode::Hidden { to } else { self.width_at(now) };
         self.enter(Mode::Error, now);
@@ -304,6 +315,7 @@ impl Hud {
       true => Some(format!("no sound from {}", self.device)),
       false => self.warning.clone(),
     };
+    let warning = warning.map(|w| fit(f, w));
     if self.mode != Mode::Recording || self.text == warning {
       return;
     }
@@ -455,6 +467,24 @@ impl App for Hud {
   }
 }
 
+/// `text` cut with "…" to what the widest pill holds: device names run long (Windows').
+fn fit(f: &mut Frame, text: String) -> String {
+  let room = MAX_WIDTH - REASON_X - PAD;
+  if f.measure(&text, FONT) <= room {
+    return text;
+  }
+
+  let mut cut: Vec<char> = text.chars().collect();
+  while cut.pop().is_some() {
+    let shown = format!("{}…", cut.iter().collect::<String>().trim_end());
+    if f.measure(&shown, FONT) <= room {
+      return shown;
+    }
+  }
+
+  "…".into()
+}
+
 /// The pill's width for a reason `text` wide.
 fn reason_width(text: f32) -> f32 {
   (REASON_X + text + PAD).clamp(WIDTH, MAX_WIDTH)
@@ -539,6 +569,27 @@ mod tests {
       Status { error: Some("could not start recording: no input".into()), ..done.clone() };
     assert_eq!(said(&failed, Some(&done), true).as_deref(), Some("could not start recording"));
     assert_eq!(said(&failed, Some(&failed), true), None);
+    let errors = [
+      ("could not start recording: no microphone found", "no microphone"),
+      (
+        "could not start recording: the microphone \"USB Mic\" is not connected, and there is no \
+         default microphone",
+        "no microphone",
+      ),
+      (
+        "could not start recording: could not open the microphone \"USB Mic\": busy",
+        "microphone failed",
+      ),
+      ("could not start recording: access is denied", "no microphone access"),
+      (
+        "could not save the settings: Permission denied (os error 13)",
+        "could not save the settings",
+      ),
+    ];
+    for (error, expected) in errors {
+      let failed = Status { error: Some(error.into()), ..done.clone() };
+      assert_eq!(said(&failed, Some(&done), true).as_deref(), Some(expected), "{error}");
+    }
   }
 
   /// The HUD in the harness, transparent as an overlay is, and how often it asked to be hidden.
@@ -593,5 +644,16 @@ mod tests {
     assert_eq!(h.app().mode(), Mode::Error);
     h.wait(COLLAPSE + ms(200));
     assert_eq!((h.app().mode(), hidden.get()), (Mode::Hidden, 1));
+  }
+
+  /// A Windows microphone's name in full would run past the pill's rounded end.
+  #[test]
+  fn a_long_reason_is_cut_to_the_widest_pill() {
+    let (mut h, _) = hud();
+    let device = "Microphone Array (Intel® Smart Sound Technology for Digital Microphones)";
+    h.app_mut().show(Show::Error(format!("no sound from {device}")));
+    h.wait(ms(300));
+    let text = h.app().text.clone().unwrap();
+    assert!(text.starts_with("no sound from Microphone") && text.ends_with('…'), "{text}");
   }
 }

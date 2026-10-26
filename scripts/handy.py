@@ -5,13 +5,15 @@ Wavo's, once:
   python3 scripts/handy.py
 
 Handy is not touched: its database is opened read-only, its recordings are only read. The script
-writes them into a Wavo archive, ~/Downloads/handy-export.zip, for Wavo's Advanced › Data ›
-Import… (as an archive from another computer); entries Wavo has already are left, so importing it
-twice adds nothing. $HANDY_DIR is Handy's data dir.
+writes them into a Wavo archive, handy-export.zip in ~/Downloads (in the home folder without one),
+for Wavo's Advanced › Data › Import… (as an archive from another computer); entries Wavo has
+already are left, so importing it twice adds nothing. $HANDY_DIR is Handy's data dir.
 
-Handy's data dir is ~/Library/Application Support/com.pais.handy by default. It holds `history.db`
-and `recordings/`. As of Handy commit 5a9451e70aedc90648ce2befd9d7e0304746f9c1
-(src-tauri/src/managers/history.rs):
+Handy's data dir is Tauri's app data dir for its identifier, com.pais.handy
+(src-tauri/tauri.conf.json): ~/Library/Application Support/com.pais.handy on macOS,
+%APPDATA%\\com.pais.handy on Windows, ~/.local/share/com.pais.handy ($XDG_DATA_HOME) on Linux; a
+portable Handy keeps it in Data next to its exe. It holds `history.db` and `recordings/`. As of
+Handy commit 5a9451e70aedc90648ce2befd9d7e0304746f9c1 (src-tauri/src/managers/history.rs):
 
 - `transcription_history (id, file_name, timestamp, ..., transcription_text, post_processed_text,
   ...)`: `timestamp` is Unix seconds, `post_processed_text` the text after Handy's optional LLM pass
@@ -39,8 +41,7 @@ import time
 import zipfile
 from pathlib import Path
 
-DEFAULT_DIR = Path.home() / "Library/Application Support/com.pais.handy"
-OUT = Path.home() / "Downloads/handy-export.zip"
+HANDY_ID = "com.pais.handy"
 MODEL = "handy"
 # Handy's recordings: a 44-byte header, then 16 kHz mono 16-bit samples, 32 bytes a ms.
 WAV_HEADER = 44
@@ -69,6 +70,25 @@ CREATE INDEX entries_audio_path ON entries (audio_path);
 CREATE INDEX entries_untranscribed ON entries (created_at) WHERE text = '';
 PRAGMA user_version = 1;
 """
+
+
+def handy_dir() -> Path:
+    """Handy's data dir on this OS: Tauri's `app_data_dir`, dirs' `data_dir` and the identifier."""
+    home = Path.home()
+    if sys.platform == "darwin":
+        return home / "Library/Application Support" / HANDY_ID
+
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA") or home / "AppData/Roaming") / HANDY_ID
+
+    xdg = os.environ.get("XDG_DATA_HOME", "")
+    return (Path(xdg) if os.path.isabs(xdg) else home / ".local/share") / HANDY_ID
+
+
+def out_file() -> Path:
+    """handy-export.zip in ~/Downloads, else in the home folder."""
+    downloads = Path.home() / "Downloads"
+    return (downloads if downloads.is_dir() else Path.home()) / "handy-export.zip"
 
 
 def read(src: Path) -> list[tuple[int, int, str | None, str]]:
@@ -142,10 +162,11 @@ def main() -> int:
     if sys.argv[1:]:
         sys.exit("usage: python3 scripts/handy.py")
 
-    src = Path(os.environ.get("HANDY_DIR") or DEFAULT_DIR)
-    entries, recordings = archive(src, OUT)
+    src = Path(os.environ.get("HANDY_DIR") or handy_dir())
+    out = out_file()
+    entries, recordings = archive(src, out)
     print(f"Handy in {src}: {entries} entries, {recordings} recordings")
-    print(f"{OUT}: import it in Wavo, Advanced › Data › Import…")
+    print(f"{out}: import it in Wavo, Advanced › Data › Import…")
     return 0
 
 

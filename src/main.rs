@@ -20,13 +20,18 @@ mod testing;
 mod transfer;
 mod window;
 
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use nimbo::desktop::Launcher;
 use nimbo::{AppInfo, Config, Presence};
+use tracing::warn;
 use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
 const INFO: AppInfo =
@@ -34,6 +39,12 @@ const INFO: AppInfo =
 
 /// `assets/icon.png` at 256 px from build.rs, raw RGBA.
 const ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/window-icon.rgba"));
+
+/// The app's log in its home, [home]: `~/Library/Application Support/me.vladkens.wavo/wavo.log`,
+/// `%LOCALAPPDATA%\me.vladkens.wavo\wavo.log`, `~/.local/share/me.vladkens.wavo/wavo.log`.
+const LOG_FILE: &str = "wavo.log";
+/// A log past this at launch is started over.
+const LOG_MAX: u64 = 5 << 20;
 
 /// The launcher entry on Linux, as the AppImage's .desktop has it (scripts/dist.py).
 const LAUNCHER: Launcher = Launcher {
@@ -59,14 +70,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-  /// Remove Wavo and all it left: its data, caches, defaults, permissions, the models it downloaded
-  /// and the app
+  #[command(about = cli::UNINSTALL)]
   Uninstall {
     /// Say what it would do, change nothing
     #[arg(long)]
     dry_run: bool,
-    /// Do not ask first
-    #[arg(short, long)]
+    #[arg(short, long, help = cli::YES)]
     yes: bool,
   },
   /// Start or stop a dictation in the running app: for a shortcut in the desktop's own settings
@@ -78,11 +87,17 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+  // Windows: only for arguments (a command, `--help`, a mistake), which print. Attached, the app
+  // would print its logs after the prompt, and closing that console would end it without its quit
+  // hook.
   #[cfg(windows)]
-  attach_console();
+  if std::env::args_os().len() > 1 {
+    attach_console();
+  }
 
   let cli = Cli::parse();
-  init_tracing();
+  // The app logs into a file too: launched from the desktop it has no stderr.
+  init_tracing(cli.command.is_none().then(home).as_deref());
   match cli.command {
     None => app::run(),
     Some(Command::Uninstall { dry_run, yes }) => cli::uninstall(dry_run, yes),
@@ -91,8 +106,8 @@ fn main() -> Result<()> {
   }
 }
 
-/// Settings and history: `$WAVO_HOME`, else the platform's data dir. Models are in the Hugging
-/// Face cache.
+/// Settings, history and the log: `$WAVO_HOME`, else the platform's data dir. Models are in the
+/// Hugging Face cache.
 fn home() -> PathBuf {
   match std::env::var_os("WAVO_HOME") {
     Some(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -110,15 +125,59 @@ fn attach_console() {
   unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
-/// Logs go to stderr, filtered by `WAVO_LOG` (`warn,wavo_app=debug`).
-fn init_tracing() {
+/// Logs go to stderr and, given a home, to its [LOG_FILE], filtered by `WAVO_LOG`
+/// (`warn,wavo_app=debug`).
+fn init_tracing(home: Option<&Path>) {
   let filter = std::env::var("WAVO_LOG").ok().and_then(|f| f.parse::<Targets>().ok());
   let filter = filter.unwrap_or_else(|| {
     Targets::new().with_default(LevelFilter::WARN).with_target("wavo_app", LevelFilter::INFO)
   });
 
+  let (file, error) = match home.map(open_log).transpose() {
+    Ok(file) => (file, None),
+    Err(e) => (None, Some(e)),
+  };
+
   tracing_subscriber::registry()
-    .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+    .with(fmt::layer().with_writer(io::stderr))
+    .with(file.map(|f| fmt::layer().with_ansi(false).with_writer(Arc::new(f))))
     .with(filter)
     .init();
+
+  if let Some(e) = error {
+    warn!("the log file: {e}");
+  }
+}
+
+/// [LOG_FILE] in `home`, appended to; started over when past [LOG_MAX].
+fn open_log(home: &Path) -> io::Result<File> {
+  fs::create_dir_all(home)?;
+  let path = home.join(LOG_FILE);
+  if fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX) {
+    File::create(&path)?;
+  }
+
+  File::options().create(true).append(true).open(path)
+}
+
+#[cfg(test)]
+mod tests {
+  use std::io::Write;
+
+  use super::*;
+  use crate::testing::TempDir;
+
+  #[test]
+  fn the_log_is_appended_to_until_too_big() {
+    let dir = TempDir::new("log");
+    let home = dir.path().join("home");
+    let path = home.join(LOG_FILE);
+    writeln!(open_log(&home).unwrap(), "one").unwrap();
+    writeln!(open_log(&home).unwrap(), "two").unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "one\ntwo\n", "the home made, then appended");
+
+    File::options().write(true).open(&path).unwrap().set_len(LOG_MAX + 1).unwrap();
+    writeln!(open_log(&home).unwrap(), "three").unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "three\n", "started over");
+  }
 }

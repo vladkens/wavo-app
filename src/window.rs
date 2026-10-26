@@ -289,6 +289,14 @@ impl App for Prefs {
     }
 
     self.focused = focused;
+    // A recording played to its end lets the speakers go, whatever page shows.
+    let h = &mut self.history;
+    if let Some((_, p)) = h.playing.take_if(|(_, p)| !p.playing())
+      && let Some(e) = p.error()
+    {
+      h.note = Some((format!("Could not play the recording: {e}"), ui.now()));
+    }
+
     // The title bar is part of the window's content.
     let bar = ui.titlebar().map_or(0.0, |(h, _)| h);
     match self.page.scrolls() {
@@ -339,7 +347,8 @@ impl App for Prefs {
     match ev {
       Event::FileDialog(answer) => {
         match (self.panel.take(), answer) {
-          (Some(Panel::Export), Some(file)) => self.shell.export(file.clone()),
+          // GNOME's save panel adds no extension: Import's *.zip would not show it.
+          (Some(Panel::Export), Some(file)) => self.shell.export(with_zip(file)),
           (Some(Panel::Import), Some(file)) => self.shell.import(file.clone()),
           _ => {}
         }
@@ -496,8 +505,10 @@ impl Prefs {
   /// The recorder and its reset; a cleared value keeps the hotkey: the app needs one.
   fn shortcut(&mut self, ui: &mut Ui) {
     let mut hotkey = Hotkey::parse(&self.settings.hotkey).ok();
+    // Linux's hotkeys are chords: a modifier key alone there would leave no hotkey at all.
+    let alone = |h: &Hotkey| cfg!(target_os = "linux") && matches!(h, Hotkey::Modifier(_));
     if ui.id("hotkey").shortcut(&mut hotkey).changed
-      && let Some(hotkey) = hotkey
+      && let Some(hotkey) = hotkey.filter(|h| !alone(h))
     {
       let hotkey = hotkey.to_string();
       info!("settings: hotkey {hotkey}");
@@ -761,6 +772,17 @@ impl Prefs {
   }
 
   /// [Shell::set_autostart] to `on` ended: the system's state after it, or why not.
+  /// A history request the session refused: said under the panel.
+  pub fn history_failed(&mut self, req: Request, error: &str) {
+    let what = match req {
+      Request::Delete(_) => "Could not delete the dictation",
+      Request::Retranscribe(_) => "Could not transcribe it again",
+      Request::Restore(_) => "Could not put the previous text back",
+      Request::Unload | Request::Imported => return,
+    };
+    self.history.said = Some(format!("{what}: {error}"));
+  }
+
   pub fn autostart_set(&mut self, on: bool, result: Result<Autostart, String>) {
     self.login.busy = None;
     match result {
@@ -1334,6 +1356,8 @@ fn imported_text(r: &Imported) -> String {
 /// How long a search stays the same before the history is read for it: a whole read takes 0.1 s,
 /// too long for each key typed.
 const SEARCH_WAIT: Duration = Duration::from_millis(150);
+/// How long a note stands in the line under the panel, in place of the totals.
+const NOTE_TIME: Duration = Duration::from_secs(4);
 
 /// A calendar day: year, month, day.
 type Day = (i32, u32, u32);
@@ -1357,8 +1381,11 @@ struct HistoryPage {
   playing: Option<(i64, Playback)>,
   /// The entry the panel under the list shows.
   selected: Option<i64>,
-  /// What the search row says: an error, "Copied".
-  note: Option<String>,
+  /// What the line under the panel says for [NOTE_TIME], and since when ([Ui::now]): an error,
+  /// "Copied".
+  note: Option<(String, Duration)>,
+  /// A note from outside a frame (a request that failed on its thread), stamped at the next one.
+  said: Option<String>,
 }
 
 impl HistoryPage {
@@ -1385,7 +1412,7 @@ impl HistoryPage {
     let moved = self.loaded.as_ref().is_some_and(|k| k.1 != key.1);
     self.loaded = Some(key.clone());
     let Some(history) = &self.db else {
-      self.note = Some("Could not open the history: see the log".into());
+      self.note = Some(("Could not open the history: see the log".into(), now));
       return None;
     };
 
@@ -1397,11 +1424,23 @@ impl HistoryPage {
     // All of them: 86k entries read in about 0.1 s.
     match db.get_page(&key.0, i64::MAX as usize) {
       Ok(entries) => (self.days, self.entries) = (days(&entries), entries),
-      Err(e) => self.note = Some(format!("Could not read the history: {e:#}")),
+      Err(e) => self.note = Some((format!("Could not read the history: {e:#}"), now)),
     }
 
     None
   }
+}
+
+/// `file`, with `.zip` added unless it ends in it; added, to a name not taken, as the panel asked
+/// about replacing `file` only: `backup.zip`, else `backup 2.zip`.
+fn with_zip(file: &Path) -> PathBuf {
+  if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+    return file.to_owned();
+  }
+
+  let name = file.file_name().unwrap_or_default().to_string_lossy();
+  let numbered = |n| if n == 1 { format!("{name}.zip") } else { format!("{name} {n}.zip") };
+  (1..).map(|n| file.with_file_name(numbered(n))).find(|p| !p.exists()).unwrap()
 }
 
 /// The days of `entries`, newest first: each one's entries and their duration in ms.
@@ -1508,24 +1547,15 @@ const TOTAL_H: f32 = 30.0;
 
 impl Prefs {
   fn history_head(&mut self, ui: &mut Ui, s: Style) {
-    let t = ui.theme();
-    let h = &mut self.history;
-    ui.row(s, |ui| {
-      ui.id("history-search").search(&mut h.search, "Search dictations");
-
-      if let Some(note) = &h.note {
-        ui.text(note, TextStyle::new(t.small, t.muted).nowrap());
-      }
-    });
+    let search = &mut self.history.search;
+    ui.row(s, |ui| _ = ui.id("history-search").search(search, "Search dictations"));
   }
 
   /// The dictations, newest first, in a plate a day, a page at a time.
   fn history(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let h = &mut self.history;
-    if let Some((_, p)) = h.playing.take_if(|(_, p)| !p.playing())
-      && let Some(e) = p.error()
-    {
-      h.note = Some(format!("Could not play the recording: {e}"));
+    if let Some(said) = h.said.take() {
+      h.note = Some((said, ui.now()));
     }
 
     if let Some(wait) = h.load(ui.now()) {
@@ -1618,9 +1648,30 @@ impl Prefs {
     self.history_act(ui, act);
   }
 
-  /// Under the panel, the whole history: `86,286 dictations · 312 h · since March 14, 2026`.
+  /// Under the panel, the whole history: `86,286 dictations · 312 h · since March 14, 2026`; for
+  /// [NOTE_TIME] after a note, the note.
   fn history_total(&self, ui: &mut Ui, fs: &FormStyle) {
-    let Some((n, ms, Some(first))) = self.history.total.filter(|t| t.0 > 0) else { return };
+    let now = ui.now();
+    let note = self.history.note.as_ref().filter(|(_, at)| now < *at + NOTE_TIME);
+    let text = match note {
+      Some((note, at)) => {
+        ui.request_frame_in(*at + NOTE_TIME - now);
+        note.clone()
+      }
+      None => match self.total_text() {
+        Some(text) => text,
+        None => return,
+      },
+    };
+
+    ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
+    ui.row(Style::new().w(grow()).h(px(TOTAL_H)).align(Align::Center, Align::Center), |ui| {
+      ui.id("history-total").text(&text, fs.note.nowrap());
+    });
+  }
+
+  fn total_text(&self) -> Option<String> {
+    let (n, ms, Some(first)) = self.history.total.filter(|t| t.0 > 0)? else { return None };
     let what = if n == 1 { "dictation" } else { "dictations" };
     let spoken = match ms / 1000 {
       s if s < 60 => format!("{s} s"),
@@ -1633,10 +1684,7 @@ impl Prefs {
       text += &format!(" · since {since}");
     }
 
-    ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
-    ui.row(Style::new().w(grow()).h(px(TOTAL_H)).align(Align::Center, Align::Center), |ui| {
-      ui.id("history-total").text(&text, fs.note);
-    });
+    Some(text)
   }
 
   fn history_act(&mut self, ui: &mut Ui, act: Option<Act>) {
@@ -1646,19 +1694,19 @@ impl Prefs {
       Some(Act::Select(id)) => h.selected = (h.selected != Some(id)).then_some(id),
       Some(Act::Copy(text)) => {
         ui.clipboard().write(&text);
-        h.note = Some("Copied to the clipboard".into());
+        h.note = Some(("Copied to the clipboard".into(), ui.now()));
       }
       Some(Act::Play(id)) => {
         let e = h.entries.iter().find(|e| e.id == id).unwrap();
         let Some(path) = h.db.as_ref().unwrap().audio_file(e) else {
-          h.note = Some("The recording is gone".into());
+          h.note = Some(("The recording is gone".into(), ui.now()));
           return;
         };
 
         let waker = ui.waker().clone();
         match Playback::start(&path, move || waker.wake()) {
           Ok(p) => h.playing = Some((id, p)),
-          Err(e) => h.note = Some(format!("Could not play the recording: {e:#}")),
+          Err(e) => h.note = Some((format!("Could not play the recording: {e:#}"), ui.now())),
         }
       }
       Some(Act::Stop) => h.playing = None,
@@ -2013,6 +2061,21 @@ mod tests {
     click(h, Id::of(CONFIRM).key("action"));
   }
 
+  /// GNOME's save panel adds no extension: Import's filter would hide the archive.
+  #[test]
+  fn an_export_ends_in_zip() {
+    for (picked, file) in
+      [("a/wavo backup", "a/wavo backup.zip"), ("a/x.ZIP", "a/x.ZIP"), ("x.tar", "x.tar.zip")]
+    {
+      assert_eq!(with_zip(Path::new(picked)), PathBuf::from(file));
+    }
+
+    // Never over an archive the panel didn't ask about.
+    let dir = TempDir::new("export-zip");
+    std::fs::write(dir.path().join("backup.zip"), "").unwrap();
+    assert_eq!(with_zip(&dir.path().join("backup")), dir.path().join("backup 2.zip"));
+  }
+
   /// Every page in both looks, as high as its content or [SCROLLING] high; with `WAVO_SHOTS` set
   /// (`make shots`), written there: also Models asking before a delete and General at the first
   /// launch.
@@ -2262,6 +2325,11 @@ mod tests {
     tab(&mut h, Page::History);
     click(&mut h, Id::of(("copy", ids[1])));
     assert_eq!(h.rt.clipboard().read().as_deref(), Some("Send the invoice to Anna."));
+    // Said under the panel for a while, the search keeping its width; then the totals again.
+    assert_eq!(h.text(Id::of("history-total")), Some("Copied to the clipboard"));
+    let search = h.rect(Id::of("history-search")).unwrap();
+    h.wait(NOTE_TIME);
+    assert_eq!(h.rect(Id::of("history-search")), Some(search));
 
     // Nothing selected: the panel under the list has no actions; a click on a row selects it.
     assert!(h.rect(Id::of(("retranscribe", ids[0]))).is_none());
