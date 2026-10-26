@@ -1511,14 +1511,10 @@ fn first_line(e: &Entry) -> String {
   e.text.chars().take(300).map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
-/// Under the text: when, how long, why it was not pasted, the model.
+/// Under the text: when, how long, the model.
 fn details(e: &Entry) -> String {
   let mut parts = vec![local_time(e.created_at).map(Local::hm).unwrap_or_default()];
   parts.push(duration_text(e.duration_ms));
-  if let (false, Some(why)) = (e.pasted, &e.not_pasted) {
-    parts.push(format!("Not pasted: {why}"));
-  }
-
   parts.extend(e.model.as_deref().map(label));
   parts.retain(|p| !p.is_empty());
   parts.join(" · ")
