@@ -140,6 +140,28 @@ pub fn warm_up() {
 
 // MARK: Capture
 
+/// `$f::<T>(…)` with `T` the sample type of `$format`: devices default to any of them (32-bit
+/// integers on Intel HDA and many USB microphones). DSD is no PCM.
+macro_rules! by_format {
+  ($format:expr, $f:ident($($arg:expr),*)) => {
+    match $format {
+      SampleFormat::I8 => $f::<i8>($($arg),*),
+      SampleFormat::I16 => $f::<i16>($($arg),*),
+      SampleFormat::I24 => $f::<cpal::I24>($($arg),*),
+      SampleFormat::I32 => $f::<i32>($($arg),*),
+      SampleFormat::I64 => $f::<i64>($($arg),*),
+      SampleFormat::U8 => $f::<u8>($($arg),*),
+      SampleFormat::U16 => $f::<u16>($($arg),*),
+      SampleFormat::U24 => $f::<cpal::U24>($($arg),*),
+      SampleFormat::U32 => $f::<u32>($($arg),*),
+      SampleFormat::U64 => $f::<u64>($($arg),*),
+      SampleFormat::F32 => $f::<f32>($($arg),*),
+      SampleFormat::F64 => $f::<f64>($($arg),*),
+      other => Err(anyhow!("unsupported sample format {other}")),
+    }
+  };
+}
+
 /// The ring holds this much audio; the recorder drains it every [POLL].
 const RING_SECONDS: usize = 2;
 
@@ -199,12 +221,8 @@ fn open_stream(device: &cpal::Device) -> Result<(Capture, Consumer<f32>)> {
   // A multiple of the channels: with whole frames written, a frame never wraps around the end.
   let (producer, ring) = RingBuffer::new(rate as usize * channels * RING_SECONDS);
   let failure = Arc::new(OnceLock::new());
-  let stream = match supported.sample_format() {
-    SampleFormat::F32 => build::<f32>(device, config, producer, failure.clone())?,
-    SampleFormat::I16 => build::<i16>(device, config, producer, failure.clone())?,
-    other => bail!("unsupported sample format {other}"),
-  };
-
+  let format = supported.sample_format();
+  let stream = by_format!(format, build(device, config, producer, failure.clone()))?;
   stream.play().context("start the input stream")?;
   let feed = Feed::Mic { _stream: stream };
   let capture =
@@ -890,12 +908,8 @@ impl Playback {
       error: OnceLock::new(),
       ended: Mutex::new(Some(ended)),
     });
-    let stream = match supported.sample_format() {
-      SampleFormat::F32 => output::<f32>(&device, config, out, play.clone())?,
-      SampleFormat::I16 => output::<i16>(&device, config, out, play.clone())?,
-      other => bail!("unsupported output format {other}"),
-    };
-
+    let format = supported.sample_format();
+    let stream = by_format!(format, output(&device, config, out, play.clone()))?;
     stream.play().context("start the output stream")?;
     Ok(Self { play, _stream: stream })
   }
@@ -977,6 +991,24 @@ mod tests {
       let peak = mid.iter().fold(0.0f32, |m, s| m.max(s.abs()));
       assert!((peak - 0.5).abs() < 0.02, "{from} → {to} Hz: peak {peak}");
     }
+  }
+
+  #[test]
+  fn every_pcm_format_has_its_sample_type() {
+    fn format<T: SizedSample>() -> Result<SampleFormat> {
+      Ok(T::FORMAT)
+    }
+
+    use SampleFormat::*;
+    for f in [I8, I16, I24, I32, I64, U8, U16, U24, U32, U64, F32, F64] {
+      assert_eq!(by_format!(f, format()).unwrap(), f);
+    }
+
+    assert!(by_format!(DsdU8, format()).is_err());
+    let (mut ring, mut got) = RingBuffer::new(4);
+    push(&mut ring, &[i32::MIN, 0, 1 << 30, 0], 2);
+    let got: Vec<f32> = (0..4).map(|_| got.pop().unwrap()).collect();
+    assert_eq!(got, [-1.0, 0.0, 0.5, 0.0]);
   }
 
   #[test]
