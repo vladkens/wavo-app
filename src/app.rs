@@ -12,8 +12,8 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use nimbo::clipboard::{Offer, Snapshot};
@@ -31,7 +31,7 @@ use crate::hud::{self, Hud, Mode, Show};
 use crate::menu::{self, Icon, Warning};
 use crate::session::{self, Handle, NotPasted, Phase, Request, Session, TextOutput, Update};
 use crate::settings::{self, HudPosition, Settings};
-use crate::window::{self, Download, Downloads, Found, Page, Pick, Prefs, no_text};
+use crate::window::{self, Download, Downloads, Export, Found, Page, Pick, Prefs, no_text};
 use crate::{INFO, audio, transfer};
 
 // How often Accessibility is checked while it is missing or the event tap is not running.
@@ -74,6 +74,7 @@ struct App {
   update: Option<Update>,
   window: Option<Window<Prefs>>,
   downloads: Downloads,
+  export: Arc<Mutex<Option<Export>>>,
   // The models downloaded and the recent dictations, as the menu last opened.
   found: Vec<Found>,
   pick: Pick,
@@ -158,6 +159,7 @@ fn start(main: &mut Main, config: session::Config, server: ctl::Server) -> Resul
     update: None,
     window: None,
     downloads: Downloads::default(),
+    export: Arc::default(),
     found: Vec::new(),
     pick: Pick::default(),
     recent: Vec::new(),
@@ -262,6 +264,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
       handle: app.handle.clone(),
       hub: app.hub.clone(),
       downloads: app.downloads.clone(),
+      export: app.export.clone(),
     };
     (shell, app.update.clone(), app.hub.clone(), app.home.clone())
   }) else {
@@ -325,6 +328,16 @@ fn request_microphone() {
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
   std::thread::Builder::new().name(name.into()).spawn(f).unwrap();
+}
+
+/// Redraws the settings window if it is open, for progress: not retried while the window is busy,
+/// where it piles up.
+fn redraw() {
+  proxy().post(|_| {
+    if let Some(w) = with_app(|app| app.window.clone()).flatten() {
+      w.redraw();
+    }
+  });
 }
 
 /// Runs `f` on the settings window if it is open; while the window is busy further up the stack (a
@@ -585,12 +598,14 @@ impl App {
 // MARK: Shell
 
 /// The settings window's way to the app. What may wait (the system's login items, a deletion, an
-/// export) runs on a thread of its own: the window keeps drawing.
+/// export) runs on a thread of its own: the window keeps drawing. A download's and the export's
+/// state are the app's: a window opened again shows them.
 struct MacShell {
   home: PathBuf,
   handle: Handle,
   hub: Hub,
   downloads: Downloads,
+  export: Arc<Mutex<Option<Export>>>,
 }
 
 impl window::Shell for MacShell {
@@ -611,12 +626,7 @@ impl window::Shell for MacShell {
     let ane = Settings::load(&self.home.join(settings::FILE)).0.neural_engine;
     self.downloads.pull(self.hub.clone().prepare(ane), model, |ended| {
       if !ended {
-        // Progress only redraws: not retried while the window is busy, where it piles up.
-        return proxy().post(|_| {
-          if let Some(w) = with_app(|app| app.window.clone()).flatten() {
-            w.with(|_| ());
-          }
-        });
+        return redraw();
       }
 
       proxy().post(|_| _ = with_app(App::read_models));
@@ -705,36 +715,57 @@ impl window::Shell for MacShell {
     crate::engine::has_neural_engine()
   }
 
-  /// Into a new archive in Downloads (nimbo has no file picker), shown there.
-  /// One at a time: a second click while one runs would pick the same file.
+  /// Into a new archive in Downloads (nimbo has no file picker). One at a time: a second click
+  /// while one runs would pick the same file.
   fn export(&self) {
-    static EXPORTING: AtomicBool = AtomicBool::new(false);
-    if EXPORTING.swap(true, Ordering::AcqRel) {
-      return info!("export: one is running already");
-    }
-
-    let home = self.home.clone();
-    spawn("export", move || {
-      let file = export_file();
-      match transfer::export(&home, &file) {
-        Ok(_) => _ = nimbo::open::reveal(&file).inspect_err(|e| warn!("show the archive: {e}")),
-        Err(e) => warn!("export to {}: {e:#}", file.display()),
+    let file = {
+      let mut state = self.export.lock().unwrap();
+      if matches!(*state, Some(Export::Running { .. })) {
+        return;
       }
 
-      EXPORTING.store(false, Ordering::Release);
+      let file = export_file();
+      *state = Some(Export::Running { file: file.clone(), done: 0, total: 0 });
+      file
+    };
+
+    let (home, state) = (self.home.clone(), self.export.clone());
+    spawn("export", move || {
+      let mut told = None::<Instant>;
+      let progress = |done, total| {
+        *state.lock().unwrap() = Some(Export::Running { file: file.clone(), done, total });
+        if told.is_none_or(|t: Instant| t.elapsed() >= Duration::from_millis(100)) {
+          told = Some(Instant::now());
+          redraw();
+        }
+      };
+      let result = transfer::export(&home, &file, progress);
+      let end = match result {
+        Ok(done) => Export::Done { file, size: done.bytes },
+        Err(e) => {
+          warn!("export to {}: {e:#}", file.display());
+          Export::Failed(format!("{e:#}"))
+        }
+      };
+      *state.lock().unwrap() = Some(end);
+      with_window(|_| ());
     });
+  }
+
+  fn export_state(&self) -> Option<Export> {
+    self.export.lock().unwrap().clone()
   }
 }
 
-/// `~/Downloads/wavo-export-2026-10-24.tar`, `-2` and so on if taken or being written.
+/// `~/Downloads/wavo-export-2026-10-24.zip`, `-2` and so on if taken or being written.
 fn export_file() -> PathBuf {
   let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
   let day = history::day_of(history::now_ms()).unwrap_or_default();
   let dir = home.join("Downloads");
   (1..)
     .map(|n| match n {
-      1 => dir.join(format!("wavo-export-{day}.tar")),
-      n => dir.join(format!("wavo-export-{day}-{n}.tar")),
+      1 => dir.join(format!("wavo-export-{day}.zip")),
+      n => dir.join(format!("wavo-export-{day}-{n}.zip")),
     })
     .find(|f| !f.exists() && !transfer::part_of(f).exists())
     .unwrap()

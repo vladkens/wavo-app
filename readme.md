@@ -27,13 +27,13 @@ An ad hoc signature changes with every build, so after an update macOS asks for 
 Export the history and settings on the old Mac with Advanced › Data › Export, or:
 
 ```sh
-/Applications/Wavo.app/Contents/MacOS/wavo-app export wavo.tar
+/Applications/Wavo.app/Contents/MacOS/wavo-app export wavo.zip
 ```
 
 and import them on the new one with Wavo quit (without `--settings` only the history comes):
 
 ```sh
-/Applications/Wavo.app/Contents/MacOS/wavo-app import wavo.tar --settings
+/Applications/Wavo.app/Contents/MacOS/wavo-app import wavo.zip --settings
 ```
 
 </details>

@@ -1,12 +1,8 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
+#!/usr/bin/env python3
 """Moves the history of Handy (https://github.com/cjpais/Handy), another local dictation app, into
 Wavo's, once: quit Wavo, then
 
-  uv run scripts/handy.py [--dry-run]
+  python3 scripts/handy.py [--dry-run]
 
 Handy is not touched: its database is opened read-only, its recordings are only read. The script
 writes them into a temporary Wavo archive and has the installed Wavo import it (its `import`
@@ -33,14 +29,16 @@ The archive is a Wavo archive (src/transfer.rs): the manifest, then `history.db`
 schema 1 (src/history.rs), then the recordings.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sqlite3
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 DEFAULT_DIR = Path.home() / "Library/Application Support/com.pais.handy"
@@ -136,11 +134,11 @@ def archive(src: Path, out: Path) -> tuple[int, int]:
         data = Path(tmp) / "wavo-export.json"
         data.write_text(json.dumps(manifest, indent=2))
 
-        with tarfile.open(out, "w", format=tarfile.GNU_FORMAT) as tar:
-            tar.add(data, "wavo-export.json")
-            tar.add(history, "history.db")
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as z:
+            z.write(data, "wavo-export.json")
+            z.write(history, "history.db")
             for file in files:
-                tar.add(src / "recordings" / file, f"recordings/{file}")
+                z.write(src / "recordings" / file, f"recordings/{file}")
 
     return len(entries), len(files)
 
@@ -148,7 +146,7 @@ def archive(src: Path, out: Path) -> tuple[int, int]:
 def main() -> int:
     args = sys.argv[1:]
     if args not in ([], ["--dry-run"]):
-        sys.exit("usage: uv run scripts/handy.py [--dry-run]")
+        sys.exit("usage: python3 scripts/handy.py [--dry-run]")
 
     src = Path(os.environ.get("HANDY_DIR") or DEFAULT_DIR)
     wavo = Path(os.environ.get("WAVO_APP") or DEFAULT_APP)
@@ -156,7 +154,7 @@ def main() -> int:
         sys.exit(f"no Wavo at {wavo}: install it (make install) or set WAVO_APP")
 
     with tempfile.TemporaryDirectory() as tmp:
-        out = Path(tmp) / "handy.tar"
+        out = Path(tmp) / "handy.zip"
         entries, recordings = archive(src, out)
         print(f"Handy in {src}: {entries} entries, {recordings} recordings", flush=True)
         done = subprocess.run([wavo, "import", out, *args])

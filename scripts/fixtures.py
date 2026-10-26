@@ -1,8 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
+#!/usr/bin/env python3
 """Speech fixtures for the tests: 16 kHz mono 16-bit WAV plus the reference transcript (.txt).
 
   scripts/fixtures.py [out_dir]    # default: target/fixtures

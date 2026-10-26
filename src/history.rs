@@ -12,7 +12,7 @@
 //!   without text whose recording is gone go, and recordings without an entry (the app died while
 //!   recording) become entries without text if they have speech, else they go.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -287,6 +287,24 @@ impl Db {
     ";
 
     self.get_all(qs, params![fold(search), limit as i64])
+  }
+
+  /// The local days (`YYYY-MM-DD`, as [day_of]) from the one of `since` (Unix ms) on, with the
+  /// count and the duration in ms of their entries that [Db::get_page] finds for `search`.
+  pub fn get_days(&self, search: &str, since: i64) -> Result<HashMap<String, (usize, i64)>> {
+    // The day of `since` starts less than two days before it: the index bounds the scan, HAVING
+    // drops the day before.
+    let qs = "
+    SELECT date(created_at / 1000, 'unixepoch', 'localtime') AS day, COUNT(*), SUM(duration_ms)
+    FROM entries
+    WHERE created_at >= ?2 - 172800000 AND (?1 = '' OR instr(wavo_fold(text), ?1) > 0)
+    GROUP BY day HAVING day >= date(?2 / 1000, 'unixepoch', 'localtime');
+    ";
+
+    let mut stmt = self.db.prepare_cached(qs)?;
+    let day = |r: &Row| Ok((r.get(0)?, (r.get::<_, i64>(1)? as usize, r.get(2)?)));
+    let items = stmt.query_map(params![fold(search), since], day)?;
+    Ok(items.collect::<rusqlite::Result<_>>()?)
   }
 
   /// The newest entry without text that `model` has not tried and nothing transcribes now.
@@ -691,6 +709,30 @@ mod tests {
     assert_eq!(page("WORLD", 100), [ids[2]]);
     assert_eq!(page("ещё", 100), [ids[1], ids[5]]);
     assert!(page("%", 100).is_empty());
+  }
+
+  /// A day counts all its entries the search finds, from the day of `since` on.
+  #[test]
+  fn days_count_their_entries() {
+    let dir = TempDir::new("history-days");
+    let h = History::open(dir.path()).unwrap();
+    let items = [(0, "one"), (60_000, "two"), (2 * DAY, "one"), (9 * DAY, "one")];
+    for (age, text) in items {
+      add(&h, age, text, false);
+    }
+
+    let since = NOW - 2 * DAY;
+    for search in ["", "ONE"] {
+      let mut want: HashMap<String, (usize, i64)> = HashMap::new();
+      for (age, text) in items {
+        let day = day_of(NOW - age).unwrap();
+        if day >= day_of(since).unwrap() && text.contains(&fold(search)) {
+          want.entry(day).or_default().0 += 1;
+        }
+      }
+
+      assert_eq!(h.db.get_days(search, since).unwrap(), want, "{search:?}");
+    }
   }
 
   #[test]

@@ -38,7 +38,7 @@ PROFILE := release
 # Built, never opened.
 bundle: # target/Wavo.app from the release profile, or PROFILE
 	cargo build --locked --profile $(PROFILE)
-	uv run scripts/bundle.py target/$(PROFILE)/wavo-app assets/icon.png $(APP)
+	python3 scripts/bundle.py target/$(PROFILE)/wavo-app assets/icon.png $(APP)
 
 dist: # target/distrib/Wavo-dev.zip from the dist profile, the release file for CI (vladkens/actions/rust-build)
 	$(MAKE) bundle PROFILE=dist
@@ -49,11 +49,11 @@ dist: # target/distrib/Wavo-dev.zip from the dist profile, the release file for 
 # they were granted to.
 run: # quit the running Wavo, start target/Wavo.app
 	$(MAKE) bundle
-	uv run scripts/run.py $(APP)
+	python3 scripts/run.py $(APP)
 
 install: # the same, installed into /Applications
 	$(MAKE) bundle
-	uv run scripts/run.py $(APP) /Applications/Wavo.app
+	python3 scripts/run.py $(APP) /Applications/Wavo.app
 
 # The installed app's binary, else the release build's; ARGS go to it (--dry-run, --yes).
 INSTALLED := /Applications/Wavo.app/Contents/MacOS/wavo-app
@@ -71,7 +71,7 @@ FIXTURES := target/fixtures/.stamp
 fixtures: $(FIXTURES) # speech fixtures for test-models
 
 $(FIXTURES): scripts/fixtures.py $(wildcard scripts/fixtures/*.txt)
-	uv run scripts/fixtures.py target/fixtures
+	python3 scripts/fixtures.py target/fixtures
 	touch $@
 
 # The ignored tests that need real models from the Hugging Face cache or the fixtures, by module

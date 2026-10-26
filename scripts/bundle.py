@@ -1,8 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
+#!/usr/bin/env python3
 """Packages the release binary as Wavo.app and signs it.
 
   scripts/bundle.py <binary> <icon.png> <Wavo.app>

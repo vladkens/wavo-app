@@ -95,8 +95,9 @@ pub trait Shell {
   fn autostart(&self) -> Result<Autostart, String>;
   /// Then [Prefs::autostart_set].
   fn set_autostart(&self, _on: bool) {}
-  /// Writes the history into an archive in Downloads and shows it.
+  /// Writes the history into an archive in Downloads: [Shell::export_state].
   fn export(&self) {}
+  fn export_state(&self) -> Option<Export>;
   fn open_url(&self, _url: &str) {}
   fn reveal(&self, _dir: &Path) {}
   /// This Mac has a Neural Engine wavo can use.
@@ -552,7 +553,7 @@ const ANE_HELP: &str = "Parakeet and GigaAM run on the Neural Engine: as fast as
   fraction of the energy. Each new version of Wavo prepares the model once, in the background \
   (10–30 s); meanwhile it runs on the GPU. Whisper always runs on the GPU.";
 const NO_ANE: &str = "Needs Apple silicon and macOS 15 or later.";
-const EXPORT_HELP: &str = "The history, its recordings and the settings, into Downloads as a .tar \
+const EXPORT_HELP: &str = "The history, its recordings and the settings, into Downloads as a .zip \
   archive. To bring one back on another Mac, quit Wavo and run: wavo-app import <file>";
 
 const HUDS: [(HudPosition, &str); 2] =
@@ -645,14 +646,54 @@ impl Prefs {
       }
     });
 
-    ui.form_section(fs, "Data", |ui| {
-      let row = FormRow::new("Export the history").info(EXPORT_HELP).tile(Tile::Icon(Icon::DOC));
-      ui.form_row(fs, row, |ui| {
-        if ui.id("export").button("Export").clicked {
-          self.shell.export();
+    ui.form_section(fs, "Data", |ui| self.export_row(ui, fs, &show));
+  }
+
+  /// Export, disabled with its progress in place of the caption while it runs; then the archive's
+  /// size with Show in Finder, or why it failed.
+  fn export_row(&self, ui: &mut Ui, fs: &FormStyle, show: &str) {
+    let state = self.shell.export_state();
+    let (caption, progress) = match &state {
+      Some(Export::Running { total: 0, .. }) => (None, Some((None, "Copying the history…".into()))),
+      Some(Export::Running { done, total, .. }) => {
+        let (k, text) = share(*done, *total);
+        (None, Some((Some(k), text)))
+      }
+      Some(Export::Done { size, .. }) => (Some(format!("Exported · {}", size_text(*size))), None),
+      Some(Export::Failed(e)) => (Some(format!("Could not export: {e}")), None),
+      None => (None, None),
+    };
+
+    let failed = matches!(state, Some(Export::Failed(_)));
+    let danger = FormStyle { caption: fs.caption.color(ui.theme().danger), ..*fs };
+    let id = Id::of("export-row");
+    let mut row = FormRow::new("Export the history").info(EXPORT_HELP).tile(Tile::Icon(Icon::DOC));
+    if let Some(caption) = &caption {
+      row = row.caption(caption);
+    }
+
+    let below = |ui: &mut Ui| {
+      if let Some((k, text)) = &progress {
+        progress_line(ui, fs, *k, text);
+      }
+    };
+    ui.with_id(id).form_row_with(if failed { &danger } else { fs }, row, below, |ui| {
+      if let Some(Export::Done { file, .. }) = &state {
+        let r = ui.disabled(!file.is_file()).id("export-show").button(show);
+        if r.clicked {
+          self.shell.reveal(file);
         }
-      });
+      }
+
+      if ui.disabled(progress.is_some()).id("export").button("Export").clicked {
+        self.shell.export();
+      }
     });
+
+    // An error cut short shows whole in its tooltip.
+    if let Some(caption) = caption.filter(|_| failed) {
+      ui.tooltip(id.key("caption"), &caption);
+    }
   }
 
   /// The switch shows the change at once and stays disabled until the system answers
@@ -709,6 +750,21 @@ pub type Found = (&'static ModelInfo, PathBuf);
 pub fn size_text(bytes: u64) -> String {
   let mb = bytes as f64 / 1e6;
   if mb >= 1000.0 { format!("{:.1} GB", mb / 1000.0) } else { format!("{mb:.0} MB") }
+}
+
+/// The share done and `42% · 114 of 272 MB`.
+fn share(done: u64, total: u64) -> (f32, String) {
+  let k = done as f32 / total.max(1) as f32;
+  (k, format!("{:.0}% · {}", k * 100.0, done_text(done, total)))
+}
+
+/// A progress bar, moving without a share, and its text, as high as a caption's line.
+fn progress_line(ui: &mut Ui, fs: &FormStyle, k: Option<f32>, text: &str) {
+  let line = Style::new().w(grow()).h(px(fs.caption.line_h)).gap(8.0);
+  ui.row(line.align(Align::Start, Align::Center), |ui| {
+    ui.col(Style::new().w(px(120.0)), |ui| ui.progress(k));
+    ui.text(text, fs.caption.nowrap());
+  });
 }
 
 /// `114 of 272 MB`, `0.4 of 1.7 GB`.
@@ -911,8 +967,7 @@ impl Prefs {
     let state = self.shell.download_state(m.name);
     let (caption, progress) = match &state {
       Some(Download::Running { done, total, rate }) => {
-        let k = *done as f32 / (*total).max(1) as f32;
-        let mut s = format!("{:.0}% · {}", k * 100.0, done_text(*done, *total));
+        let (k, mut s) = share(*done, *total);
         if let Some(rate) = rate {
           s += &format!(" · {:.1} MB/s", rate / 1e6);
         }
@@ -929,12 +984,7 @@ impl Prefs {
     let id = Id::of(("model", m.name));
     let below = |ui: &mut Ui| {
       if let Some((k, text)) = &progress {
-        // The bar, moving without a share, as high as the caption's line.
-        let line = Style::new().w(grow()).h(px(fs.caption.line_h)).gap(8.0);
-        ui.row(line.align(Align::Start, Align::Center), |ui| {
-          ui.col(Style::new().w(px(120.0)), |ui| ui.progress(*k));
-          ui.text(text, fs.caption.nowrap());
-        });
+        progress_line(ui, fs, *k, text);
       }
     };
     let row = model_row(m, caption.as_deref());
@@ -1091,6 +1141,24 @@ impl Downloads {
   }
 }
 
+// MARK: Export
+
+/// How the history's export goes ([Shell::export]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Export {
+  /// Into `file`: bytes written of `total`, 0 while the history is copied first.
+  Running {
+    file: PathBuf,
+    done: u64,
+    total: u64,
+  },
+  Done {
+    file: PathBuf,
+    size: u64,
+  },
+  Failed(String),
+}
+
 // MARK: History
 
 /// Entries a page adds.
@@ -1106,6 +1174,8 @@ struct HistoryPage {
   revision: u64,
   search: String,
   entries: Vec<Entry>,
+  /// The count and duration of each day shown, all its entries, not only those loaded.
+  days: HashMap<String, (usize, i64)>,
   /// Show More clicked so many times.
   pages: usize,
   more: bool,
@@ -1136,12 +1206,17 @@ impl HistoryPage {
       }
     }
 
+    let db = &self.db.as_ref().unwrap().db;
     let limit = (self.pages + 1) * PAGE_SIZE;
-    match self.db.as_ref().unwrap().db.get_page(&key.0, limit + 1) {
-      Ok(mut entries) => {
+    let page = db.get_page(&key.0, limit + 1).and_then(|entries| {
+      let since = entries[..entries.len().min(limit)].last().map_or(i64::MAX, |e| e.created_at);
+      Ok((db.get_days(&key.0, since)?, entries))
+    });
+    match page {
+      Ok((days, mut entries)) => {
         self.more = entries.len() > limit;
         entries.truncate(limit);
-        self.entries = entries;
+        (self.entries, self.days) = (entries, days);
       }
       Err(e) => self.note = Some(format!("Could not read the history: {e:#}")),
     }
@@ -1210,10 +1285,9 @@ fn details(e: &Entry) -> String {
   parts.join(" · ")
 }
 
-/// `3 dictations · 1:15`.
-fn day_note(entries: &[&Entry]) -> String {
-  let n = entries.len();
-  let s = entries.iter().map(|e| e.duration_ms).sum::<i64>() / 1000;
+/// `3 dictations · 1:15`: of the whole day, `(count, ms)`.
+fn day_note((n, ms): (usize, i64)) -> String {
+  let s = ms / 1000;
   let what = if n == 1 { "dictation" } else { "dictations" };
   format!("{n} {what} · {}:{:02}", s / 60, s % 60)
 }
@@ -1280,7 +1354,9 @@ impl Prefs {
     let (now, mut act) = (now_ms(), None);
     let fs = &FormStyle { caption: fs.caption.ellipsis(), pad_y: fs.pad_y + 4.0, ..*fs };
     for (day, entries) in &days {
-      let note = day_note(entries);
+      let (y, m, d) = *day;
+      let note =
+        day_note(h.days.get(&format!("{y:04}-{m:02}-{d:02}")).copied().unwrap_or_default());
       ui.form_section_with(
         fs,
         &day_title(*day, now),
@@ -1297,8 +1373,12 @@ impl Prefs {
       );
     }
 
-    if h.more && Button::new("Show More").show(ui.id("more")).clicked {
-      h.pages += 1;
+    if h.more {
+      ui.row(Style::new().w(grow()).align(Align::Center, Align::Center), |ui| {
+        if Button::new("Show More").show(ui.id("more")).clicked {
+          h.pages += 1;
+        }
+      });
     }
 
     self.history_act(ui, act);
@@ -1531,6 +1611,9 @@ mod tests {
     deleted: Vec<&'static str>,
     requests: Vec<Request>,
     autostarts: Vec<bool>,
+    export: Option<Export>,
+    exports: usize,
+    revealed: Vec<PathBuf>,
   }
 
   #[derive(Clone, Default)]
@@ -1611,6 +1694,22 @@ mod tests {
 
     fn set_autostart(&self, on: bool) {
       self.log().autostarts.push(on);
+    }
+
+    /// It runs 37% through until the test says otherwise.
+    fn export(&self) {
+      let mut log = self.log();
+      log.exports += 1;
+      let file = PathBuf::from("/tmp/wavo-export.zip");
+      log.export = Some(Export::Running { file, done: 6_000_000_000, total: 16_000_000_000 });
+    }
+
+    fn export_state(&self) -> Option<Export> {
+      self.log().export.clone()
+    }
+
+    fn reveal(&self, dir: &Path) {
+      self.log().revealed.push(dir.to_owned());
     }
   }
 
@@ -1848,6 +1947,28 @@ mod tests {
     h.app_mut().autostart_set(true, Err("not permitted".into()));
     assert!(!h.app().settings.autostart);
     assert_eq!(h.app().login.error.as_deref(), Some("Couldn't turn it on: not permitted"));
+  }
+
+  /// Export is disabled while it runs; Finder shows the archive only on a click.
+  #[test]
+  fn the_export_shows_how_it_goes() {
+    let home = Home::new("window-export", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Advanced);
+    click(&mut h, Id::of("export"));
+    click(&mut h, Id::of("export"));
+    assert_eq!(fake.log().exports, 1);
+    assert!(h.rect(Id::of("export-show")).is_none());
+
+    let file = home.dir.path().join("wavo-export.zip");
+    std::fs::write(&file, "").unwrap();
+    fake.log().export = Some(Export::Done { file: file.clone(), size: 16_000_000_000 });
+    h.frame();
+    click(&mut h, Id::of("export-show"));
+    assert_eq!(fake.log().revealed, [file]);
+    click(&mut h, Id::of("export"));
+    assert_eq!(fake.log().exports, 2);
   }
 
   #[test]

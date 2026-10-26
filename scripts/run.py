@@ -1,8 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
+#!/usr/bin/env python3
 """Starts a built Wavo.app in place of the running one, optionally installing it first.
 
   scripts/run.py <Wavo.app> [<dest, e.g. /Applications/Wavo.app>]
