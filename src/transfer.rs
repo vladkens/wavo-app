@@ -260,9 +260,10 @@ fn import_into(
   }
 
   // In the archive's order, read front to back.
+  // Nothing fails between adding the entries and marking them idle.
+  let (prefix, len) = (format!("{RECORDINGS_DIR}/"), fs::metadata(file)?.len());
   let history = history.as_ref().unwrap();
   let (ids, mut copies) = plan.add(history, &starts)?;
-  let (prefix, len) = (format!("{RECORDINGS_DIR}/"), fs::metadata(file)?.len());
   for i in 0..archive.len() {
     let dst = match archive.name_for_index(i) {
       Some(Ok(name)) => name.strip_prefix(&prefix).and_then(|rec| copies.remove(rec)),
