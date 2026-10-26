@@ -38,8 +38,8 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
   let config = nimbo::paths::config_dir(INFO.id);
   let config = (config != nimbo::paths::data_dir(INFO.id)).then_some(config);
   let caches = [nimbo::paths::cache_dir(INFO.id), nimbo::paths::cache_dir("wavo")];
-  let dirs = [home.clone()].into_iter().chain(config).chain(caches);
-  let mut paths: Vec<PathBuf> = dirs.filter(|p| p.exists()).collect();
+  let dirs = [home.clone()].into_iter().chain(config).chain(caches).collect();
+  let mut paths: Vec<PathBuf> = outermost(dirs).into_iter().filter(|p| p.exists()).collect();
   paths.extend(app_bundle());
   let list = || {
     paths.iter().for_each(|p| println!("{}", p.display()));
@@ -113,6 +113,12 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
   Ok(())
 }
 
+/// `dirs` but those inside another, which go with it (Windows: the cache dir in the data dir).
+fn outermost(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+  let inside = |p: &PathBuf| dirs.iter().any(|d| d != p && p.starts_with(d));
+  dirs.iter().filter(|p| !inside(p)).cloned().collect()
+}
+
 /// The app this runs from, `/Applications/Wavo.app`; none for a bare binary (a build).
 fn app_bundle() -> Option<PathBuf> {
   let exe = std::env::current_exe().ok()?;
@@ -162,4 +168,16 @@ fn quit_and_wait(home: &Path) -> Result<()> {
   }
 
   bail!("quit Wavo first")
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_dir_inside_another_goes_with_it() {
+    let p = PathBuf::from;
+    let dirs = vec![p("/data/wavo"), p("/data/wavo2"), p("/data/wavo/cache"), p("/cache/wavo")];
+    assert_eq!(outermost(dirs), [p("/data/wavo"), p("/data/wavo2"), p("/cache/wavo")]);
+  }
 }
