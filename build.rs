@@ -37,8 +37,10 @@ fn exe_icon(out: &Path, w: usize, h: usize, rgba: &[u8]) {
   let path = out.join("wavo.ico");
   dir.write(File::create(&path).expect("wavo.ico")).expect("write wavo.ico");
 
+  // UTF-8, as rc.exe reads the ANSI code page otherwise: a path with an accented user name.
+  let path = path.display().to_string().replace('\\', "/");
   let rc = out.join("wavo.rc");
-  write(&rc, format!("1 ICON \"{}\"\n", path.display().to_string().replace('\\', "/")).as_bytes());
+  write(&rc, format!("#pragma code_page(65001)\n1 ICON \"{path}\"\n").as_bytes());
   embed_resource::compile(&rc, embed_resource::NONE).manifest_optional().expect("wavo.rc");
 }
 
