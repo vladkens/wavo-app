@@ -598,6 +598,8 @@ impl Prefs {
 
 // MARK: Advanced
 
+const TOOK_HELP: &str = "After each dictation the HUD shows for a second how long the text took after \
+  the stop.";
 const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle this long. The next \
   dictation loads it again, which takes a moment.";
 const ANE_HELP: &str = "Parakeet and GigaAM run on the Neural Engine: as fast as on the GPU at a \
@@ -638,6 +640,13 @@ impl Prefs {
         let mut cur = self.settings.hud_position;
         if ui.id("hud").select(&mut cur, &HUDS).changed {
           self.edit(move |s| s.hud_position = cur);
+        }
+      });
+
+      ui.form_row(fs, FormRow::new("Show the transcription time").info(TOOK_HELP), |ui| {
+        let mut on = self.settings.show_transcription_time;
+        if ui.id("took").toggle(&mut on, "").changed {
+          self.edit(move |s| s.show_transcription_time = on);
         }
       });
 
@@ -1029,7 +1038,7 @@ impl Prefs {
     self.edit(move |s| s.model = Some(name.to_owned()));
   }
 
-  /// Use (or "✓ In use"), the bin and ⓘ: the model to ask about deleting.
+  /// Use (or "✓ In use"), the bin and ↗: the model to ask about deleting.
   fn downloaded_row(
     &mut self,
     ui: &mut Ui,
@@ -1103,7 +1112,8 @@ impl Prefs {
         }
       } else {
         let r = ui.id(("cancel", m.name)).icon_button(Icon::X);
-        ui.tooltip(r.id, "Cancel the download");
+        let preparing = matches!(state, Some(Download::Preparing));
+        ui.tooltip(r.id, if preparing { "Cancel" } else { "Cancel the download" });
         if r.clicked {
           self.shell.cancel_download(m.name);
         }
@@ -1113,10 +1123,11 @@ impl Prefs {
     });
   }
 
-  /// A model's ⓘ, last in its row: its card.
+  /// A model's ↗, last in its row: its card (license, languages, benchmarks) in the browser, the
+  /// sign About's links have too.
   fn card(&self, ui: &mut Ui, m: &ModelInfo) {
-    let r = ui.id(("info", m.name)).info_button();
-    ui.tooltip(r.id, "The model’s card: its license, languages and benchmarks");
+    let r = ui.id(("card", m.name)).icon_button(Icon::EXTERNAL);
+    ui.tooltip(r.id, "Open the model’s page on Hugging Face");
     if r.clicked {
       self.shell.open_url(m.card);
     }
@@ -1495,6 +1506,11 @@ pub fn no_text(tried_model: Option<&str>) -> String {
   }
 }
 
+/// A row's line ([first_line]); one being recorded or transcribed has no text yet, not "no text".
+fn row_line(e: &Entry, working: bool) -> String {
+  if working && e.text.is_empty() { "Transcribing…".into() } else { first_line(e) }
+}
+
 /// A row's line: the text on one line, else [no_text].
 fn first_line(e: &Entry) -> String {
   if e.text.is_empty() {
@@ -1569,7 +1585,7 @@ impl Prefs {
     let titles: Vec<String> = h.days.iter().map(|(day, ..)| day_title(*day, now)).collect();
     let groups: Vec<(&str, usize)> =
       titles.iter().zip(&h.days).map(|(t, (_, r, _))| (t.as_str(), r.len())).collect();
-    let (entries, days) = (&h.entries, &h.days);
+    let (entries, days, status) = (&h.entries, &h.days, &self.status);
     let entry = |g: usize, i: usize| &entries[days[g].1.start + i];
     let key = |g, i| entry(g, i).id as u64;
     let note = |ui: &mut Ui, g: usize| {
@@ -1580,7 +1596,8 @@ impl Prefs {
       let e = entry(g, i);
       let selected = h.selected == Some(e.id);
       let playing = h.playing.as_ref().is_some_and(|(id, _)| *id == e.id);
-      if let Some(a) = entry_row(ui, fs, e, selected, playing) {
+      let working = status.current == Some(e.id) || status.retranscribing.contains(&e.id);
+      if let Some(a) = entry_row(ui, fs, e, selected, playing, working) {
         act = Some(a);
       }
     };
@@ -1714,10 +1731,18 @@ impl Prefs {
   }
 }
 
-/// A dictation's row, all of one height: its text on a line and the details under it, Play and
-/// Copy centred at its right. A click on it selects it (tinted), for the panel under the list.
-fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, selected: bool, playing: bool) -> Option<Act> {
-  let line = first_line(e);
+/// A dictation's row (`working`: being recorded or transcribed now), all of one height: its text on
+/// a line and the details under it, Play and Copy centred at its right. A click on it selects it
+/// (tinted), for the panel under the list.
+fn entry_row(
+  ui: &mut Ui,
+  fs: &FormStyle,
+  e: &Entry,
+  selected: bool,
+  playing: bool,
+  working: bool,
+) -> Option<Act> {
+  let line = row_line(e, working);
   let caption = details(e);
   let mut fs = *fs;
   fs.row = fs.row.hit();
@@ -1797,7 +1822,7 @@ impl Prefs {
       ui.el(Style::new().h(px(10.0)));
       ui.text("Wavo", TextStyle::new(Font { size: 20.0, ..t.bold }, t.text).ellipsis());
       ui.el(Style::new().h(px(2.0)));
-      ui.text(concat!("Version ", env!("CARGO_PKG_VERSION")), fs.note);
+      ui.text(crate::VERSION, fs.note);
       ui.el(Style::new().h(px(8.0)));
       ui.text("Local dictation: hold a key, speak, and the text lands where you type.", t.label());
       ui.el(Style::new().h(px(14.0)));
@@ -2050,6 +2075,19 @@ mod tests {
     click(h, Id::of(CONFIRM).key("action"));
   }
 
+  /// The dictation in progress shows as being transcribed, not as one without text.
+  #[test]
+  fn the_dictation_in_progress_is_transcribing() {
+    let e = |text: &str| Entry {
+      text: text.into(),
+      tried_model: Some("parakeet-ultra-Q8_0".into()),
+      ..Entry::default()
+    };
+    assert_eq!(row_line(&e(""), true), "Transcribing…");
+    assert!(row_line(&e(""), false).starts_with("no text"));
+    assert_eq!(row_line(&e("Hi."), true), "Hi.");
+  }
+
   /// GNOME's save panel adds no extension: Import's filter would hide the archive.
   #[test]
   fn an_export_ends_in_zip() {
@@ -2294,7 +2332,7 @@ mod tests {
     h.frame();
     h.frame();
     let shown: Vec<&str> = (hub::MODELS.iter())
-      .filter(|m| h.rect(Id::of(("info", m.name))).is_some())
+      .filter(|m| h.rect(Id::of(("card", m.name))).is_some())
       .map(|m| m.name)
       .collect();
     assert_eq!(shown, [TWO[1], "moonshine-tiny", "moonshine-base"]);

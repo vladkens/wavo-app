@@ -14,7 +14,6 @@ use crate::session::{NoModel, Outcome, Phase, Status};
 use crate::window::{Found, Pick, microphones as mic_choices};
 
 pub const RECENT: usize = 10;
-const TITLE: &str = concat!("Wavo ", env!("CARGO_PKG_VERSION"));
 
 // MARK: Icon
 
@@ -174,7 +173,8 @@ pub fn menu(
   found: &[Found],
   pick: &Pick,
 ) -> Menu {
-  let header = [Some(TITLE), hotkey, state(status)].into_iter().flatten();
+  let title = format!("Wavo {}", crate::VERSION);
+  let header = [Some(title.as_str()), hotkey, state(status)].into_iter().flatten();
   let header = header.collect::<Vec<_>>().join(" · ");
   // Labels fit the menu's width by themselves (nimbo's Item::new).
   let mut items = vec![Item::new("header", &header).enabled(false)];
@@ -324,7 +324,13 @@ mod tests {
     let wave = Choice { id: devices[1].id.clone(), name: devices[1].name.clone() };
     let mics = (&devices[..], Some(&wave));
     let items = menu(Some("⌥Space"), &s, &list, &[], mics, &[], &Pick::default()).items;
-    assert!(items[0].label.ends_with("⌥Space · Recording…"), "{}", items[0].label);
+    // The header as long as the build's version lets it be (a dirty build's runs longer).
+    let header = format!("Wavo {} · ⌥Space · Recording…", crate::VERSION);
+    let label = &items[0].label;
+    match header.chars().count() <= 48 {
+      true => assert_eq!(*label, header),
+      false => assert!(label.starts_with("Wavo v") && label.contains("⌥Space"), "{label}"),
+    }
     assert_eq!(
       (items[1].label.as_str(), items[8].label.as_str()),
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")

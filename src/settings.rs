@@ -45,6 +45,8 @@ pub struct Settings {
   /// Launch at login.
   pub autostart: bool,
   pub hud_position: HudPosition,
+  /// After each dictation the HUD says how long the text took: a debugging aid.
+  pub show_transcription_time: bool,
   /// Wayland's GlobalShortcuts portal took the hotkey once: later launches bind it without a click
   /// (the desktop remembers the person's answer).
   pub hotkey_portal: bool,
@@ -79,11 +81,12 @@ impl Default for Settings {
       model: None,
       auto_paste: true,
       keep_in_clipboard: false,
-      unload_after_minutes: Some(5),
+      unload_after_minutes: Some(15),
       neural_engine: true,
       history_retention: Retention::Unlimited,
       autostart: false,
       hud_position: HudPosition::Bottom,
+      show_transcription_time: false,
       hotkey_portal: false,
     }
   }

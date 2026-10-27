@@ -295,6 +295,8 @@ pub struct Status {
   pub recording: Option<RecordingStatus>,
   pub engine: EngineStatus,
   pub last: Option<Last>,
+  /// The entry of the dictation in progress, recording or transcribing.
+  pub current: Option<i64>,
   /// Entries being transcribed again.
   pub retranscribing: Vec<i64>,
   /// Entries transcribed again in this run, whose first text a restore puts back.
@@ -367,6 +369,8 @@ pub struct Last {
   pub error: Option<String>,
   pub pasted: bool,
   pub not_pasted: Option<String>,
+  /// From the stop to the text, pasted or not.
+  pub took_ms: Option<u64>,
 }
 
 /// What a platform shell shows, sent to the [`Observer`] after every change.
@@ -1133,7 +1137,8 @@ impl<O: TextOutput> Controller<O> {
 
   /// The dictation becomes the last one, and the retention runs.
   fn complete(&mut self) {
-    let d = self.dictation.take().unwrap();
+    let mut d = self.dictation.take().unwrap();
+    d.last.took_ms = d.stopped.map(|s| s.elapsed().as_millis() as u64);
     if d.prewarmed
       && let Some(loaded) = &self.engine
     {
@@ -1303,6 +1308,7 @@ impl<O: TextOutput> Controller<O> {
       }),
       engine,
       last: self.last.clone(),
+      current: d.and_then(|d| d.last.entry),
       retranscribing: self.retranscribing.iter().map(|r| r.entry).collect(),
       restorable: self.originals.keys().copied().collect(),
       error: self.error.clone(),
