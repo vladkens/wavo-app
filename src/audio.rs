@@ -229,8 +229,9 @@ fn as_devices(inputs: &[Input], default: Option<&str>) -> Vec<Device> {
   inputs.iter().map(device).collect()
 }
 
-/// The transport by the platform: CoreAudio's on macOS (cpal tells none there), cpal's on Windows,
-/// where a hands-free Bluetooth headset (`BTHHFENUM`) comes as a headset on no known interface.
+/// The transport by the platform: CoreAudio's on macOS (cpal tells none there), cpal's elsewhere,
+/// on Windows with the endpoint's enumerator, which cpal reads only for `BTHENUM`: a hands-free
+/// Bluetooth headset is `BTHHFENUM`.
 fn transport(id: Option<&str>, description: &cpal::DeviceDescription) -> Transport {
   use cpal::{DeviceType, InterfaceType};
 
@@ -248,7 +249,12 @@ fn transport(id: Option<&str>, description: &cpal::DeviceDescription) -> Transpo
     };
   }
 
-  #[cfg(not(target_os = "macos"))]
+  #[cfg(windows)]
+  if id.and_then(wasapi::enumerator).is_some_and(|e| e.to_uppercase().starts_with("BTH")) {
+    return Transport::Bluetooth;
+  }
+
+  #[cfg(not(any(target_os = "macos", windows)))]
   let _ = id;
   match (description.interface_type(), description.device_type()) {
     (InterfaceType::Bluetooth, _) => Transport::Bluetooth,
@@ -257,7 +263,6 @@ fn transport(id: Option<&str>, description: &cpal::DeviceDescription) -> Transpo
     (InterfaceType::Virtual | InterfaceType::Aggregate, _) | (_, DeviceType::Virtual) => {
       Transport::Virtual
     }
-    (_, DeviceType::Headset | DeviceType::Handset) => Transport::Bluetooth,
     _ => Transport::Unknown,
   }
 }
@@ -285,20 +290,27 @@ pub fn automatic(devices: &[Device], lid_closed: bool) -> Auto {
     return Auto::Device(i);
   }
 
-  let rank = |d: &Device| match d.transport {
-    Transport::BuiltIn => 0,
-    Transport::Usb => 1,
-    Transport::Unknown => 2,
-    Transport::Bluetooth | Transport::Virtual => 3,
-  };
-  let others = devices.iter().enumerate().filter(|&(j, d)| j != i && usable(d));
-  let others = others.filter(|(_, d)| d.transport != Transport::Virtual);
-  match others.min_by_key(|(_, d)| rank(d)) {
-    Some((j, d)) if d.transport != Transport::Bluetooth => Auto::Device(j),
+  match best(devices, lid_closed, Some(i)) {
+    Some(j) if devices[j].transport != Transport::Bluetooth => Auto::Device(j),
     _ if usable(default) => Auto::Device(i),
-    Some((j, _)) => Auto::Device(j),
+    Some(j) => Auto::Device(j),
     None => Auto::Nothing,
   }
+}
+
+/// The best of `devices` but `except`: the built-in one (not under a closed lid), a USB one,
+/// anything else, a Bluetooth one; never a virtual one.
+fn best(devices: &[Device], lid_closed: bool, except: Option<usize>) -> Option<usize> {
+  let rank = |d: &Device| match d.transport {
+    Transport::BuiltIn if lid_closed => None,
+    Transport::BuiltIn => Some(0),
+    Transport::Usb => Some(1),
+    Transport::Unknown => Some(2),
+    Transport::Bluetooth => Some(3),
+    Transport::Virtual => None,
+  };
+  let ranked = devices.iter().enumerate().filter(|&(j, _)| Some(j) != except);
+  ranked.filter_map(|(j, d)| Some((rank(d)?, j))).min().map(|(_, j)| j)
 }
 
 /// A laptop's lid is closed (macOS: its built-in microphone is cut off then); `false` without one.
@@ -326,10 +338,16 @@ fn automatic_input(host: &cpal::Host, failed: Option<&Choice>) -> Result<Option<
 
   let inputs: Vec<Input> = listed(inputs(host)).into_iter().filter(|d| !failed(d)).collect();
   let devices = as_devices(&inputs, default.as_ref().and_then(|d| d.id.as_deref()));
-  match automatic(&devices, lid) {
+  let pick = match default.as_ref().is_some_and(failed) {
+    // The failed one is the system's: the best of the rest.
+    true => best(&devices, lid, None).map_or(Auto::Nothing, Auto::Device),
+    false => automatic(&devices, lid),
+  };
+  match pick {
     Auto::Device(i) => Ok(inputs.into_iter().nth(i)),
-    Auto::System => Ok(default.filter(|d| !failed(d))),
-    Auto::Nothing => bail!("no microphone: the lid is closed"),
+    Auto::System => Ok(default),
+    Auto::Nothing if lid => bail!("no microphone: the lid is closed"),
+    Auto::Nothing => Ok(None),
   }
 }
 
@@ -403,6 +421,41 @@ pub fn warm_up() {
 
   if let Err(e) = thread::Builder::new().name("audio-warm-up".into()).spawn(warm) {
     debug!("audio warm-up: {e}");
+  }
+}
+
+#[cfg(windows)]
+mod wasapi {
+  //! An endpoint's PnP enumerator (`BTHENUM`, `BTHHFENUM`, `USB`, `HDAUDIO`…) by its ID.
+
+  use windows::Win32::Devices::Properties::DEVPKEY_Device_EnumeratorName;
+  use windows::Win32::Foundation::PROPERTYKEY;
+  use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator};
+  use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
+  use windows::Win32::System::Com::{
+    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, STGM_READ,
+  };
+  use windows::core::HSTRING;
+
+  pub fn enumerator(id: &str) -> Option<String> {
+    // SAFETY: COM is on for this thread (by cpal already, or here; another model is fine); the
+    // objects are released on drop, the string freed once.
+    unsafe {
+      let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+      let devices: IMMDeviceEnumerator =
+        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+      let store = devices.GetDevice(&HSTRING::from(id)).ok()?.OpenPropertyStore(STGM_READ).ok()?;
+      // The DEVPROPKEY's GUID and index, as a property store takes them.
+      let key = PROPERTYKEY {
+        fmtid: DEVPKEY_Device_EnumeratorName.fmtid,
+        pid: DEVPKEY_Device_EnumeratorName.pid,
+      };
+      let value = store.GetValue(&key).ok()?;
+      let text = PropVariantToStringAlloc(&value).ok()?;
+      let enumerator = text.to_string().ok();
+      CoTaskMemFree(Some(text.0.cast()));
+      enumerator.filter(|e| !e.is_empty())
+    }
   }
 }
 
@@ -1468,6 +1521,11 @@ mod tests {
     for (list, lid_closed, want) in cases {
       assert_eq!(automatic(&devices(list), lid_closed), want, "{list:?}, lid closed: {lid_closed}");
     }
+
+    // A chosen one that failed and was the system's: the best of the rest, even without a default.
+    let rest = devices(&[(Bluetooth, false), (Usb, false), (BuiltIn, false)]);
+    assert_eq!((best(&rest, false, None), best(&rest, true, None)), (Some(2), Some(1)));
+    assert_eq!(best(&devices(&[(Virtual, false)]), false, None), None);
   }
 
   #[test]

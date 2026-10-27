@@ -2130,6 +2130,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wavo",
+ "windows",
  "zip",
 ]
 
