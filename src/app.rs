@@ -437,7 +437,7 @@ impl App {
         }
 
         // A permission missing shows here and in the menu: no window opens by itself. A denied
-        // microphone sends silence, which would say "no sound" instead.
+        // microphone sends silence: no level to show.
         let denied = matches!(self.mic(), Access::Denied | Access::Restricted);
         let hint = match () {
           _ if denied => Some("allow the microphone to record".to_owned()),

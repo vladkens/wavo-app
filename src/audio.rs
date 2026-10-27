@@ -805,7 +805,7 @@ struct Live {
 }
 
 /// The recording's level and whether the microphone sends any sound, for another thread.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Meter(Arc<Live>);
 
 impl Meter {
@@ -823,6 +823,12 @@ impl Meter {
   pub fn pause(&self) -> Duration {
     let frames = self.0.pause.load(Ordering::Relaxed);
     Duration::from_millis(u64::from(frames) * FRAME as u64 * 1000 / u64::from(SAMPLE_RATE))
+  }
+
+  /// A test's microphone going silent or sounding again.
+  #[cfg(test)]
+  pub fn set_silent(&self, silent: bool) {
+    self.0.silent.store(silent, Ordering::Relaxed);
   }
 }
 
