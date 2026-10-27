@@ -324,7 +324,13 @@ mod tests {
     let wave = Choice { id: devices[1].id.clone(), name: devices[1].name.clone() };
     let mics = (&devices[..], Some(&wave));
     let items = menu(Some("⌥Space"), &s, &list, &[], mics, &[], &Pick::default()).items;
-    assert!(items[0].label.ends_with("⌥Space · Recording…"), "{}", items[0].label);
+    // The header as long as the build's version lets it be (a dirty build's runs longer).
+    let header = format!("Wavo {} · ⌥Space · Recording…", crate::VERSION);
+    let label = &items[0].label;
+    match header.chars().count() <= 48 {
+      true => assert_eq!(*label, header),
+      false => assert!(label.starts_with("Wavo v") && label.contains("⌥Space"), "{label}"),
+    }
     assert_eq!(
       (items[1].label.as_str(), items[8].label.as_str()),
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")
