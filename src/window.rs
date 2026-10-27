@@ -92,6 +92,7 @@ pub trait Shell {
   fn lid_closed(&self) -> bool {
     false
   }
+
   fn access(&self) -> Access;
   /// The system's prompt while it can still ask ([Prefs::access_changed]), else its pane.
   fn allow(&self, _pane: Pane) {}
