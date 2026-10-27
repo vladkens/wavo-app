@@ -143,6 +143,8 @@ fn short(error: &str) -> String {
   let known = [
     (&["no speech model", "no model"][..], "download a model"),
     // audio.rs's: none plugged in, or the chosen one gone with no default to fall back to.
+    // Automatic's, when only a closed lid's microphone is there.
+    (&["the lid is closed"][..], "no microphone: lid closed"),
     (&["no microphone found", "no default microphone"][..], "no microphone"),
     (&["could not open the microphone"][..], "microphone failed"),
     (&["password", "secure"][..], "password field"),
@@ -610,6 +612,7 @@ mod tests {
     assert_eq!(said(&failed, Some(&failed), true), None);
     let errors = [
       ("could not start recording: no microphone found", "no microphone"),
+      ("could not start recording: no microphone: the lid is closed", "no microphone: lid closed"),
       (
         "could not start recording: the microphone \"USB Mic\" is not connected, and there is no \
          default microphone",

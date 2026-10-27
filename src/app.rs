@@ -84,6 +84,7 @@ struct App {
   found: Vec<Found>,
   pick: Pick,
   devices: Vec<audio::Device>,
+  lid_closed: bool,
   recent: Vec<Entry>,
   /// What the menu's Recent and the window read: one connection on the main thread, besides the
   /// session's.
@@ -201,6 +202,7 @@ fn start(main: &mut Main, config: session::Config, instance: Instance) -> Result
     found: Vec::new(),
     pick: Pick::default(),
     devices: audio::devices(),
+    lid_closed: audio::lid_closed(),
     recent: Vec::new(),
     history,
     accessibility: false,
@@ -607,6 +609,7 @@ impl App {
   fn menu_opening(&mut self) {
     self.microphone = permissions::microphone();
     self.devices = audio::devices();
+    self.lid_closed = audio::lid_closed();
     self.clipboard = SystemClipboard.readable();
     self.read_models();
     self.read_recent();
@@ -640,8 +643,8 @@ impl App {
 
   /// The menu's microphone `i`, as [App::refresh] listed them.
   fn choose_mic(&mut self, i: usize) {
-    let saved = self.update.as_ref().and_then(|u| u.settings.microphone.clone());
-    let (mics, _) = window::microphones(&self.devices, saved.as_ref());
+    let saved = self.update.as_ref().map(|u| u.settings.microphone.clone()).unwrap_or_default();
+    let (mics, _) = window::microphones(&self.devices, &saved, self.lid_closed);
     if let Some((name, choice)) = mics.into_iter().nth(i) {
       info!("microphone {name} chosen in the menu");
       self.handle.edit_settings(move |s| s.microphone = choice);
@@ -699,7 +702,7 @@ impl App {
         menu::recent_title(empty.as_deref().unwrap_or(&e.text), e.created_at, now)
       })
       .collect();
-    let mics = (&self.devices[..], update.settings.microphone.as_ref());
+    let mics = (&self.devices[..], &update.settings.microphone, self.lid_closed);
     let (status, found, pick) = (&update.status, &self.found, &self.pick);
     let menu = menu::menu(hotkey.as_deref(), status, &warnings, &recent, mics, found, pick);
     if menu != self.menu {
@@ -734,6 +737,10 @@ impl window::Shell for AppShell {
 
   fn devices(&self) -> Vec<audio::Device> {
     audio::devices()
+  }
+
+  fn lid_closed(&self) -> bool {
+    audio::lid_closed()
   }
 
   fn download(&self, model: &'static ModelInfo) {

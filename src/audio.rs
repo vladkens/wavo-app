@@ -37,24 +37,91 @@ pub struct Choice {
   pub name: String,
 }
 
+/// The microphone that records. Stored as `"automatic"`, `null` (the system default, as files
+/// written before Automatic have it) or a [Choice].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "Option<Stored>", into = "Option<Stored>")]
+pub enum Microphone {
+  /// The system's input, unless it is a Bluetooth one and another is there ([automatic]).
+  #[default]
+  Automatic,
+  /// The system's input, whatever it is.
+  System,
+  Device(Choice),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Stored {
+  Device(Choice),
+  Word(Word),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Word {
+  Automatic,
+}
+
+impl From<Option<Stored>> for Microphone {
+  fn from(stored: Option<Stored>) -> Self {
+    match stored {
+      None => Self::System,
+      Some(Stored::Word(Word::Automatic)) => Self::Automatic,
+      Some(Stored::Device(choice)) => Self::Device(choice),
+    }
+  }
+}
+
+impl From<Microphone> for Option<Stored> {
+  fn from(mic: Microphone) -> Self {
+    match mic {
+      Microphone::Automatic => Some(Stored::Word(Word::Automatic)),
+      Microphone::System => None,
+      Microphone::Device(choice) => Some(Stored::Device(choice)),
+    }
+  }
+}
+
+/// How a microphone is attached, as [automatic] ranks them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Transport {
+  /// The computer's own, a headset on its jack too.
+  BuiltIn,
+  Usb,
+  /// A headset's: recording turns it to its call profile, whose sound is worse and whose first
+  /// moments are lost.
+  Bluetooth,
+  /// Software that routes audio (a loopback, an aggregate).
+  Virtual,
+  /// Anything else, and all of Linux's (ALSA does not tell).
+  #[default]
+  Unknown,
+}
+
 /// An input device as the settings list it.
 #[derive(Debug, Clone)]
 pub struct Device {
   pub id: Option<String>,
   pub name: String,
   pub default: bool,
+  pub transport: Transport,
 }
 
 struct Input {
   id: Option<String>,
   name: String,
+  transport: Transport,
   device: cpal::Device,
 }
 
 impl Input {
   fn new(device: cpal::Device) -> Option<Self> {
-    let name = device.description().ok()?.name().to_owned(); // `None`: unplugged while listed
-    Some(Self { id: device.id().ok().map(|id| id.to_string()), name, device })
+    let description = device.description().ok()?; // `None`: unplugged while listed
+    let id = device.id().ok();
+    let transport = transport(id.as_ref().map(|id| id.id()), &description);
+    let name = description.name().to_owned();
+    Some(Self { id: id.map(|id| id.to_string()), name, transport, device })
   }
 
   fn is(&self, choice: &Choice) -> bool {
@@ -147,24 +214,129 @@ fn cards(pcms: &[&str], ids: &[(String, String)]) -> Vec<usize> {
 pub fn devices() -> Vec<Device> {
   let host = cpal::default_host();
   let default = host.default_input_device();
-  let inputs = listed(inputs(&host)).into_iter();
-  inputs
-    .map(|x| Device { default: default.as_ref() == Some(&x.device), id: x.id, name: x.name })
-    .collect()
+  as_devices(&listed(inputs(&host)), default.as_ref())
 }
 
-/// Opens `choice` (`None`: the system default) with `open`: its name, what `open` made, and a
-/// warning when the chosen device is missing or fails and the default is used. The choice stays:
-/// once the device is back, the next recording uses it.
+fn as_devices(inputs: &[Input], default: Option<&cpal::Device>) -> Vec<Device> {
+  let device = |x: &Input| Device {
+    id: x.id.clone(),
+    name: x.name.clone(),
+    default: default == Some(&x.device),
+    transport: x.transport,
+  };
+  inputs.iter().map(device).collect()
+}
+
+/// The transport by the platform: CoreAudio's on macOS (cpal tells none there), cpal's on Windows,
+/// where a hands-free Bluetooth headset (`BTHHFENUM`) comes as a headset on no known interface.
+fn transport(id: Option<&str>, description: &cpal::DeviceDescription) -> Transport {
+  use cpal::{DeviceType, InterfaceType};
+
+  #[cfg(target_os = "macos")]
+  if let Some(kind) = id.and_then(coreaudio::transport) {
+    return match &kind.to_be_bytes() {
+      b"bltn" => Transport::BuiltIn,
+      b"usb " => Transport::Usb,
+      b"blue" | b"blea" => Transport::Bluetooth,
+      b"virt" | b"grup" | b"auto" => Transport::Virtual,
+      _ => Transport::Unknown,
+    };
+  }
+
+  #[cfg(not(target_os = "macos"))]
+  let _ = id;
+  match (description.interface_type(), description.device_type()) {
+    (InterfaceType::Bluetooth, _) => Transport::Bluetooth,
+    (InterfaceType::BuiltIn, _) => Transport::BuiltIn,
+    (InterfaceType::Usb, _) => Transport::Usb,
+    (InterfaceType::Virtual | InterfaceType::Aggregate, _) | (_, DeviceType::Virtual) => {
+      Transport::Virtual
+    }
+    (_, DeviceType::Headset | DeviceType::Handset) => Transport::Bluetooth,
+    _ => Transport::Unknown,
+  }
+}
+
+/// What [Microphone::Automatic] records with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Auto {
+  /// The listed device at this index.
+  Device(usize),
+  /// The system default as it is: none of the listed is it (ALSA's), or none is listed.
+  System,
+  /// Only a closed lid's microphone is there, which hears nothing.
+  Nothing,
+}
+
+/// The system's input, unless it is a Bluetooth one (recording turns those headphones to their call
+/// profile: worse sound, the first moments lost) or the built-in one under a closed lid (Apple's
+/// laptops cut it off): then another, the built-in one first, a USB one, anything else, a
+/// Bluetooth one. Bluetooth when it is all there is; never a virtual one the system did not pick.
+pub fn automatic(devices: &[Device], lid_closed: bool) -> Auto {
+  let usable = |d: &Device| !(lid_closed && d.transport == Transport::BuiltIn);
+  let Some(i) = devices.iter().position(|d| d.default) else { return Auto::System };
+  let default = &devices[i];
+  if default.transport != Transport::Bluetooth && usable(default) {
+    return Auto::Device(i);
+  }
+
+  let rank = |d: &Device| match d.transport {
+    Transport::BuiltIn => 0,
+    Transport::Usb => 1,
+    Transport::Unknown => 2,
+    Transport::Bluetooth | Transport::Virtual => 3,
+  };
+  let others = devices.iter().enumerate().filter(|&(j, d)| j != i && usable(d));
+  let others = others.filter(|(_, d)| d.transport != Transport::Virtual);
+  match others.min_by_key(|(_, d)| rank(d)) {
+    Some((j, d)) if d.transport != Transport::Bluetooth => Auto::Device(j),
+    _ if usable(default) => Auto::Device(i),
+    Some((j, _)) => Auto::Device(j),
+    None => Auto::Nothing,
+  }
+}
+
+/// A laptop's lid is closed (macOS: its built-in microphone is cut off then); `false` without one.
+pub fn lid_closed() -> bool {
+  #[cfg(target_os = "macos")]
+  return coreaudio::lid_closed();
+
+  #[cfg(not(target_os = "macos"))]
+  false
+}
+
+/// The input [Microphone::Automatic] records with: the default without listing every device when
+/// it will do, else the listed ones by [automatic]; `None` when there is no input at all.
+fn automatic_input(host: &cpal::Host) -> Result<Option<Input>> {
+  let lid = lid_closed();
+  let default = host.default_input_device().and_then(Input::new);
+  let fits =
+    |d: &Input| d.transport != Transport::Bluetooth && !(lid && d.transport == Transport::BuiltIn);
+  if default.as_ref().is_some_and(fits) {
+    return Ok(default);
+  }
+
+  let inputs = listed(inputs(host));
+  let devices = as_devices(&inputs, default.as_ref().map(|d| &d.device));
+  match automatic(&devices, lid) {
+    Auto::Device(i) => Ok(inputs.into_iter().nth(i)),
+    Auto::System => Ok(default),
+    Auto::Nothing => bail!("no microphone: the lid is closed"),
+  }
+}
+
+/// Opens `mic` with `open`: its name, what `open` made, and a warning when a chosen device is
+/// missing or fails and [Microphone::Automatic]'s is used instead. The choice stays: once the
+/// device is back, the next recording uses it.
 fn open_device<T>(
-  choice: Option<&Choice>,
+  mic: &Microphone,
   open: impl Fn(&cpal::Device) -> Result<T>,
 ) -> Result<(String, T, Option<String>)> {
   let host = cpal::default_host();
-  let default = host.default_input_device().and_then(Input::new);
   let mut warning = None;
-  if let Some(choice) = choice {
+  if let Microphone::Device(choice) = mic {
     // The default first: usually it is the one, and listing every device is slower.
+    let default = host.default_input_device().and_then(Input::new);
     let found = match &default {
       Some(d) if d.is(choice) => Some((d.device.clone(), d.name.clone())),
       _ => {
@@ -188,7 +360,14 @@ fn open_device<T>(
     }
   }
 
-  let Some(Input { name, device, .. }) = default else {
+  let fallback = match mic {
+    Microphone::System => host.default_input_device().and_then(Input::new),
+    _ => automatic_input(&host).map_err(|e| match &warning {
+      Some(w) => anyhow!("{w}, and {e}"),
+      None => e,
+    })?,
+  };
+  let Some(Input { name, device, .. }) = fallback else {
     match warning {
       Some(w) => bail!("{w}, and there is no default microphone"),
       None => bail!("no microphone found"),
@@ -213,6 +392,129 @@ pub fn warm_up() {
 
   if let Err(e) = thread::Builder::new().name("audio-warm-up".into()).spawn(warm) {
     debug!("audio warm-up: {e}");
+  }
+}
+
+#[cfg(target_os = "macos")]
+mod coreaudio {
+  //! A device's transport by its UID (CoreAudio), and the lid's state (IOKit's power domain).
+
+  use std::ffi::{c_char, c_void};
+  use std::ptr::null;
+
+  #[repr(C)]
+  struct Address {
+    selector: u32,
+    scope: u32,
+    element: u32,
+  }
+
+  const SYSTEM_OBJECT: u32 = 1;
+  const GLOBAL: u32 = u32::from_be_bytes(*b"glob");
+  const UID_TO_DEVICE: u32 = u32::from_be_bytes(*b"uidd");
+  const TRANSPORT: u32 = u32::from_be_bytes(*b"tran");
+  const UTF8: u32 = 0x0800_0100;
+
+  #[link(name = "CoreAudio", kind = "framework")]
+  unsafe extern "C" {
+    fn AudioObjectGetPropertyData(
+      id: u32,
+      address: *const Address,
+      qualifier_size: u32,
+      qualifier: *const c_void,
+      size: *mut u32,
+      data: *mut c_void,
+    ) -> i32;
+  }
+
+  #[link(name = "CoreFoundation", kind = "framework")]
+  unsafe extern "C" {
+    fn CFStringCreateWithBytes(
+      alloc: *const c_void,
+      bytes: *const u8,
+      len: isize,
+      encoding: u32,
+      external: u8,
+    ) -> *const c_void;
+    fn CFGetTypeID(cf: *const c_void) -> usize;
+    fn CFBooleanGetTypeID() -> usize;
+    fn CFBooleanGetValue(boolean: *const c_void) -> u8;
+    fn CFRelease(cf: *const c_void);
+  }
+
+  #[link(name = "IOKit", kind = "framework")]
+  unsafe extern "C" {
+    fn IOServiceMatching(name: *const c_char) -> *mut c_void;
+    fn IOServiceGetMatchingService(main_port: u32, matching: *mut c_void) -> u32;
+    fn IORegistryEntryCreateCFProperty(
+      entry: u32,
+      key: *const c_void,
+      alloc: *const c_void,
+      options: u32,
+    ) -> *const c_void;
+    fn IOObjectRelease(object: u32) -> i32;
+  }
+
+  /// A CFString of `s`, to release.
+  fn cf_string(s: &str) -> *const c_void {
+    // SAFETY: the bytes are valid UTF-8 for their length.
+    unsafe { CFStringCreateWithBytes(null(), s.as_ptr(), s.len() as isize, UTF8, 0) }
+  }
+
+  /// `kAudioDevicePropertyTransportType` of the device with this UID (`'usb '`, `'blue'`…).
+  pub fn transport(uid: &str) -> Option<u32> {
+    let uid = cf_string(uid);
+    if uid.is_null() {
+      return None;
+    }
+
+    let (mut device, mut size) = (0u32, size_of::<u32>() as u32);
+    let address = Address { selector: UID_TO_DEVICE, scope: GLOBAL, element: 0 };
+    let qualifier = (&raw const uid).cast::<c_void>();
+    let out = (&raw mut device).cast::<c_void>();
+    let ptr = size_of::<*const c_void>() as u32;
+    // SAFETY: the qualifier is the CFString's pointer, the data a UInt32 of `size` bytes.
+    let status = unsafe {
+      AudioObjectGetPropertyData(SYSTEM_OBJECT, &address, ptr, qualifier, &mut size, out)
+    };
+    // SAFETY: created above, released once.
+    unsafe { CFRelease(uid) };
+    if status != 0 || device == 0 {
+      return None;
+    }
+
+    let (mut kind, mut size) = (0u32, size_of::<u32>() as u32);
+    let address = Address { selector: TRANSPORT, scope: GLOBAL, element: 0 };
+    let out = (&raw mut kind).cast::<c_void>();
+    // SAFETY: no qualifier; the data is a UInt32 of `size` bytes.
+    let status = unsafe { AudioObjectGetPropertyData(device, &address, 0, null(), &mut size, out) };
+    (status == 0).then_some(kind)
+  }
+
+  /// IOPMrootDomain's `AppleClamshellState`: present only on a laptop.
+  pub fn lid_closed() -> bool {
+    // SAFETY: the matching dictionary is consumed by the lookup; the service is released.
+    let root =
+      unsafe { IOServiceGetMatchingService(0, IOServiceMatching(c"IOPMrootDomain".as_ptr())) };
+    if root == 0 {
+      return false;
+    }
+
+    let key = cf_string("AppleClamshellState");
+    // SAFETY: a registry entry and a CFString key; the result is owned, released below.
+    let value = unsafe { IORegistryEntryCreateCFProperty(root, key, null(), 0) };
+    // SAFETY: each released once.
+    unsafe { (CFRelease(key), IOObjectRelease(root)) };
+    if value.is_null() {
+      return false;
+    }
+
+    // SAFETY: a CF object, checked to be a CFBoolean before reading it.
+    let closed =
+      unsafe { CFGetTypeID(value) == CFBooleanGetTypeID() && CFBooleanGetValue(value) != 0 };
+    // SAFETY: owned above.
+    unsafe { CFRelease(value) };
+    closed
   }
 }
 
@@ -246,16 +548,16 @@ const RING_SECONDS: usize = 2;
 /// What a recording captures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-  /// The chosen microphone, the system default for `None`.
-  Mic(Option<Choice>),
+  /// The chosen microphone.
+  Mic(Microphone),
   /// A WAV file played in real time, then silence.
   File(PathBuf),
 }
 
 impl Source {
   /// The fake microphone ([fake_mic]) if there is one, else the microphone `choice`.
-  pub fn new(fake: Option<PathBuf>, choice: Option<Choice>) -> Self {
-    fake.map_or(Self::Mic(choice), Self::File)
+  pub fn new(fake: Option<PathBuf>, mic: Microphone) -> Self {
+    fake.map_or(Self::Mic(mic), Self::File)
   }
 }
 
@@ -282,12 +584,12 @@ enum Feed {
 }
 
 fn capture(source: &Source) -> Result<(Capture, Consumer<f32>)> {
-  let choice = match source {
+  let mic = match source {
     Source::File(path) => return fake_capture(path),
-    Source::Mic(choice) => choice.as_ref(),
+    Source::Mic(mic) => mic,
   };
 
-  let (device, (mut capture, ring), warning) = open_device(choice, open_stream)?;
+  let (device, (mut capture, ring), warning) = open_device(mic, open_stream)?;
   (capture.device, capture.warning) = (device, warning);
   Ok((capture, ring))
 }
@@ -1093,6 +1395,47 @@ mod tests {
       assert!(crossings.abs_diff(1_584) <= 4, "{from} → {to} Hz: {crossings} crossings");
       let peak = mid.iter().fold(0.0f32, |m, s| m.max(s.abs()));
       assert!((peak - 0.5).abs() < 0.02, "{from} → {to} Hz: peak {peak}");
+    }
+  }
+
+  /// Automatic's pick by the devices' transports, which one is the system default, and the lid.
+  #[test]
+  fn automatic_avoids_a_bluetooth_mic_and_a_closed_lid() {
+    use Transport::*;
+
+    let devices = |list: &[(Transport, bool)]| -> Vec<Device> {
+      let device = |(i, &(transport, default)): (usize, &(Transport, bool))| Device {
+        id: Some(format!("d{i}")),
+        name: format!("d{i}"),
+        default,
+        transport,
+      };
+      list.iter().enumerate().map(device).collect()
+    };
+    let cases = [
+      // The system's input when it will do.
+      (&[(BuiltIn, true), (Bluetooth, false)][..], false, Auto::Device(0)),
+      (&[(Usb, true), (BuiltIn, false)], false, Auto::Device(0)),
+      (&[(Virtual, true), (BuiltIn, false)], false, Auto::Device(0)),
+      // A Bluetooth one: the built-in one, else a USB one, else anything but virtual.
+      (&[(Bluetooth, true), (Usb, false), (BuiltIn, false)], false, Auto::Device(2)),
+      (&[(Bluetooth, true), (Virtual, false), (Usb, false)], false, Auto::Device(2)),
+      (&[(Bluetooth, true), (Unknown, false)], false, Auto::Device(1)),
+      // Bluetooth when it is all there is, or all that is left.
+      (&[(Bluetooth, true)], false, Auto::Device(0)),
+      (&[(Bluetooth, true), (Virtual, false)], false, Auto::Device(0)),
+      (&[(Bluetooth, true), (Bluetooth, false)], false, Auto::Device(0)),
+      // A closed lid: not the built-in one.
+      (&[(Bluetooth, true), (BuiltIn, false)], true, Auto::Device(0)),
+      (&[(BuiltIn, true), (Usb, false)], true, Auto::Device(1)),
+      (&[(BuiltIn, true), (Bluetooth, false)], true, Auto::Device(1)),
+      (&[(BuiltIn, true)], true, Auto::Nothing),
+      // No listed default (ALSA's), or nothing at all: the system's.
+      (&[(Unknown, false), (Bluetooth, false)], false, Auto::System),
+      (&[], false, Auto::System),
+    ];
+    for (list, lid_closed, want) in cases {
+      assert_eq!(automatic(&devices(list), lid_closed), want, "{list:?}, lid closed: {lid_closed}");
     }
   }
 

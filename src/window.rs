@@ -24,7 +24,7 @@ use nimbo::{
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
-use crate::audio::{self, Choice, Playback};
+use crate::audio::{self, Auto, Choice, Microphone, Playback, Transport};
 use crate::history::{Entry, History, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms};
 use crate::session::{NoModel, Request, Status, label};
 use crate::settings::{Activation, HudPosition, Settings, language_name};
@@ -88,6 +88,10 @@ pub trait Shell {
   /// The shortcut recorder records: the current hotkey is not matched meanwhile.
   fn pause_hotkey(&self, _paused: bool) {}
   fn devices(&self) -> Vec<audio::Device>;
+  /// [audio::lid_closed], for Automatic's microphone.
+  fn lid_closed(&self) -> bool {
+    false
+  }
   fn access(&self) -> Access;
   /// The system's prompt while it can still ask ([Prefs::access_changed]), else its pane.
   fn allow(&self, _pane: Pane) {}
@@ -144,6 +148,8 @@ pub struct Prefs {
   hub: Hub,
   home: PathBuf,
   devices: Vec<audio::Device>,
+  /// A laptop's lid is closed: its built-in microphone hears nothing ([audio::automatic]).
+  lid_closed: bool,
   found: Vec<Found>,
   pick: Pick,
   access: Access,
@@ -178,6 +184,7 @@ impl Prefs {
       hub,
       home: home.to_owned(),
       devices: Vec::new(),
+      lid_closed: false,
       found: Vec::new(),
       pick: Pick::default(),
       access,
@@ -207,6 +214,7 @@ impl Prefs {
   /// Looks again at what the session does not push: when the window opens or comes to the front.
   pub fn refresh(&mut self) {
     self.devices = self.shell.devices();
+    self.lid_closed = self.shell.lid_closed();
     self.access = self.shell.access();
     self.login.state = self.shell.autostart();
     self.models_changed();
@@ -414,12 +422,18 @@ impl Prefs {
     self.permissions(ui, fs);
     // By what matters most: the microphone, the model and its language, then the shortcut.
     ui.form_section(fs, "Dictation", |ui| {
-      let (mics, at) = microphones(&self.devices, self.settings.microphone.as_ref());
+      let (devices, saved) = (&self.devices, &self.settings.microphone);
+      let (mics, at) = microphones(devices, saved, self.lid_closed);
       let labels: Vec<&str> = mics.iter().map(|m| m.0.as_str()).collect();
-      ui.form_row(fs, FormRow::new("Microphone"), |ui| {
+      let mut row = FormRow::new("Microphone");
+      if let Some(note) = bluetooth_only(devices, saved, self.lid_closed) {
+        row = row.caption(note);
+      }
+
+      ui.form_row(fs, row, |ui| {
         // ALSA's names run past 60 characters: a longer one ends in "…" beside its label.
         let mut cur = at;
-        let pop = PopUp::new(&mut cur, &labels).separators(&[0]).max_width(MIC_WIDTH);
+        let pop = PopUp::new(&mut cur, &labels).separators(&[1]).max_width(MIC_WIDTH);
         if pop.show(ui.id("mic")).changed {
           let choice = mics[cur].1.clone();
           self.edit(move |s| s.microphone = choice.clone());
@@ -813,30 +827,56 @@ impl Prefs {
 /// A downloaded model: wavo's, and its file.
 pub type Found = (&'static ModelInfo, PathBuf);
 
-/// The system default, the `devices`, and the `saved` one when it is not connected; the index of
-/// the current one. Here and in the menu.
+/// Automatic with the device it picks, the system default, the `devices`, and the `saved` one when
+/// it is not connected; the index of the current one. Here and in the menu.
 pub fn microphones(
   devices: &[audio::Device],
-  saved: Option<&Choice>,
-) -> (Vec<(String, Option<Choice>)>, usize) {
+  saved: &Microphone,
+  lid_closed: bool,
+) -> (Vec<(String, Microphone)>, usize) {
+  let automatic = match audio::automatic(devices, lid_closed) {
+    Auto::Device(i) => format!("Automatic ({})", devices[i].name),
+    Auto::System => "Automatic".to_owned(),
+    Auto::Nothing => "Automatic (none: the lid is closed)".to_owned(),
+  };
   let default = match devices.iter().find(|d| d.default) {
     Some(d) => format!("System Default ({})", d.name),
     None => "System Default".to_owned(),
   };
-  let mut items = vec![(default, None)];
+  let mut items = vec![(automatic, Microphone::Automatic), (default, Microphone::System)];
   for d in devices {
-    items.push((d.name.clone(), Some(Choice { id: d.id.clone(), name: d.name.clone() })));
+    let choice = Choice { id: d.id.clone(), name: d.name.clone() };
+    items.push((d.name.clone(), Microphone::Device(choice)));
   }
 
-  let Some(saved) = saved else { return (items, 0) };
+  let saved = match saved {
+    Microphone::Automatic => return (items, 0),
+    Microphone::System => return (items, 1),
+    Microphone::Device(choice) => choice,
+  };
   let by_id = devices.iter().position(|d| saved.id.is_some() && d.id == saved.id);
   if let Some(i) = by_id.or_else(|| devices.iter().position(|d| d.name == saved.name)) {
-    return (items, i + 1);
+    return (items, i + 2);
   }
 
-  items.push((format!("{} (not connected)", saved.name), Some(saved.clone())));
+  items.push((format!("{} (not connected)", saved.name), Microphone::Device(saved.clone())));
   let at = items.len() - 1;
   (items, at)
+}
+
+/// Under Automatic when the device it picks is a Bluetooth one: there is no other.
+pub fn bluetooth_only(
+  devices: &[audio::Device],
+  saved: &Microphone,
+  lid_closed: bool,
+) -> Option<&'static str> {
+  let auto = (*saved == Microphone::Automatic).then(|| audio::automatic(devices, lid_closed))?;
+  match auto {
+    Auto::Device(i) if devices[i].transport == Transport::Bluetooth => {
+      Some("Only a Bluetooth mic: the sound is worse")
+    }
+    _ => None,
+  }
 }
 
 /// `740 MB`, `16.0 GB`; `48 KB` under a megabyte (an empty history's archive).
@@ -1910,12 +1950,14 @@ mod tests {
     }
 
     fn devices(&self) -> Vec<audio::Device> {
-      let device = |name: &str, default| audio::Device {
+      let device = |name: &str, default, transport| audio::Device {
         id: Some(name.to_lowercase()),
         name: name.into(),
         default,
+        transport,
       };
-      vec![device("MacBook Pro Microphone", true), device("USB Mic", false)]
+      let mac = device("MacBook Pro Microphone", true, Transport::BuiltIn);
+      vec![mac, device("USB Mic", false, Transport::Usb)]
     }
 
     fn access(&self) -> Access {
@@ -2226,7 +2268,8 @@ mod tests {
     let home = Home::new("window-selects", &TWO);
     let fake = Fake::default();
     let mut h = home.harness(&fake, Settings::default());
-    for (id, item) in [("activation", 2), ("mic", 2), ("model", 1)] {
+    // The microphone's items: Automatic, the system default, then the devices.
+    for (id, item) in [("activation", 2), ("mic", 3), ("model", 1)] {
       click(&mut h, Id::of(id));
       click(&mut h, Id::of(id).key(("item", item)));
     }
@@ -2236,7 +2279,7 @@ mod tests {
     let s = fake.log().settings.clone();
     assert_eq!(
       (s.activation, s.microphone, s.model.as_deref()),
-      (Activation::Toggle, Some(usb), Some(TWO[1]))
+      (Activation::Toggle, Microphone::Device(usb), Some(TWO[1]))
     );
     assert!(!s.auto_paste);
 
