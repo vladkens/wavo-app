@@ -963,8 +963,11 @@ impl TextOutput for GuiOutput {
   /// `target` or sits in a password field; `keep` leaves the text on the clipboard.
   fn paste(&mut self, text: &str, target: &Option<Focused>, keep: bool) -> Result<(), NotPasted> {
     // Given up after MAIN_WAIT (PORTAL_WAIT on Wayland): when the main thread gets to it, it is not
-    // pasted any more.
-    let opts = Paste { restore: !keep, target: target.clone() };
+    // pasted any more, and nimbo's paste stops just before then, as a clipboard or a focus that
+    // doesn't answer holds it (no ⌘V a minute late).
+    let wait = if focus::hidden() { PORTAL_WAIT } else { MAIN_WAIT };
+    let deadline = Some(Instant::now() + wait - Duration::from_millis(100));
+    let opts = Paste { restore: !keep, target: target.clone(), deadline };
     let (text, late) = (text.to_owned(), Arc::new(AtomicBool::new(false)));
     let gave_up = late.clone();
     let paste = move |_: &mut Main| {
@@ -976,10 +979,9 @@ impl TextOutput for GuiOutput {
       info!("paste: {} chars", text.chars().count());
       Ok(())
     };
-    let wait = if focus::hidden() { PORTAL_WAIT } else { MAIN_WAIT };
     proxy().call(paste, wait).unwrap_or_else(|| {
       late.store(true, Ordering::Release);
-      Err(NotPasted::Failed("the app was too busy to paste".into()))
+      Err(busy())
     })
   }
 
@@ -1006,6 +1008,12 @@ fn not_pasted(e: paste::NotPasted) -> NotPasted {
       NotPasted::FocusChanged
     }
     paste::NotPasted::SecureField => NotPasted::SecureField,
+    paste::NotPasted::Late => busy(),
     e => NotPasted::Failed(e.to_string()),
   }
+}
+
+/// The main thread didn't get to the paste in time, or the paste ran out of it.
+fn busy() -> NotPasted {
+  NotPasted::Failed("the app was too busy to paste".into())
 }
