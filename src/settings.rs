@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use isolang::Language;
 use serde::{Deserialize, Serialize};
 
-use crate::audio::Choice;
+use crate::audio::Microphone;
 use crate::history::Retention;
 
 pub const FILE: &str = "settings.json";
@@ -28,8 +28,7 @@ pub struct Settings {
   /// A chord (`option+space`) or a modifier alone (`left_option`, `fn`), nimbo's hotkey grammar.
   pub hotkey: String,
   pub activation: Activation,
-  /// `None` is the system default input.
-  pub microphone: Option<Choice>,
+  pub microphone: Microphone,
   /// A language code, or `auto` for the model to detect it.
   pub language: String,
   /// A model name or a GGUF file path; `None` is the first model found.
@@ -76,7 +75,7 @@ impl Default for Settings {
       schema_version: 1,
       hotkey: DEFAULT_HOTKEY.into(),
       activation: Activation::HoldOrToggle,
-      microphone: None,
+      microphone: Microphone::Automatic,
       language: "auto".into(),
       model: None,
       auto_paste: true,
@@ -165,6 +164,7 @@ pub fn language_name(code: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::audio::Choice;
   use crate::testing::TempDir;
 
   #[test]
@@ -176,7 +176,10 @@ mod tests {
     let settings = Settings {
       hotkey: "fn".into(),
       activation: Activation::Toggle,
-      microphone: Some(Choice { id: Some("uid-1".into()), name: "RØDE PodMic USB".into() }),
+      microphone: Microphone::Device(Choice {
+        id: Some("uid-1".into()),
+        name: "RØDE PodMic USB".into(),
+      }),
       language: "ru".into(),
       unload_after_minutes: None,
       history_retention: Retention::Count(500),
@@ -191,6 +194,14 @@ mod tests {
     fs::write(&path, r#"{"hotkey": "fn", "start_in_tray": true}"#).unwrap();
     let older = Settings { hotkey: "fn".into(), ..Settings::default() };
     assert_eq!(Settings::load(&path), (older, None));
+
+    // The microphone as stored: `null` is the system default, as before Automatic.
+    for (stored, mic) in [("null", Microphone::System), (r#""automatic""#, Microphone::Automatic)] {
+      fs::write(&path, format!(r#"{{"microphone": {stored}}}"#)).unwrap();
+      assert_eq!(Settings::load(&path).0.microphone, mic, "{stored}");
+      Settings { microphone: mic, ..Settings::default() }.save(&path).unwrap();
+      assert!(fs::read_to_string(&path).unwrap().contains(&format!(r#""microphone": {stored}"#)));
+    }
   }
 
   #[test]
