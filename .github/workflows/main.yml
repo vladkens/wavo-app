@@ -104,7 +104,7 @@ jobs:
           artifact: release-${{ matrix.os }}
       # Windows publishes installers, in the exes' place: the first install and the updater's.
       - if: runner.os == 'Windows'
-        uses: vladkens/actions/windows-installer@v1
+        uses: vladkens/actions/windows-installer@windows-installer
         with:
           name: Wavo
           id: 314a56a8-8a8b-4c18-954d-b930203f086d
