@@ -143,6 +143,8 @@ fn short(error: &str) -> String {
   let known = [
     (&["no speech model", "no model"][..], "download a model"),
     // audio.rs's: none plugged in, or the chosen one gone with no default to fall back to.
+    // Automatic's, when only a closed lid's microphone is there.
+    (&["the lid is closed"][..], "no microphone: lid closed"),
     (&["no microphone found", "no default microphone"][..], "no microphone"),
     (&["could not open the microphone"][..], "microphone failed"),
     (&["password", "secure"][..], "password field"),
@@ -166,7 +168,7 @@ fn short(error: &str) -> String {
 // MARK: Hud
 
 pub enum Show {
-  /// `seconds` in so far; `warning` takes the level's place while the microphone sends sound.
+  /// `seconds` in so far; `warning` takes the level's place, over no sound too.
   Recording {
     meter: Option<Meter>,
     device: String,
@@ -339,13 +341,11 @@ impl Hud {
     self.width = (width, width, now);
   }
 
-  /// While recording: no sound first (the recording's own), else the shell's warning.
+  /// While recording: the shell's warning first, as it blocks the dictation (no model, a
+  /// permission), so the pill keeps it through the recording; no sound only without one.
   fn warn(&mut self, f: &mut Frame) {
-    let warning = match self.silent {
-      true => Some(format!("no sound from {}", self.device)),
-      false => self.warning.clone(),
-    };
-    let warning = warning.map(|w| fit(f, w));
+    let silent = self.silent.then(|| format!("no sound from {}", self.device));
+    let warning = self.warning.clone().or(silent).map(|w| fit(f, w));
     if self.mode != Mode::Recording || self.text == warning {
       return;
     }
@@ -610,6 +610,7 @@ mod tests {
     assert_eq!(said(&failed, Some(&failed), true), None);
     let errors = [
       ("could not start recording: no microphone found", "no microphone"),
+      ("could not start recording: no microphone: the lid is closed", "no microphone: lid closed"),
       (
         "could not start recording: the microphone \"USB Mic\" is not connected, and there is no \
          default microphone",
@@ -725,6 +726,22 @@ mod tests {
     assert_eq!(h.app().mode(), Mode::Error);
     h.wait(COLLAPSE + ms(200));
     assert_eq!((h.app().mode(), hidden.get()), (Mode::Hidden, 1));
+  }
+
+  /// A model still downloading and a silent microphone: the model's warning stays, as it blocks
+  /// the dictation.
+  #[test]
+  fn a_blocking_warning_stays_over_no_sound() {
+    let (mut h, _) = hud();
+    let meter = Meter::default();
+    let warning = Some("download a model".to_owned());
+    let device = "Default Audio Device".to_owned();
+    h.app_mut().show(Show::Recording { meter: Some(meter.clone()), device, seconds: 1.0, warning });
+    h.wait(ms(300));
+    assert_eq!(h.app().text.as_deref(), Some("download a model"));
+    meter.set_silent(true);
+    h.wait(ms(300));
+    assert_eq!(h.app().text.as_deref(), Some("download a model"), "no switch to no sound");
   }
 
   /// A Windows microphone's name in full would run past the pill's rounded end.

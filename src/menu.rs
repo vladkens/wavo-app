@@ -7,11 +7,11 @@
 use nimbo::Hotkey;
 use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
 
-use crate::audio::{Choice, Device};
+use crate::audio::{Device, Microphone};
 use crate::engine::Phase as EnginePhase;
 use crate::history::{local_time, shorten};
 use crate::session::{NoModel, Outcome, Phase, Status};
-use crate::window::{Found, Pick, microphones as mic_choices};
+use crate::window::{Found, Pick, bluetooth_only, microphones as mic_choices};
 
 pub const RECENT: usize = 10;
 
@@ -163,13 +163,13 @@ pub fn recent_title(text: &str, created_at: i64, now: i64) -> String {
 }
 
 /// Item ids: `recent:<i>`, `mic:<i>`, `model:<name>`, `warn:…` and fixed ones, as `app::chosen`
-/// handles them. `mics`: the devices and the one saved.
+/// handles them. `mics`: the devices, the one saved and whether the lid is closed.
 pub fn menu(
   hotkey: Option<&str>,
   status: &Status,
   warnings: &[Warning],
   recent: &[String],
-  mics: (&[Device], Option<&Choice>),
+  mics: (&[Device], &Microphone, bool),
   found: &[Found],
   pick: &Pick,
 ) -> Menu {
@@ -188,7 +188,7 @@ pub fn menu(
   let loaded = status.engine.phase != EnginePhase::Stopped && status.state == Phase::Idle;
   let recent: Vec<Item> =
     recent.iter().enumerate().map(|(i, title)| Item::new(&format!("recent:{i}"), title)).collect();
-  let (mic, mics) = microphones(mics);
+  let (mic, mics, note) = microphones(mics);
   let (model, models) = models(found, pick);
   items.extend([
     Item::separator(),
@@ -196,6 +196,12 @@ pub fn menu(
     Item::new("recent", "Recent").enabled(!recent.is_empty()).submenu(Menu::new(recent)),
     Item::separator(),
     Item::new("mic", &mic).submenu(mics),
+  ]);
+  if let Some(note) = note {
+    items.push(Item::new("mic-note", note).enabled(false));
+  }
+
+  items.extend([
     Item::new("model", &model).submenu(models),
     Item::new("unload", "Unload Model").enabled(loaded),
     Item::separator(),
@@ -213,18 +219,18 @@ fn with_key(item: Item, key: &str) -> Item {
   if cfg!(target_os = "macos") { item.key(key) } else { item }
 }
 
-/// The microphone in use, and the submenu: the system default, then the devices, the one in use
-/// checked.
-fn microphones((devices, saved): (&[Device], Option<&Choice>)) -> (String, Menu) {
-  let (mics, at) = mic_choices(devices, saved);
+/// The microphone in use, the submenu (Automatic and the system default, then the devices, the one
+/// in use checked) and a note under it when Automatic has only a Bluetooth one.
+fn microphones(
+  (devices, saved, lid_closed): (&[Device], &Microphone, bool),
+) -> (String, Menu, Option<&'static str>) {
+  let (mics, at) = mic_choices(devices, saved, lid_closed);
   let mut items: Vec<Item> = (mics.iter().enumerate())
     .map(|(i, (label, _))| Item::new(&format!("mic:{i}"), label).checked(i == at))
     .collect();
-  if items.len() > 1 {
-    items.insert(1, Item::separator());
-  }
-
-  (mics[at].0.clone(), Menu::new(items))
+  items.insert(2, Item::separator());
+  let note = bluetooth_only(devices, saved, lid_closed);
+  (mics[at].0.clone(), Menu::new(items), note)
 }
 
 /// The model in use, and the submenu: the models downloaded with the one that transcribes checked,
@@ -273,6 +279,7 @@ fn state(status: &Status) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::audio::{Choice, Transport};
 
   #[test]
   fn every_icon_is_an_18_point_even_odd_path() {
@@ -318,11 +325,17 @@ mod tests {
     s.state = Phase::Recording;
     assert_eq!(icon(&s, &list), Icon::Recording, "the phase first");
 
-    let device = |name: &str, default| Device { id: Some(name.into()), name: name.into(), default };
-    let devices =
-      [device("MacBook Pro Microphone", true), device("Elgato Wave:3 Microphone Array", false)];
+    let device = |name: &str, default, transport| {
+      let (id, name) = (Some(name.into()), name.into());
+      Device { id, name, default, transport }
+    };
+    let devices = [
+      device("MacBook Pro Microphone", true, Transport::BuiltIn),
+      device("Elgato Wave:3 Microphone Array", false, Transport::Usb),
+    ];
     let wave = Choice { id: devices[1].id.clone(), name: devices[1].name.clone() };
-    let mics = (&devices[..], Some(&wave));
+    let wave = Microphone::Device(wave);
+    let mics = (&devices[..], &wave, false);
     let items = menu(Some("⌥Space"), &s, &list, &[], mics, &[], &Pick::default()).items;
     // The header as long as the build's version lets it be (a dirty build's runs longer).
     let header = format!("Wavo {} · ⌥Space · Recording…", crate::VERSION);
@@ -343,12 +356,27 @@ mod tests {
     assert_eq!(mic.label, "Elgato Wave:3 Microphone Array");
     let sub = &mic.submenu.as_ref().unwrap().items;
     let got: Vec<_> = sub.iter().map(|i| (i.label.as_str(), i.checked)).collect();
-    assert_eq!(got[0], ("System Default (MacBook Pro Microphone)", false));
-    let devices_got = &got[2..];
+    assert_eq!(got[0], ("Automatic (MacBook Pro Microphone)", false));
+    assert_eq!(got[1], ("System Default (MacBook Pro Microphone)", false));
+    let devices_got = &got[3..];
     assert_eq!(devices_got, [("MacBook Pro Microphone", false), (devices[1].name.as_str(), true)]);
 
-    let items = menu(None, &s, &list, &[], (&devices[..], None), &[], &Pick::default()).items;
-    let mic = items.iter().find(|i| i.id == "mic").unwrap();
-    assert_eq!(mic.label, "System Default (MacBook Pro Microphone)");
+    let mic_label = |devices: &[Device], saved: &Microphone, lid_closed| {
+      let items = menu(None, &s, &list, &[], (devices, saved, lid_closed), &[], &Pick::default());
+      let label = |id| items.items.iter().find(|i| i.id == id).map(|i| i.label.clone());
+      (label("mic").unwrap(), label("mic-note"))
+    };
+    let system = mic_label(&devices, &Microphone::System, false);
+    assert_eq!(system, ("System Default (MacBook Pro Microphone)".into(), None));
+    // Automatic: the built-in one, the USB one under a closed lid; a lone Bluetooth one with a
+    // note.
+    let auto = Microphone::Automatic;
+    assert_eq!(mic_label(&devices, &auto, false).0, "Automatic (MacBook Pro Microphone)");
+    assert_eq!(mic_label(&devices, &auto, true).0, "Automatic (Elgato Wave:3 Microphone Array)");
+    let airpods = [device("AirPods Pro", true, Transport::Bluetooth)];
+    let note = Some("Only a Bluetooth mic: the sound is worse".into());
+    assert_eq!(mic_label(&airpods, &auto, false), ("Automatic (AirPods Pro)".into(), note));
+    let lid = [device("MacBook Pro Microphone", true, Transport::BuiltIn)];
+    assert_eq!(mic_label(&lid, &auto, true).0, "Automatic (none: the lid is closed)");
   }
 }

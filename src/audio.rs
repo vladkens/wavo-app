@@ -18,6 +18,7 @@ use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use earshot::Detector;
 use hound::{WavReader, WavSpec, WavWriter};
+pub use nimbo::hardware::Transport;
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler};
@@ -37,24 +38,75 @@ pub struct Choice {
   pub name: String,
 }
 
+/// The microphone that records. Stored as `"automatic"`, `null` (the system default, as files
+/// written before Automatic have it) or a [Choice].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "Option<Stored>", into = "Option<Stored>")]
+pub enum Microphone {
+  /// The system's input, unless it is a Bluetooth one and another is there ([automatic]).
+  #[default]
+  Automatic,
+  /// The system's input, whatever it is.
+  System,
+  Device(Choice),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Stored {
+  Device(Choice),
+  Word(Word),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Word {
+  Automatic,
+}
+
+impl From<Option<Stored>> for Microphone {
+  fn from(stored: Option<Stored>) -> Self {
+    match stored {
+      None => Self::System,
+      Some(Stored::Word(Word::Automatic)) => Self::Automatic,
+      Some(Stored::Device(choice)) => Self::Device(choice),
+    }
+  }
+}
+
+impl From<Microphone> for Option<Stored> {
+  fn from(mic: Microphone) -> Self {
+    match mic {
+      Microphone::Automatic => Some(Stored::Word(Word::Automatic)),
+      Microphone::System => None,
+      Microphone::Device(choice) => Some(Stored::Device(choice)),
+    }
+  }
+}
+
 /// An input device as the settings list it.
 #[derive(Debug, Clone)]
 pub struct Device {
   pub id: Option<String>,
   pub name: String,
   pub default: bool,
+  pub transport: Transport,
 }
 
 struct Input {
   id: Option<String>,
   name: String,
+  transport: Transport,
   device: cpal::Device,
 }
 
 impl Input {
   fn new(device: cpal::Device) -> Option<Self> {
-    let name = device.description().ok()?.name().to_owned(); // `None`: unplugged while listed
-    Some(Self { id: device.id().ok().map(|id| id.to_string()), name, device })
+    let description = device.description().ok()?; // `None`: unplugged while listed
+    let id = device.id().ok();
+    let transport = transport(id.as_ref().map(|id| id.id()), &description);
+    let name = description.name().to_owned();
+    Some(Self { id: id.map(|id| id.to_string()), name, transport, device })
   }
 
   fn is(&self, choice: &Choice) -> bool {
@@ -146,25 +198,135 @@ fn cards(pcms: &[&str], ids: &[(String, String)]) -> Vec<usize> {
 /// not listed: on Linux the System Default item names none.
 pub fn devices() -> Vec<Device> {
   let host = cpal::default_host();
-  let default = host.default_input_device();
-  let inputs = listed(inputs(&host)).into_iter();
-  inputs
-    .map(|x| Device { default: default.as_ref() == Some(&x.device), id: x.id, name: x.name })
-    .collect()
+  let default = host.default_input_device().and_then(|d| d.id().ok()).map(|id| id.to_string());
+  as_devices(&listed(inputs(&host)), default.as_deref())
 }
 
-/// Opens `choice` (`None`: the system default) with `open`: its name, what `open` made, and a
-/// warning when the chosen device is missing or fails and the default is used. The choice stays:
-/// once the device is back, the next recording uses it.
+/// The default by its ID: on Windows cpal's default device is a handle of its own that follows
+/// the system's, equal to no listed one, though its ID is the endpoint's.
+fn as_devices(inputs: &[Input], default: Option<&str>) -> Vec<Device> {
+  let device = |x: &Input| Device {
+    id: x.id.clone(),
+    name: x.name.clone(),
+    default: default.is_some() && x.id.as_deref() == default,
+    transport: x.transport,
+  };
+  inputs.iter().map(device).collect()
+}
+
+/// The transport as the OS tells it ([nimbo::hardware::transport]), else as cpal does: Linux's
+/// all, Windows' besides Bluetooth and USB.
+fn transport(id: Option<&str>, description: &cpal::DeviceDescription) -> Transport {
+  use cpal::{DeviceType, InterfaceType};
+
+  let by_os = id.map_or(Transport::Unknown, nimbo::hardware::transport);
+  if by_os != Transport::Unknown {
+    return by_os;
+  }
+
+  match (description.interface_type(), description.device_type()) {
+    (InterfaceType::Bluetooth, _) => Transport::Bluetooth,
+    (InterfaceType::BuiltIn, _) => Transport::BuiltIn,
+    (InterfaceType::Usb, _) => Transport::Usb,
+    (InterfaceType::Virtual | InterfaceType::Aggregate, _) | (_, DeviceType::Virtual) => {
+      Transport::Virtual
+    }
+    _ => Transport::Unknown,
+  }
+}
+
+/// What [Microphone::Automatic] records with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Auto {
+  /// The listed device at this index.
+  Device(usize),
+  /// The system default as it is: none of the listed is it (ALSA's), or none is listed.
+  System,
+  /// Only a closed lid's microphone is there, which hears nothing.
+  Nothing,
+}
+
+/// The system's input, unless it is a Bluetooth one (recording turns those headphones to their call
+/// profile: worse sound, the first moments lost) or the built-in one under a closed lid (Apple's
+/// laptops cut it off): then another, the built-in one first, a USB one, anything else, a
+/// Bluetooth one. Bluetooth when it is all there is; never a virtual one the system did not pick.
+pub fn automatic(devices: &[Device], lid_closed: bool) -> Auto {
+  let usable = |d: &Device| !(lid_closed && d.transport == Transport::BuiltIn);
+  let Some(i) = devices.iter().position(|d| d.default) else { return Auto::System };
+  let default = &devices[i];
+  if default.transport != Transport::Bluetooth && usable(default) {
+    return Auto::Device(i);
+  }
+
+  match best(devices, lid_closed, Some(i)) {
+    Some(j) if devices[j].transport != Transport::Bluetooth => Auto::Device(j),
+    _ if usable(default) => Auto::Device(i),
+    Some(j) => Auto::Device(j),
+    None => Auto::Nothing,
+  }
+}
+
+/// The best of `devices` but `except`: the built-in one (not under a closed lid), a USB one,
+/// anything else, a Bluetooth one; never a virtual one.
+fn best(devices: &[Device], lid_closed: bool, except: Option<usize>) -> Option<usize> {
+  let rank = |d: &Device| match d.transport {
+    Transport::BuiltIn if lid_closed => None,
+    Transport::BuiltIn => Some(0),
+    Transport::Usb => Some(1),
+    Transport::Other | Transport::Unknown => Some(2),
+    Transport::Bluetooth => Some(3),
+    Transport::Virtual => None,
+  };
+  let ranked = devices.iter().enumerate().filter(|&(j, _)| Some(j) != except);
+  ranked.filter_map(|(j, d)| Some((rank(d)?, j))).min().map(|(_, j)| j)
+}
+
+/// A laptop's lid is closed (macOS: its built-in microphone is cut off then); `false` without one.
+pub fn lid_closed() -> bool {
+  nimbo::hardware::lid_closed() == Some(true)
+}
+
+/// The input [Microphone::Automatic] records with: the default without listing every device when
+/// it will do, else the listed ones by [automatic], never `failed` (a chosen one that did not
+/// open); `None` when there is no input at all.
+fn automatic_input(host: &cpal::Host, failed: Option<&Choice>) -> Result<Option<Input>> {
+  let lid = lid_closed();
+  let default = host.default_input_device().and_then(Input::new);
+  let failed = |d: &Input| failed.is_some_and(|c| d.is(c));
+  let fits = |d: &Input| {
+    d.transport != Transport::Bluetooth && !(lid && d.transport == Transport::BuiltIn) && !failed(d)
+  };
+  if default.as_ref().is_some_and(fits) {
+    return Ok(default);
+  }
+
+  let inputs: Vec<Input> = listed(inputs(host)).into_iter().filter(|d| !failed(d)).collect();
+  let devices = as_devices(&inputs, default.as_ref().and_then(|d| d.id.as_deref()));
+  let pick = match default.as_ref().is_some_and(failed) {
+    // The failed one is the system's: the best of the rest.
+    true => best(&devices, lid, None).map_or(Auto::Nothing, Auto::Device),
+    false => automatic(&devices, lid),
+  };
+  match pick {
+    Auto::Device(i) => Ok(inputs.into_iter().nth(i)),
+    Auto::System => Ok(default),
+    Auto::Nothing if lid => bail!("no microphone: the lid is closed"),
+    Auto::Nothing => Ok(None),
+  }
+}
+
+/// Opens `mic` with `open`: its name, what `open` made, and a warning when a chosen device is
+/// missing or fails and [Microphone::Automatic]'s is used instead. The choice stays: once the
+/// device is back, the next recording uses it.
 fn open_device<T>(
-  choice: Option<&Choice>,
+  mic: &Microphone,
   open: impl Fn(&cpal::Device) -> Result<T>,
 ) -> Result<(String, T, Option<String>)> {
   let host = cpal::default_host();
-  let default = host.default_input_device().and_then(Input::new);
   let mut warning = None;
-  if let Some(choice) = choice {
+  if let Microphone::Device(choice) = mic {
     // The default first: usually it is the one, and listing every device is slower.
+    let default = host.default_input_device().and_then(Input::new);
     let found = match &default {
       Some(d) if d.is(choice) => Some((d.device.clone(), d.name.clone())),
       _ => {
@@ -188,7 +350,17 @@ fn open_device<T>(
     }
   }
 
-  let Some(Input { name, device, .. }) = default else {
+  let fallback = match mic {
+    Microphone::System => host.default_input_device().and_then(Input::new),
+    Microphone::Automatic => automatic_input(&host, None)?,
+    Microphone::Device(choice) => {
+      automatic_input(&host, Some(choice)).map_err(|e| match &warning {
+        Some(w) => anyhow!("{w}, and {e}"),
+        None => e,
+      })?
+    }
+  };
+  let Some(Input { name, device, .. }) = fallback else {
     match warning {
       Some(w) => bail!("{w}, and there is no default microphone"),
       None => bail!("no microphone found"),
@@ -246,16 +418,16 @@ const RING_SECONDS: usize = 2;
 /// What a recording captures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-  /// The chosen microphone, the system default for `None`.
-  Mic(Option<Choice>),
+  /// The chosen microphone.
+  Mic(Microphone),
   /// A WAV file played in real time, then silence.
   File(PathBuf),
 }
 
 impl Source {
   /// The fake microphone ([fake_mic]) if there is one, else the microphone `choice`.
-  pub fn new(fake: Option<PathBuf>, choice: Option<Choice>) -> Self {
-    fake.map_or(Self::Mic(choice), Self::File)
+  pub fn new(fake: Option<PathBuf>, mic: Microphone) -> Self {
+    fake.map_or(Self::Mic(mic), Self::File)
   }
 }
 
@@ -282,12 +454,12 @@ enum Feed {
 }
 
 fn capture(source: &Source) -> Result<(Capture, Consumer<f32>)> {
-  let choice = match source {
+  let mic = match source {
     Source::File(path) => return fake_capture(path),
-    Source::Mic(choice) => choice.as_ref(),
+    Source::Mic(mic) => mic,
   };
 
-  let (device, (mut capture, ring), warning) = open_device(choice, open_stream)?;
+  let (device, (mut capture, ring), warning) = open_device(mic, open_stream)?;
   (capture.device, capture.warning) = (device, warning);
   Ok((capture, ring))
 }
@@ -419,7 +591,7 @@ struct Live {
 }
 
 /// The recording's level and whether the microphone sends any sound, for another thread.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Meter(Arc<Live>);
 
 impl Meter {
@@ -437,6 +609,12 @@ impl Meter {
   pub fn pause(&self) -> Duration {
     let frames = self.0.pause.load(Ordering::Relaxed);
     Duration::from_millis(u64::from(frames) * FRAME as u64 * 1000 / u64::from(SAMPLE_RATE))
+  }
+
+  /// A test's microphone going silent or sounding again.
+  #[cfg(test)]
+  pub fn set_silent(&self, silent: bool) {
+    self.0.silent.store(silent, Ordering::Relaxed);
   }
 }
 
@@ -1094,6 +1272,52 @@ mod tests {
       let peak = mid.iter().fold(0.0f32, |m, s| m.max(s.abs()));
       assert!((peak - 0.5).abs() < 0.02, "{from} → {to} Hz: peak {peak}");
     }
+  }
+
+  /// Automatic's pick by the devices' transports, which one is the system default, and the lid.
+  #[test]
+  fn automatic_avoids_a_bluetooth_mic_and_a_closed_lid() {
+    use Transport::*;
+
+    let devices = |list: &[(Transport, bool)]| -> Vec<Device> {
+      let device = |(i, &(transport, default)): (usize, &(Transport, bool))| Device {
+        id: Some(format!("d{i}")),
+        name: format!("d{i}"),
+        default,
+        transport,
+      };
+      list.iter().enumerate().map(device).collect()
+    };
+    let cases = [
+      // The system's input when it will do.
+      (&[(BuiltIn, true), (Bluetooth, false)][..], false, Auto::Device(0)),
+      (&[(Usb, true), (BuiltIn, false)], false, Auto::Device(0)),
+      (&[(Virtual, true), (BuiltIn, false)], false, Auto::Device(0)),
+      // A Bluetooth one: the built-in one, else a USB one, else anything but virtual.
+      (&[(Bluetooth, true), (Usb, false), (BuiltIn, false)], false, Auto::Device(2)),
+      (&[(Bluetooth, true), (Virtual, false), (Usb, false)], false, Auto::Device(2)),
+      (&[(Bluetooth, true), (Unknown, false)], false, Auto::Device(1)),
+      // Bluetooth when it is all there is, or all that is left.
+      (&[(Bluetooth, true)], false, Auto::Device(0)),
+      (&[(Bluetooth, true), (Virtual, false)], false, Auto::Device(0)),
+      (&[(Bluetooth, true), (Bluetooth, false)], false, Auto::Device(0)),
+      // A closed lid: not the built-in one.
+      (&[(Bluetooth, true), (BuiltIn, false)], true, Auto::Device(0)),
+      (&[(BuiltIn, true), (Usb, false)], true, Auto::Device(1)),
+      (&[(BuiltIn, true), (Bluetooth, false)], true, Auto::Device(1)),
+      (&[(BuiltIn, true)], true, Auto::Nothing),
+      // No listed default (ALSA's), or nothing at all: the system's.
+      (&[(Unknown, false), (Bluetooth, false)], false, Auto::System),
+      (&[], false, Auto::System),
+    ];
+    for (list, lid_closed, want) in cases {
+      assert_eq!(automatic(&devices(list), lid_closed), want, "{list:?}, lid closed: {lid_closed}");
+    }
+
+    // A chosen one that failed and was the system's: the best of the rest, even without a default.
+    let rest = devices(&[(Bluetooth, false), (Usb, false), (BuiltIn, false)]);
+    assert_eq!((best(&rest, false, None), best(&rest, true, None)), (Some(2), Some(1)));
+    assert_eq!(best(&devices(&[(Virtual, false)]), false, None), None);
   }
 
   #[test]
