@@ -104,6 +104,7 @@ jobs:
     if: >-
       github.event_name == 'push' && github.ref == 'refs/heads/main'
       && startsWith(github.event.head_commit.message, 'release: v')
+      && github.triggering_actor == github.repository_owner
     needs: build
     runs-on: macos-latest
     environment: release
@@ -117,6 +118,8 @@ jobs:
           path: target/distrib
       - uses: vladkens/actions/macos-sign@v1
         with:
+          files: target/distrib/*-macos.zip
+          required: true
           entitlements: assets/wavo.entitlements
           certificate: ${{ secrets.APPLE_CERTIFICATE }}
           certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
