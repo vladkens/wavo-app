@@ -18,6 +18,7 @@ use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use earshot::Detector;
 use hound::{WavReader, WavSpec, WavWriter};
+pub use nimbo::hardware::Transport;
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler};
@@ -81,22 +82,6 @@ impl From<Microphone> for Option<Stored> {
       Microphone::Device(choice) => Some(Stored::Device(choice)),
     }
   }
-}
-
-/// How a microphone is attached, as [automatic] ranks them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Transport {
-  /// The computer's own microphone, which a closed lid cuts off on Apple's laptops.
-  BuiltIn,
-  Usb,
-  /// A headset's: recording turns it to its call profile, whose sound is worse and whose first
-  /// moments are lost.
-  Bluetooth,
-  /// Software that routes audio (a loopback, an aggregate).
-  Virtual,
-  /// Anything else (a headset on a Mac's jack), and all of Linux's (ALSA does not tell).
-  #[default]
-  Unknown,
 }
 
 /// An input device as the settings list it.
@@ -229,33 +214,16 @@ fn as_devices(inputs: &[Input], default: Option<&str>) -> Vec<Device> {
   inputs.iter().map(device).collect()
 }
 
-/// The transport by the platform: CoreAudio's on macOS (cpal tells none there), cpal's elsewhere,
-/// on Windows with the endpoint's enumerator, which cpal reads only for `BTHENUM`: a hands-free
-/// Bluetooth headset is `BTHHFENUM`.
+/// The transport as the OS tells it ([nimbo::hardware::transport]), else as cpal does: Linux's
+/// all, Windows' besides Bluetooth and USB.
 fn transport(id: Option<&str>, description: &cpal::DeviceDescription) -> Transport {
   use cpal::{DeviceType, InterfaceType};
 
-  #[cfg(target_os = "macos")]
-  if let Some(uid) = id
-    && let Some(kind) = coreaudio::transport(uid)
-  {
-    return match &kind.to_be_bytes() {
-      // The built-in transport is the jack's too: only the internal microphone is cut off.
-      b"bltn" if coreaudio::internal(uid) => Transport::BuiltIn,
-      b"usb " => Transport::Usb,
-      b"blue" | b"blea" => Transport::Bluetooth,
-      b"virt" | b"grup" | b"fgrp" => Transport::Virtual,
-      _ => Transport::Unknown,
-    };
+  let by_os = id.map_or(Transport::Unknown, nimbo::hardware::transport);
+  if by_os != Transport::Unknown {
+    return by_os;
   }
 
-  #[cfg(windows)]
-  if id.and_then(wasapi::enumerator).is_some_and(|e| e.to_uppercase().starts_with("BTH")) {
-    return Transport::Bluetooth;
-  }
-
-  #[cfg(not(any(target_os = "macos", windows)))]
-  let _ = id;
   match (description.interface_type(), description.device_type()) {
     (InterfaceType::Bluetooth, _) => Transport::Bluetooth,
     (InterfaceType::BuiltIn, _) => Transport::BuiltIn,
@@ -305,7 +273,7 @@ fn best(devices: &[Device], lid_closed: bool, except: Option<usize>) -> Option<u
     Transport::BuiltIn if lid_closed => None,
     Transport::BuiltIn => Some(0),
     Transport::Usb => Some(1),
-    Transport::Unknown => Some(2),
+    Transport::Other | Transport::Unknown => Some(2),
     Transport::Bluetooth => Some(3),
     Transport::Virtual => None,
   };
@@ -315,11 +283,7 @@ fn best(devices: &[Device], lid_closed: bool, except: Option<usize>) -> Option<u
 
 /// A laptop's lid is closed (macOS: its built-in microphone is cut off then); `false` without one.
 pub fn lid_closed() -> bool {
-  #[cfg(target_os = "macos")]
-  return coreaudio::lid_closed();
-
-  #[cfg(not(target_os = "macos"))]
-  false
+  nimbo::hardware::lid_closed() == Some(true)
 }
 
 /// The input [Microphone::Automatic] records with: the default without listing every device when
@@ -421,184 +385,6 @@ pub fn warm_up() {
 
   if let Err(e) = thread::Builder::new().name("audio-warm-up".into()).spawn(warm) {
     debug!("audio warm-up: {e}");
-  }
-}
-
-#[cfg(windows)]
-mod wasapi {
-  //! An endpoint's PnP enumerator (`BTHENUM`, `BTHHFENUM`, `USB`, `HDAUDIO`…) by its ID.
-
-  use windows::Win32::Devices::Properties::DEVPKEY_Device_EnumeratorName;
-  use windows::Win32::Foundation::PROPERTYKEY;
-  use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator};
-  use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
-  use windows::Win32::System::Com::{
-    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, STGM_READ,
-  };
-  use windows::core::HSTRING;
-
-  pub fn enumerator(id: &str) -> Option<String> {
-    // SAFETY: COM is on for this thread (by cpal already, or here; another model is fine); the
-    // objects are released on drop, the string freed once.
-    unsafe {
-      let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-      let devices: IMMDeviceEnumerator =
-        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-      let store = devices.GetDevice(&HSTRING::from(id)).ok()?.OpenPropertyStore(STGM_READ).ok()?;
-      // The DEVPROPKEY's GUID and index, as a property store takes them.
-      let key = PROPERTYKEY {
-        fmtid: DEVPKEY_Device_EnumeratorName.fmtid,
-        pid: DEVPKEY_Device_EnumeratorName.pid,
-      };
-      let value = store.GetValue(&key).ok()?;
-      let text = PropVariantToStringAlloc(&value).ok()?;
-      let enumerator = text.to_string().ok();
-      CoTaskMemFree(Some(text.0.cast()));
-      enumerator.filter(|e| !e.is_empty())
-    }
-  }
-}
-
-#[cfg(target_os = "macos")]
-mod coreaudio {
-  //! A device's transport by its UID (CoreAudio), and the lid's state (IOKit's power domain).
-
-  use std::ffi::{c_char, c_void};
-  use std::ptr::null;
-
-  #[repr(C)]
-  struct Address {
-    selector: u32,
-    scope: u32,
-    element: u32,
-  }
-
-  const SYSTEM_OBJECT: u32 = 1;
-  const GLOBAL: u32 = u32::from_be_bytes(*b"glob");
-  const UID_TO_DEVICE: u32 = u32::from_be_bytes(*b"uidd");
-  const TRANSPORT: u32 = u32::from_be_bytes(*b"tran");
-  const DATA_SOURCE: u32 = u32::from_be_bytes(*b"ssrc");
-  const INPUT: u32 = u32::from_be_bytes(*b"inpt");
-  const UTF8: u32 = 0x0800_0100;
-
-  #[link(name = "CoreAudio", kind = "framework")]
-  unsafe extern "C" {
-    fn AudioObjectGetPropertyData(
-      id: u32,
-      address: *const Address,
-      qualifier_size: u32,
-      qualifier: *const c_void,
-      size: *mut u32,
-      data: *mut c_void,
-    ) -> i32;
-  }
-
-  #[link(name = "CoreFoundation", kind = "framework")]
-  unsafe extern "C" {
-    fn CFStringCreateWithBytes(
-      alloc: *const c_void,
-      bytes: *const u8,
-      len: isize,
-      encoding: u32,
-      external: u8,
-    ) -> *const c_void;
-    fn CFGetTypeID(cf: *const c_void) -> usize;
-    fn CFBooleanGetTypeID() -> usize;
-    fn CFBooleanGetValue(boolean: *const c_void) -> u8;
-    fn CFRelease(cf: *const c_void);
-  }
-
-  #[link(name = "IOKit", kind = "framework")]
-  unsafe extern "C" {
-    fn IOServiceMatching(name: *const c_char) -> *mut c_void;
-    fn IOServiceGetMatchingService(main_port: u32, matching: *mut c_void) -> u32;
-    fn IORegistryEntryCreateCFProperty(
-      entry: u32,
-      key: *const c_void,
-      alloc: *const c_void,
-      options: u32,
-    ) -> *const c_void;
-    fn IOObjectRelease(object: u32) -> i32;
-  }
-
-  /// A CFString of `s`, to release.
-  fn cf_string(s: &str) -> *const c_void {
-    // SAFETY: the bytes are valid UTF-8 for their length.
-    unsafe { CFStringCreateWithBytes(null(), s.as_ptr(), s.len() as isize, UTF8, 0) }
-  }
-
-  /// `kAudioDevicePropertyTransportType` of the device with this UID (`'usb '`, `'blue'`…).
-  pub fn transport(uid: &str) -> Option<u32> {
-    let device = device(uid)?;
-    let (mut kind, mut size) = (0u32, size_of::<u32>() as u32);
-    let address = Address { selector: TRANSPORT, scope: GLOBAL, element: 0 };
-    let out = (&raw mut kind).cast::<c_void>();
-    // SAFETY: no qualifier; the data is a UInt32 of `size` bytes.
-    let status = unsafe { AudioObjectGetPropertyData(device, &address, 0, null(), &mut size, out) };
-    (status == 0).then_some(kind)
-  }
-
-  /// The AudioObjectID of the device with this UID.
-  fn device(uid: &str) -> Option<u32> {
-    let uid = cf_string(uid);
-    if uid.is_null() {
-      return None;
-    }
-
-    let (mut device, mut size) = (0u32, size_of::<u32>() as u32);
-    let address = Address { selector: UID_TO_DEVICE, scope: GLOBAL, element: 0 };
-    let qualifier = (&raw const uid).cast::<c_void>();
-    let out = (&raw mut device).cast::<c_void>();
-    let ptr = size_of::<*const c_void>() as u32;
-    // SAFETY: the qualifier is the CFString's pointer, the data a UInt32 of `size` bytes.
-    let status = unsafe {
-      AudioObjectGetPropertyData(SYSTEM_OBJECT, &address, ptr, qualifier, &mut size, out)
-    };
-    // SAFETY: created above, released once.
-    unsafe { CFRelease(uid) };
-    (status == 0 && device != 0).then_some(device)
-  }
-
-  /// The computer's own microphone, not a headset on its jack (the same transport): Apple
-  /// silicon's own device, or an Intel Mac's built-in input on its internal source.
-  pub fn internal(uid: &str) -> bool {
-    if uid == "BuiltInMicrophoneDevice" {
-      return true;
-    }
-
-    let Some(device) = device(uid) else { return false };
-    let (mut source, mut size) = (0u32, size_of::<u32>() as u32);
-    let address = Address { selector: DATA_SOURCE, scope: INPUT, element: 0 };
-    let out = (&raw mut source).cast::<c_void>();
-    // SAFETY: no qualifier; the data is a UInt32 of `size` bytes.
-    let status = unsafe { AudioObjectGetPropertyData(device, &address, 0, null(), &mut size, out) };
-    status == 0 && source == u32::from_be_bytes(*b"imic")
-  }
-
-  /// IOPMrootDomain's `AppleClamshellState`: present only on a laptop.
-  pub fn lid_closed() -> bool {
-    // SAFETY: the matching dictionary is consumed by the lookup; the service is released.
-    let root =
-      unsafe { IOServiceGetMatchingService(0, IOServiceMatching(c"IOPMrootDomain".as_ptr())) };
-    if root == 0 {
-      return false;
-    }
-
-    let key = cf_string("AppleClamshellState");
-    // SAFETY: a registry entry and a CFString key; the result is owned, released below.
-    let value = unsafe { IORegistryEntryCreateCFProperty(root, key, null(), 0) };
-    // SAFETY: each released once.
-    unsafe { (CFRelease(key), IOObjectRelease(root)) };
-    if value.is_null() {
-      return false;
-    }
-
-    // SAFETY: a CF object, checked to be a CFBoolean before reading it.
-    let closed =
-      unsafe { CFGetTypeID(value) == CFBooleanGetTypeID() && CFBooleanGetValue(value) != 0 };
-    // SAFETY: owned above.
-    unsafe { CFRelease(value) };
-    closed
   }
 }
 
