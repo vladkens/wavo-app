@@ -39,7 +39,7 @@ jobs:
           rc=$(printf '%s\n' /usr/lib/llvm-*/bin/llvm-rc | sort -V | tail -n1) && test -x "$rc"
           echo "RC_x86_64_pc_windows_gnu=$rc" >> "$GITHUB_ENV"
       - run: make check
-      - run: cargo-zigbuild clippy --release --locked --all-targets --target aarch64-apple-darwin --target x86_64-pc-windows-gnu -- -D warnings
+      - run: cargo-zigbuild clippy --keep-going --release --locked --all-targets --target aarch64-apple-darwin --target x86_64-pc-windows-gnu -- -D warnings
       - run: make test
 
   # Release files, a job per OS; aarch64 cross-compiled. Linux on the oldest LTS for its glibc.
