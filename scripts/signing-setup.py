@@ -17,7 +17,8 @@ takes; the second sets the PEM as the secret UPDATE_KEY.
 
 Everything private stays in ~/.config/wavo-signing (mode 700; $WAVO_SIGNING_DIR for another), the
 login keychain and the repo's secrets: nothing secret is printed. Done steps are skipped, so it
-can run again; a secret already set stays. --dry-run prints the keychain, notarytool and gh
+can run again; a secret already set stays, but for the certificate's when another .cer is given
+(a renewal: Apple takes the same request again). --dry-run prints the keychain, notarytool and gh
 commands instead of running them.
 """
 
@@ -109,38 +110,43 @@ def common_name(cert: Path) -> str:
     return next(ln.split("=", 1)[1].strip() for ln in subject.splitlines() if "commonName" in ln)
 
 
-def p12(cer: Path | None) -> tuple[Path, str, str]:
-    """The .p12 from Apple's certificate, its password, and the identity's name."""
+def p12(cer: Path | None) -> tuple[Path, str, str, bool]:
+    """The .p12 from Apple's certificate, its password, the identity's name, and whether it is
+    new: made again for another certificate (a renewal) too."""
     out, password = DIR / "developer-id.p12", DIR / "developer-id.password"
     key, cert, g2 = DIR / "developer-id.key", DIR / "developer-id.pem", DIR / "g2.pem"
-    if not out.exists():
-        if not cer:
-            sys.exit(CERTIFICATE.format(csr=DIR / "developer-id.csr"))
+    if not cer:
+        return out, password.read_text(), common_name(cert), False
 
-        run(OPENSSL, "x509", "-inform", "DER", "-in", cer, "-out", cert)
-        if not common_name(cert).startswith(DEVELOPER_ID):
-            sys.exit(f'{cer}: "{common_name(cert)}", not a "Developer ID Application" certificate')
+    new = DIR / "developer-id.new.pem"
+    run(OPENSSL, "x509", "-inform", "DER", "-in", cer, "-out", new)
+    if out.exists() and cert.exists() and new.read_text() == cert.read_text():
+        new.unlink()
+        return out, password.read_text(), common_name(cert), False
 
-        public = run(OPENSSL, "x509", "-in", cert, "-noout", "-pubkey")
-        if public != run(OPENSSL, "pkey", "-in", key, "-pubout"):
-            sys.exit(f"{cer}: made for another request, not {DIR / 'developer-id.csr'}")
+    if not common_name(new).startswith(DEVELOPER_ID):
+        sys.exit(f'{cer}: "{common_name(new)}", not a "Developer ID Application" certificate')
 
-        der = urllib.request.urlopen(G2, timeout=30).read()
-        if hashlib.sha256(der).hexdigest() != G2_SHA256:
-            sys.exit(f"{G2}: not the certificate pinned here")
+    public = run(OPENSSL, "x509", "-in", new, "-noout", "-pubkey")
+    if public != run(OPENSSL, "pkey", "-in", key, "-pubout"):
+        sys.exit(f"{cer}: made for another request, not {DIR / 'developer-id.csr'}")
 
-        (DIR / "g2.cer").write_bytes(der)
-        run(OPENSSL, "x509", "-inform", "DER", "-in", DIR / "g2.cer", "-out", g2)
-        try:
-            run(OPENSSL, "verify", "-partial_chain", "-CAfile", g2, cert)
-        except subprocess.CalledProcessError:
-            sys.exit(f'{cer}: not from the "G2 Sub-CA": make it again with that one')
+    der = urllib.request.urlopen(G2, timeout=30).read()
+    if hashlib.sha256(der).hexdigest() != G2_SHA256:
+        sys.exit(f"{G2}: not the certificate pinned here")
 
-        password.write_text(secrets.token_urlsafe(24))
-        run(LIBRESSL, "pkcs12", "-export", "-inkey", key, "-in", cert, "-certfile", g2,
-            "-out", out, "-passout", f"file:{password}")
+    (DIR / "g2.cer").write_bytes(der)
+    run(OPENSSL, "x509", "-inform", "DER", "-in", DIR / "g2.cer", "-out", g2)
+    try:
+        run(OPENSSL, "verify", "-partial_chain", "-CAfile", g2, new)
+    except subprocess.CalledProcessError:
+        sys.exit(f'{cer}: not from the "G2 Sub-CA": make it again with that one')
 
-    return out, password.read_text(), common_name(cert)
+    new.rename(cert)
+    password.write_text(secrets.token_urlsafe(24))
+    run(LIBRESSL, "pkcs12", "-export", "-inkey", key, "-in", cert, "-certfile", g2,
+        "-out", out, "-passout", f"file:{password}")
+    return out, password.read_text(), common_name(cert), True
 
 
 def keychain(p12: Path, password: str, name: str) -> None:
@@ -173,8 +179,8 @@ def notary() -> dict[str, str]:
     return key
 
 
-def github(values: dict[str, str]) -> None:
-    """The secrets not set yet; the repo is the one gh sees here."""
+def github(values: dict[str, str], again: set[str]) -> None:
+    """The secrets not set yet, and `again`; the repo is the one gh sees here."""
     repo, have = "<repo>", set()
     if not dry:
         repo = run("gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner",
@@ -184,7 +190,7 @@ def github(values: dict[str, str]) -> None:
         have = set(names.split())
 
     for name, value in values.items():
-        if name not in have:
+        if name not in have or name in again:
             act("gh", "secret", "set", name, "-R", repo, stdin=value)
 
     print(f"the secrets of {repo} are set: {', '.join(values)}")
@@ -207,7 +213,7 @@ def main() -> int:
         print(CERTIFICATE.format(csr=req))
         return 0
 
-    cert, password, name = p12(args.cer)
+    cert, password, name, renewed = p12(args.cer)
     keychain(cert, password, name)
     key = notary()
     github({
@@ -217,7 +223,7 @@ def main() -> int:
         "NOTARY_KEY_ID": key["id"],
         "NOTARY_ISSUER": key["issuer"],
         "UPDATE_KEY": update.read_text(),
-    })
+    }, {"MACOS_CERT_P12", "MACOS_CERT_PASSWORD"} if renewed else set())
     return 0
 
 

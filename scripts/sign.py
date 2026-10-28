@@ -56,7 +56,7 @@ def notarize(archive: Path, app: Path, tmp: Path) -> None:
             "--issuer", os.environ["NOTARY_ISSUER"]]
     submit = ["xcrun", "notarytool", "submit", archive, *auth, "--wait", "--timeout", "30m",
               "--output-format", "json"]
-    out = subprocess.run([str(a) for a in submit], capture_output=True, text=True)
+    out = subprocess.run([str(a) for a in submit], check=False, capture_output=True, text=True)
     result = json.loads(out.stdout or "{}")
     if result.get("status") != "Accepted":
         if "id" in result:
