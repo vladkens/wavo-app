@@ -99,9 +99,40 @@ jobs:
           crates: false
           artifact: release-${{ matrix.os }}
 
+  # Signs in a job that compiles nothing: dependencies' build scripts never run where the certificate is.
+  sign:
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && startsWith(github.event.head_commit.message, 'release: v')
+    needs: build
+    runs-on: macos-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-macOS
+          path: target/distrib
+      - uses: vladkens/actions/macos-sign@v1
+        with:
+          entitlements: assets/wavo.entitlements
+          certificate: ${{ secrets.APPLE_CERTIFICATE }}
+          certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          api-key: ${{ secrets.APPLE_API_KEY }}
+          api-key-id: ${{ secrets.APPLE_API_KEY_ID }}
+          api-issuer: ${{ secrets.APPLE_API_ISSUER }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-macOS
+          path: target/distrib/*
+          overwrite: true
+
   publish:
-    if: github.ref == 'refs/heads/main'
-    needs: [test, macos, windows, build]
+    # Also when `sign` is skipped: every commit but a release's.
+    if: github.ref == 'refs/heads/main' && !failure() && !cancelled()
+    needs: [test, macos, windows, build, sign]
     runs-on: ubuntu-latest
     permissions:
       attestations: write

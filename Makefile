@@ -32,9 +32,9 @@ clean:
 APP := target/Wavo.app
 PROFILE := release
 
-# target/Wavo.app (scripts/bundle.py), signed with Wavo's own identity, "Wavo Local Signing",
-# made in the login keychain before the first bundle; no bundle when it can't sign (CI: ad hoc).
-# Built, never opened.
+# target/Wavo.app (scripts/bundle.py), signed with a Developer ID in the keychain, else Wavo's own
+# identity, "Wavo Local Signing", made in the login keychain before the first bundle; no bundle
+# when it can't sign (CI: ad hoc). Built, never opened.
 bundle: # target/Wavo.app from the release profile, or PROFILE
 	cargo build --locked --profile $(PROFILE)
 	python3 scripts/bundle.py target/$(PROFILE)/wavo-app assets/icon.png $(APP)
