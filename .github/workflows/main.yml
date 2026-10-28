@@ -24,7 +24,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: cross
-          save-if: true
+          save-if: ${{ github.event_name != 'pull_request' }}
       # ALSA for cpal; fonts and text libraries for the HUD's tests in nimbo's harness.
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libfontconfig1 libfreetype6 libharfbuzz0b fonts-dejavu-core
       - run: rustup toolchain install nightly --profile minimal --component rustfmt
