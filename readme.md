@@ -36,7 +36,7 @@
 <details>
 <summary>Which file, and the first launch</summary>
 
-- **macOS** 14 or later, Apple Silicon: `Wavo-dev-macos.zip`; move `Wavo.app` into `/Applications`. It is signed ad hoc for now, so macOS refuses the first launch: right-click → Open (on macOS 15 and later: System Settings › Privacy & Security › Open Anyway), or run `xattr -dr com.apple.quarantine /Applications/Wavo.app`. After an update macOS asks for Accessibility and the microphone again.
+- **macOS** 14 or later, Apple Silicon: `Wavo-dev-macos.dmg`; open it and drag Wavo into Applications. It is signed ad hoc for now, so macOS refuses the first launch: right-click → Open (on macOS 15 and later: System Settings › Privacy & Security › Open Anyway), or run `xattr -dr com.apple.quarantine /Applications/Wavo.app`. After an update macOS asks for Accessibility and the microphone again.
 - **Windows** 10 or 11: `Wavo-dev-windows-x64.zip`, or `-arm64` for Windows on Arm; unzip it anywhere and run `Wavo.exe`. It is not signed yet: SmartScreen says "Windows protected your PC", More info → Run anyway. Its icon is in the notification area, perhaps under the ^ arrow.
 - **Linux**, x86_64 or aarch64: `Wavo-dev-linux-<arch>.AppImage`; make it executable (`chmod +x`) and run it.
 

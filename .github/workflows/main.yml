@@ -118,7 +118,7 @@ jobs:
           path: target/distrib
       - uses: vladkens/actions/macos-sign@v1
         with:
-          files: target/distrib/*-macos.zip
+          files: target/distrib/*-macos.dmg
           required: true
           entitlements: assets/wavo.entitlements
           certificate: ${{ secrets.APPLE_CERTIFICATE }}

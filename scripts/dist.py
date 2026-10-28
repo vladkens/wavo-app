@@ -6,7 +6,8 @@
 A file per Rust target given, else for this machine; the `dist` profile. Named
 `Wavo-dev-<os>[-<arch>]`, renamed `Wavo-vX.Y.Z-…` by a release:
 
-- macOS: `Wavo-dev-macos.zip`, Wavo.app (scripts/bundle.py) zipped by ditto.
+- macOS: `Wavo-dev-macos.dmg`, Wavo.app (scripts/bundle.py) beside an /Applications link to drag
+  it to; a release's is signed and notarized by main.yml's `sign`.
 - Windows: `Wavo-dev-windows-<x64|arm64>.zip`, Wavo.exe with the license.
 - Linux: `Wavo-dev-linux-<x86_64|aarch64>.AppImage`: the binary, its .desktop entry and icon. It
   links only glibc and libasound and loads GTK and the rest at run time (nimbo), so nothing else
@@ -77,8 +78,13 @@ def arch(target: str | None = None) -> str:
 def macos(binary: Path, _arch: str) -> Path:
     app = ROOT / "target" / "Wavo.app"
     run(sys.executable, ROOT / "scripts" / "bundle.py", binary, ICON, app)
-    out = OUT / "Wavo-dev-macos.zip"
-    run("ditto", "-c", "-k", "--keepParent", app, out)
+    root = ROOT / "target" / "Wavo.dmgroot"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir()
+    run("ditto", app, root / "Wavo.app")
+    (root / "Applications").symlink_to("/Applications")
+    out = OUT / "Wavo-dev-macos.dmg"
+    run("hdiutil", "create", "-volname", "Wavo", "-srcfolder", root, "-format", "UDZO", "-ov", out)
     return out
 
 
