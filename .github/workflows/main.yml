@@ -25,31 +25,19 @@ jobs:
       # ALSA for cpal; fonts and text libraries for the HUD's tests in nimbo's harness.
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libfontconfig1 libfreetype6 libharfbuzz0b fonts-dejavu-core
       - run: rustup toolchain install nightly --profile minimal --component rustfmt
+      # macOS's and Windows' code is checked from here: zig compiles their C (ring, SQLite), llvm-rc
+      # the exe's icon.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: |
+          curl -sSfL https://github.com/rust-cross/cargo-zigbuild/releases/download/v0.23.4/cargo-zigbuild-x86_64-unknown-linux-musl.tar.xz | tar -xJ -C ~/.cargo/bin --strip-components=1 cargo-zigbuild-x86_64-unknown-linux-musl/cargo-zigbuild
+          rustup target add aarch64-apple-darwin x86_64-pc-windows-gnu
+          rc=$(printf '%s\n' /usr/lib/llvm-*/bin/llvm-rc | sort -V | tail -n1) && test -x "$rc"
+          echo "RC_x86_64_pc_windows_gnu=$rc" >> "$GITHUB_ENV"
       - run: make check
+      - run: cargo-zigbuild clippy --release --locked --all-targets --target aarch64-apple-darwin --target x86_64-pc-windows-gnu -- -D warnings
       - run: make test
-
-  # Each OS's own code: clippy and the tests on macOS and Windows too.
-  macos:
-    runs-on: macos-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - run: cargo clippy --release --all-targets -- -D warnings
-      - run: make test
-
-  windows:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - run: cargo clippy --release --locked --all-targets -- -D warnings
-      - run: cargo test --release --locked
 
   # Release files, a job per OS; aarch64 cross-compiled. Linux on the oldest LTS for its glibc.
   build:
@@ -101,7 +89,7 @@ jobs:
 
   publish:
     if: github.ref == 'refs/heads/main'
-    needs: [test, macos, windows, build]
+    needs: [test, build]
     runs-on: ubuntu-latest
     permissions:
       attestations: write
