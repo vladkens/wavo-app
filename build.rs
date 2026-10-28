@@ -1,26 +1,109 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! The build script: `$OUT_DIR/about-icon.rgba`, `assets/icon.png` at 128 px (64 points at 2x) as
-//! raw RGBA, the About page's ([nimbo::Ui::rgba_image] takes pixels, nimbo decodes no PNG).
+//! The build script: `assets/icon.png` as the app's icons in `$OUT_DIR`, raw RGBA for nimbo, which
+//! decodes no PNG:
+//! - `about-icon.rgba`: 128 px (64 points at 2x), the About page's ([nimbo::Ui::rgba_image]);
+//! - `window-icon.rgba`: 256 px, the windows' off macOS ([nimbo::Config::icon]);
+//! - for Windows, `wavo.ico` linked into the exe as its icon, the one Explorer shows.
+//!
+//! And the version the app shows, `WAVO_VERSION` ([version]).
 
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const ICON: &str = "assets/icon.png";
-/// The About icon's side in pixels.
-const PX: usize = 128;
+/// The sizes in the exe's icon: Explorer's views and the taskbar at 100–200% scale.
+const ICO: [usize; 6] = [16, 24, 32, 48, 64, 256];
 
 fn main() {
   println!("cargo:rerun-if-changed={ICON}");
+  println!("cargo:rustc-env=WAVO_VERSION={}", version());
   let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
   let (w, h, rgba) = decode(ICON);
-  let about = out.join("about-icon.rgba");
-  std::fs::write(&about, resized(w, h, &rgba, PX))
-    .unwrap_or_else(|e| panic!("write {}: {e}", about.display()));
+  write(&out.join("about-icon.rgba"), &resized(w, h, &rgba, 128));
+  write(&out.join("window-icon.rgba"), &resized(w, h, &rgba, 256));
+
+  if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+    exe_icon(&out, w, h, &rgba);
+  }
+}
+
+/// The version the build shows, as CI's dev builds have it (vladkens/actions dev-version): Cargo's
+/// when CI stamped it already (a pre-release part); else `git describe` against the last vX.Y.Z
+/// tag, `0.9.0-12-g3672a1b` after one, `0.1.0-g3672a1b` before any, the plain version on its tag;
+/// `-dirty` with uncommitted changes; Cargo's without git (a crate build).
+fn version() -> String {
+  let pkg = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
+  if pkg.contains('-') {
+    return pkg;
+  }
+
+  let Some(sha) = git(&["rev-parse", "--short", "HEAD"]) else { return pkg };
+  rerun_on_git();
+  let described = git(&["describe", "--tags", "--match", "v[0-9]*.[0-9]*.[0-9]*"]);
+  let version = match described {
+    Some(d) => d.trim_start_matches('v').to_owned(),
+    None => format!("{pkg}-g{sha}"),
+  };
+
+  let dirty =
+    git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
+  if dirty { format!("{version}-dirty") } else { version }
+}
+
+/// `git` in the package's folder: its trimmed output, `None` when it fails or there is no git.
+fn git(args: &[&str]) -> Option<String> {
+  let out = Command::new("git").args(args).output().ok().filter(|o| o.status.success())?;
+  Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// The version again when HEAD moves, a tag comes or the tree changes: HEAD and the index (in a
+/// worktree's own git dir), the ref HEAD names and the tags (in the shared one), and the sources.
+fn rerun_on_git() {
+  let dir = |arg| git(&["rev-parse", arg]).map(PathBuf::from);
+  let (Some(own), Some(shared)) = (dir("--absolute-git-dir"), dir("--git-common-dir")) else {
+    return;
+  };
+
+  let shared = std::env::current_dir().map(|cwd| cwd.join(&shared)).unwrap_or(shared);
+  let head = git(&["rev-parse", "--symbolic-full-name", "HEAD"]).filter(|r| r.starts_with("refs/"));
+  let mut paths = vec![own.join("HEAD"), own.join("index"), shared.join("packed-refs")];
+  paths.push(shared.join("refs/tags"));
+  paths.extend(head.map(|r| shared.join(r)));
+  paths.extend(["src", "Cargo.toml", "Cargo.lock"].map(PathBuf::from));
+  // A path that isn't there would run this every build.
+  for path in paths.iter().filter(|p| p.exists()) {
+    println!("cargo:rerun-if-changed={}", path.display());
+  }
+}
+
+/// `wavo.ico` and a resource script with it as the first icon, which Windows takes for the exe's,
+/// compiled and linked into the binary (rc.exe, or llvm-rc when cross-compiling).
+fn exe_icon(out: &Path, w: usize, h: usize, rgba: &[u8]) {
+  let mut dir = ico::IconDir::new(ico::ResourceType::Icon);
+  for n in ICO {
+    let image = ico::IconImage::from_rgba_data(n as u32, n as u32, resized(w, h, rgba, n));
+    dir.add_entry(ico::IconDirEntry::encode(&image).expect("an icon image"));
+  }
+
+  let path = out.join("wavo.ico");
+  dir.write(File::create(&path).expect("wavo.ico")).expect("write wavo.ico");
+
+  // UTF-8, as rc.exe reads the ANSI code page otherwise: a path with an accented user name.
+  let path = path.display().to_string().replace('\\', "/");
+  let rc = out.join("wavo.rc");
+  write(&rc, format!("#pragma code_page(65001)\n1 ICON \"{path}\"\n").as_bytes());
+  embed_resource::compile(&rc, embed_resource::NONE).manifest_optional().expect("wavo.rc");
+}
+
+fn write(path: &Path, data: &[u8]) {
+  fs::write(path, data).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
 /// The PNG at `path` as `(width, height, RGBA)`, 8 bits a channel, not premultiplied.
 fn decode(path: &str) -> (usize, usize, Vec<u8>) {
-  let file = std::fs::File::open(path).unwrap_or_else(|e| panic!("open {path}: {e}"));
+  let file = File::open(path).unwrap_or_else(|e| panic!("open {path}: {e}"));
   let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
   decoder.set_transformations(png::Transformations::STRIP_16 | png::Transformations::ALPHA);
   let mut reader = decoder.read_info().expect("a PNG");

@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ startsWith(github.event.head_commit.message, 'release:') && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -28,7 +28,7 @@ jobs:
       - run: make check
       - run: make test
 
-  # The macOS shell builds only there: its clippy and tests, the rest's again.
+  # Each OS's own code: clippy and the tests on macOS and Windows too.
   macos:
     runs-on: macos-latest
     timeout-minutes: 20
@@ -39,3 +39,82 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
       - run: cargo clippy --release --all-targets -- -D warnings
       - run: make test
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: cargo clippy --release --locked --all-targets -- -D warnings
+      - run: cargo test --release --locked
+
+  # Release files, a job per OS; aarch64 cross-compiled. Linux on the oldest LTS for its glibc.
+  build:
+    name: build ${{ matrix.os }}
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macOS
+            runner: macos-latest
+            dist: make dist
+          - os: Windows
+            runner: windows-latest
+            dist: python scripts/dist.py x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+          - os: Linux
+            runner: ubuntu-22.04
+            dist: python3 scripts/dist.py x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    env:
+      # Linux aarch64 cross-build.
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      PKG_CONFIG_ALLOW_CROSS: 1
+      PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
+    steps:
+      - uses: actions/checkout@v7
+      # arm64 ALSA from Ubuntu's ports mirror.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo rm -f /etc/apt/sources.list.d/*
+          sudo sed -i -E 's/^deb ([^[])/deb [arch=amd64] \1/' /etc/apt/sources.list
+          for suite in jammy jammy-updates; do
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $suite main universe"
+          done | sudo tee -a /etc/apt/sources.list
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libasound2-dev:arm64 gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+      - if: runner.os == 'Windows'
+        run: rustup target add aarch64-pc-windows-msvc
+      - uses: vladkens/actions/rust-build@v1
+        with:
+          name: Wavo
+          dist: ${{ matrix.dist }}
+          dev: true
+          crates: false
+          artifact: release-${{ matrix.os }}
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: [test, macos, windows, build]
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      # One artifact for rust-publish, from the build jobs' own.
+      - uses: actions/upload-artifact/merge@v7
+        with:
+          name: release
+          pattern: release-*
+      - uses: vladkens/actions/rust-publish@v1
+        with:
+          name: Wavo
+          crates: false

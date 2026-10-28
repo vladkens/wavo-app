@@ -17,30 +17,31 @@ hound = "3.5.1"
 isolang = "2.4.0"
 libc = "0.2.191"
 nimbo = { git = "https://github.com/vladkens/nimbo", branch = "main" }
-rtrb = "0.4.0"
+rtrb = "0.4.1"
 rubato = "5.0.1"
-rusqlite = { version = "0.40.2", features = ["bundled", "functions"] }
+rusqlite = { version = "0.41.0", features = ["bundled", "functions"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-tar = { version = "0.4.46", default-features = false }
 thiserror = "2.0.21"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 wavo = { git = "https://github.com/vladkens/wavo", branch = "main", default-features = false, features = ["hub"] }
+zip = { version = "9.1.1", default-features = false }
 
-# panic = "unwind" (the default), not "abort": the engine thread catches a panic of wavo or wgpu
-# and the app carries on. `fast` inherits it.
+# Everything built here, once: no LTO and incremental, a change rebuilds the app's crate and links
+# fast. panic = "unwind" (the default), not "abort": the engine thread catches a panic of wavo or
+# wgpu and the app carries on. `dist` inherits it.
 [profile.release]
-lto = "thin"
 strip = true
-
-# `make run` and `make install`: release speed without LTO, rebuilt incrementally, for trying a
-# change.
-[profile.fast]
-inherits = "release"
-lto = false
 incremental = true
-codegen-units = 256
+
+# The release file of `make dist` (CI): thin LTO.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+incremental = false
 
 [build-dependencies]
+embed-resource = "3.0.12"
+ico = "0.6.0"
 png = "0.18.1"

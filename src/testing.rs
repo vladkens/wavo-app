@@ -1,24 +1,22 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! Test helpers: temp dirs, polling, audio and history files, speech fixtures, real models and
-//! fake ones in a cache, a fake engine and faults to inject, the app binary and WER.
+//! fake ones in a cache, a fake engine, and WER.
 
-use std::collections::VecDeque;
 use std::f32::consts::TAU;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use rusqlite::Connection;
+use wavo::Backend;
 
-use crate::audio::vad::Clip;
-use crate::audio::wav::WavSink;
-use crate::audio::{SAMPLE_RATE, wav};
-use crate::engine::model::{Loader, Piece, SpeechModel};
+use crate::audio::{Clip, SAMPLE_RATE, WavSink, read_wav};
+use crate::engine::{Loader, Model, SpeechModel};
 use crate::history::DB_FILE;
 
 /// A fresh directory under the system temp dir, removed on drop.
@@ -97,10 +95,6 @@ pub struct Fixture {
 }
 
 impl Fixture {
-  pub fn seconds(&self) -> f64 {
-    self.pcm.len() as f64 / SAMPLE_RATE as f64
-  }
-
   /// What the engine gets for this recording (see [`Clip::engine_input`]).
   pub fn input(&self) -> Clip {
     let clip = Clip::analyze(self.pcm.clone());
@@ -113,13 +107,10 @@ pub fn fixture(name: &str) -> Fixture {
   Fixture { name: name.into(), pcm: fixture_pcm(name), text }
 }
 
-/// Audio of a fixture, also of those without a transcript (`silence`, `noise`).
+/// Also of those without a transcript (`silence`, `noise`).
 pub fn fixture_pcm(name: &str) -> Vec<f32> {
-  wav::read(&fixture_wav(name)).unwrap_or_else(|e| panic!("{e:#} (run `make fixtures`)"))
-}
-
-pub fn fixture_wav(name: &str) -> PathBuf {
-  fixtures_dir().join(format!("{name}.wav"))
+  let wav = fixtures_dir().join(format!("{name}.wav"));
+  read_wav(&wav).unwrap_or_else(|e| panic!("{e:#} (run `make fixtures`)"))
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -134,12 +125,6 @@ pub fn model_ru() -> PathBuf {
 /// Multilingual test model: `$WAVO_TEST_MODEL_EN`, else whisper-turbo from the Hugging Face cache.
 pub fn model_en() -> PathBuf {
   test_model("WAVO_TEST_MODEL_EN", "whisper-turbo")
-}
-
-/// Parakeet v3, which detects its languages itself: `$WAVO_TEST_MODEL_PARAKEET`, else parakeet-v3
-/// from the Hugging Face cache.
-pub fn model_parakeet() -> PathBuf {
-  test_model("WAVO_TEST_MODEL_PARAKEET", "parakeet-v3")
 }
 
 fn test_model(var: &str, name: &str) -> PathBuf {
@@ -164,251 +149,171 @@ pub fn download(hub: &wavo::hub::Hub, name: &str) -> PathBuf {
   file
 }
 
-/// The `wavo-app` binary next to this test binary (`target/<profile>/deps/..`). Unit tests cannot
-/// run `main`, so `make test-models` builds it first.
-pub fn app_exe() -> PathBuf {
-  let test_exe = env::current_exe().unwrap();
-  let dir = test_exe.parent().and_then(Path::parent).unwrap();
-  let exe = dir.join(format!("wavo-app{}", env::consts::EXE_SUFFIX));
-  assert!(exe.is_file(), "{} is missing: `cargo build --release` first", exe.display());
-  exe
-}
-
-/// A stand-in for wavo, in the process as wavo is: it loads any file (on device `fake`) unless the
-/// file is gone or starts with `BROKEN` (a load that fails, as wavo's does), cuts long audio with
-/// [`wavo::split`] as wavo does, and answers every piece with its text, trimmed. Clones count the
-/// loads, the models in memory and the runs of pieces together.
+/// A stand-in for wavo: it loads any file but one that is gone or starts with `BROKEN`, cuts the
+/// audio with [`wavo::split`] at its window and answers each piece with its text. Clones share the
+/// counters.
 #[derive(Clone)]
 pub struct FakeModels {
   text: String,
-  max_audio_ms: Option<u32>,
+  window_ms: u32,
   loads: Arc<AtomicUsize>,
   live: Arc<AtomicUsize>,
   /// The samples of each piece run, in order.
   runs: Arc<Mutex<Vec<usize>>>,
+  panic_next: Arc<AtomicBool>,
+  /// Runs of a model loaded for the Neural Engine fail, as Core ML may.
+  ane_fails: Arc<AtomicBool>,
+  /// Loads for the Neural Engine fail, as when Core ML refuses the program.
+  ane_load_fails: Arc<AtomicBool>,
+  /// Whether each load (tried) was for the Neural Engine, in order.
+  ane_loads: Arc<Mutex<Vec<bool>>>,
+  /// Prepared for the Neural Engine ([Loader::ane_ready]), and how long its load takes.
+  ane_ready: bool,
+  ane_load: Arc<Mutex<Duration>>,
+  /// Whether each job ran on a model loaded for the Neural Engine, in order.
+  jobs_on_ane: Arc<Mutex<Vec<bool>>>,
+  gate: Arc<Mutex<Option<Receiver<()>>>>,
 }
 
 impl FakeModels {
-  /// Models that take any length in one piece.
   pub fn new(text: &str) -> Self {
     Self {
       text: text.trim().to_owned(),
-      max_audio_ms: None,
+      window_ms: u32::MAX,
       loads: Arc::default(),
       live: Arc::default(),
       runs: Arc::default(),
+      panic_next: Arc::default(),
+      ane_fails: Arc::default(),
+      ane_load_fails: Arc::default(),
+      ane_loads: Arc::default(),
+      ane_ready: false,
+      ane_load: Arc::default(),
+      jobs_on_ane: Arc::default(),
+      gate: Arc::default(),
     }
   }
 
-  /// Models trained on audio of up to `ms`.
-  pub fn max_audio_ms(self, ms: u32) -> Self {
-    Self { max_audio_ms: Some(ms), ..self }
+  pub fn window_ms(self, ms: u32) -> Self {
+    Self { window_ms: ms, ..self }
   }
 
-  /// Models loaded so far.
+  /// Prepared for the Neural Engine, whose load takes `took`.
+  pub fn on_ane(self, took: Duration) -> Self {
+    *self.ane_load.lock().unwrap() = took;
+    Self { ane_ready: true, ..self }
+  }
+
+  pub fn jobs_on_ane(&self) -> Vec<bool> {
+    self.jobs_on_ane.lock().unwrap().clone()
+  }
+
   pub fn loads(&self) -> usize {
     self.loads.load(Ordering::SeqCst)
   }
 
-  /// Models in memory now: loaded and not dropped yet.
+  /// Models in memory now.
   pub fn live(&self) -> usize {
     self.live.load(Ordering::SeqCst)
   }
 
-  /// How many samples each piece run so far had, in order.
   pub fn runs(&self) -> Vec<usize> {
     self.runs.lock().unwrap().clone()
+  }
+
+  /// The next run panics, as a bug in wavo would.
+  pub fn panic_next(&self) {
+    self.panic_next.store(true, Ordering::SeqCst);
+  }
+
+  pub fn ane_fails(&self) {
+    self.ane_fails.store(true, Ordering::SeqCst);
+  }
+
+  pub fn ane_load_fails(&self) {
+    self.ane_load_fails.store(true, Ordering::SeqCst);
+  }
+
+  pub fn ane_loads(&self) -> Vec<bool> {
+    self.ane_loads.lock().unwrap().clone()
+  }
+
+  /// Every piece waits until the sender is dropped.
+  pub fn hold(&self) -> Sender<()> {
+    let (tx, rx) = bounded(0);
+    *self.gate.lock().unwrap() = Some(rx);
+    tx
   }
 }
 
 impl Loader for FakeModels {
-  fn load(&self, path: &Path) -> anyhow::Result<Box<dyn SpeechModel>> {
+  fn load(&self, path: &Path, backend: Backend) -> anyhow::Result<Model> {
     if fs::read(path)?.starts_with(b"BROKEN") {
       anyhow::bail!("not a speech model");
     }
 
+    // A load for the Neural Engine is noted as it starts; a prepared one takes its time.
+    let ane = backend != Backend::Gpu;
+    self.ane_loads.lock().unwrap().push(ane);
+    if ane && self.ane_ready {
+      thread::sleep(*self.ane_load.lock().unwrap());
+    }
+
+    if backend == Backend::NeuralEngine && self.ane_load_fails.load(Ordering::SeqCst) {
+      anyhow::bail!("Core ML could not load the program");
+    }
+
     self.loads.fetch_add(1, Ordering::SeqCst);
     self.live.fetch_add(1, Ordering::SeqCst);
-    Ok(Box::new(FakeModel { models: self.clone() }))
+    Ok(Box::new(FakeModel(self.clone(), ane)))
+  }
+
+  fn ane_ready(&self, _path: &Path) -> bool {
+    self.ane_ready
   }
 }
 
-struct FakeModel {
-  models: FakeModels,
-}
+struct FakeModel(FakeModels, bool);
 
 impl SpeechModel for FakeModel {
   fn device(&self) -> String {
     "fake".into()
   }
 
-  fn max_audio_ms(&self) -> Option<u32> {
-    self.models.max_audio_ms
-  }
-
   fn transcribe(
     &self,
     pcm: &[f32],
     _language: Option<&str>,
-    on_piece: &mut dyn FnMut(Piece) -> ControlFlow<()>,
+    on_piece: &mut dyn FnMut(usize, usize) -> ControlFlow<()>,
   ) -> anyhow::Result<String> {
-    let pieces = wavo::split(pcm, self.models.max_audio_ms.unwrap_or(u32::MAX));
+    let m = &self.0;
+    m.jobs_on_ane.lock().unwrap().push(self.1);
+    assert!(!m.panic_next.swap(false, Ordering::SeqCst), "injected panic in a run");
+    if self.1 && m.ane_fails.load(Ordering::SeqCst) {
+      return Err(wavo::Error::NeuralEngine("injected".into()).into());
+    }
+
+    let pieces = wavo::split(pcm, m.window_ms);
     let count = pieces.len();
     for (index, range) in pieces.into_iter().enumerate() {
-      self.models.runs.lock().unwrap().push(range.len());
-      if on_piece(Piece { index, count }).is_break() {
+      let gate = m.gate.lock().unwrap().clone();
+      if let Some(gate) = gate {
+        let _ = gate.recv();
+      }
+
+      m.runs.lock().unwrap().push(range.len());
+      if on_piece(index, count).is_break() {
         return Err(wavo::Error::Cancelled.into());
       }
     }
 
-    let texts = vec![self.models.text.as_str(); count];
-    Ok(texts.join(" ").trim().to_owned())
+    Ok(vec![m.text.as_str(); count].join(" ").trim().to_owned())
   }
 }
 
 impl Drop for FakeModel {
   fn drop(&mut self) {
-    self.models.live.fetch_sub(1, Ordering::SeqCst);
-  }
-}
-
-/// What a load or a run does instead of its own work, injected with [`Faults`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fault {
-  /// Panics, as a bug in wavo or wgpu would.
-  Panic,
-  /// Fails with this message, as a bad request does.
-  Fail(&'static str),
-  /// Fails as wavo does when the GPU device is lost.
-  GpuLost,
-  /// Blocks until [`Faults::release`], then does its work: a wedged GPU, or a run held while the
-  /// test looks.
-  Hang,
-  /// Does its work: the fault for a later piece goes after it.
-  Pass,
-}
-
-/// Faults for the loads and the runs of pieces of the [`Loader`] that [`Faults::wrap`] wraps,
-/// taken in order. Clones share them.
-#[derive(Clone)]
-pub struct Faults(Arc<FaultState>);
-
-struct FaultState {
-  loads: Mutex<VecDeque<Fault>>,
-  runs: Mutex<VecDeque<Fault>>,
-  /// A hang waits on the receiver until [`Faults::release`] replaces the pair, dropping the
-  /// sender.
-  gate: Mutex<(Sender<()>, Receiver<()>)>,
-  hanging: AtomicUsize,
-}
-
-impl Faults {
-  pub fn new() -> Self {
-    Self(Arc::new(FaultState {
-      loads: Mutex::default(),
-      runs: Mutex::default(),
-      gate: Mutex::new(bounded(0)),
-      hanging: AtomicUsize::new(0),
-    }))
-  }
-
-  /// The next load does `fault`.
-  pub fn load(&self, fault: Fault) {
-    self.0.loads.lock().unwrap().push_back(fault);
-  }
-
-  /// The next run of a piece does `fault`.
-  pub fn run(&self, fault: Fault) {
-    self.0.runs.lock().unwrap().push_back(fault);
-  }
-
-  /// Ends every [`Fault::Hang`] in progress.
-  pub fn release(&self) {
-    *self.0.gate.lock().unwrap_or_else(PoisonError::into_inner) = bounded(0);
-  }
-
-  /// Loads and runs of pieces held in a [`Fault::Hang`] now.
-  pub fn hanging(&self) -> usize {
-    self.0.hanging.load(Ordering::SeqCst)
-  }
-
-  pub fn wrap(&self, loader: impl Loader + 'static) -> Arc<dyn Loader> {
-    Arc::new(Faulty { inner: Box::new(loader), faults: self.clone() })
-  }
-
-  fn take(&self, queue: &Mutex<VecDeque<Fault>>, what: &str) -> anyhow::Result<()> {
-    let fault = queue.lock().unwrap_or_else(PoisonError::into_inner).pop_front();
-    match fault {
-      Some(Fault::Panic) => panic!("injected panic in {what}"),
-      Some(Fault::Fail(message)) => anyhow::bail!(message),
-      Some(Fault::GpuLost) => return Err(wavo::Error::Gpu("device lost".into()).into()),
-      Some(Fault::Hang) => {
-        let gate = self.0.gate.lock().unwrap().1.clone();
-        self.0.hanging.fetch_add(1, Ordering::SeqCst);
-        let _ = gate.recv();
-        self.0.hanging.fetch_sub(1, Ordering::SeqCst);
-      }
-      Some(Fault::Pass) | None => {}
-    }
-
-    Ok(())
-  }
-}
-
-struct Faulty {
-  inner: Box<dyn Loader>,
-  faults: Faults,
-}
-
-impl Loader for Faulty {
-  fn load(&self, path: &Path) -> anyhow::Result<Box<dyn SpeechModel>> {
-    self.faults.take(&self.faults.0.loads, "the load")?;
-    let inner = self.inner.load(path)?;
-    Ok(Box::new(FaultyModel { inner, faults: self.faults.clone() }))
-  }
-}
-
-struct FaultyModel {
-  inner: Box<dyn SpeechModel>,
-  faults: Faults,
-}
-
-impl SpeechModel for FaultyModel {
-  fn device(&self) -> String {
-    self.inner.device()
-  }
-
-  fn max_audio_ms(&self) -> Option<u32> {
-    self.inner.max_audio_ms()
-  }
-
-  /// Each piece's fault is taken before it runs: the first's before the run, the next one's after
-  /// the piece before it.
-  fn transcribe(
-    &self,
-    pcm: &[f32],
-    language: Option<&str>,
-    on_piece: &mut dyn FnMut(Piece) -> ControlFlow<()>,
-  ) -> anyhow::Result<String> {
-    let runs = &self.faults.0.runs;
-    self.faults.take(runs, "a run")?;
-    let mut failed = None;
-    let result = self.inner.transcribe(pcm, language, &mut |piece| {
-      if on_piece(piece).is_break() {
-        return ControlFlow::Break(());
-      }
-
-      if piece.index + 1 < piece.count
-        && let Err(e) = self.faults.take(runs, "a run")
-      {
-        failed = Some(e);
-        return ControlFlow::Break(());
-      }
-
-      ControlFlow::Continue(())
-    });
-
-    failed.map_or(result, Err)
+    self.0.live.fetch_sub(1, Ordering::SeqCst);
   }
 }
 
@@ -435,59 +340,8 @@ pub fn wer(reference: &str, hypothesis: &str) -> f64 {
   prev[h.len()] as f64 / r.len() as f64
 }
 
-/// For each paragraph of `reference` (separated by blank lines), the share of its words that the
-/// best word alignment with `hypothesis` matches exactly.
-pub fn paragraph_recall(reference: &str, hypothesis: &str) -> Vec<f64> {
-  let paragraphs: Vec<Vec<String>> =
-    reference.split("\n\n").map(words).filter(|p| !p.is_empty()).collect();
-  let r: Vec<&String> = paragraphs.iter().flatten().collect();
-  let h = words(hypothesis);
-
-  // d[i][j] = distance(r[..i], h[..j]); then walk back to find the matched reference words.
-  let mut d = vec![vec![0usize; h.len() + 1]; r.len() + 1];
-  for (i, row) in d.iter_mut().enumerate() {
-    row[0] = i;
-  }
-
-  for (j, cell) in d[0].iter_mut().enumerate() {
-    *cell = j;
-  }
-
-  for i in 1..=r.len() {
-    for j in 1..=h.len() {
-      let substitute = d[i - 1][j - 1] + usize::from(*r[i - 1] != h[j - 1]);
-      d[i][j] = substitute.min(d[i - 1][j] + 1).min(d[i][j - 1] + 1);
-    }
-  }
-
-  let mut matched = vec![false; r.len()];
-  let (mut i, mut j) = (r.len(), h.len());
-  while i > 0 && j > 0 {
-    if *r[i - 1] == h[j - 1] && d[i][j] == d[i - 1][j - 1] {
-      matched[i - 1] = true;
-      (i, j) = (i - 1, j - 1);
-    } else if d[i][j] == d[i - 1][j - 1] + 1 {
-      (i, j) = (i - 1, j - 1);
-    } else if d[i][j] == d[i - 1][j] + 1 {
-      i -= 1;
-    } else {
-      j -= 1;
-    }
-  }
-
-  let mut start = 0;
-  paragraphs
-    .iter()
-    .map(|p| {
-      let found = matched[start..start + p.len()].iter().filter(|&&m| m).count();
-      start += p.len();
-      found as f64 / p.len() as f64
-    })
-    .collect()
-}
-
 /// Lowercase words without punctuation; `ё` counts as `е`, hyphens and apostrophes split words.
-pub fn words(text: &str) -> Vec<String> {
+fn words(text: &str) -> Vec<String> {
   text
     .to_lowercase()
     .replace('ё', "е")
@@ -502,32 +356,13 @@ mod tests {
   use super::*;
 
   #[test]
-  fn words_normalize_case_punctuation_and_yo() {
-    assert_eq!(words("Ёлка, ЗЕЛЁНАЯ — что-то!"), ["елка", "зеленая", "что", "то"]);
-    assert_eq!(words("  It's   fine.\n"), ["it", "s", "fine"]);
-    assert!(words(" … ").is_empty());
-  }
-
-  #[test]
   fn wer_counts_substitutions_insertions_deletions() {
-    assert_eq!(wer("раз два три четыре", "Раз, два, три, четыре."), 0.0);
+    assert_eq!(wer("Ёлка, раз-два три", "елка раз два, три."), 0.0);
     assert_eq!(wer("a b c d", "a x c d"), 0.25);
     assert_eq!(wer("a b c d", "a b d"), 0.25);
     assert_eq!(wer("a b c d", "a b c c d"), 0.25);
     assert_eq!(wer("a b", ""), 1.0);
     assert_eq!(wer("a b", "x y z w"), 2.0);
     assert_eq!(wer("", ""), 0.0);
-  }
-
-  #[test]
-  fn paragraph_recall_counts_matched_words_per_paragraph() {
-    let reference = "раз два три четыре\n\nпять шесть семь восемь";
-    assert_eq!(
-      paragraph_recall(reference, "Раз, два, три, четыре. Пять, шесть, семь, восемь."),
-      [1.0, 1.0]
-    );
-    assert_eq!(paragraph_recall(reference, "раз два три четыре"), [1.0, 0.0]);
-    assert_eq!(paragraph_recall(reference, "раз два x четыре пять шесть"), [0.75, 0.5]);
-    assert_eq!(paragraph_recall(reference, ""), [0.0, 0.0]);
   }
 }
