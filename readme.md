@@ -37,15 +37,15 @@
 <summary>Which file, and the first launch</summary>
 
 - **macOS** 14 or later, Apple Silicon: `Wavo-dev-macos.zip`; move `Wavo.app` into `/Applications`. It is signed ad hoc for now, so macOS refuses the first launch: right-click → Open (on macOS 15 and later: System Settings › Privacy & Security › Open Anyway), or run `xattr -dr com.apple.quarantine /Applications/Wavo.app`. After an update macOS asks for Accessibility and the microphone again.
-- **Windows** 10 or 11: `Wavo-dev-windows-x64.zip`, or `-arm64` for Windows on Arm; unzip it anywhere and run `Wavo.exe`. It is not signed yet: SmartScreen says "Windows protected your PC", More info → Run anyway. Its icon is in the notification area, perhaps under the ^ arrow.
-- **Linux**, x86_64 or aarch64: `Wavo-dev-linux-<arch>.AppImage`; make it executable (`chmod +x`) and run it.
+- **Windows** 10 or 11: `Wavo-dev-windows-x64-setup.exe`, or `-arm64` for Windows on Arm; it installs Wavo for you alone, with no administrator, with a Start menu entry. It is not signed yet: SmartScreen says "Windows protected your PC", More info → Run anyway. Its icon is in the notification area, perhaps under the ^ arrow.
+- **Linux**, x86_64 or aarch64: `Wavo-dev-linux-<arch>.AppImage`; make it executable (`chmod +x`) and run it. On Debian and Ubuntu, `Wavo-dev-linux-<arch>.deb` instead: `sudo apt install ./Wavo-dev-linux-<arch>.deb`, then Wavo is in the apps menu.
 
 </details>
 
 <details>
 <summary>Linux: Wayland, GNOME and the tray</summary>
 
-On Wayland the paste goes through the desktop's RemoteDesktop portal, which asks once, at the first paste or earlier through the menu's "Allow Paste…"; the hotkey needs its GlobalShortcuts portal (KDE Plasma 6, GNOME 48 and later), and the menu's "Allow the Hotkey…" lets the desktop ask for it. Where there is no such portal (GNOME before 48 on Wayland, as in Ubuntu 24.04, where the paste still works), add a shortcut in the desktop's own keyboard settings that runs `/path/to/Wavo-dev-linux-<arch>.AppImage toggle`: it starts a dictation and the next one stops it.
+On Wayland the paste goes through the desktop's RemoteDesktop portal, which asks once, at the first paste or earlier through the menu's "Allow Paste…"; the hotkey needs its GlobalShortcuts portal (KDE Plasma 6, GNOME 48 and later), and the menu's "Allow the Hotkey…" lets the desktop ask for it. Where there is no such portal (GNOME before 48 on Wayland, as in Ubuntu 24.04, where the paste still works), add a shortcut in the desktop's own keyboard settings that runs `/path/to/Wavo-dev-linux-<arch>.AppImage toggle` (`wavo-app toggle` from the .deb): it starts a dictation and the next one stops it.
 
 The tray icon needs a panel that shows StatusNotifierItems: KDE, Xfce, Cinnamon, MATE, or GNOME with the AppIndicator extension, which Ubuntu ships.
 
@@ -78,12 +78,12 @@ It writes `~/Downloads/handy-export.zip`: bring it in with Advanced › Data ›
 <details>
 <summary>Removing Wavo</summary>
 
-The app's `uninstall` command removes all Wavo left: the history, settings and caches, the models it downloaded, and on macOS its permissions and the app itself. `--dry-run` lists them first.
+The app's `uninstall` command removes all Wavo left: the history, settings and caches, the models it downloaded, and on macOS its permissions and the app itself. `--dry-run` lists them first. On Windows remove the app itself afterwards in Settings › Apps, and with a .deb by `sudo apt remove wavo`.
 
 ```sh
-/Applications/Wavo.app/Contents/MacOS/wavo-app uninstall   # macOS
-.\Wavo.exe uninstall --yes                                 # Windows, without the question
-./Wavo-dev-linux-<arch>.AppImage uninstall                 # Linux
+/Applications/Wavo.app/Contents/MacOS/wavo-app uninstall          # macOS
+& "$env:LOCALAPPDATA\Programs\Wavo\Wavo.exe" uninstall --yes   # Windows, without the question
+./Wavo-dev-linux-<arch>.AppImage uninstall                        # Linux, or wavo-app uninstall
 ```
 
 </details>

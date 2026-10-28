@@ -31,6 +31,20 @@ zip = { version = "9.1.1", default-features = false }
 # Everything built here, once: no LTO and incremental, a change rebuilds the app's crate and links
 # fast. panic = "unwind" (the default), not "abort": the engine thread catches a panic of wavo or
 # wgpu and the app carries on. `dist` inherits it.
+# The .deb beside the AppImage (scripts/dist.py): the binary, the launcher entry dist.py writes and
+# the icon; GTK and the rest nimbo loads at run time are only recommended.
+[package.metadata.deb]
+name = "wavo"
+maintainer = "vladkens"
+section = "utils"
+depends = "libc6 (>= 2.35), libasound2 | libasound2t64"
+recommends = "libgtk-3-0 | libgtk-3-0t64, libgtk-layer-shell0, libfontconfig1, libfreetype6, libharfbuzz0b, libx11-6, libxtst6"
+assets = [
+  ["target/release/wavo-app", "usr/bin/", "755"],
+  ["target/deb/me.vladkens.wavo.desktop", "usr/share/applications/", "644"],
+  ["assets/icon.png", "usr/share/icons/hicolor/512x512/apps/me.vladkens.wavo.png", "644"],
+]
+
 [profile.release]
 strip = true
 incremental = true

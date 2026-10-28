@@ -137,8 +137,9 @@ pub fn run() -> Result<()> {
 
 fn start(main: &mut Main, config: session::Config, instance: Instance) -> Result<()> {
   let _ = PROXY.set(main.proxy());
-  // Linux only: the dock, Wayland's window icon and the portals' dialogs find the app by it.
-  if installed() {
+  // Linux only: the dock, Wayland's window icon and the portals' dialogs find the app by it. A
+  // package (/usr) brings its own, which one here would outlive.
+  if installed() && !std::env::current_exe().is_ok_and(|e| e.starts_with("/usr")) {
     match nimbo::desktop::install(&INFO, &crate::LAUNCHER) {
       Ok(true) => info!("the launcher entry written"),
       Ok(false) => {}

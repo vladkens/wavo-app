@@ -7,11 +7,13 @@ A file per Rust target given, else for this machine; the `dist` profile. Named
 `Wavo-dev-<os>[-<arch>]`, renamed `Wavo-vX.Y.Z-…` by a release:
 
 - macOS: `Wavo-dev-macos.zip`, Wavo.app (scripts/bundle.py) zipped by ditto.
-- Windows: `Wavo-dev-windows-<x64|arm64>.zip`, Wavo.exe with the license.
+- Windows: `Wavo-dev-windows-<x64|arm64>.exe`, which CI packs into a per-user installer
+  (vladkens/actions/windows-installer), published in its place.
 - Linux: `Wavo-dev-linux-<x86_64|aarch64>.AppImage`: the binary, its .desktop entry and icon. It
   links only glibc and libasound and loads GTK and the rest at run time (nimbo), so nothing else
   goes in. appimagetool and its static runtime (no libfuse2 needed) are pinned below, downloaded
-  into target/appimage once and checked by their SHA-256.
+  into target/appimage once and checked by their SHA-256. Beside it `Wavo-dev-linux-<arch>.deb`,
+  the same files, by cargo-deb (`[package.metadata.deb]` in Cargo.toml).
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ import shutil
 import subprocess
 import sys
 import urllib.request
-import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -84,11 +85,8 @@ def macos(binary: Path, _arch: str) -> Path:
 
 def windows(binary: Path, a: str) -> Path:
     name = {"x86_64": "x64", "aarch64": "arm64"}[a]
-    out = OUT / f"Wavo-dev-windows-{name}.zip"
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(binary, "Wavo/Wavo.exe")
-        z.write(ROOT / "LICENSE", "Wavo/LICENSE.txt")
-
+    out = OUT / f"Wavo-dev-windows-{name}.exe"
+    shutil.copy2(binary, out)
     return out
 
 
@@ -131,6 +129,21 @@ def linux(binary: Path, a: str) -> Path:
     # Runs without FUSE (CI has none): the tool unpacks itself.
     env = {**os.environ, "APPIMAGE_EXTRACT_AND_RUN": "1", "ARCH": a}
     run(tool, "--no-appstream", "--runtime-file", runtime, appdir, out, env=env)
+    deb(binary, a)
+    return out
+
+
+def deb(binary: Path, a: str) -> Path:
+    """The .deb of the binary built for its target: cargo-deb packs what Cargo.toml lists."""
+    entry = ROOT / "target" / "deb" / f"{ID}.desktop"
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text(DESKTOP)
+    out = OUT / f"Wavo-dev-linux-{a}.deb"
+    # target/<triple>/dist/wavo-app, or target/dist/wavo-app for this machine.
+    triple = binary.parent.parent
+    to = ["--target", triple.name] if triple != ROOT / "target" else []
+    flags = ["--no-build", "--no-strip", "--profile", "dist", "--output", out]
+    run("cargo", "deb", *flags, *to, cwd=ROOT)
     return out
 
 

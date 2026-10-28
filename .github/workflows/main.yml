@@ -91,6 +91,10 @@ jobs:
           rustup target add aarch64-unknown-linux-gnu
       - if: runner.os == 'Windows'
         run: rustup target add aarch64-pc-windows-msvc
+      - if: runner.os == 'Linux'
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-deb@3.8.0
       - uses: vladkens/actions/rust-build@v1
         with:
           name: Wavo
@@ -98,6 +102,25 @@ jobs:
           dev: true
           crates: false
           artifact: release-${{ matrix.os }}
+      # Windows publishes installers, in the exes' place: the first install and the updater's.
+      - if: runner.os == 'Windows'
+        uses: vladkens/actions/windows-installer@v1
+        with:
+          name: Wavo
+          id: 314a56a8-8a8b-4c18-954d-b930203f086d
+          exe: |
+            x64=target/distrib/Wavo-dev-windows-x64.exe
+            arm64=target/distrib/Wavo-dev-windows-arm64.exe
+          license: LICENSE
+          autostart: me.vladkens.wavo
+          dir: target/installers
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.os }}
+          path: target/installers/*
+          if-no-files-found: error
+          overwrite: true
 
   publish:
     if: github.ref == 'refs/heads/main'
