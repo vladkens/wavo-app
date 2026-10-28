@@ -66,7 +66,7 @@ def run(*args: str | Path, **kw) -> str:
                           **kw).stdout
 
 
-def act(*args: str | Path, input: str | None = None) -> None:
+def act(*args: str | Path, stdin: str | None = None) -> None:
     """A change outside DIR: printed, not run, with --dry-run. Its arguments are never printed
     whole (`security import` takes the password)."""
     if dry:
@@ -74,7 +74,7 @@ def act(*args: str | Path, input: str | None = None) -> None:
         return
 
     try:
-        run(*args, input=input)
+        run(*args, input=stdin)
     except subprocess.CalledProcessError as e:
         sys.exit(f"{' '.join(str(a) for a in args[:4])} … failed: {e.stderr.strip()}")
 
@@ -185,7 +185,7 @@ def github(values: dict[str, str]) -> None:
 
     for name, value in values.items():
         if name not in have:
-            act("gh", "secret", "set", name, "-R", repo, input=value)
+            act("gh", "secret", "set", name, "-R", repo, stdin=value)
 
     print(f"the secrets of {repo} are set: {', '.join(values)}")
 
