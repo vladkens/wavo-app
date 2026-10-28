@@ -19,8 +19,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      # A key of its own: the cache saved before the cross targets would match and never be saved
+      # again with them.
       - uses: Swatinem/rust-cache@v2
         with:
+          key: cross
           save-if: true
       # ALSA for cpal; fonts and text libraries for the HUD's tests in nimbo's harness.
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libfontconfig1 libfreetype6 libharfbuzz0b fonts-dejavu-core
