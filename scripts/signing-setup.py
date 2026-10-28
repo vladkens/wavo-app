@@ -110,19 +110,19 @@ def common_name(cert: Path) -> str:
     return next(ln.split("=", 1)[1].strip() for ln in subject.splitlines() if "commonName" in ln)
 
 
-def p12(cer: Path | None) -> tuple[Path, str, str, bool]:
-    """The .p12 from Apple's certificate, its password, the identity's name, and whether it is
-    new: made again for another certificate (a renewal) too."""
+def p12(cer: Path | None) -> tuple[Path, str, str]:
+    """The .p12 from Apple's certificate, its password, and the identity's name; made again for
+    another certificate (a renewal)."""
     out, password = DIR / "developer-id.p12", DIR / "developer-id.password"
     key, cert, g2 = DIR / "developer-id.key", DIR / "developer-id.pem", DIR / "g2.pem"
     if not cer:
-        return out, password.read_text(), common_name(cert), False
+        return out, password.read_text(), common_name(cert)
 
     new = DIR / "developer-id.new.pem"
     run(OPENSSL, "x509", "-inform", "DER", "-in", cer, "-out", new)
     if out.exists() and cert.exists() and new.read_text() == cert.read_text():
         new.unlink()
-        return out, password.read_text(), common_name(cert), False
+        return out, password.read_text(), common_name(cert)
 
     if not common_name(new).startswith(DEVELOPER_ID):
         sys.exit(f'{cer}: "{common_name(new)}", not a "Developer ID Application" certificate')
@@ -142,11 +142,15 @@ def p12(cer: Path | None) -> tuple[Path, str, str, bool]:
     except subprocess.CalledProcessError:
         sys.exit(f'{cer}: not from the "G2 Sub-CA": make it again with that one')
 
+    # Made aside and moved in once whole: a failure leaves the old ones as they were.
+    new_out, new_password = DIR / "developer-id.new.p12", DIR / "developer-id.new.password"
+    new_password.write_text(secrets.token_urlsafe(24))
+    run(LIBRESSL, "pkcs12", "-export", "-inkey", key, "-in", new, "-certfile", g2,
+        "-out", new_out, "-passout", f"file:{new_password}")
+    new_password.rename(password)
+    new_out.rename(out)
     new.rename(cert)
-    password.write_text(secrets.token_urlsafe(24))
-    run(LIBRESSL, "pkcs12", "-export", "-inkey", key, "-in", cert, "-certfile", g2,
-        "-out", out, "-passout", f"file:{password}")
-    return out, password.read_text(), common_name(cert), True
+    return out, password.read_text(), common_name(cert)
 
 
 def keychain(p12: Path, password: str, name: str) -> None:
@@ -213,17 +217,26 @@ def main() -> int:
         print(CERTIFICATE.format(csr=req))
         return 0
 
-    cert, password, name, renewed = p12(args.cer)
-    keychain(cert, password, name)
+    pfx, password, name = p12(args.cer)
+    keychain(pfx, password, name)
     key = notary()
+    # The .p12 the secrets have: one made since (a renewal) replaces it.
+    pushed, digest = DIR / "developer-id.pushed", hashlib.sha256(pfx.read_bytes()).hexdigest()
+    again = set()
+    if not pushed.exists() or pushed.read_text() != digest:
+        again = {"MACOS_CERT_P12", "MACOS_CERT_PASSWORD"}
+
     github({
-        "MACOS_CERT_P12": base64.b64encode(cert.read_bytes()).decode(),
+        "MACOS_CERT_P12": base64.b64encode(pfx.read_bytes()).decode(),
         "MACOS_CERT_PASSWORD": password,
         "NOTARY_KEY": base64.b64encode((DIR / "notary.p8").read_bytes()).decode(),
         "NOTARY_KEY_ID": key["id"],
         "NOTARY_ISSUER": key["issuer"],
         "UPDATE_KEY": update.read_text(),
-    }, {"MACOS_CERT_P12", "MACOS_CERT_PASSWORD"} if renewed else set())
+    }, again)
+    if not dry:
+        pushed.write_text(digest)
+
     return 0
 
 
