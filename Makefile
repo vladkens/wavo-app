@@ -27,14 +27,14 @@ clean:
 	cargo clean
 
 # wavo-app
-.PHONY: bundle dist run install uninstall shots fixtures test-models
+.PHONY: bundle dist run install uninstall signing shots fixtures test-models
 
 APP := target/Wavo.app
 PROFILE := release
 
-# target/Wavo.app (scripts/bundle.py), signed with Wavo's own identity, "Wavo Local Signing",
-# made in the login keychain before the first bundle; no bundle when it can't sign (CI: ad hoc).
-# Built, never opened.
+# target/Wavo.app (scripts/bundle.py), signed with a Developer ID when the keychain has one (make
+# signing), else with Wavo's own identity, "Wavo Local Signing", made in the login keychain before
+# the first bundle; no bundle when it can't sign (CI: ad hoc). Built, never opened.
 bundle: # target/Wavo.app from the release profile, or PROFILE
 	cargo build --locked --profile $(PROFILE)
 	python3 scripts/bundle.py target/$(PROFILE)/wavo-app assets/icon.png $(APP)
@@ -57,6 +57,12 @@ INSTALLED := /Applications/Wavo.app/Contents/MacOS/wavo-app
 
 uninstall: # remove Wavo and all it left (data, models, permissions, the app): then a clean install
 	$(or $(wildcard $(INSTALLED)),target/release/wavo-app) uninstall $(ARGS)
+
+# scripts/signing-setup.py, the maintainer's, run twice: first the request for Apple's Developer ID
+# certificate, then with CER= that certificate: the login keychain, the notary key and the repo's
+# secrets that CI signs and notarizes the release with (scripts/sign.py).
+signing: # set up the release signing, once (CER= Apple's certificate)
+	python3 scripts/signing-setup.py $(CER)
 
 shots: # the settings window's pages, headless, into target/shots/
 	WAVO_SHOTS=$(CURDIR)/target/shots cargo test $(CARGO_FLAGS) every_page_renders

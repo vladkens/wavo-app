@@ -90,7 +90,7 @@ The app's `uninstall` command removes all Wavo left: the history, settings and c
 
 ## 🤝 Contributing
 
-Pull requests are welcome, and so are your agents: point them at [agents.md](agents.md). `make check` lints, `make test` runs the tests, `make shots` draws the settings pages into `target/shots/` without opening a window, and on a Mac `make install` builds `Wavo.app`, installs it into `/Applications` and starts it.
+Pull requests are welcome, and so are your agents: point them at [agents.md](agents.md). `make check` lints, `make test` runs the tests, `make shots` draws the settings pages into `target/shots/` without opening a window, and on a Mac `make install` builds `Wavo.app`, installs it into `/Applications` and starts it. It signs the app with a certificate of its own, made in your keychain on the first build, so macOS keeps the permissions you grant across rebuilds; there is nothing to set up. Releases are signed with the Developer ID and notarized in CI, from the secrets `make signing` sets up once.
 
 ## 🤖 How it's made
 

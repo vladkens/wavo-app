@@ -99,9 +99,36 @@ jobs:
           crates: false
           artifact: release-${{ matrix.os }}
 
+  # The macOS app signed with the Developer ID and notarized (scripts/sign.py), in place of the
+  # build's ad-hoc one. Its own job, which never compiles: the certificate never meets the
+  # dependencies' build scripts. Without the secrets (a fork) a notice, and the app stays.
+  sign:
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+      NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+      NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-macOS
+          path: target/distrib
+      - run: python3 scripts/sign.py target/distrib/Wavo-dev-macos.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macOS
+          path: target/distrib/*
+          if-no-files-found: error
+          overwrite: true
+
   publish:
     if: github.ref == 'refs/heads/main'
-    needs: [test, macos, windows, build]
+    needs: [test, macos, windows, build, sign]
     runs-on: ubuntu-latest
     permissions:
       attestations: write
