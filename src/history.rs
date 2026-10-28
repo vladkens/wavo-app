@@ -87,8 +87,6 @@ pub fn local_time(ms: i64) -> Option<Local> {
     return None;
   }
 
-  #[cfg(windows)]
-  let _proof: u32 = "a type error only Windows sees";
   // SAFETY: as above, Windows' C runtime's own.
   #[cfg(windows)]
   if unsafe { libc::localtime_s(&mut tm, &time) } != 0 {

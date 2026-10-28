@@ -911,8 +911,6 @@ impl window::Shell for AppShell {
 /// Wavo is out of view, is nimbo's activity the transfer holds. Other systems don't tell them
 /// apart.
 fn user_initiated() {
-  #[cfg(target_os = "macos")]
-  let _proof: u32 = "a type error only macOS sees";
   // SAFETY: it sets the calling thread's own class.
   #[cfg(target_os = "macos")]
   unsafe {
