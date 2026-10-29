@@ -35,7 +35,7 @@ app-id = "314a56a8-8a8b-4c18-954d-b930203f086d"
 [package.metadata.nimbo.linux]
 categories = ["Utility", "Accessibility"]
 deb-package = "wavo"
-deb-depends = ["libc6 (>= 2.35)", "libasound2 | libasound2t64"]
+deb-depends = ["libc6 (>= 2.28)", "libasound2 | libasound2t64"]
 
 [dependencies]
 anyhow = "1.0.104"

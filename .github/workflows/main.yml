@@ -30,7 +30,7 @@ jobs:
       - run: make check CROSS="aarch64-apple-darwin x86_64-pc-windows-gnu"
       - run: make test
 
-  # A job per OS; aarch64 cross-compiled. Linux on the oldest LTS for its glibc.
+  # A job per OS; aarch64 cross-compiled.
   build:
     name: build ${{ matrix.os }}
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
@@ -45,13 +45,11 @@ jobs:
             runner: windows-latest
             dist: make dist T=x86_64-pc-windows-msvc && make dist T=aarch64-pc-windows-msvc
           - os: Linux
-            runner: ubuntu-22.04
+            runner: ubuntu-latest
             dist: make dist T=x86_64-unknown-linux-gnu && make dist T=aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     env:
       # Linux aarch64 cross-build.
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
       PKG_CONFIG_ALLOW_CROSS: 1
       PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
     steps:
@@ -60,14 +58,13 @@ jobs:
       - if: runner.os == 'Linux'
         run: |
           sudo dpkg --add-architecture arm64
-          sudo rm -f /etc/apt/sources.list.d/*
-          sudo sed -i -E 's/^deb ([^[])/deb [arch=amd64] \1/' /etc/apt/sources.list
-          for suite in jammy jammy-updates; do
-            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $suite main universe"
-          done | sudo tee -a /etc/apt/sources.list
+          sudo sed -i '/^Types:/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+          . /etc/os-release
+          printf 'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: %s %s-updates\nComponents: main universe\nArchitectures: arm64\n' "$VERSION_CODENAME" "$VERSION_CODENAME" | sudo tee /etc/apt/sources.list.d/arm64.sources
           sudo apt-get update
-          sudo apt-get install -y pkg-config libasound2-dev libasound2-dev:arm64 gcc-aarch64-linux-gnu
+          sudo apt-get install -y pkg-config libasound2-dev libasound2-dev:arm64
           rustup target add aarch64-unknown-linux-gnu
+          python3 -m venv ~/zig && ~/zig/bin/pip install -q cargo-zigbuild==0.23.4 ziglang==0.16.0 && echo ~/zig/bin >> "$GITHUB_PATH"
       # The runner image has no make.
       - if: runner.os == 'Windows'
         run: |

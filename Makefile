@@ -42,6 +42,7 @@ NIMBO = $(shell cargo metadata --format-version 1 --locked | $(PY) -c 'import js
   if p["name"] == "nimbo"))')
 # dist's target: this machine's, or T.
 T ?= $(shell rustc -vV | sed -n 's/^host: //p')
+GLIBC := 2.28
 
 # Signed with a Developer ID in the keychain, else "Wavo Local Signing", made in the login keychain
 # before the first bundle, so macOS keeps the grants across rebuilds; no bundle when it can't sign
@@ -51,7 +52,8 @@ bundle: # target/Wavo.app from the release profile, or PROFILE
 	$(PY) "$(NIMBO)/scripts/pack.py" app --bin target/$(PROFILE)/wavo-app
 
 dist: # T's binary in target/distrib/T, for CI (vladkens/actions/rust-build); pack makes the files
-	cargo build --locked --profile dist --target $(T)
+	$(if $(findstring linux-gnu,$(T)),cargo zigbuild --locked --profile dist --target $(T).$(GLIBC),\
+	  cargo build --locked --profile dist --target $(T))
 	mkdir -p target/distrib/$(T)
 	cp target/$(T)/dist/wavo-app$(EXE) target/distrib/$(T)/
 
