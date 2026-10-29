@@ -5,10 +5,6 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-    inputs:
-      sign:
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -19,7 +15,6 @@ concurrency:
 
 jobs:
   test:
-    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -35,7 +30,6 @@ jobs:
 
   # Each OS's own code: clippy and the tests on macOS and Windows too.
   macos:
-    if: github.event_name != 'workflow_dispatch'
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -47,7 +41,6 @@ jobs:
       - run: make test
 
   windows:
-    if: github.event_name != 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -69,6 +62,12 @@ jobs:
           - os: macOS
             runner: macos-latest
             dist: make dist
+          - os: Windows
+            runner: windows-latest
+            dist: make dist T=x86_64-pc-windows-msvc && make dist T=aarch64-pc-windows-msvc
+          - os: Linux
+            runner: ubuntu-22.04
+            dist: make dist T=x86_64-unknown-linux-gnu && make dist T=aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     env:
       # Linux aarch64 cross-build.
@@ -108,7 +107,6 @@ jobs:
           runner.os == 'macOS' && github.event_name == 'push' && github.ref == 'refs/heads/main'
           && startsWith(github.event.head_commit.message, 'release: v')
           && github.triggering_actor == github.repository_owner
-          || inputs.sign
         run: ditto -c -k --keepParent target/Wavo.app target/Wavo.app.zip
       - if: steps.app.outcome == 'success'
         uses: actions/upload-artifact@v7
@@ -122,7 +120,6 @@ jobs:
       github.event_name == 'push' && github.ref == 'refs/heads/main'
       && startsWith(github.event.head_commit.message, 'release: v')
       && github.triggering_actor == github.repository_owner
-      || inputs.sign
     needs: build
     runs-on: macos-latest
     timeout-minutes: 30
