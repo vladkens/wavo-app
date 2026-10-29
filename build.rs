@@ -11,8 +11,10 @@ fn main() {
 
 /// The version the build shows, as CI's dev builds have it (vladkens/actions dev-version): Cargo's
 /// when CI stamped it already (a pre-release part); else `git describe` against the last vX.Y.Z
-/// tag, `0.9.0-12-g3672a1b` after one, `0.1.0-g3672a1b` before any, the plain version on its tag;
-/// `-dirty` with uncommitted changes; Cargo's without git (a crate build).
+/// tag, `0.9.0-12-g3672a1b` after one, `0.1.0-g3672a1b` before any, the plain version on its tag
+/// and on its release commit (`release: vX.Y.Z`, which CI builds before the tag is made: a
+/// release's files show the version they are published as); `-dirty` with uncommitted changes;
+/// Cargo's without git (a crate build).
 fn version() -> String {
   let pkg = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
   if pkg.contains('-') {
@@ -21,8 +23,11 @@ fn version() -> String {
 
   let Some(sha) = git(&["rev-parse", "--short", "HEAD"]) else { return pkg };
   rerun_on_git();
+  let subject = git(&["log", "-1", "--format=%s"]);
+  let release = subject.is_some_and(|s| s.starts_with(&format!("release: v{pkg}")));
   let described = git(&["describe", "--tags", "--match", "v[0-9]*.[0-9]*.[0-9]*"]);
   let version = match described {
+    _ if release => pkg,
     Some(d) => d.trim_start_matches('v').to_owned(),
     None => format!("{pkg}-g{sha}"),
   };
