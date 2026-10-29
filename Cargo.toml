@@ -70,6 +70,3 @@ incremental = true
 inherits = "release"
 lto = "thin"
 incremental = false
-
-[build-dependencies]
-png = "0.18.1"
