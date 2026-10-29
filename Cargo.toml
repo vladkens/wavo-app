@@ -20,19 +20,13 @@ publisher = "vladkens"
 [package.metadata.nimbo.macos]
 accessory = true
 entitlements = "assets/wavo.entitlements"
-
-[package.metadata.nimbo.macos.usage]
-NSMicrophoneUsageDescription = "Wavo records your voice while you dictate and turns it into text on this Mac. Nothing leaves your computer."
-
-[package.metadata.nimbo.macos.plist]
-LSApplicationCategoryType = "public.app-category.productivity"
-NSSupportsAutomaticTermination = false
-NSSupportsSuddenTermination = false
-
+plist.NSMicrophoneUsageDescription = "Wavo records your voice while you dictate and turns it into text on this Mac. Nothing leaves your computer."
+plist.LSApplicationCategoryType = "public.app-category.productivity"
+plist.NSSupportsAutomaticTermination = false
+plist.NSSupportsSuddenTermination = false
 # MallocSpaceEfficient=1 (libmalloc's src/malloc.c): no large-block cache, empty pages given back
 # at once, or malloc keeps the large blocks a model frees after its unload. LaunchServices sets it.
-[package.metadata.nimbo.macos.plist.LSEnvironment]
-MallocSpaceEfficient = "1"
+plist.LSEnvironment.MallocSpaceEfficient = "1"
 
 [package.metadata.nimbo.windows]
 app-id = "314a56a8-8a8b-4c18-954d-b930203f086d"
