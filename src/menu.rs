@@ -1,21 +1,23 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! The menu bar icon and menu: a header with the app, the hotkey and the state; the warnings, most
-//! opening where they are fixed; an update found or going on; Copy Last Dictation and Recent; the
-//! model in use with the others downloaded; Unload Model, History…, Settings…, Check for Updates…,
-//! Quit.
+//! opening where they are fixed; Copy Last Dictation and Recent; the model in use with the others
+//! downloaded; Unload Model, History…, Settings…; the updater's item, Check for Updates… or what
+//! the update does; Quit.
 
 use nimbo::Hotkey;
 use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
+use nimbo::update::dialog::{self, State};
 
 use crate::audio::{Device, Microphone};
 use crate::engine::Phase as EnginePhase;
 use crate::history::{local_time, shorten};
 use crate::session::{NoModel, Outcome, Phase, Status};
-use crate::updater::{self, State};
 use crate::window::{Found, Pick, bluetooth_only, microphones as mic_choices};
 
 pub const RECENT: usize = 10;
+/// The updater's item: Check for Updates…, or what the update does; it opens the update's window.
+pub const UPDATE: &str = "update";
 
 // MARK: Icon
 
@@ -164,7 +166,7 @@ pub fn recent_title(text: &str, created_at: i64, now: i64) -> String {
   format!("{when} · {preview}")
 }
 
-/// Item ids: `recent:<i>`, `mic:<i>`, `model:<name>`, `warn:…`, `update:…` and fixed ones, as
+/// Item ids: `recent:<i>`, `mic:<i>`, `model:<name>`, `warn:…` and fixed ones, as
 /// `app::chosen` handles them. `mics`: the devices, the one saved and whether the lid is closed;
 /// `models`: those downloaded and the pick; `update`: the updater's state, `None` in a build that
 /// doesn't update.
@@ -187,8 +189,6 @@ pub fn menu(
     let mark = if w.id == "warn:download" { "" } else { "⚠︎ " };
     items.push(Item::new(w.id, &format!("{mark}{}", w.text)).enabled(w.action));
   }
-
-  items.extend(update.and_then(updater::menu_row));
 
   let last = status.last.as_ref().is_some_and(|l| !l.text.is_empty());
   let loaded = status.engine.phase != EnginePhase::Stopped && status.state == Phase::Idle;
@@ -216,7 +216,7 @@ pub fn menu(
     // nothing.
     with_key(Item::new("settings", "Settings…"), "cmd+comma"),
   ]);
-  items.extend(update.map(updater::check_row));
+  items.extend(update.map(|s| dialog::menu_item(UPDATE, s)));
   items.extend([Item::separator(), with_key(Item::new("quit", "Quit Wavo"), "cmd+q")]);
   Menu::new(items)
 }
@@ -388,20 +388,22 @@ mod tests {
     assert!(!items.iter().any(|i| i.id.starts_with("update")), "a build that doesn't update");
   }
 
-  /// An update shows under the warnings; Check for Updates… sits above Quit.
+  /// The updater's one item sits above Quit and says what goes on.
   #[test]
-  fn an_update_shows_under_the_warnings() {
+  fn the_updates_item_sits_above_quit() {
     let s = Status::default();
     let pick = Pick::default();
-    let ids = |state: State| {
+    let items = |state: State| {
       let mics = (&[][..], &Microphone::System, false);
       let items = menu(None, &s, &[], &[], mics, (&[], &pick), Some(&state)).items;
-      items.into_iter().map(|i| i.id).collect::<Vec<_>>()
+      items.into_iter().map(|i| (i.id, i.label)).collect::<Vec<_>>()
     };
-    let idle = ids(State::Idle);
-    assert_eq!(idle[1..].first().map(String::as_str), Some(""), "a separator after the header");
-    assert_eq!(idle[idle.len() - 4..], ["settings", "update:check", "", "quit"].map(String::from));
-    let available = ids(State::Available(nimbo::update::Release::test("1.2.0")));
-    assert_eq!(available[1], "update");
+    let idle = items(State::Idle);
+    let ids: Vec<_> = idle[idle.len() - 4..].iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["settings", UPDATE, "", "quit"]);
+    assert_eq!(idle[idle.len() - 3].1, "Check for Updates…");
+    let available = items(State::Available(nimbo::update::Release::test("1.2.0")));
+    assert_eq!(available.len(), idle.len(), "one item still");
+    assert_eq!(available[available.len() - 3].1, "Update Available: v1.2.0…");
   }
 }

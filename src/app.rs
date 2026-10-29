@@ -25,8 +25,9 @@ use nimbo::instance::{self, Claim, Instance};
 use nimbo::paste::{self, PORTAL_WAIT, Paste};
 use nimbo::permissions::{self, Access, Pane};
 use nimbo::tray::{Menu, Tray};
+use nimbo::update::dialog::{self, About, Act, State, Updater};
 use nimbo::update::{self, Release, Staged};
-use nimbo::{Clipboard, Main, Proxy, SystemClipboard, Window, autostart};
+use nimbo::{Clipboard, Main, Png, Proxy, SystemClipboard, Window, autostart};
 use tracing::{error, info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
@@ -35,11 +36,10 @@ use crate::hud::{self, Hud, Mode, Show};
 use crate::menu::{self, Icon, Warning};
 use crate::session::{self, Handle, NotPasted, Phase, Request, Session, TextOutput, Update};
 use crate::settings::{self, HudPosition, Settings};
-use crate::updater::{self, Act, State, Updater};
 use crate::window::{
   self, Download, Downloads, Export, Found, Import, Page, Pick, Prefs, Transfer, no_text,
 };
-use crate::{INFO, audio, transfer};
+use crate::{INFO, audio, transfer, updater};
 
 // How often Accessibility is checked while it is missing or the event tap is not running.
 const ACCESS_POLL: Duration = Duration::from_secs(2);
@@ -102,8 +102,9 @@ struct App {
   // The paste may read the clipboard to restore it.
   clipboard: bool,
   fake_mic: bool,
-  /// Shared with the window's About.
+  /// Shared with the update's window.
   updater: Arc<Mutex<Updater>>,
+  update_window: Option<Window<UpdateWindow>>,
   /// The update downloaded, put in place once no dictation runs.
   staged: Option<Staged>,
   /// The update goes in: no dictation starts, and the app quits once its installer runs.
@@ -235,6 +236,7 @@ fn start(
     clipboard: SystemClipboard.readable(),
     fake_mic,
     updater: Arc::new(Mutex::new(Updater::new(supported))),
+    update_window: None,
     staged: None,
     installing: false,
     session,
@@ -298,9 +300,8 @@ fn chosen(main: &mut Main, id: &str) {
     return;
   }
 
-  if let Some(act) = Act::of(id) {
-    with_app(|app| app.update_act(act));
-    return;
+  if id == menu::UPDATE {
+    return open_update(main);
   }
 
   if let Some(name) = id.strip_prefix("model:") {
@@ -750,7 +751,7 @@ impl App {
       .collect();
     let mics = (&self.devices[..], &update.settings.microphone, self.lid_closed);
     let (status, found, pick) = (&update.status, &self.found, &self.pick);
-    let updating = self.updater.lock().unwrap().showing();
+    let updating = self.updater.lock().unwrap().showing().cloned();
     let models = (&found[..], pick);
     let menu =
       menu::menu(hotkey.as_deref(), status, &warnings, &recent, mics, models, updating.as_ref());
@@ -763,23 +764,80 @@ impl App {
 
 // MARK: Updates
 
-impl App {
-  /// At launch and every [updater::TICK]: an automatic check when one is due and they are on.
-  fn update_tick(&mut self) {
-    if self.settings().auto_update && self.updater.lock().unwrap().due(SystemTime::now()) {
-      self.check_update(false);
-    }
+/// The menu item: the update's window ([UpdateWindow]), brought to the front if open, with a check
+/// when there is nothing else to show.
+fn open_update(main: &mut Main) {
+  let Some((start, open, updater, auto)) = with_app(|app| {
+    let start = app.updater.lock().unwrap().open();
+    let open = app.update_window.clone().filter(Window::is_open);
+    (start, open, app.updater.clone(), app.settings().auto_update)
+  }) else {
+    return;
+  };
 
-    proxy().after(updater::TICK, |_| _ = with_app(App::update_tick));
+  match open {
+    Some(w) => w.front(),
+    None => {
+      let w = main.open(&update_config(), UpdateWindow { updater, auto });
+      w.on_close(|_| {
+        with_app(|app| {
+          app.update_window = None;
+          app.updater.lock().unwrap().closed();
+          app.update_changed();
+        });
+      });
+      with_app(|app| app.update_window = Some(w));
+    }
   }
 
-  fn check_update(&mut self, manual: bool) {
-    let start = self.updater.lock().unwrap().check(manual);
-    self.update_changed();
-    if !start {
-      return;
+  with_app(|app| {
+    if start {
+      App::spawn_check();
     }
 
+    app.update_changed();
+  });
+}
+
+/// The update's window: a fixed size, the app's icon in its title bar off macOS.
+fn update_config() -> nimbo::Config {
+  crate::with_icon(dialog::config("Software Update"))
+}
+
+/// The update's window: nimbo's [dialog::view] over the app's [Updater]; what the person chooses
+/// goes to the app.
+struct UpdateWindow {
+  updater: Arc<Mutex<Updater>>,
+  /// Check for updates automatically, as the settings had it at the opening and the box since.
+  auto: bool,
+}
+
+impl nimbo::App for UpdateWindow {
+  fn view(&mut self, ui: &mut nimbo::Ui) {
+    let state = self.updater.lock().unwrap().state.clone();
+    let about = About { name: "Wavo", version: crate::VERSION, icon: Some(Png::new(crate::ICON)) };
+    let Some(act) = dialog::view(ui, &about, &state, self.auto) else { return };
+    if let Act::Auto(on) = act {
+      self.auto = on;
+    }
+
+    proxy().post(move |_| _ = with_app(|app| app.update_act(act)));
+  }
+}
+
+impl App {
+  /// At launch and every [dialog::TICK]: an automatic check when one is due and they are on.
+  fn update_tick(&mut self) {
+    let due = self.updater.lock().unwrap().due(SystemTime::now());
+    if self.settings().auto_update && due && self.updater.lock().unwrap().check(false) {
+      App::spawn_check();
+    }
+
+    proxy().after(dialog::TICK, |_| _ = with_app(App::update_tick));
+  }
+
+  /// The check, on a thread, its answer to [App::update_checked].
+  fn spawn_check() {
     spawn("update-check", || {
       let found = match updater::fake() {
         Some(version) => {
@@ -801,26 +859,15 @@ impl App {
     }
 
     let skipped = self.settings().skipped_update;
-    let mut updater = self.updater.lock().unwrap();
-    updater.checked(found, skipped.as_deref(), SystemTime::now());
-    if matches!(updater.state, State::UpToDate(_)) {
-      proxy().after(updater::UP_TO_DATE, |_| {
-        _ = with_app(|app| {
-          app.updater.lock().unwrap().expire(SystemTime::now());
-          app.update_changed();
-        })
-      });
-    }
-
-    drop(updater);
+    self.updater.lock().unwrap().checked(found, skipped.as_deref(), SystemTime::now());
     self.update_changed();
   }
 
-  /// From the menu or About.
+  /// From the update's window.
   fn update_act(&mut self, act: Act) {
     let mut updater = self.updater.lock().unwrap();
+    let mut close = false;
     match act {
-      Act::Check => {}
       Act::Install | Act::Retry => {
         if let Some(release) = updater.install() {
           info!("update: downloading {}", release.version);
@@ -828,7 +875,7 @@ impl App {
             // Told to the main thread only when the whole percent changes.
             let mut told = 0;
             let progress = |done, total| {
-              let done = updater::percent(done, total);
+              let done = dialog::percent(done, total);
               if done != told {
                 told = done;
                 proxy().post(move |_| _ = with_app(|app| app.update_progress(done)));
@@ -842,31 +889,44 @@ impl App {
             let staged = update::download(&release, progress);
             proxy().post(|_| _ = with_app(|app| app.update_downloaded(staged)));
           });
+        } else if updater.check(true) {
+          // Retry after a check that failed.
+          App::spawn_check();
         }
       }
-      Act::Later => updater.later(),
+      Act::Later => {
+        updater.later();
+        close = true;
+      }
       Act::Skip => {
         if let Some(version) = updater.skip() {
           info!("update: {version} skipped");
           self.handle.edit_settings(move |s| s.skipped_update = Some(version));
         }
+
+        close = true;
       }
       Act::Notes => {
-        let (State::Available(r) | State::Failed(Some(r), _)) = &updater.state else { return };
-        if let Err(e) = nimbo::open::url(&updater::notes_url(&r.version)) {
+        if let State::Available(r) | State::Failed(Some(r), _) = &updater.state
+          && let Err(e) = nimbo::open::url(&updater::notes_url(&r.version))
+        {
           warn!("the release notes: {e}");
         }
       }
+      Act::Close => close = true,
+      Act::Auto(on) => self.handle.edit_settings(move |s| s.auto_update = on),
     }
 
-    // Check, and Retry after a check that failed.
-    let failed = matches!(updater.state, State::Failed(None, _));
-    let check = act == Act::Check || act == Act::Retry && failed;
     drop(updater);
-    match check {
-      true => self.check_update(true),
-      false => self.update_changed(),
+    if close {
+      proxy().post(|_| {
+        if let Some(w) = with_app(|app| app.update_window.clone()).flatten() {
+          w.close();
+        }
+      });
     }
+
+    self.update_changed();
   }
 
   fn update_progress(&mut self, done: u8) {
@@ -931,10 +991,14 @@ impl App {
     proxy().post(|main| main.quit());
   }
 
-  /// The menu, and About if it shows.
+  /// The menu item, and the update's window if it shows.
   fn update_changed(&mut self) {
     self.refresh();
-    redraw();
+    proxy().post(|_| {
+      if let Some(w) = with_app(|app| app.update_window.clone()).flatten() {
+        w.redraw();
+      }
+    });
   }
 
   /// As the session last told them, else as saved (before its first update).
@@ -1140,12 +1204,12 @@ impl window::Shell for AppShell {
     self.import.lock().unwrap().clone()
   }
 
-  fn update_state(&self) -> Option<State> {
-    self.updater.lock().unwrap().showing()
+  fn updates(&self) -> bool {
+    self.updater.lock().unwrap().showing().is_some()
   }
 
-  fn update_act(&self, act: Act) {
-    proxy().post(move |_| _ = with_app(|app| app.update_act(act)));
+  fn check_updates(&self) {
+    proxy().post(open_update);
   }
 }
 
