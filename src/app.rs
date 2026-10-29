@@ -109,8 +109,16 @@ struct App {
   staged: Option<Staged>,
   /// The update goes in: no dictation starts, and the app quits once its installer runs.
   installing: bool,
+  /// The installer runs: the app quits once no dictation runs, [QUIT_WAIT] at the latest.
+  quitting: bool,
+  /// The settings window records a shortcut: the hotkey is paused for it.
+  recording_shortcut: bool,
   session: Session,
 }
+
+/// How long a dictation the installer found running may go on: nimbo's installer waits 30 s for
+/// the app to quit.
+const QUIT_WAIT: Duration = Duration::from_secs(25);
 
 /// Returns at once when another instance runs for the same home (it opens its settings), else when
 /// the app quits. `updated`: the failure of the update that started this app, from nimbo's
@@ -241,6 +249,8 @@ fn start(
     update_window: None,
     staged: None,
     installing: false,
+    quitting: false,
+    recording_shortcut: false,
     session,
   };
   if let Some(e) = updated {
@@ -384,7 +394,8 @@ fn open_window(main: &mut Main, page: Option<Page>) {
   w.on_close(|_| {
     with_app(|app| {
       app.window = None;
-      app.hotkeys.pause(false);
+      app.recording_shortcut = false;
+      app.pause_hotkeys();
     });
   });
   w.front();
@@ -528,6 +539,7 @@ impl App {
     }
 
     self.install_staged();
+    self.quit_when_idle();
     self.refresh();
   }
 
@@ -964,26 +976,40 @@ impl App {
     };
 
     self.installing = true;
-    self.hotkeys.pause(true);
+    self.pause_hotkeys();
     spawn("update", || {
       let installed = update::install(staged);
       proxy().post(|_| _ = with_app(|app| app.update_installed(installed)));
     });
   }
 
-  /// Its installer runs: it waits for this app to quit, at once (no dictation runs), puts the new
-  /// one in and starts it. Else why not, and dictations start again.
+  /// Its installer runs: it waits for this app to quit, puts the new one in and starts it. Else
+  /// why not, and dictations start again.
   fn update_installed(&mut self, installed: io::Result<()>) {
     if let Err(e) = installed {
       warn!("update install: {e}");
       self.installing = false;
-      self.hotkeys.pause(false);
+      self.pause_hotkeys();
       self.updater.lock().unwrap().failed(&e);
       return self.update_changed();
     }
 
-    info!("update: the installer runs, quitting");
-    proxy().post(|main| main.quit());
+    info!("update: the installer runs, quitting once no dictation runs");
+    self.quitting = true;
+    self.quit_when_idle();
+    proxy().after(QUIT_WAIT, |main| main.quit());
+  }
+
+  /// A dictation that started as the update went in (its key was on its way) ends first.
+  fn quit_when_idle(&self) {
+    if self.quitting && self.update.as_ref().is_none_or(idle) {
+      proxy().post(|main| main.quit());
+    }
+  }
+
+  /// The hotkey paused while the update goes in or a shortcut is recorded, and only then.
+  fn pause_hotkeys(&mut self) {
+    self.hotkeys.pause(self.installing || self.recording_shortcut);
   }
 
   /// The menu's items, and the update's window if it shows.
@@ -1026,7 +1052,12 @@ impl window::Shell for AppShell {
   }
 
   fn pause_hotkey(&self, paused: bool) {
-    proxy().post(move |_| _ = with_app(|app| app.hotkeys.pause(paused)));
+    proxy().post(move |_| {
+      with_app(|app| {
+        app.recording_shortcut = paused;
+        app.pause_hotkeys();
+      });
+    });
   }
 
   fn devices(&self) -> Vec<audio::Device> {
