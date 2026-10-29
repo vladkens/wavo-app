@@ -412,9 +412,9 @@ pub enum Request {
   Unload,
   /// An import added dictations: the update after it carries the history's change.
   Imported,
-  /// No dictation runs, as the session stands after what was sent before it: an error while one
-  /// does.
-  Idle,
+  /// The app quits for an update: no dictation runs, as the session stands after what was sent
+  /// before it, and none starts from then on; an error while one runs, which ends as usual.
+  Close,
 }
 
 enum Msg {
@@ -458,6 +458,7 @@ impl Session {
       retranscribing: Vec::new(),
       originals: BTreeMap::new(),
       untried: false,
+      closed: false,
       model_path: None,
       model_error: None,
       model_fallback: None,
@@ -590,6 +591,8 @@ struct Controller<O: TextOutput> {
   originals: BTreeMap<i64, Original>,
   /// Entries without text may wait for the model now found.
   untried: bool,
+  /// The app quits for an update ([Request::Close]): no dictation starts.
+  closed: bool,
   /// The model [`Controller::check_model`] last found.
   model_path: Option<PathBuf>,
   model_error: Option<NoModel>,
@@ -664,6 +667,7 @@ impl<O: TextOutput> Controller<O> {
 
   fn on_msg(&mut self, msg: Msg) {
     match msg {
+      Msg::Input(Input::KeyDown { .. } | Input::Toggle) if self.closed => {}
       Msg::Input(input) => {
         // A press is a new attempt: the last one's error goes.
         if matches!(input, Input::KeyDown { repeat: false, .. }) && self.error.take().is_some() {
@@ -733,10 +737,15 @@ impl<O: TextOutput> Controller<O> {
         Ok(())
       }
       Request::Imported => Ok(()),
-      Request::Idle => match self.dictation {
-        Some(_) => bail!("a dictation runs"),
-        None => Ok(()),
-      },
+      Request::Close => {
+        if self.dictation.is_some() {
+          bail!("a dictation runs");
+        }
+
+        info!("closed for the update: no dictation starts");
+        self.closed = true;
+        Ok(())
+      }
     }
   }
 
@@ -1745,17 +1754,19 @@ mod tests {
 
   /// Escape while recording or transcribing keeps nothing; the next dictation has the same warm
   /// engine.
-  /// The update asks before the app quits: a dictation that runs, or whose key came first, is
-  /// busy until it ends.
+  /// The update closes the session before the app quits: a dictation that runs, or whose key came
+  /// first, ends first; once closed, no key starts one.
   #[test]
-  fn idle_is_asked_after_the_inputs_before_it() {
-    let s = InProcess::start("session-idle", &Settings::default(), Some(&loud(20.0)), "hi", &[]);
-    assert_eq!(s.handle.request(Request::Idle), Ok(()));
+  fn closing_waits_for_the_dictation_then_starts_none() {
+    let s = InProcess::start("session-close", &Settings::default(), Some(&loud(20.0)), "hi", &[]);
     s.press();
-    assert!(s.handle.request(Request::Idle).is_err(), "the key came first");
+    assert!(s.handle.request(Request::Close).is_err(), "the key came first");
     s.handle.input(Input::Escape);
     s.finished(1);
-    assert_eq!(s.handle.request(Request::Idle), Ok(()));
+    assert_eq!(s.handle.request(Request::Close), Ok(()));
+    s.press();
+    s.handle.input(Input::Toggle);
+    assert_eq!(s.handle.request(Request::Close), Ok(()), "no dictation started");
   }
 
   #[test]

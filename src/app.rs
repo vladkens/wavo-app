@@ -985,8 +985,8 @@ impl App {
     proxy().after(QUIT_WAIT, |main| main.quit());
   }
 
-  /// The app quits once the session itself says no dictation runs: one whose key was on its way as
-  /// the update went in ends first.
+  /// The app quits once the session itself says no dictation runs and closes to new ones: one whose
+  /// key was on its way as the update went in ends first.
   fn quit_when_idle(&self) {
     if !self.quitting || !self.update.as_ref().is_none_or(idle) {
       return;
@@ -994,7 +994,7 @@ impl App {
 
     let handle = self.handle.clone();
     spawn("update-quit", move || {
-      if handle.request(Request::Idle).is_ok() {
+      if handle.request(Request::Close).is_ok() {
         proxy().post(|main| main.quit());
       }
     });

@@ -822,7 +822,7 @@ impl Prefs {
       Request::Delete(_) => "Could not delete the dictation",
       Request::Retranscribe(_) => "Could not transcribe it again",
       Request::Restore(_) => "Could not put the previous text back",
-      Request::Unload | Request::Imported | Request::Idle => return,
+      Request::Unload | Request::Imported | Request::Close => return,
     };
     self.history.said = Some(format!("{what}: {error}"));
   }
