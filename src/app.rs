@@ -103,7 +103,7 @@ struct App {
   clipboard: bool,
   fake_mic: bool,
   /// Shared with the window's About.
-  updater: Arc<Mutex<Updater<Release>>>,
+  updater: Arc<Mutex<Updater>>,
   /// The update downloaded, put in place once no dictation runs.
   staged: Option<Staged>,
   /// The update goes in: no dictation starts, and the app quits once its installer runs.
@@ -162,6 +162,8 @@ fn start(
     }
   }
 
+  // Asked once: nimbo tries a staging folder beside the app.
+  let supported = installed() && update::supported().inspect_err(|e| info!("updates: {e}")).is_ok();
   let fake_mic = config.fake_mic.is_some();
   let (home, hub) = (config.home.clone(), config.hub.clone());
   let observer = Box::new(|update: Update| {
@@ -231,7 +233,7 @@ fn start(
     asked_microphone: false,
     clipboard: SystemClipboard.readable(),
     fake_mic,
-    updater: Arc::default(),
+    updater: Arc::new(Mutex::new(Updater::new(supported))),
     staged: None,
     installing: false,
     session,
@@ -243,7 +245,7 @@ fn start(
 
   app.check_access();
   app.read_models();
-  if updates() {
+  if supported {
     proxy().post(|_| _ = with_app(App::update_tick));
   }
 
@@ -426,12 +428,6 @@ fn installed() -> bool {
 /// No dictation runs.
 fn idle(update: &Update) -> bool {
   update.status.state == Phase::Idle
-}
-
-/// The person's Wavo checks for updates, not a run with its own `WAVO_HOME`; nimbo's check skips a
-/// development build.
-fn updates() -> bool {
-  installed()
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
@@ -753,7 +749,7 @@ impl App {
       .collect();
     let mics = (&self.devices[..], &update.settings.microphone, self.lid_closed);
     let (status, found, pick) = (&update.status, &self.found, &self.pick);
-    let updating = updates().then(|| self.updater.lock().unwrap().state.versions());
+    let updating = self.updater.lock().unwrap().showing();
     let models = (&found[..], pick);
     let menu =
       menu::menu(hotkey.as_deref(), status, &warnings, &recent, mics, models, updating.as_ref());
@@ -793,6 +789,7 @@ impl App {
     match &found {
       Ok(Some(r)) => info!("update: {} is out", r.version),
       Ok(None) => info!("update: none"),
+      Err(e) if e.kind() == io::ErrorKind::Unsupported => info!("update: {e}"),
       Err(e) => warn!("update check: {e}"),
     }
 
@@ -842,9 +839,8 @@ impl App {
         }
       }
       Act::Notes => {
-        let shown = updater.state.versions();
-        let (State::Available(v) | State::Failed(Some(v), _)) = shown else { return };
-        if let Err(e) = nimbo::open::url(&updater::notes_url(&v)) {
+        let (State::Available(r) | State::Failed(Some(r), _)) = &updater.state else { return };
+        if let Err(e) = nimbo::open::url(&updater::notes_url(&r.version)) {
           warn!("the release notes: {e}");
         }
       }
@@ -937,7 +933,7 @@ struct AppShell {
   downloads: Downloads,
   export: Arc<Mutex<Option<Export>>>,
   import: Arc<Mutex<Option<Import>>>,
-  updater: Arc<Mutex<Updater<Release>>>,
+  updater: Arc<Mutex<Updater>>,
 }
 
 impl window::Shell for AppShell {
@@ -1119,8 +1115,8 @@ impl window::Shell for AppShell {
     self.import.lock().unwrap().clone()
   }
 
-  fn update_state(&self) -> Option<State<String>> {
-    updates().then(|| self.updater.lock().unwrap().state.versions())
+  fn update_state(&self) -> Option<State> {
+    self.updater.lock().unwrap().showing()
   }
 
   fn update_act(&self, act: Act) {

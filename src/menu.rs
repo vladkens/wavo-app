@@ -175,7 +175,7 @@ pub fn menu(
   recent: &[String],
   mics: (&[Device], &Microphone, bool),
   (found, pick): (&[Found], &Pick),
-  update: Option<&State<String>>,
+  update: Option<&State>,
 ) -> Menu {
   let title = format!("Wavo {}", crate::VERSION);
   let header = [Some(title.as_str()), hotkey, state(status)].into_iter().flatten();
@@ -393,7 +393,7 @@ mod tests {
   fn an_update_shows_under_the_warnings() {
     let s = Status::default();
     let pick = Pick::default();
-    let ids = |state: State<String>| {
+    let ids = |state: State| {
       let mics = (&[][..], &Microphone::System, false);
       let items = menu(None, &s, &[], &[], mics, (&[], &pick), Some(&state)).items;
       items.into_iter().map(|i| i.id).collect::<Vec<_>>()
@@ -401,7 +401,7 @@ mod tests {
     let idle = ids(State::Idle);
     assert_eq!(idle[1..].first().map(String::as_str), Some(""), "a separator after the header");
     assert_eq!(idle[idle.len() - 4..], ["settings", "update:check", "", "quit"].map(String::from));
-    let available = ids(State::Available("1.2.0".into()));
+    let available = ids(State::Available(nimbo::update::Release::test("1.2.0")));
     assert_eq!(available[1], "update");
   }
 }

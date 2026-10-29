@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
+use nimbo::update::Release;
 use nimbo::{
   Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
   FormStyle, Hotkey, Icon, Id, Key, NamedKey, PopUp, Select, Style, TextStyle, Tile, Ui, Weight,
@@ -120,8 +121,9 @@ pub trait Shell {
   fn has_neural_engine(&self) -> bool {
     false
   }
-  /// What the updater does; `None` where the app doesn't check (a run with its own `WAVO_HOME`).
-  fn update_state(&self) -> Option<State<String>> {
+  /// What the updater does; `None` where the app can't update (nimbo's `update::supported`, a dev
+  /// build, a run with its own `WAVO_HOME`).
+  fn update_state(&self) -> Option<State> {
     None
   }
   /// The window is redrawn as the state changes.
@@ -698,7 +700,7 @@ impl Prefs {
         }
       });
 
-      // Only where the app checks: the person's Wavo.
+      // Only where the app can update.
       if self.shell.update_state().is_some() {
         ui.form_row(fs, FormRow::new("Automatic updates").info(UPDATE_HELP), |ui| {
           let mut on = self.settings.auto_update;
@@ -1925,7 +1927,7 @@ impl Prefs {
       true => "Wavo looks for a new version at launch and once a day.",
       false => "Automatic updates are off: Wavo looks when you ask.",
     };
-    let available = |v: &str| format!("Update available: {}", updater::shown(v));
+    let available = |r: &Release| format!("Update Available: {}", updater::shown(&r.version));
     let (label, caption, act, on) = match &state {
       State::Idle => ("Updates".to_owned(), idle.to_owned(), UpdateAct::Check, true),
       State::Checking => ("Updates".into(), "Checking…".into(), UpdateAct::Check, false),
@@ -1939,7 +1941,7 @@ impl Prefs {
         (available(v), format!("Downloading: {done}%"), UpdateAct::Install, false)
       }
       State::Restarting(v) => (available(v), "Restarting…".into(), UpdateAct::Install, false),
-      State::Failed(_, why) => ("Update failed".into(), why.clone(), UpdateAct::Retry, true),
+      State::Failed(_, why) => ("Update Failed".into(), why.clone(), UpdateAct::Retry, true),
     };
 
     ui.form_section(fs, "Updates", |ui| {
@@ -1990,7 +1992,7 @@ mod tests {
     revealed: Vec<PathBuf>,
     import: Option<Import>,
     imports: Vec<PathBuf>,
-    update: Option<State<String>>,
+    update: Option<State>,
     acts: Vec<UpdateAct>,
   }
 
@@ -2101,7 +2103,7 @@ mod tests {
       self.log().revealed.push(dir.to_owned());
     }
 
-    fn update_state(&self) -> Option<State<String>> {
+    fn update_state(&self) -> Option<State> {
       self.log().update.clone()
     }
 
@@ -2263,7 +2265,7 @@ mod tests {
       let fake = Fake::default();
       let running = Download::Running { done: 114_000_000, total: 272_000_000, rate: Some(3.2e6) };
       fake.log().states.insert("gigaam-v3-e2e-ctc", running);
-      fake.log().update = Some(State::Available("0.2.0".into()));
+      fake.log().update = Some(State::Available(Release::test("0.2.0")));
       let mut h = home.harness(&fake, Settings::default());
       h.event(Event::Appearance(appearance));
       for (page, _, name) in PAGES {
@@ -2357,7 +2359,7 @@ mod tests {
       h.app_mut();
       h.frame();
     };
-    set(&mut h, State::Available("0.2.0".into()));
+    set(&mut h, State::Available(Release::test("0.2.0")));
     click(&mut h, Id::of("auto-update"));
     assert!(!fake.log().settings.auto_update);
     tab(&mut h, Page::About);
