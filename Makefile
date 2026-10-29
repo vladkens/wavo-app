@@ -93,7 +93,7 @@ $(FIXTURES): scripts/fixtures.py $(wildcard scripts/fixtures/*.txt)
 # The ignored tests that need real models from the Hugging Face cache or the fixtures, by module
 # (not those that need a microphone); WAVO_TEST_MODEL_RU and WAVO_TEST_MODEL_EN pick the models by
 # path.
-MODEL_TESTS := engine::tests:: audio::tests::fixtures
+MODEL_TESTS := engine::tests:: audio::tests::fixtures session::tests::the_tail_after_speech
 
 test-models: fixtures # the ignored tests on real models
 	cargo test $(CARGO_FLAGS) -- --ignored --test-threads=1 --nocapture $(MODEL_TESTS)

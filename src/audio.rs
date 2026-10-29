@@ -586,7 +586,7 @@ struct Live {
   /// RMS of the last window as `f32` bits.
   level: AtomicU32,
   silent: AtomicBool,
-  /// VAD frames since the last that was not a pause ([PAUSE]).
+  /// VAD frames since the last that was not the tail's pause ([TAIL_QUIET]).
   pause: AtomicU32,
 }
 
@@ -931,6 +931,10 @@ const VOICED: f32 = 0.5;
 /// A frame scoring below this is a pause; between the two it is neither: never speech, never cut
 /// out. Digital silence scores 0.1–0.3, quiet noise up to 0.4, speech mostly above 0.8.
 const PAUSE: f32 = 0.35;
+/// A frame scoring below this counts toward the tail's pause after the stop. After a word the
+/// scores fall slowly: on a real microphone (1,500 recordings) the silence after speech still
+/// scores 0.35–0.5 a few hundred ms on, but below 0.6 within 130 ms in three of four.
+const TAIL_QUIET: f32 = 0.6;
 /// Speech needs at least this much voiced audio; with less the engine is not called.
 const MIN_SPEECH_MS: usize = 150;
 /// Silence kept before the first and after the last speech in the engine's input.
@@ -988,10 +992,38 @@ impl Vad {
     // Earshot wants [-1, 1]; resampling can overshoot a full-scale signal a little.
     self.pending.iter_mut().for_each(|s| *s = s.clamp(-1.0, 1.0));
     let score = self.detector.predict_f32(&self.pending);
-    self.pause = if score < PAUSE { self.pause + 1 } else { 0 };
+    self.pause = if score < TAIL_QUIET { self.pause + 1 } else { 0 };
     self.scores.push(score);
     self.pending.clear();
   }
+}
+
+/// The meter's [pause](Meter::pause) at every [POLL], with the time, while `pcm` (16 kHz) plays in
+/// real time from a 48 kHz device in 512-frame callbacks, drained as a recorder drains it: what the
+/// session's tail sees, about 40 ms behind the sound.
+#[cfg(test)]
+pub fn pauses(pcm: &[f32]) -> Vec<(Duration, Duration)> {
+  let (rate, callback) = (48_000, 512);
+  let mut device = Vec::new();
+  let mut up = Resample::new(SAMPLE_RATE, rate).unwrap();
+  up.push(pcm, &mut device);
+  up.finish(&mut device);
+
+  let mut down = Resample::new(rate, SAMPLE_RATE).unwrap();
+  let (mut vad, mut out, mut fed) = (Vad::default(), Vec::new(), 0);
+  let frame_ms = FRAME as u64 * 1000 / u64::from(SAMPLE_RATE);
+  let polls = device.len() as u32 / (rate * POLL.as_millis() as u32 / 1000);
+  (0..polls)
+    .map(|i| {
+      let at = POLL * i;
+      let delivered = (at.as_millis() as usize * rate as usize / 1000) / callback * callback;
+      out.clear();
+      down.push(&device[fed..delivered], &mut out);
+      fed = delivered;
+      vad.push(&out);
+      (at, Duration::from_millis(vad.pause as u64 * frame_ms))
+    })
+    .collect()
 }
 
 /// 16 kHz mono audio with its VAD scores, one per [FRAME] (the last frame may be partial).
