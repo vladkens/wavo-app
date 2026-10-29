@@ -78,31 +78,73 @@ jobs:
           crates: false
           artifact: release-${{ matrix.os }}
 
+  # tmp, proof only: pack run directly, the files uploaded, nothing published.
   publish:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch'
     needs: [test, build]
     runs-on: ubuntu-latest
-    permissions:
-      attestations: write
-      contents: write
-      id-token: write
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      UPDATE_KEY: ${{ secrets.UPDATE_KEY }}
     steps:
       - uses: actions/checkout@v7
-      # One artifact for rust-publish, from the build jobs' own.
-      - uses: actions/upload-artifact/merge@v7
+      - uses: actions/download-artifact@v8
         with:
-          name: release
           pattern: release-*
+          merge-multiple: true
+          path: target/distrib
       - run: sudo apt-get update && sudo apt-get install -y nsis hfsprogs
-      - uses: vladkens/actions/rust-publish@v1
+      - run: make pack
+      - uses: actions/upload-artifact@v7
         with:
-          name: Wavo
-          crates: false
-          pack: make pack
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          UPDATE_KEY: ${{ secrets.UPDATE_KEY }}
+          name: packed-dev
+          path: target/distrib/Wavo-*
+      - run: rm -f target/distrib/Wavo-* && make pack TAG=v0.1.0
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packed-release
+          path: |
+            target/distrib/Wavo-*
+            target/distrib/update.txt
+
+  # tmp, proof only: what the files hold, in a job without secrets.
+  verify:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: packed-dev
+          path: packed
+      - run: sudo apt-get update -q && sudo apt-get install -yq 7zip python3-pefile
+      - run: ls -l packed
+      - name: The setups' files
+        run: for s in packed/*-setup.exe; do 7z x -y -o"x/$(basename "$s")" "$s" > /dev/null; done; find x -type f
+      - name: The exes' resources
+        shell: python3 {0}
+        run: |
+          import glob, pefile
+          names = {3: "ICON", 14: "GROUP_ICON", 16: "VERSION", 24: "MANIFEST"}
+          for path in sorted(glob.glob("x/*/*.exe")):
+              pe = pefile.PE(path)
+              print("==", path, pe.FILE_HEADER.NumberOfSections, [s.Name.rstrip(b"\0") for s in pe.sections])
+              res = pe.DIRECTORY_ENTRY_RESOURCE.entries if hasattr(pe, "DIRECTORY_ENTRY_RESOURCE") else []
+              for t in res:
+                  print(" ", names.get(t.id, t.id), [e.id for e in t.directory.entries])
+              for fi in getattr(pe, "FileInfo", []):
+                  for f in fi:
+                      for st in getattr(f, "StringTable", []):
+                          print(" ", {k.decode(): v.decode() for k, v in st.entries.items()})
+              print("  warnings:", pe.get_warnings()[:5])
+      - name: The newest glibc the Linux binaries need
+        run: |
+          for d in packed/*.deb; do dpkg-deb -x "$d" "deb-$(basename "$d")"; done
+          for b in deb-*/usr/bin/*; do echo "$b: $(readelf -V -W "$b" | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -1)"; done
+      - name: The AppImage and the .deb
+        run: |
+          a=$(ls packed/*x86_64.AppImage) && chmod +x "$a" && (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/$a" --appimage-extract > /dev/null && ls squashfs-root && cat squashfs-root/*.desktop)
+          for d in packed/*.deb; do echo "== $d"; dpkg-deb -I "$d"; dpkg-deb -c "$d"; done
