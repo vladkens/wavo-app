@@ -119,6 +119,13 @@ pub trait Shell {
   fn has_neural_engine(&self) -> bool {
     false
   }
+  /// The app can update itself: not where nimbo's `update::supported` says no, a dev build, a run
+  /// with its own `WAVO_HOME`.
+  fn updates(&self) -> bool {
+    false
+  }
+  /// The update's window, with a check when it has nothing else to show.
+  fn check_updates(&self) {}
 }
 
 enum Delete {
@@ -625,6 +632,9 @@ const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another compute
 const EXPORT_HELP: &str = "The history, its recordings and the settings, into a .zip archive: \
   Import brings it back, here or on another computer.";
 
+const UPDATE_HELP: &str = "Wavo looks for a new version at launch and once a day; the menu says \
+  when there is one. Off, it looks only when you choose Check for Updates.";
+
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
 
@@ -688,6 +698,16 @@ impl Prefs {
           self.edit(move |s| s.history_retention = cur);
         }
       });
+
+      // Only where the app can update.
+      if self.shell.updates() {
+        ui.form_row(fs, FormRow::new("Check for updates").info(UPDATE_HELP), |ui| {
+          let mut on = self.settings.auto_update;
+          if ui.id("auto-update").toggle(&mut on, "").changed {
+            self.edit(move |s| s.auto_update = on);
+          }
+        });
+      }
     });
 
     let models = self.hub.root().to_owned();
@@ -802,7 +822,7 @@ impl Prefs {
       Request::Delete(_) => "Could not delete the dictation",
       Request::Retranscribe(_) => "Could not transcribe it again",
       Request::Restore(_) => "Could not put the previous text back",
-      Request::Unload | Request::Imported => return,
+      Request::Unload | Request::Imported | Request::Close => return,
     };
     self.history.said = Some(format!("{what}: {error}"));
   }
@@ -1874,6 +1894,11 @@ impl Prefs {
         if ui.id(("link", "coffee")).button("Buy Me a Coffee").clicked {
           self.shell.open_url(COFFEE);
         }
+
+        // Only where the app can update.
+        if self.shell.updates() && ui.id("updates").button("Check for Updates…").clicked {
+          self.shell.check_updates();
+        }
       });
     });
 
@@ -1925,6 +1950,8 @@ mod tests {
     revealed: Vec<PathBuf>,
     import: Option<Import>,
     imports: Vec<PathBuf>,
+    updates: bool,
+    checks: usize,
   }
 
   #[derive(Clone, Default)]
@@ -2032,6 +2059,14 @@ mod tests {
 
     fn reveal(&self, dir: &Path) {
       self.log().revealed.push(dir.to_owned());
+    }
+
+    fn updates(&self) -> bool {
+      self.log().updates
+    }
+
+    fn check_updates(&self) {
+      self.log().checks += 1;
     }
   }
 
@@ -2188,6 +2223,7 @@ mod tests {
       let fake = Fake::default();
       let running = Download::Running { done: 114_000_000, total: 272_000_000, rate: Some(3.2e6) };
       fake.log().states.insert("gigaam-v3-e2e-ctc", running);
+      fake.log().updates = true;
       let mut h = home.harness(&fake, Settings::default());
       h.event(Event::Appearance(appearance));
       for (page, _, name) in PAGES {
@@ -2261,6 +2297,28 @@ mod tests {
     click(&mut h, Id::of("hotkey"));
     tab(&mut h, Page::About);
     assert_eq!(fake.log().paused, [true, false, true, false]);
+  }
+
+  /// About's Check for Updates… opens the update's window, Advanced turns the automatic checks off;
+  /// neither shows in a build that doesn't update.
+  #[test]
+  fn about_checks_for_updates() {
+    let home = Home::new("window-update", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::About);
+    assert!(h.rect(Id::of("updates")).is_none());
+    tab(&mut h, Page::Advanced);
+    assert!(h.rect(Id::of("auto-update")).is_none());
+
+    fake.log().updates = true;
+    h.app_mut();
+    h.frame();
+    click(&mut h, Id::of("auto-update"));
+    assert!(!fake.log().settings.auto_update);
+    tab(&mut h, Page::About);
+    click(&mut h, Id::of("updates"));
+    assert_eq!(fake.log().checks, 1);
   }
 
   #[test]

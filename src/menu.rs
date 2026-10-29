@@ -1,11 +1,13 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! The menu bar icon and menu: a header with the app, the hotkey and the state; the warnings, most
-//! opening where they are fixed; Copy Last Dictation and Recent; the model in use with the others
-//! downloaded; Unload Model, History…, Settings…, Quit.
+//! opening where they are fixed; an update found or going on; Copy Last Dictation and Recent; the
+//! model in use with the others downloaded; Unload Model, History…, Settings…, Check for Updates…,
+//! Quit.
 
 use nimbo::Hotkey;
 use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
+use nimbo::update::dialog::{self, State};
 
 use crate::audio::{Device, Microphone};
 use crate::engine::Phase as EnginePhase;
@@ -14,6 +16,10 @@ use crate::session::{NoModel, Outcome, Phase, Status};
 use crate::window::{Found, Pick, bluetooth_only, microphones as mic_choices};
 
 pub const RECENT: usize = 10;
+/// The update's row under the warnings while it has news, and Check for Updates… above Quit: both
+/// open the update's window.
+pub const UPDATE: &str = "update";
+pub const CHECK_UPDATES: &str = "update-check";
 
 // MARK: Icon
 
@@ -162,16 +168,18 @@ pub fn recent_title(text: &str, created_at: i64, now: i64) -> String {
   format!("{when} · {preview}")
 }
 
-/// Item ids: `recent:<i>`, `mic:<i>`, `model:<name>`, `warn:…` and fixed ones, as `app::chosen`
-/// handles them. `mics`: the devices, the one saved and whether the lid is closed.
+/// Item ids: `recent:<i>`, `mic:<i>`, `model:<name>`, `warn:…` and fixed ones, as
+/// `app::chosen` handles them. `mics`: the devices, the one saved and whether the lid is closed;
+/// `models`: those downloaded and the pick; `update`: the updater's state, `None` in a build that
+/// doesn't update.
 pub fn menu(
   hotkey: Option<&str>,
   status: &Status,
   warnings: &[Warning],
   recent: &[String],
   mics: (&[Device], &Microphone, bool),
-  found: &[Found],
-  pick: &Pick,
+  (found, pick): (&[Found], &Pick),
+  update: Option<&State>,
 ) -> Menu {
   let title = format!("Wavo {}", crate::VERSION);
   let header = [Some(title.as_str()), hotkey, state(status)].into_iter().flatten();
@@ -183,6 +191,8 @@ pub fn menu(
     let mark = if w.id == "warn:download" { "" } else { "⚠︎ " };
     items.push(Item::new(w.id, &format!("{mark}{}", w.text)).enabled(w.action));
   }
+
+  items.extend(update.and_then(|s| dialog::menu_item(UPDATE, s)));
 
   let last = status.last.as_ref().is_some_and(|l| !l.text.is_empty());
   let loaded = status.engine.phase != EnginePhase::Stopped && status.state == Phase::Idle;
@@ -209,9 +219,9 @@ pub fn menu(
     // A tray menu's keys work only in macOS's; Windows' and Linux's would show keys that do
     // nothing.
     with_key(Item::new("settings", "Settings…"), "cmd+comma"),
-    Item::separator(),
-    with_key(Item::new("quit", "Quit Wavo"), "cmd+q"),
   ]);
+  items.extend(update.map(|s| dialog::check_item(CHECK_UPDATES, s)));
+  items.extend([Item::separator(), with_key(Item::new("quit", "Quit Wavo"), "cmd+q")]);
   Menu::new(items)
 }
 
@@ -336,7 +346,8 @@ mod tests {
     let wave = Choice { id: devices[1].id.clone(), name: devices[1].name.clone() };
     let wave = Microphone::Device(wave);
     let mics = (&devices[..], &wave, false);
-    let items = menu(Some("⌥Space"), &s, &list, &[], mics, &[], &Pick::default()).items;
+    let pick = Pick::default();
+    let items = menu(Some("⌥Space"), &s, &list, &[], mics, (&[], &pick), None).items;
     // The header as long as the build's version lets it be (a dirty build's runs longer).
     let header = format!("Wavo {} · ⌥Space · Recording…", crate::VERSION);
     let label = &items[0].label;
@@ -362,7 +373,7 @@ mod tests {
     assert_eq!(devices_got, [("MacBook Pro Microphone", false), (devices[1].name.as_str(), true)]);
 
     let mic_label = |devices: &[Device], saved: &Microphone, lid_closed| {
-      let items = menu(None, &s, &list, &[], (devices, saved, lid_closed), &[], &Pick::default());
+      let items = menu(None, &s, &list, &[], (devices, saved, lid_closed), (&[], &pick), None);
       let label = |id| items.items.iter().find(|i| i.id == id).map(|i| i.label.clone());
       (label("mic").unwrap(), label("mic-note"))
     };
@@ -378,5 +389,25 @@ mod tests {
     assert_eq!(mic_label(&airpods, &auto, false), ("Automatic (AirPods Pro)".into(), note));
     let lid = [device("MacBook Pro Microphone", true, Transport::BuiltIn)];
     assert_eq!(mic_label(&lid, &auto, true).0, "Automatic (none: the lid is closed)");
+    assert!(!items.iter().any(|i| i.id.starts_with("update")), "a build that doesn't update");
+  }
+
+  /// An update shows under the header and the warnings; Check for Updates… sits above Quit.
+  #[test]
+  fn an_update_shows_under_the_header() {
+    let s = Status::default();
+    let pick = Pick::default();
+    let items = |state: State| {
+      let mics = (&[][..], &Microphone::System, false);
+      let items = menu(None, &s, &[], &[], mics, (&[], &pick), Some(&state)).items;
+      items.into_iter().map(|i| (i.id, i.label)).collect::<Vec<_>>()
+    };
+    let idle = items(State::Idle);
+    let ids: Vec<_> = idle[idle.len() - 4..].iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["settings", CHECK_UPDATES, "", "quit"]);
+    assert_eq!(idle[idle.len() - 3].1, "Check for Updates…");
+    assert!(!idle.iter().any(|(id, _)| id == UPDATE), "no news");
+    let available = items(State::Available(nimbo::update::Release::test("1.2.0")));
+    assert_eq!(available[1], (UPDATE.into(), "Update Available: v1.2.0…".into()));
   }
 }
