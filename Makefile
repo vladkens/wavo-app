@@ -31,21 +31,26 @@ clean:
 
 APP := target/Wavo.app
 PROFILE := release
+# Windows has python, where python3 may be the Store's stub.
+PY := $(if $(filter Windows_NT,$(OS)),python,python3)
 # nimbo's checkout at the rev Cargo.lock pins: its scripts/pack.py makes the app and the release
 # files from Cargo.toml's [package.metadata.nimbo].
-NIMBO = $(shell cargo metadata --format-version 1 --locked | python3 -c 'import json, os, sys; \
+NIMBO = $(shell cargo metadata --format-version 1 --locked | $(PY) -c 'import json, os, sys; \
   print(next(os.path.dirname(p["manifest_path"]) for p in json.load(sys.stdin)["packages"] \
   if p["name"] == "nimbo"))')
+# dist's target: this machine's, or T.
+T ?= $(shell rustc -vV | sed -n 's/^host: //p')
 
 # Signed with a Developer ID in the keychain, else "Wavo Local Signing", made in the login keychain
 # before the first bundle, so macOS keeps the grants across rebuilds; no bundle when it can't sign
 # (CI: ad hoc). Built, never opened.
 bundle: # target/Wavo.app from the release profile, or PROFILE
 	cargo build --locked --profile $(PROFILE)
-	python3 "$(NIMBO)/scripts/pack.py" app --bin target/$(PROFILE)/wavo-app --out target
+	$(PY) "$(NIMBO)/scripts/pack.py" app --bin target/$(PROFILE)/wavo-app
 
-dist: # this OS's release files in target/distrib from the dist profile, for CI (vladkens/actions/rust-build)
-	bash scripts/dist.sh
+dist: # T's release files in target/distrib, Wavo-dev-*, for CI (vladkens/actions/rust-build)
+	cargo build --locked --profile dist --target $(T)
+	$(PY) "$(NIMBO)/scripts/pack.py" dist --label dev --target $(T)
 
 # scripts/run.py: Wavo's permissions are reset first when the bundle's signature is not the one
 # they were granted to.
