@@ -11,6 +11,8 @@ prepare:
 check:
 	cargo +nightly fmt --check
 	cargo clippy $(CARGO_FLAGS) --all-targets -- -D warnings
+	$(if $(CROSS),cargo-zigbuild clippy $(CARGO_FLAGS) --keep-going --all-targets \
+	  $(addprefix --target ,$(CROSS)) -- -D warnings)
 
 test:
 	cargo test $(CARGO_FLAGS)
@@ -27,7 +29,7 @@ clean:
 	cargo clean
 
 # wavo-app
-.PHONY: bundle dist run install uninstall shots fixtures test-models
+.PHONY: bundle dist pack run install uninstall shots fixtures test-models
 
 APP := target/Wavo.app
 PROFILE := release
@@ -48,9 +50,16 @@ bundle: # target/Wavo.app from the release profile, or PROFILE
 	cargo build --locked --profile $(PROFILE)
 	$(PY) "$(NIMBO)/scripts/pack.py" app --bin target/$(PROFILE)/wavo-app
 
-dist: # T's release files in target/distrib, Wavo-dev-*, for CI (vladkens/actions/rust-build)
+dist: # T's binary in target/distrib/T, for CI (vladkens/actions/rust-build); pack makes the files
 	cargo build --locked --profile dist --target $(T)
-	$(PY) "$(NIMBO)/scripts/pack.py" dist --label dev --target $(T)
+	mkdir -p target/distrib/$(T)
+	cp target/$(T)/dist/wavo-app$(EXE) target/distrib/$(T)/
+
+NIMBO_REV = $(shell sed -n 's|^source = "git+https://github.com/vladkens/nimbo?.*\([0-9a-f]\{40\}\)"$$|\1|p' Cargo.lock)
+
+pack: # the release files from target/distrib's binaries, signed with the secrets in env, else ad hoc
+	curl -fsSL --create-dirs -o target/pack.py https://raw.githubusercontent.com/vladkens/nimbo/$(NIMBO_REV)/scripts/pack.py
+	$(PY) target/pack.py release target/distrib $(if $(TAG),--tag $(TAG))
 
 # scripts/run.py: Wavo's permissions are reset first when the bundle's signature is not the one
 # they were granted to.

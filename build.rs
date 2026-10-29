@@ -3,10 +3,8 @@
 //! The build script: `assets/icon.png` as the app's icons in `$OUT_DIR`, raw RGBA for nimbo, which
 //! decodes no PNG:
 //! - `about-icon.rgba`: 128 px (64 points at 2x), the About page's ([nimbo::Ui::rgba_image]);
-//! - `window-icon.rgba`: 256 px, the windows' off macOS ([nimbo::Config::icon]);
-//! - for Windows, `wavo.ico` linked into the exe as its icon, the one Explorer shows.
-//!
-//! The last two are [cropped] to the tile: Apple's margin around it would show it small.
+//! - `window-icon.rgba`: 256 px, the windows' off macOS ([nimbo::Config::icon]), [cropped] to the
+//!   tile: Apple's margin around it would show it small.
 //!
 //! And the version the app shows, `WAVO_VERSION` ([version]).
 
@@ -15,8 +13,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const ICON: &str = "assets/icon.png";
-/// The sizes in the exe's icon: Explorer's views and the taskbar at 100–200% scale.
-const ICO: [usize; 6] = [16, 24, 32, 48, 64, 256];
 
 fn main() {
   println!("cargo:rerun-if-changed={ICON}");
@@ -26,10 +22,6 @@ fn main() {
   write(&out.join("about-icon.rgba"), &resized(w, h, &rgba, 128));
   let (side, tile) = cropped(w, h, &rgba);
   write(&out.join("window-icon.rgba"), &resized(side, side, &tile, 256));
-
-  if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-    exe_icon(&out, side, side, &tile);
-  }
 }
 
 /// The version the build shows, as CI's dev builds have it (vladkens/actions dev-version): Cargo's
@@ -79,25 +71,6 @@ fn rerun_on_git() {
   for path in paths.iter().filter(|p| p.exists()) {
     println!("cargo:rerun-if-changed={}", path.display());
   }
-}
-
-/// `wavo.ico` and a resource script with it as the first icon, which Windows takes for the exe's,
-/// compiled and linked into the binary (rc.exe, or llvm-rc when cross-compiling).
-fn exe_icon(out: &Path, w: usize, h: usize, rgba: &[u8]) {
-  let mut dir = ico::IconDir::new(ico::ResourceType::Icon);
-  for n in ICO {
-    let image = ico::IconImage::from_rgba_data(n as u32, n as u32, resized(w, h, rgba, n));
-    dir.add_entry(ico::IconDirEntry::encode(&image).expect("an icon image"));
-  }
-
-  let path = out.join("wavo.ico");
-  dir.write(File::create(&path).expect("wavo.ico")).expect("write wavo.ico");
-
-  // UTF-8, as rc.exe reads the ANSI code page otherwise: a path with an accented user name.
-  let path = path.display().to_string().replace('\\', "/");
-  let rc = out.join("wavo.rc");
-  write(&rc, format!("#pragma code_page(65001)\n1 ICON \"{path}\"\n").as_bytes());
-  embed_resource::compile(&rc, embed_resource::NONE).manifest_optional().expect("wavo.rc");
 }
 
 fn write(path: &Path, data: &[u8]) {
