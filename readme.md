@@ -55,6 +55,8 @@ The tray icon needs a panel that shows StatusNotifierItems: KDE, Xfce, Cinnamon,
 
 The menu-bar icon opens the recent dictations, the model and the microphone. **Settings** changes the shortcut, the language and the rest, and keeps the **History**: search it, play a recording back, transcribe it again with another model.
 
+A release keeps itself up to date: it looks for a new version at launch and once a day and offers it in the menu, where **Install and Relaunch** puts it in place; Advanced › Automatic updates turns the look off. The dev pre-release doesn't update.
+
 <details>
 <summary>Moving to another computer</summary>
 

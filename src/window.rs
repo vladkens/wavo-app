@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
+use nimbo::update::Release;
 use nimbo::{
   Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
   FormStyle, Hotkey, Icon, Id, Key, NamedKey, PopUp, Select, Style, TextStyle, Tile, Ui, Weight,
@@ -29,6 +30,7 @@ use crate::history::{Entry, History, Local, RECORDINGS_DIR, Retention, fold, loc
 use crate::session::{NoModel, Request, Status, label};
 use crate::settings::{Activation, HudPosition, Settings, language_name};
 use crate::transfer::Imported;
+use crate::updater::{self, Act as UpdateAct, State};
 
 // MARK: Window
 
@@ -119,6 +121,13 @@ pub trait Shell {
   fn has_neural_engine(&self) -> bool {
     false
   }
+  /// What the updater does; `None` where the app can't update (nimbo's `update::supported`, a dev
+  /// build, a run with its own `WAVO_HOME`).
+  fn update_state(&self) -> Option<State> {
+    None
+  }
+  /// The window is redrawn as the state changes.
+  fn update_act(&self, _act: UpdateAct) {}
 }
 
 enum Delete {
@@ -624,6 +633,8 @@ const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another compute
   history does not have are added with their recordings; the settings stay as they are.";
 const EXPORT_HELP: &str = "The history, its recordings and the settings, into a .zip archive: \
   Import brings it back, here or on another computer.";
+const UPDATE_HELP: &str = "Wavo looks for a new version at launch and once a day and offers it in \
+  the menu: nothing installs until you choose Install and Relaunch.";
 
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
@@ -688,6 +699,16 @@ impl Prefs {
           self.edit(move |s| s.history_retention = cur);
         }
       });
+
+      // Only where the app can update.
+      if self.shell.update_state().is_some() {
+        ui.form_row(fs, FormRow::new("Automatic updates").info(UPDATE_HELP), |ui| {
+          let mut on = self.settings.auto_update;
+          if ui.id("auto-update").toggle(&mut on, "").changed {
+            self.edit(move |s| s.auto_update = on);
+          }
+        });
+      }
     });
 
     let models = self.hub.root().to_owned();
@@ -1877,6 +1898,7 @@ impl Prefs {
       });
     });
 
+    self.updates(ui, fs);
     // Denser than a setting's rows: six of them.
     let fs = &FormStyle { caption: fs.caption.ellipsis(), pad_y: 5.0, ..*fs };
     // A row's controls go on its name's line: the ↗ is centred in the whole row instead.
@@ -1893,6 +1915,50 @@ impl Prefs {
           });
         });
       }
+    });
+  }
+
+  /// The updater's state, as the menu says it, with its button: Check for Updates, Update (and
+  /// Release Notes), Retry. None in a build that doesn't update.
+  fn updates(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    let Some(state) = self.shell.update_state() else { return };
+    let idle = match self.settings.auto_update {
+      true => "Wavo looks for a new version at launch and once a day.",
+      false => "Automatic updates are off: Wavo looks when you ask.",
+    };
+    let available = |r: &Release| format!("Update Available: {}", updater::shown(&r.version));
+    let (label, caption, act, on) = match &state {
+      State::Idle => ("Updates".to_owned(), idle.to_owned(), UpdateAct::Check, true),
+      State::Checking => ("Updates".into(), "Checking…".into(), UpdateAct::Check, false),
+      State::UpToDate(_) => {
+        ("Updates".into(), "No updates available.".into(), UpdateAct::Check, true)
+      }
+      State::Available(v) => {
+        (available(v), "Installs it and restarts Wavo.".into(), UpdateAct::Install, true)
+      }
+      State::Downloading(v, done) => {
+        (available(v), format!("Downloading: {done}%"), UpdateAct::Install, false)
+      }
+      State::Restarting(v) => (available(v), "Restarting…".into(), UpdateAct::Install, false),
+      State::Failed(_, why) => ("Update Failed".into(), why.clone(), UpdateAct::Retry, true),
+    };
+
+    ui.form_section(fs, "Updates", |ui| {
+      ui.form_row(fs, FormRow::new(&label).caption(&caption), |ui| {
+        let notes = matches!(state, State::Available(_));
+        if notes && ui.id("update-notes").button("Release Notes").clicked {
+          self.shell.update_act(UpdateAct::Notes);
+        }
+
+        let button = match act {
+          UpdateAct::Install => Button::new("Update").primary(),
+          UpdateAct::Retry => Button::new("Retry"),
+          _ => Button::new("Check for Updates"),
+        };
+        if button.show(ui.disabled(!on).id("update")).clicked {
+          self.shell.update_act(act);
+        }
+      });
     });
   }
 }
@@ -1925,6 +1991,8 @@ mod tests {
     revealed: Vec<PathBuf>,
     import: Option<Import>,
     imports: Vec<PathBuf>,
+    update: Option<State>,
+    acts: Vec<UpdateAct>,
   }
 
   #[derive(Clone, Default)]
@@ -2032,6 +2100,14 @@ mod tests {
 
     fn reveal(&self, dir: &Path) {
       self.log().revealed.push(dir.to_owned());
+    }
+
+    fn update_state(&self) -> Option<State> {
+      self.log().update.clone()
+    }
+
+    fn update_act(&self, act: UpdateAct) {
+      self.log().acts.push(act);
     }
   }
 
@@ -2188,6 +2264,7 @@ mod tests {
       let fake = Fake::default();
       let running = Download::Running { done: 114_000_000, total: 272_000_000, rate: Some(3.2e6) };
       fake.log().states.insert("gigaam-v3-e2e-ctc", running);
+      fake.log().update = Some(State::Available(Release::test("0.2.0")));
       let mut h = home.harness(&fake, Settings::default());
       h.event(Event::Appearance(appearance));
       for (page, _, name) in PAGES {
@@ -2261,6 +2338,36 @@ mod tests {
     click(&mut h, Id::of("hotkey"));
     tab(&mut h, Page::About);
     assert_eq!(fake.log().paused, [true, false, true, false]);
+  }
+
+  /// About says what the updater does, with its button; Advanced turns the automatic checks off.
+  /// Neither shows in a build that doesn't update.
+  #[test]
+  fn about_offers_the_update() {
+    let home = Home::new("window-update", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::About);
+    assert!(h.rect(Id::of("update")).is_none());
+    tab(&mut h, Page::Advanced);
+    assert!(h.rect(Id::of("auto-update")).is_none());
+
+    // The app redraws the window as the state changes.
+    let set = |h: &mut Harness<Prefs>, state| {
+      fake.log().update = Some(state);
+      h.app_mut();
+      h.frame();
+    };
+    set(&mut h, State::Available(Release::test("0.2.0")));
+    click(&mut h, Id::of("auto-update"));
+    assert!(!fake.log().settings.auto_update);
+    tab(&mut h, Page::About);
+    click(&mut h, Id::of("update-notes"));
+    click(&mut h, Id::of("update"));
+    set(&mut h, State::Failed(None, "offline".into()));
+    assert!(h.rect(Id::of("update-notes")).is_none());
+    click(&mut h, Id::of("update"));
+    assert_eq!(fake.log().acts, [UpdateAct::Notes, UpdateAct::Install, UpdateAct::Retry]);
   }
 
   #[test]

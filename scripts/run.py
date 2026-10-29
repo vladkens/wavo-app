@@ -72,8 +72,12 @@ def main() -> int:
         subprocess.run(["ditto", app, dest], check=True)
         app = dest
 
-    env = "WAVO_LOG=warn,wavo_app=debug"
-    subprocess.run(["open", "--stderr", log, "--env", env, app], check=True)
+    # The fakes (WAVO_FAKE_MIC, WAVO_FAKE_UPDATE) pass through: `open` starts the app without
+    # this shell's environment.
+    env = ["WAVO_LOG=warn,wavo_app=debug"]
+    env += [f"{k}={v}" for k, v in os.environ.items() if k.startswith("WAVO_FAKE_")]
+    flags = [a for e in env for a in ("--env", e)]
+    subprocess.run(["open", "--stderr", log, *flags, app], check=True)
     print(f"started {app}, log in {log}")
     return 0
 

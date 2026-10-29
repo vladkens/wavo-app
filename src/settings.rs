@@ -49,6 +49,10 @@ pub struct Settings {
   /// Wayland's GlobalShortcuts portal took the hotkey once: later launches bind it without a click
   /// (the desktop remembers the person's answer).
   pub hotkey_portal: bool,
+  /// Check for a new version at launch and once a day, and offer it in the menu (a release only).
+  pub auto_update: bool,
+  /// The version Skip This Version passed over: automatic checks don't offer it.
+  pub skipped_update: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -87,6 +91,8 @@ impl Default for Settings {
       hud_position: HudPosition::Bottom,
       show_transcription_time: false,
       hotkey_portal: false,
+      auto_update: true,
+      skipped_update: None,
     }
   }
 }
