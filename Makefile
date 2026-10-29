@@ -42,7 +42,7 @@ NIMBO = $(shell cargo metadata --format-version 1 --locked | python3 -c 'import 
 # (CI: ad hoc). Built, never opened.
 bundle: # target/Wavo.app from the release profile, or PROFILE
 	cargo build --locked --profile $(PROFILE)
-	python3 $(NIMBO)/scripts/pack.py app --bin target/$(PROFILE)/wavo-app --out target
+	python3 "$(NIMBO)/scripts/pack.py" app --bin target/$(PROFILE)/wavo-app --out target
 
 dist: # this OS's release files in target/distrib from the dist profile, for CI (vladkens/actions/rust-build)
 	bash scripts/dist.sh
