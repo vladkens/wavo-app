@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   test:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -30,6 +31,7 @@ jobs:
 
   # Each OS's own code: clippy and the tests on macOS and Windows too.
   macos:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -41,6 +43,7 @@ jobs:
       - run: make test
 
   windows:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -59,8 +62,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macOS
-            runner: macos-latest
           - os: Windows
             runner: windows-latest
           - os: Linux
@@ -74,6 +75,8 @@ jobs:
       PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       # arm64 ALSA from Ubuntu's ports mirror.
       - if: runner.os == 'Linux'
         run: |
