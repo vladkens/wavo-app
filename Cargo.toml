@@ -2,10 +2,46 @@
 name = "wavo-app"
 version = "0.1.0"
 edition = "2024"
+authors = ["vladkens <v.pronsky@gmail.com>"]
 description = "Local dictation: hold a hotkey, speak, and the text lands where you were typing."
 license = "MIT"
 repository = "https://github.com/vladkens/wavo-app"
 publish = false
+
+# The app as nimbo's scripts/pack.py makes it: the macOS app and disk image, the Windows
+# installer, the AppImage and the .deb.
+[package.metadata.nimbo]
+id = "me.vladkens.wavo"
+name = "Wavo"
+icon = "assets/icon.png"
+comment = "Local dictation: hold a hotkey, speak, and the text lands where you were typing"
+publisher = "vladkens"
+
+[package.metadata.nimbo.macos]
+accessory = true
+entitlements = "assets/wavo.entitlements"
+
+[package.metadata.nimbo.macos.usage]
+NSMicrophoneUsageDescription = "Wavo records your voice while you dictate and turns it into text on this Mac. Nothing leaves your computer."
+
+[package.metadata.nimbo.macos.plist]
+LSApplicationCategoryType = "public.app-category.productivity"
+NSSupportsAutomaticTermination = false
+NSSupportsSuddenTermination = false
+
+# MallocSpaceEfficient=1 (libmalloc's src/malloc.c): no large-block cache, empty pages given back
+# at once, or malloc keeps the large blocks a model frees after its unload. LaunchServices sets it.
+[package.metadata.nimbo.macos.plist.LSEnvironment]
+MallocSpaceEfficient = "1"
+
+[package.metadata.nimbo.windows]
+app-id = "314a56a8-8a8b-4c18-954d-b930203f086d"
+
+# The binary links glibc and libasound; pack.py recommends what nimbo loads at run time.
+[package.metadata.nimbo.linux]
+categories = ["Utility", "Accessibility"]
+deb-package = "wavo"
+deb-depends = ["libc6 (>= 2.35)", "libasound2 | libasound2t64"]
 
 [dependencies]
 anyhow = "1.0.104"

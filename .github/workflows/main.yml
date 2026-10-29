@@ -61,13 +61,10 @@ jobs:
         include:
           - os: macOS
             runner: macos-latest
-            dist: make dist
           - os: Windows
             runner: windows-latest
-            dist: python scripts/dist.py x86_64-pc-windows-msvc aarch64-pc-windows-msvc
           - os: Linux
             runner: ubuntu-22.04
-            dist: python3 scripts/dist.py x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     env:
       # Linux aarch64 cross-build.
@@ -94,7 +91,7 @@ jobs:
       - uses: vladkens/actions/rust-build@v1
         with:
           name: Wavo
-          dist: ${{ matrix.dist }}
+          dist: bash scripts/dist.sh
           dev: true
           crates: false
           artifact: release-${{ matrix.os }}

@@ -48,7 +48,8 @@ const LOG_FILE: &str = "wavo.log";
 /// A log past this at launch is started over.
 const LOG_MAX: u64 = 5 << 20;
 
-/// The launcher entry on Linux, as the AppImage's .desktop has it (scripts/dist.py).
+/// The launcher entry on Linux, as the AppImage's .desktop has it (Cargo.toml's
+/// `[package.metadata.nimbo]`).
 const LAUNCHER: Launcher = Launcher {
   comment: "Local dictation: hold a hotkey, speak, and the text lands where you were typing",
   categories: &["Utility", "Accessibility"],
