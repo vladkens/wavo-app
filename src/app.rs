@@ -165,7 +165,9 @@ fn start(
 
   // Asked once: nimbo tries a staging folder beside the app.
   let supported = updater::fake().is_some()
-    || installed() && update::supported().inspect_err(|e| info!("updates: {e}")).is_ok();
+    || installed()
+      && !update::dev(crate::VERSION)
+      && update::supported().inspect_err(|e| info!("updates: {e}")).is_ok();
   let fake_mic = config.fake_mic.is_some();
   let (home, hub) = (config.home.clone(), config.hub.clone());
   let observer = Box::new(|update: Update| {
@@ -300,7 +302,7 @@ fn chosen(main: &mut Main, id: &str) {
     return;
   }
 
-  if id == menu::UPDATE {
+  if id == menu::UPDATE || id == menu::CHECK_UPDATES {
     return open_update(main);
   }
 
@@ -764,13 +766,13 @@ impl App {
 
 // MARK: Updates
 
-/// The menu item: the update's window ([UpdateWindow]), brought to the front if open, with a check
-/// when there is nothing else to show.
+/// The menu's items: the update's window ([UpdateWindow]), brought to the front if open, with a
+/// check when there is nothing else to show.
 fn open_update(main: &mut Main) {
-  let Some((start, open, updater, auto)) = with_app(|app| {
+  let Some((start, open, updater)) = with_app(|app| {
     let start = app.updater.lock().unwrap().open();
     let open = app.update_window.clone().filter(Window::is_open);
-    (start, open, app.updater.clone(), app.settings().auto_update)
+    (start, open, app.updater.clone())
   }) else {
     return;
   };
@@ -778,7 +780,7 @@ fn open_update(main: &mut Main) {
   match open {
     Some(w) => w.front(),
     None => {
-      let w = main.open(&update_config(), UpdateWindow { updater, auto });
+      let w = main.open(&update_config(), UpdateWindow { updater });
       w.on_close(|_| {
         with_app(|app| {
           app.update_window = None;
@@ -808,19 +810,13 @@ fn update_config() -> nimbo::Config {
 /// goes to the app.
 struct UpdateWindow {
   updater: Arc<Mutex<Updater>>,
-  /// Check for updates automatically, as the settings had it at the opening and the box since.
-  auto: bool,
 }
 
 impl nimbo::App for UpdateWindow {
   fn view(&mut self, ui: &mut nimbo::Ui) {
     let state = self.updater.lock().unwrap().state.clone();
     let about = About { name: "Wavo", version: crate::VERSION, icon: Some(Png::new(crate::ICON)) };
-    let Some(act) = dialog::view(ui, &about, &state, self.auto) else { return };
-    if let Act::Auto(on) = act {
-      self.auto = on;
-    }
-
+    let Some(act) = dialog::view(ui, &about, &state) else { return };
     proxy().post(move |_| _ = with_app(|app| app.update_act(act)));
   }
 }
@@ -914,7 +910,6 @@ impl App {
         }
       }
       Act::Close => close = true,
-      Act::Auto(on) => self.handle.edit_settings(move |s| s.auto_update = on),
     }
 
     drop(updater);
@@ -991,7 +986,7 @@ impl App {
     proxy().post(|main| main.quit());
   }
 
-  /// The menu item, and the update's window if it shows.
+  /// The menu's items, and the update's window if it shows.
   fn update_changed(&mut self) {
     self.refresh();
     proxy().post(|_| {

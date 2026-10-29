@@ -632,6 +632,9 @@ const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another compute
 const EXPORT_HELP: &str = "The history, its recordings and the settings, into a .zip archive: \
   Import brings it back, here or on another computer.";
 
+const UPDATE_HELP: &str = "Wavo looks for a new version at launch and once a day; the menu says \
+  when there is one. Off, it looks only when you choose Check for Updates.";
+
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
 
@@ -695,6 +698,16 @@ impl Prefs {
           self.edit(move |s| s.history_retention = cur);
         }
       });
+
+      // Only where the app can update.
+      if self.shell.updates() {
+        ui.form_row(fs, FormRow::new("Check for updates").info(UPDATE_HELP), |ui| {
+          let mut on = self.settings.auto_update;
+          if ui.id("auto-update").toggle(&mut on, "").changed {
+            self.edit(move |s| s.auto_update = on);
+          }
+        });
+      }
     });
 
     let models = self.hub.root().to_owned();
@@ -2286,8 +2299,8 @@ mod tests {
     assert_eq!(fake.log().paused, [true, false, true, false]);
   }
 
-  /// About's Check for Updates… opens the update's window; it doesn't show in a build that
-  /// doesn't update.
+  /// About's Check for Updates… opens the update's window, Advanced turns the automatic checks off;
+  /// neither shows in a build that doesn't update.
   #[test]
   fn about_checks_for_updates() {
     let home = Home::new("window-update", &TWO);
@@ -2295,10 +2308,15 @@ mod tests {
     let mut h = home.harness(&fake, Settings::default());
     tab(&mut h, Page::About);
     assert!(h.rect(Id::of("updates")).is_none());
+    tab(&mut h, Page::Advanced);
+    assert!(h.rect(Id::of("auto-update")).is_none());
 
     fake.log().updates = true;
     h.app_mut();
     h.frame();
+    click(&mut h, Id::of("auto-update"));
+    assert!(!fake.log().settings.auto_update);
+    tab(&mut h, Page::About);
     click(&mut h, Id::of("updates"));
     assert_eq!(fake.log().checks, 1);
   }

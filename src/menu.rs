@@ -1,9 +1,9 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! The menu bar icon and menu: a header with the app, the hotkey and the state; the warnings, most
-//! opening where they are fixed; Copy Last Dictation and Recent; the model in use with the others
-//! downloaded; Unload Model, History…, Settings…; the updater's item, Check for Updates… or what
-//! the update does; Quit.
+//! opening where they are fixed; an update found or going on; Copy Last Dictation and Recent; the
+//! model in use with the others downloaded; Unload Model, History…, Settings…, Check for Updates…,
+//! Quit.
 
 use nimbo::Hotkey;
 use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
@@ -16,8 +16,10 @@ use crate::session::{NoModel, Outcome, Phase, Status};
 use crate::window::{Found, Pick, bluetooth_only, microphones as mic_choices};
 
 pub const RECENT: usize = 10;
-/// The updater's item: Check for Updates…, or what the update does; it opens the update's window.
+/// The update's row under the warnings while it has news, and Check for Updates… above Quit: both
+/// open the update's window.
 pub const UPDATE: &str = "update";
+pub const CHECK_UPDATES: &str = "update-check";
 
 // MARK: Icon
 
@@ -190,6 +192,8 @@ pub fn menu(
     items.push(Item::new(w.id, &format!("{mark}{}", w.text)).enabled(w.action));
   }
 
+  items.extend(update.and_then(|s| dialog::menu_item(UPDATE, s)));
+
   let last = status.last.as_ref().is_some_and(|l| !l.text.is_empty());
   let loaded = status.engine.phase != EnginePhase::Stopped && status.state == Phase::Idle;
   let recent: Vec<Item> =
@@ -216,7 +220,7 @@ pub fn menu(
     // nothing.
     with_key(Item::new("settings", "Settings…"), "cmd+comma"),
   ]);
-  items.extend(update.map(|s| dialog::menu_item(UPDATE, s)));
+  items.extend(update.map(|s| dialog::check_item(CHECK_UPDATES, s)));
   items.extend([Item::separator(), with_key(Item::new("quit", "Quit Wavo"), "cmd+q")]);
   Menu::new(items)
 }
@@ -388,9 +392,9 @@ mod tests {
     assert!(!items.iter().any(|i| i.id.starts_with("update")), "a build that doesn't update");
   }
 
-  /// The updater's one item sits above Quit and says what goes on.
+  /// An update shows under the header and the warnings; Check for Updates… sits above Quit.
   #[test]
-  fn the_updates_item_sits_above_quit() {
+  fn an_update_shows_under_the_header() {
     let s = Status::default();
     let pick = Pick::default();
     let items = |state: State| {
@@ -400,10 +404,10 @@ mod tests {
     };
     let idle = items(State::Idle);
     let ids: Vec<_> = idle[idle.len() - 4..].iter().map(|(id, _)| id.as_str()).collect();
-    assert_eq!(ids, ["settings", UPDATE, "", "quit"]);
+    assert_eq!(ids, ["settings", CHECK_UPDATES, "", "quit"]);
     assert_eq!(idle[idle.len() - 3].1, "Check for Updates…");
+    assert!(!idle.iter().any(|(id, _)| id == UPDATE), "no news");
     let available = items(State::Available(nimbo::update::Release::test("1.2.0")));
-    assert_eq!(available.len(), idle.len(), "one item still");
-    assert_eq!(available[available.len() - 3].1, "Update Available: v1.2.0…");
+    assert_eq!(available[1], (UPDATE.into(), "Update Available: v1.2.0…".into()));
   }
 }
