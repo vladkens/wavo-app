@@ -412,6 +412,9 @@ pub enum Request {
   Unload,
   /// An import added dictations: the update after it carries the history's change.
   Imported,
+  /// No dictation runs, as the session stands after what was sent before it: an error while one
+  /// does.
+  Idle,
 }
 
 enum Msg {
@@ -730,6 +733,10 @@ impl<O: TextOutput> Controller<O> {
         Ok(())
       }
       Request::Imported => Ok(()),
+      Request::Idle => match self.dictation {
+        Some(_) => bail!("a dictation runs"),
+        None => Ok(()),
+      },
     }
   }
 
@@ -1738,6 +1745,19 @@ mod tests {
 
   /// Escape while recording or transcribing keeps nothing; the next dictation has the same warm
   /// engine.
+  /// The update asks before the app quits: a dictation that runs, or whose key came first, is
+  /// busy until it ends.
+  #[test]
+  fn idle_is_asked_after_the_inputs_before_it() {
+    let s = InProcess::start("session-idle", &Settings::default(), Some(&loud(20.0)), "hi", &[]);
+    assert_eq!(s.handle.request(Request::Idle), Ok(()));
+    s.press();
+    assert!(s.handle.request(Request::Idle).is_err(), "the key came first");
+    s.handle.input(Input::Escape);
+    s.finished(1);
+    assert_eq!(s.handle.request(Request::Idle), Ok(()));
+  }
+
   #[test]
   fn escape_keeps_nothing() {
     let s = InProcess::start(

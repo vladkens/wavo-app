@@ -107,12 +107,8 @@ struct App {
   update_window: Option<Window<UpdateWindow>>,
   /// The update downloaded, put in place once no dictation runs.
   staged: Option<Staged>,
-  /// The update goes in: no dictation starts, and the app quits once its installer runs.
-  installing: bool,
   /// The installer runs: the app quits once no dictation runs, [QUIT_WAIT] at the latest.
   quitting: bool,
-  /// The settings window records a shortcut: the hotkey is paused for it.
-  recording_shortcut: bool,
   session: Session,
 }
 
@@ -194,11 +190,7 @@ fn start(
   let toggle = handle.clone();
   main.serve(instance, move |_, cmd| match cmd.name.as_str() {
     instance::OPEN | instance::QUIT => {}
-    // None while an update goes in: the app quits after it.
-    "toggle" if with_app(|app| app.installing) != Some(true) => {
-      toggle.input(session::Input::Toggle)
-    }
-    "toggle" => info!("toggle: an update goes in"),
+    "toggle" => toggle.input(session::Input::Toggle),
     other => warn!("unknown command {other:?}"),
   })?;
 
@@ -248,9 +240,7 @@ fn start(
     updater: Arc::new(Mutex::new(Updater::new(supported))),
     update_window: None,
     staged: None,
-    installing: false,
     quitting: false,
-    recording_shortcut: false,
     session,
   };
   if let Some(e) = updated {
@@ -394,8 +384,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
   w.on_close(|_| {
     with_app(|app| {
       app.window = None;
-      app.recording_shortcut = false;
-      app.pause_hotkeys();
+      app.hotkeys.pause(false);
     });
   });
   w.front();
@@ -975,8 +964,6 @@ impl App {
       return;
     };
 
-    self.installing = true;
-    self.pause_hotkeys();
     spawn("update", || {
       let installed = update::install(staged);
       proxy().post(|_| _ = with_app(|app| app.update_installed(installed)));
@@ -988,8 +975,6 @@ impl App {
   fn update_installed(&mut self, installed: io::Result<()>) {
     if let Err(e) = installed {
       warn!("update install: {e}");
-      self.installing = false;
-      self.pause_hotkeys();
       self.updater.lock().unwrap().failed(&e);
       return self.update_changed();
     }
@@ -1000,16 +985,19 @@ impl App {
     proxy().after(QUIT_WAIT, |main| main.quit());
   }
 
-  /// A dictation that started as the update went in (its key was on its way) ends first.
+  /// The app quits once the session itself says no dictation runs: one whose key was on its way as
+  /// the update went in ends first.
   fn quit_when_idle(&self) {
-    if self.quitting && self.update.as_ref().is_none_or(idle) {
-      proxy().post(|main| main.quit());
+    if !self.quitting || !self.update.as_ref().is_none_or(idle) {
+      return;
     }
-  }
 
-  /// The hotkey paused while the update goes in or a shortcut is recorded, and only then.
-  fn pause_hotkeys(&mut self) {
-    self.hotkeys.pause(self.installing || self.recording_shortcut);
+    let handle = self.handle.clone();
+    spawn("update-quit", move || {
+      if handle.request(Request::Idle).is_ok() {
+        proxy().post(|main| main.quit());
+      }
+    });
   }
 
   /// The menu's items, and the update's window if it shows.
@@ -1052,12 +1040,7 @@ impl window::Shell for AppShell {
   }
 
   fn pause_hotkey(&self, paused: bool) {
-    proxy().post(move |_| {
-      with_app(|app| {
-        app.recording_shortcut = paused;
-        app.pause_hotkeys();
-      });
-    });
+    proxy().post(move |_| _ = with_app(|app| app.hotkeys.pause(paused)));
   }
 
   fn devices(&self) -> Vec<audio::Device> {
