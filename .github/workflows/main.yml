@@ -119,14 +119,24 @@ jobs:
           path: target/distrib
       - uses: vladkens/actions/macos-sign@v1
         with:
+          step: sign
           files: target/distrib/*-macos.zip
           required: true
           entitlements: assets/wavo.entitlements
           certificate: ${{ secrets.APPLE_CERTIFICATE }}
           certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      - uses: vladkens/actions/macos-sign@v1
+        with:
+          step: notarize
+          files: target/distrib/*-macos.zip
+          required: true
           api-key: ${{ secrets.APPLE_API_KEY }}
           api-key-id: ${{ secrets.APPLE_API_KEY_ID }}
           api-issuer: ${{ secrets.APPLE_API_ISSUER }}
+      - if: always()
+        uses: vladkens/actions/macos-sign@v1
+        with:
+          step: cleanup
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-macOS
