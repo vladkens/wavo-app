@@ -22,8 +22,6 @@ accessory = true
 entitlements = "assets/wavo.entitlements"
 plist.NSMicrophoneUsageDescription = "Wavo records your voice while you dictate and turns it into text on this Mac. Nothing leaves your computer."
 plist.LSApplicationCategoryType = "public.app-category.productivity"
-plist.NSSupportsAutomaticTermination = false
-plist.NSSupportsSuddenTermination = false
 # MallocSpaceEfficient=1 (libmalloc's src/malloc.c): no large-block cache, empty pages given back
 # at once, or malloc keeps the large blocks a model frees after its unload. LaunchServices sets it.
 plist.LSEnvironment.MallocSpaceEfficient = "1"

@@ -423,6 +423,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "afea66474c4036a7e5fa4b072a3b0a09cd0b01f00134da3115d76b7cc5899f03"
 
 [[package]]
+name = "ed25519-compact"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1454db4f2edb7f0e8fe0c5b375b0c978fc63244cc9f010d160e417eb10139aa8"
+
+[[package]]
 name = "embed-resource"
 version = "3.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -898,10 +904,11 @@ dependencies = [
 [[package]]
 name = "nimbo"
 version = "0.0.1"
-source = "git+https://github.com/vladkens/nimbo?branch=main#972eb685349df4e71c6b34715dbdf632c1694d4e"
+source = "git+https://github.com/vladkens/nimbo?branch=main#e5ba21598131f8e809557df229e94454eb82fd15"
 dependencies = [
  "block2",
  "dispatch2",
+ "ed25519-compact",
  "keyboard-types",
  "objc2",
  "objc2-app-kit",
@@ -910,6 +917,7 @@ dependencies = [
  "objc2-core-text",
  "objc2-foundation",
  "objc2-quartz-core",
+ "objc2-security",
  "objc2-service-management",
  "windows-sys 0.61.2",
 ]

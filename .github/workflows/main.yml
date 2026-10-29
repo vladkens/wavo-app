@@ -117,7 +117,23 @@ jobs:
         with:
           name: release
           pattern: release-*
-      - uses: vladkens/actions/rust-publish@v1
+      - id: publish
+        uses: vladkens/actions/rust-publish@v1
         with:
           name: Wavo
           crates: false
+      # The release's update.txt for the app's updater, written and signed by nimbo's pack.py at the
+      # commit Cargo.lock holds; skipped without the UPDATE_KEY secret.
+      - if: steps.publish.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.publish.outputs.tag }}
+          FILES: ${{ steps.publish.outputs.files }}
+          UPDATE_KEY: ${{ secrets.UPDATE_KEY }}
+        run: |
+          [ -n "$UPDATE_KEY" ] || { echo "::notice::no UPDATE_KEY secret: $TAG has no update feed"; exit 0; }
+          rev=$(grep -A2 '^name = "nimbo"$' Cargo.lock | sed -n 's/^source = .*#\([0-9a-f]*\)"$/\1/p')
+          curl -fsSL -o "$RUNNER_TEMP/pack.py" "https://raw.githubusercontent.com/vladkens/nimbo/$rev/scripts/pack.py"
+          python3 "$RUNNER_TEMP/pack.py" feed --url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" \
+            --out "$RUNNER_TEMP" $(grep -E '\.(dmg|exe|AppImage)$' <<< "$FILES")
+          gh release upload "$TAG" "$RUNNER_TEMP/update.txt" --clobber

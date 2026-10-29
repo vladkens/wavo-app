@@ -17,6 +17,7 @@ mod settings;
 #[cfg(test)]
 mod testing;
 mod transfer;
+mod updater;
 mod window;
 
 use std::fs::{self, File};
@@ -90,6 +91,9 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+  // First, before any thread: run as an update's installer it never returns; else the failure of
+  // the update that started this app.
+  let updated = nimbo::update::finish();
   // Windows: only for arguments (a command, `--help`, a mistake), which print. Attached, the app
   // would print its logs after the prompt, and closing that console would end it without its quit
   // hook.
@@ -101,7 +105,7 @@ fn main() -> Result<()> {
   // The app logs into a file too: launched from the desktop it has no stderr.
   init_tracing(cli.command.is_none().then(home).as_deref());
   match cli.command {
-    None => app::run(),
+    None => app::run(updated),
     Some(Command::Uninstall { dry_run, yes }) => cli::uninstall(dry_run, yes),
     Some(Command::Toggle) => cli::send("toggle"),
     Some(Command::Quit) => cli::send("quit"),
