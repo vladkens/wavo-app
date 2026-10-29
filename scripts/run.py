@@ -3,7 +3,7 @@
 
   scripts/run.py <Wavo.app> [<dest, e.g. /Applications/Wavo.app>]
 
-The bundle has to be signed with a certificate (scripts/bundle.py), never ad hoc: the permissions
+The bundle has to be signed with a certificate (`make bundle`), never ad hoc: the permissions
 macOS grants are kept for its designated requirement. The requirement they were last granted to
 is kept in Wavo's data home; when the bundle's differs (another identity, or the first run of this
 script), Wavo's permissions are reset first, so System Settings has no stale Wavo whose switch is

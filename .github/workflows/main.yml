@@ -64,10 +64,10 @@ jobs:
             dist: make dist
           - os: Windows
             runner: windows-latest
-            dist: python scripts/dist.py x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+            dist: make dist T=x86_64-pc-windows-msvc && make dist T=aarch64-pc-windows-msvc
           - os: Linux
             runner: ubuntu-22.04
-            dist: python3 scripts/dist.py x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+            dist: make dist T=x86_64-unknown-linux-gnu && make dist T=aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     env:
       # Linux aarch64 cross-build.
@@ -89,8 +89,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libasound2-dev libasound2-dev:arm64 gcc-aarch64-linux-gnu
           rustup target add aarch64-unknown-linux-gnu
+      # The runner image has no make.
       - if: runner.os == 'Windows'
-        run: rustup target add aarch64-pc-windows-msvc
+        run: |
+          rustup target add aarch64-pc-windows-msvc
+          choco install make --no-progress -y
       - uses: vladkens/actions/rust-build@v1
         with:
           name: Wavo

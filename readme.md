@@ -36,9 +36,9 @@
 <details>
 <summary>Which file, and the first launch</summary>
 
-- **macOS** 14 or later, Apple Silicon: `Wavo-dev-macos.zip`; move `Wavo.app` into `/Applications`. It is signed ad hoc for now, so macOS refuses the first launch: right-click → Open (on macOS 15 and later: System Settings › Privacy & Security › Open Anyway), or run `xattr -dr com.apple.quarantine /Applications/Wavo.app`. After an update macOS asks for Accessibility and the microphone again.
-- **Windows** 10 or 11: `Wavo-dev-windows-x64.zip`, or `-arm64` for Windows on Arm; unzip it anywhere and run `Wavo.exe`. It is not signed yet: SmartScreen says "Windows protected your PC", More info → Run anyway. Its icon is in the notification area, perhaps under the ^ arrow.
-- **Linux**, x86_64 or aarch64: `Wavo-dev-linux-<arch>.AppImage`; make it executable (`chmod +x`) and run it.
+- **macOS** 14 or later, Apple Silicon: `Wavo-dev-macos-aarch64.dmg`; open it and drag Wavo into Applications. The dev build is signed ad hoc, so macOS refuses the first launch: right-click → Open (on macOS 15 and later: System Settings › Privacy & Security › Open Anyway), or run `xattr -dr com.apple.quarantine /Applications/Wavo.app`. After an update macOS asks for Accessibility and the microphone again.
+- **Windows** 10 or 11: `Wavo-dev-windows-x64-setup.exe`, or `-arm64-setup.exe` for Windows on Arm: it installs Wavo for you alone, no administrator needed, with a Start menu entry, and Settings › Apps removes it. It is not signed yet: SmartScreen says "Windows protected your PC", More info → Run anyway. Its icon is in the notification area, perhaps under the ^ arrow.
+- **Linux**, x86_64 or aarch64: `Wavo-dev-linux-<arch>.AppImage`; make it executable (`chmod +x`) and run it. On Debian and Ubuntu `Wavo-dev-linux-<arch>.deb` installs it instead: `sudo apt install ./Wavo-dev-linux-<arch>.deb`.
 
 </details>
 
@@ -81,9 +81,9 @@ It writes `~/Downloads/handy-export.zip`: bring it in with Advanced › Data ›
 The app's `uninstall` command removes all Wavo left: the history, settings and caches, the models it downloaded, and on macOS its permissions and the app itself. `--dry-run` lists them first.
 
 ```sh
-/Applications/Wavo.app/Contents/MacOS/wavo-app uninstall   # macOS
-.\Wavo.exe uninstall --yes                                 # Windows, without the question
-./Wavo-dev-linux-<arch>.AppImage uninstall                 # Linux
+/Applications/Wavo.app/Contents/MacOS/wavo-app uninstall      # macOS
+& "$env:LOCALAPPDATA\Programs\Wavo\Wavo.exe" uninstall --yes  # Windows, then Settings › Apps
+./Wavo-dev-linux-<arch>.AppImage uninstall                    # Linux (the .deb: wavo-app uninstall, then apt remove wavo)
 ```
 
 </details>
