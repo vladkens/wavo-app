@@ -25,33 +25,12 @@ jobs:
       # ALSA for cpal; fonts and text libraries for the HUD's tests in nimbo's harness.
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libfontconfig1 libfreetype6 libharfbuzz0b fonts-dejavu-core
       - run: rustup toolchain install nightly --profile minimal --component rustfmt
-      - run: make check
+      - run: rustup target add aarch64-apple-darwin x86_64-pc-windows-gnu
+      - run: python3 -m venv ~/zig && ~/zig/bin/pip install -q cargo-zigbuild==0.23.4 ziglang==0.16.0 && echo ~/zig/bin >> "$GITHUB_PATH"
+      - run: make check CROSS="aarch64-apple-darwin x86_64-pc-windows-gnu"
       - run: make test
 
-  # Each OS's own code: clippy and the tests on macOS and Windows too.
-  macos:
-    runs-on: macos-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - run: cargo clippy --release --all-targets -- -D warnings
-      - run: make test
-
-  windows:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - run: cargo clippy --release --locked --all-targets -- -D warnings
-      - run: cargo test --release --locked
-
-  # Release files, a job per OS; aarch64 cross-compiled. Linux on the oldest LTS for its glibc.
+  # A job per OS; aarch64 cross-compiled. Linux on the oldest LTS for its glibc.
   build:
     name: build ${{ matrix.os }}
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
@@ -104,7 +83,7 @@ jobs:
 
   publish:
     if: github.ref == 'refs/heads/main'
-    needs: [test, macos, windows, build]
+    needs: [test, build]
     runs-on: ubuntu-latest
     permissions:
       attestations: write
@@ -117,7 +96,16 @@ jobs:
         with:
           name: release
           pattern: release-*
+      - run: sudo apt-get update && sudo apt-get install -y nsis hfsprogs
       - uses: vladkens/actions/rust-publish@v1
         with:
           name: Wavo
           crates: false
+          pack: make pack
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          UPDATE_KEY: ${{ secrets.UPDATE_KEY }}

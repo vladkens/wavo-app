@@ -1850,16 +1850,15 @@ const ACKS: [(&str, &str, &str); 6] = [
   ),
 ];
 
-/// `assets/icon.png` at 128 px (64 points at 2x) as RGBA, from build.rs.
-static ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/about-icon.rgba"));
-
 impl Prefs {
   fn about(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let t = ui.theme();
     let head =
       Style::new().w(grow()).pads([10.0, 0.0, 6.0, 0.0]).align(Align::Center, Align::Start);
     ui.col(head, |ui| {
-      ui.rgba_image(128, 128, ICON, Style::new().w(px(64.0)).h(px(64.0)));
+      // 128 px: 64 points at 2x.
+      let icon = nimbo::Png::new(crate::ICON).side(128);
+      ui.png_image(icon, Style::new().w(px(64.0)).h(px(64.0)));
       ui.el(Style::new().h(px(10.0)));
       ui.text("Wavo", TextStyle::new(Font { size: 20.0, ..t.bold }, t.text).ellipsis());
       ui.el(Style::new().h(px(2.0)));

@@ -70,8 +70,3 @@ incremental = true
 inherits = "release"
 lto = "thin"
 incremental = false
-
-[build-dependencies]
-embed-resource = "3.0.12"
-ico = "0.6.0"
-png = "0.18.1"

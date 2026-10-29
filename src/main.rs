@@ -27,7 +27,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use nimbo::desktop::Launcher;
-use nimbo::{AppInfo, Config, Presence};
+use nimbo::{AppInfo, Config, Png, Presence};
 use tracing::warn;
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt;
@@ -39,8 +39,8 @@ const VERSION: &str = concat!("v", env!("WAVO_VERSION"));
 const INFO: AppInfo =
   AppInfo { id: "me.vladkens.wavo", name: "Wavo", presence: Presence::Accessory };
 
-/// `assets/icon.png` at 256 px from build.rs, raw RGBA.
-const ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/window-icon.rgba"));
+/// The app's icon, decoded by nimbo when first shown.
+const ICON: &[u8] = include_bytes!("../assets/icon.png");
 
 /// The app's log in its home, [home]: `~/Library/Application Support/me.vladkens.wavo/wavo.log`,
 /// `%LOCALAPPDATA%\me.vladkens.wavo\wavo.log`, `~/.local/share/me.vladkens.wavo/wavo.log`.
@@ -53,13 +53,13 @@ const LOG_MAX: u64 = 5 << 20;
 const LAUNCHER: Launcher = Launcher {
   comment: "Local dictation: hold a hotkey, speak, and the text lands where you were typing",
   categories: &["Utility", "Accessibility"],
-  icon: (256, ICON),
+  icon: Png::icon(ICON),
 };
 
 /// `cfg` with the app's icon in the title bar and taskbar; macOS shows the bundle's.
 fn with_icon(cfg: Config) -> Config {
   #[cfg(not(target_os = "macos"))]
-  let cfg = cfg.icon(256, ICON);
+  let cfg = cfg.png_icon(Png::icon(ICON));
 
   cfg
 }
