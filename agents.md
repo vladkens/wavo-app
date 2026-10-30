@@ -20,4 +20,5 @@ The dictation app (`wavo-app`, `publish = false`) for macOS, Windows and Linux: 
 - Tests only read the Hugging Face cache (`make test-models` runs on its real models); anything that downloads gets a temp `HF_HOME`.
 - No generated or binary files in git: screenshots and speech fixtures are made into `target/`; the app icon is the one binary.
 - Start every `.rs` file with `// Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app`.
+- `make check` (nightly fmt, clippy with `-D warnings`) and `make test` pass before a pull request.
 - A commit is one short lowercase line, no body.
