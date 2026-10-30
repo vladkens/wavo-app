@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
+use nimbo::system::Change;
 use nimbo::{
   Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
   FormStyle, Hotkey, Icon, Id, Item, Key, Menu, NamedKey, PopUp, Select, Style, TextStyle, Tile,
@@ -357,10 +358,19 @@ impl App for Prefs {
   }
 
   /// The file Export's or Import's panel picked; Esc, or a click on nothing above the panel
-  /// under the history, unselects its dictation.
+  /// under the history, unselects its dictation; the microphones or the lid changed: read again
+  /// for the Microphone row.
   fn event(&mut self, cx: &mut Cx, ev: &Event) -> bool {
     let history = self.page == Page::History;
     match ev {
+      Event::System(Change::AudioInputs | Change::DefaultInput) => {
+        self.devices = self.shell.devices();
+        true
+      }
+      Event::System(Change::Lid) => {
+        self.lid_closed = self.shell.lid_closed();
+        true
+      }
       Event::FileDialog(answer) => {
         match (self.panel.take(), answer) {
           // GNOME's save panel adds no extension: Import's *.zip would not show it.
@@ -401,6 +411,25 @@ const SECURE_INPUT_NOTE: &str = "Secure Input is on (a password field, or a term
   Keyboard Entry): the shortcut works through a backup path, and Esc may not cancel.";
 const ACTIVATION_HELP: &str = "How the hotkey records: while you hold it, from one press to the \
   next, or both (a short tap latches the recording on).";
+// What Automatic does here ([audio::automatic]): macOS tells the built-in microphone from a
+// headset on its jack, and the lid; Windows tells USB and Bluetooth, and counts its board's sound
+// (HDAUDIO), the jack too, as built-in; Linux (ALSA) tells no transport and lists no default.
+const MIC_HELP: &str = match () {
+  _ if cfg!(target_os = "macos") => {
+    "Automatic takes a USB microphone first, then the built-in one while the lid is open, then a \
+     wired one, and a Bluetooth headset only when there is no other: it records at call quality \
+     and loses the first words. System Default uses whatever the system picks."
+  }
+  _ if cfg!(windows) => {
+    "Automatic takes a USB microphone first, then the computer’s own or a wired one, and a \
+     Bluetooth headset only when there is no other: it records at call quality and loses the \
+     first words. System Default uses whatever the system picks."
+  }
+  _ => {
+    "Automatic and System Default both use the system’s input. Linux doesn’t tell Wavo how a \
+     microphone is attached, so neither skips a Bluetooth headset."
+  }
+};
 // Where the person turns launch at login back on, which the system turned off.
 const LOGIN_APPROVAL: &str = if cfg!(windows) {
   "Turn Wavo on in Task Manager › Startup apps."
@@ -433,12 +462,15 @@ impl Prefs {
       let (devices, saved) = (&self.devices, &self.settings.microphone);
       let (mics, at) = microphones(devices, saved, self.lid_closed);
       let labels: Vec<&str> = mics.iter().map(|m| m.0.as_str()).collect();
-      let mut row = FormRow::new("Microphone");
-      if let Some(note) = bluetooth_only(devices, saved, self.lid_closed) {
-        row = row.caption(note);
-      }
+      let warning = mic_warning(devices, saved, self.lid_closed);
+      // The warning alone in the ⓘ's place: what is wrong matters then, not how the modes choose.
+      let row = FormRow::new("Microphone");
+      let row = match &warning {
+        Some(warning) => row.warning(warning),
+        None => row.info(MIC_HELP),
+      };
 
-      ui.form_row(fs, row, |ui| {
+      ui.id("mic-row").form_row(fs, row, |ui| {
         // ALSA's names run past 60 characters: a longer one ends in "…" beside its label.
         let mut cur = at;
         let pop = PopUp::new(&mut cur, &labels).separators(&[1]).max_width(MIC_WIDTH);
@@ -634,6 +666,7 @@ const EXPORT_HELP: &str = "The history, its recordings and the settings, into a 
 
 const UPDATE_HELP: &str = "Wavo looks for a new version at launch and once a day; the menu says \
   when there is one. Off, it looks only when you choose Check for Updates.";
+const NO_UPDATES: &str = "This copy of Wavo doesn’t update itself.";
 
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
@@ -660,6 +693,7 @@ const RETENTIONS: [(Retention, &str); 7] = [
 
 impl Prefs {
   fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    // The pop-ups first, then the switches.
     ui.form_section(fs, "App", |ui| {
       ui.form_row(fs, FormRow::new("Show the HUD at"), |ui| {
         let mut cur = self.settings.hud_position;
@@ -668,17 +702,24 @@ impl Prefs {
         }
       });
 
-      ui.form_row(fs, FormRow::new("Show the transcription time").info(TOOK_HELP), |ui| {
-        let mut on = self.settings.show_transcription_time;
-        if ui.id("took").toggle(&mut on, "").changed {
-          self.edit(move |s| s.show_transcription_time = on);
-        }
-      });
-
       ui.form_row(fs, FormRow::new("Unload the model").info(UNLOAD_HELP), |ui| {
         let mut cur = self.settings.unload_after_minutes;
         if Select::new(&mut cur, &UNLOADS).separators(&[0]).show(ui.id("unload")).changed {
           self.edit(move |s| s.unload_after_minutes = cur);
+        }
+      });
+
+      ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
+        let mut cur = self.settings.history_retention;
+        if ui.id("retention").select(&mut cur, &RETENTIONS).changed {
+          self.edit(move |s| s.history_retention = cur);
+        }
+      });
+
+      ui.form_row(fs, FormRow::new("Show the transcription time").info(TOOK_HELP), |ui| {
+        let mut on = self.settings.show_transcription_time;
+        if ui.id("took").toggle(&mut on, "").changed {
+          self.edit(move |s| s.show_transcription_time = on);
         }
       });
 
@@ -692,22 +733,16 @@ impl Prefs {
         });
       }
 
-      ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
-        let mut cur = self.settings.history_retention;
-        if ui.id("retention").select(&mut cur, &RETENTIONS).changed {
-          self.edit(move |s| s.history_retention = cur);
+      // Off and disabled where the app can't update, the setting kept; its ⓘ says why.
+      let updates = self.shell.updates();
+      let help = if updates { UPDATE_HELP } else { NO_UPDATES };
+      let row = FormRow::new("Check for updates").info(help).disabled(!updates);
+      ui.id("auto-update-row").form_row(fs, row, |ui| {
+        let mut on = updates && self.settings.auto_update;
+        if ui.id("auto-update").toggle(&mut on, "").changed {
+          self.edit(move |s| s.auto_update = on);
         }
       });
-
-      // Only where the app can update.
-      if self.shell.updates() {
-        ui.form_row(fs, FormRow::new("Check for updates").info(UPDATE_HELP), |ui| {
-          let mut on = self.settings.auto_update;
-          if ui.id("auto-update").toggle(&mut on, "").changed {
-            self.edit(move |s| s.auto_update = on);
-          }
-        });
-      }
     });
 
     let models = self.hub.root().to_owned();
@@ -855,12 +890,15 @@ pub fn microphones(
   saved: &Microphone,
   lid_closed: bool,
 ) -> (Vec<(String, Microphone)>, usize) {
-  let automatic = match audio::automatic(devices, lid_closed) {
-    Auto::Device(i) => format!("Automatic ({})", devices[i].name),
-    Auto::System => "Automatic".to_owned(),
-    Auto::Nothing => "Automatic (none: the lid is closed)".to_owned(),
+  let default = devices.iter().find(|d| d.default);
+  let automatic = match (audio::automatic(devices, lid_closed), default) {
+    (Auto::Device(i), _) => format!("Automatic ({})", devices[i].name),
+    // Only virtual ones, or a closed lid's with a virtual default: the system's.
+    (Auto::System, Some(d)) => format!("Automatic ({})", d.name),
+    (Auto::System, None) => "Automatic".to_owned(),
+    (Auto::Nothing, _) => "Automatic (none: the lid is closed)".to_owned(),
   };
-  let default = match devices.iter().find(|d| d.default) {
+  let default = match default {
     Some(d) => format!("System Default ({})", d.name),
     None => "System Default".to_owned(),
   };
@@ -875,14 +913,50 @@ pub fn microphones(
     Microphone::System => return (items, 1),
     Microphone::Device(choice) => choice,
   };
-  let by_id = devices.iter().position(|d| saved.id.is_some() && d.id == saved.id);
-  if let Some(i) = by_id.or_else(|| devices.iter().position(|d| d.name == saved.name)) {
+  if let Some(i) = audio::position(devices, saved) {
     return (items, i + 2);
   }
 
   items.push((format!("{} (not connected)", saved.name), Microphone::Device(saved.clone())));
   let at = items.len() - 1;
   (items, at)
+}
+
+/// While the `saved` microphone isn't connected: its name, and what records in its place, the
+/// system's input ([audio::in_use]), [Auto::Nothing] when there is no input. Here and in the menu.
+pub fn not_connected<'a>(
+  devices: &[audio::Device],
+  saved: &'a Microphone,
+  lid_closed: bool,
+) -> Option<(&'a str, Auto)> {
+  let Microphone::Device(choice) = saved else { return None };
+  let missing = audio::position(devices, choice).is_none();
+  missing.then(|| (choice.name.as_str(), audio::in_use(devices, saved, lid_closed)))
+}
+
+/// A listed microphone's name, the built-in one's under a closed lid saying so, as Automatic's
+/// does: it hears nothing.
+pub fn mic_name(device: &audio::Device, lid_closed: bool) -> String {
+  match lid_closed && device.transport == Transport::BuiltIn {
+    true => format!("{} (the lid is closed)", device.name),
+    false => device.name.clone(),
+  }
+}
+
+/// The Microphone row's warning: the one chosen isn't connected, and what records instead; or
+/// Automatic has only a Bluetooth one.
+fn mic_warning(devices: &[audio::Device], saved: &Microphone, lid_closed: bool) -> Option<String> {
+  let Some((name, instead)) = not_connected(devices, saved, lid_closed) else {
+    return bluetooth_only(devices, saved, lid_closed).map(str::to_owned);
+  };
+
+  Some(match instead {
+    Auto::Device(i) => {
+      format!("{name} isn’t connected: Wavo records with {}", mic_name(&devices[i], lid_closed))
+    }
+    Auto::System => format!("{name} isn’t connected: Wavo records with the system’s input"),
+    Auto::Nothing => format!("{name} isn’t connected, and there is no other microphone"),
+  })
 }
 
 /// Under Automatic when the device it picks is a Bluetooth one: there is no other.
@@ -2003,6 +2077,9 @@ mod tests {
   struct Log {
     settings: Settings,
     paused: Vec<bool>,
+    /// A MacBook's microphone and a USB one unless set.
+    devices: Option<Vec<audio::Device>>,
+    lid_closed: bool,
     /// All allowed unless set.
     access: Option<Access>,
     allowed: Vec<Pane>,
@@ -2044,6 +2121,10 @@ mod tests {
     }
 
     fn devices(&self) -> Vec<audio::Device> {
+      if let Some(devices) = &self.log().devices {
+        return devices.clone();
+      }
+
       let device = |name: &str, default, transport| audio::Device {
         id: Some(name.to_lowercase()),
         name: name.into(),
@@ -2052,6 +2133,10 @@ mod tests {
       };
       let mac = device("MacBook Pro Microphone", true, Transport::BuiltIn);
       vec![mac, device("USB Mic", false, Transport::Usb)]
+    }
+
+    fn lid_closed(&self) -> bool {
+      self.log().lid_closed
     }
 
     fn access(&self) -> Access {
@@ -2219,6 +2304,27 @@ mod tests {
     click(h, Id::of(CONFIRM).key("action"));
   }
 
+  /// The accessibility tree's line that starts with `prefix`, as assistive technology reads it.
+  fn a11y_line(h: &Harness<Prefs>, prefix: &str) -> Option<String> {
+    let tree = h.a11y();
+    tree.lines().map(str::trim).find(|l| l.starts_with(prefix)).map(str::to_owned)
+  }
+
+  /// Rests the pointer on the mark of the row `row` (its ⓘ, or the warning in its place) until
+  /// its tooltip shows; the tooltip's text.
+  fn tip(h: &mut Harness<Prefs>, row: &str) -> String {
+    let mark = Id::of(row).key("info");
+    let r = h.rect(mark).unwrap_or_else(|| panic!("no mark in {row}"));
+    h.move_to(r.x + r.w / 2.0, r.y + r.h / 2.0);
+    h.wait(Duration::from_millis(400));
+    let tip = mark.key("tip");
+    assert!(h.rect(tip).is_some(), "no tooltip on the mark of {row}");
+    let text = h.text(tip.nth(0)).unwrap_or_default().to_owned();
+    h.leave();
+    h.frame();
+    text
+  }
+
   /// The dictation in progress shows as being transcribed, not as one without text.
   #[test]
   fn the_dictation_in_progress_is_transcribing() {
@@ -2248,8 +2354,8 @@ mod tests {
   }
 
   /// Every page in both looks, as high as its content or [SCROLLING] high; with `WAVO_SHOTS` set
-  /// (`make shots`), written there: also Models asking before a delete and General at the first
-  /// launch.
+  /// (`make shots`), written there: also Advanced in a build that doesn't update, Models asking
+  /// before a delete and General at the first launch.
   #[test]
   fn every_page_renders_in_both_looks() {
     let home =
@@ -2311,6 +2417,10 @@ mod tests {
         assert_eq!(ground[0] < 100, appearance.dark, "{name} {look}: {ground:?}");
       }
 
+      fake.log().updates = false;
+      tab(&mut h, Page::Advanced);
+      shot(&mut h, &format!("advanced-no-updates-{look}"));
+
       tab(&mut h, Page::History);
       click(&mut h, Id::of(("text", ids[6])));
       shot(&mut h, &format!("history-selected-{look}"));
@@ -2367,20 +2477,31 @@ mod tests {
   }
 
   /// About's Check for Updates… opens the update's window, Advanced turns the automatic checks off;
-  /// neither shows in a build that doesn't update.
+  /// in a build that doesn't update About has no button and Advanced's switch is off and disabled,
+  /// the setting kept on, its row's ⓘ enabled and saying why.
   #[test]
   fn about_checks_for_updates() {
     let home = Home::new("window-update", &TWO);
     let fake = Fake::default();
+    // On, as by default.
     let mut h = home.harness(&fake, Settings::default());
+    assert!(fake.log().settings.auto_update);
+    let switch = |h: &Harness<Prefs>| a11y_line(h, r#"switch "Check for updates""#);
     tab(&mut h, Page::About);
     assert!(h.rect(Id::of("updates")).is_none());
     tab(&mut h, Page::Advanced);
-    assert!(h.rect(Id::of("auto-update")).is_none());
+    assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" off disabled"#));
+    let info = format!(r#"button "Info" desc {NO_UPDATES:?}"#);
+    assert_eq!(a11y_line(&h, &info), Some(info), "enabled");
+    assert_eq!(tip(&mut h, "auto-update-row"), NO_UPDATES);
+    click(&mut h, Id::of("auto-update"));
+    assert!(fake.log().settings.auto_update, "kept");
 
     fake.log().updates = true;
     h.app_mut();
     h.frame();
+    assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" on"#));
+    assert_eq!(tip(&mut h, "auto-update-row"), UPDATE_HELP);
     click(&mut h, Id::of("auto-update"));
     assert!(!fake.log().settings.auto_update);
     tab(&mut h, Page::About);
@@ -2428,6 +2549,117 @@ mod tests {
     h.app_mut().autostart_set(true, Err("not permitted".into()));
     assert!(!h.app().settings.autostart);
     assert_eq!(h.app().login.error.as_deref(), Some("Couldn't turn it on: not permitted"));
+  }
+
+  /// A chosen microphone that isn't connected stays the pop-up's choice, and the warning in its
+  /// row's ⓘ's place names the one that records instead: the system's input, not Automatic's USB
+  /// one. Its tooltip is the warning alone; no caption under the label. With no warning, the ⓘ.
+  #[test]
+  fn a_mic_not_connected_says_what_records() {
+    let home = Home::new("window-mic", &TWO);
+    let fake = Fake::default();
+    let row = |h: &Harness<Prefs>| a11y_line(h, r#"pop up button "Microphone""#);
+    let mark = |h: &Harness<Prefs>| a11y_line(h, r#"button "Warning""#);
+    let info = format!(r#"button "Info" desc {MIC_HELP:?}"#);
+    let wh = Choice { id: Some("wh-1000xm5".into()), name: "WH-1000XM5".into() };
+    let wh = Microphone::Device(wh);
+    let mut h = home.harness(&fake, Settings { microphone: wh.clone(), ..Settings::default() });
+    let warning = "WH-1000XM5 isn’t connected: Wavo records with MacBook Pro Microphone";
+    let pop = r#"pop up button "Microphone" value "WH-1000XM5 (not connected)""#;
+    assert_eq!(row(&h).as_deref(), Some(pop), "no caption");
+    assert_eq!(mark(&h), Some(format!(r#"button "Warning" desc {warning:?}"#)));
+    assert_eq!(a11y_line(&h, &info), None, "no ⓘ beside the warning");
+    assert_eq!(tip(&mut h, "mic-row"), warning);
+    assert!(h.rect(Id::of("mic-row").key("caption")).is_none());
+
+    let mut h = home.harness(&fake, Settings::default());
+    let auto = r#"pop up button "Microphone" value "Automatic (USB Mic)""#;
+    assert_eq!(row(&h).as_deref(), Some(auto));
+    assert_eq!(mark(&h), None, "the ⓘ alone");
+    assert_eq!(a11y_line(&h, &info).as_ref(), Some(&info));
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
+
+    // Under a closed lid that one hears nothing: the warning says so.
+    let lid = format!("{warning} (the lid is closed)");
+    assert_eq!(mic_warning(&fake.devices(), &wh, true), Some(lid));
+
+    // The system's input named by no listed device (ALSA's), or none listed: Linux has ALSA's
+    // `default` all the same, elsewhere there is no input at all.
+    let alsa = [audio::Device { default: false, ..fake.devices()[1].clone() }];
+    let unnamed = "WH-1000XM5 isn’t connected: Wavo records with the system’s input";
+    assert_eq!(mic_warning(&alsa, &wh, false).as_deref(), Some(unnamed));
+    let none = match cfg!(target_os = "linux") {
+      true => unnamed,
+      false => "WH-1000XM5 isn’t connected, and there is no other microphone",
+    };
+    assert_eq!(mic_warning(&[], &wh, false).as_deref(), Some(none));
+  }
+
+  /// Automatic with only a Bluetooth microphone left warns in the row's ⓘ's place, the warning
+  /// alone in its tip; with another one there, the ⓘ and its tip. The open window reads the
+  /// microphones again on either audio change.
+  #[test]
+  fn only_a_bluetooth_mic_warns() {
+    let home = Home::new("window-bluetooth", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    let airpods = audio::Device {
+      id: Some("airpods".into()),
+      name: "AirPods Pro".into(),
+      default: true,
+      transport: Transport::Bluetooth,
+    };
+    fake.log().devices = Some(vec![airpods]);
+    assert!(h.event(Event::System(Change::DefaultInput)));
+    h.frame();
+    let warning = "Only a Bluetooth mic: the sound is worse";
+    assert_eq!(tip(&mut h, "mic-row"), warning);
+
+    fake.log().devices = None;
+    assert!(h.event(Event::System(Change::AudioInputs)));
+    h.frame();
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
+  }
+
+  /// The chosen microphone unplugged while the window is open: on the change, not before, the
+  /// pop-up says it isn't connected and the warning names the one that records instead; the lid
+  /// closed, that one hears nothing; plugged in again, the warning goes and the ⓘ is back.
+  #[test]
+  fn devices_and_the_lid_redraw_the_mic_row() {
+    let home = Home::new("window-system", &TWO);
+    let fake = Fake::default();
+    let usb = Choice { id: Some("usb mic".into()), name: "USB Mic".into() };
+    let settings = Settings { microphone: Microphone::Device(usb), ..Settings::default() };
+    let mut h = home.harness(&fake, settings);
+    let row = |h: &Harness<Prefs>| a11y_line(h, r#"pop up button "Microphone""#);
+    let mark = |h: &Harness<Prefs>| a11y_line(h, r#"button "Warning""#);
+    let pop = |value: &str| Some(format!(r#"pop up button "Microphone" value {value:?}"#));
+    let warns = |w: &str| Some(format!(r#"button "Warning" desc {w:?}"#));
+    assert_eq!(row(&h), pop("USB Mic"));
+    assert_eq!(mark(&h), None);
+
+    let mac = fake.devices()[0].clone();
+    fake.log().devices = Some(vec![mac]);
+    h.app_mut();
+    assert!(h.frame());
+    assert_eq!(row(&h), pop("USB Mic"), "not read again before the change");
+    assert!(h.event(Event::System(Change::AudioInputs)));
+    h.frame();
+    let gone = "USB Mic isn’t connected: Wavo records with MacBook Pro Microphone";
+    assert_eq!(row(&h), pop("USB Mic (not connected)"));
+    assert_eq!(mark(&h), warns(gone));
+
+    fake.log().lid_closed = true;
+    assert!(h.event(Event::System(Change::Lid)));
+    h.frame();
+    assert_eq!(mark(&h), warns(&format!("{gone} (the lid is closed)")));
+
+    fake.log().devices = None;
+    assert!(h.event(Event::System(Change::AudioInputs)));
+    h.frame();
+    assert_eq!(row(&h), pop("USB Mic"));
+    assert_eq!(mark(&h), None);
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
   }
 
   /// Export asks the save panel where; it is disabled while it runs; Finder shows the archive only

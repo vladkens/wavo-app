@@ -8,12 +8,14 @@
 use nimbo::Hotkey;
 use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
 
-use crate::audio::{Device, Microphone};
+use crate::audio::{Auto, Device, Microphone};
 use crate::engine::Phase as EnginePhase;
 use crate::history::{local_time, shorten};
 use crate::session::{NoModel, Outcome, Phase, Status};
 use crate::updater::{self, State};
-use crate::window::{Found, Pick, bluetooth_only, microphones as mic_choices};
+use crate::window::{
+  Found, Pick, bluetooth_only, mic_name, microphones as mic_choices, not_connected,
+};
 
 pub const RECENT: usize = 10;
 /// The update's row under the warnings while it has news, and Check for Updates… above Quit: both
@@ -208,7 +210,7 @@ pub fn menu(
     Item::new("mic", &mic).submenu(mics),
   ]);
   if let Some(note) = note {
-    items.push(Item::new("mic-note", note).enabled(false));
+    items.push(Item::new("mic-note", &note).enabled(false));
   }
 
   items.extend([
@@ -251,17 +253,28 @@ fn with_key(item: Item, key: &str) -> Item {
 }
 
 /// The microphone in use, the submenu (Automatic and the system default, then the devices, the one
-/// in use checked) and a note under it when Automatic has only a Bluetooth one.
+/// chosen checked) and a note under it: the one chosen isn't connected (the one in use is the
+/// system's input), or Automatic has only a Bluetooth one.
 fn microphones(
   (devices, saved, lid_closed): (&[Device], &Microphone, bool),
-) -> (String, Menu, Option<&'static str>) {
+) -> (String, Menu, Option<String>) {
   let (mics, at) = mic_choices(devices, saved, lid_closed);
   let mut items: Vec<Item> = (mics.iter().enumerate())
     .map(|(i, (label, _))| Item::new(&format!("mic:{i}"), label).checked(i == at))
     .collect();
   items.insert(2, Item::separator());
-  let note = bluetooth_only(devices, saved, lid_closed);
-  (mics[at].0.clone(), Menu::new(items), note)
+  let menu = Menu::new(items);
+  let Some((name, instead)) = not_connected(devices, saved, lid_closed) else {
+    let note = bluetooth_only(devices, saved, lid_closed).map(str::to_owned);
+    return (mics[at].0.clone(), menu, note);
+  };
+
+  let title = match instead {
+    Auto::Device(i) => mic_name(&devices[i], lid_closed),
+    Auto::System => "System Default".to_owned(),
+    Auto::Nothing => "No Microphone".to_owned(),
+  };
+  (title, menu, Some(format!("{name} isn’t connected")))
 }
 
 /// The model in use, and the submenu: the models downloaded with the one that transcribes checked,
@@ -390,7 +403,7 @@ mod tests {
     assert_eq!(mic.label, "Elgato Wave:3 Microphone Array");
     let sub = &mic.submenu.as_ref().unwrap().items;
     let got: Vec<_> = sub.iter().map(|i| (i.label.as_str(), i.checked)).collect();
-    assert_eq!(got[0], ("Automatic (MacBook Pro Microphone)", false));
+    assert_eq!(got[0], ("Automatic (Elgato Wave:3 Microphone Array)", false));
     assert_eq!(got[1], ("System Default (MacBook Pro Microphone)", false));
     let devices_got = &got[3..];
     assert_eq!(devices_got, [("MacBook Pro Microphone", false), (devices[1].name.as_str(), true)]);
@@ -402,17 +415,86 @@ mod tests {
     };
     let system = mic_label(&devices, &Microphone::System, false);
     assert_eq!(system, ("System Default (MacBook Pro Microphone)".into(), None));
-    // Automatic: the built-in one, the USB one under a closed lid; a lone Bluetooth one with a
-    // note.
-    let auto = Microphone::Automatic;
-    assert_eq!(mic_label(&devices, &auto, false).0, "Automatic (MacBook Pro Microphone)");
-    assert_eq!(mic_label(&devices, &auto, true).0, "Automatic (Elgato Wave:3 Microphone Array)");
+    // Automatic: the USB one over the built-in default; the built-in one over a Bluetooth one, but
+    // not under a closed lid, and a Bluetooth one left alone has a note; a virtual one only when
+    // no other is there, as the system's, also under a closed lid.
+    let mac = [device("MacBook Pro Microphone", true, Transport::BuiltIn)];
+    let both = [mac[0].clone(), device("AirPods Pro", false, Transport::Bluetooth)];
     let airpods = [device("AirPods Pro", true, Transport::Bluetooth)];
-    let note = Some("Only a Bluetooth mic: the sound is worse".into());
-    assert_eq!(mic_label(&airpods, &auto, false), ("Automatic (AirPods Pro)".into(), note));
-    let lid = [device("MacBook Pro Microphone", true, Transport::BuiltIn)];
-    assert_eq!(mic_label(&lid, &auto, true).0, "Automatic (none: the lid is closed)");
+    let loopback = [device("BlackHole 2ch", true, Transport::Virtual)];
+    let krisp = [
+      device("MacBook Pro Microphone", false, Transport::BuiltIn),
+      device("Krisp Microphone", true, Transport::Virtual),
+    ];
+    let note = Some("Only a Bluetooth mic: the sound is worse");
+    let cases = [
+      (&devices[..], false, "Automatic (Elgato Wave:3 Microphone Array)", None),
+      (&both, false, "Automatic (MacBook Pro Microphone)", None),
+      (&both, true, "Automatic (AirPods Pro)", note),
+      (&airpods, false, "Automatic (AirPods Pro)", note),
+      (&mac, true, "Automatic (none: the lid is closed)", None),
+      (&loopback, false, "Automatic (BlackHole 2ch)", None),
+      (&krisp, true, "Automatic (Krisp Microphone)", None),
+    ];
+    for (devices, lid_closed, label, note) in cases {
+      let got = mic_label(devices, &Microphone::Automatic, lid_closed);
+      assert_eq!(got, (label.to_owned(), note.map(str::to_owned)), "lid closed: {lid_closed}");
+    }
+
     assert!(!items.iter().any(|i| i.id.starts_with("update")), "a build that doesn't update");
+  }
+
+  /// A chosen microphone that isn't connected stays checked in the submenu; the menu names the one
+  /// that records in its place, the system's input (not Automatic's pick), a note under it.
+  #[test]
+  fn a_mic_not_connected_names_the_one_that_records() {
+    use Transport::*;
+
+    let device = |name: &str, default, transport| {
+      let (id, name) = (Some(name.into()), name.into());
+      Device { id, name, default, transport }
+    };
+    let wh = device("WH-1000XM5", false, Bluetooth);
+    let headphones = Microphone::Device(Choice { id: wh.id.clone(), name: wh.name.clone() });
+    let (s, pick) = (Status::default(), Pick::default());
+    // The menu's title and note, the submenu's checked item.
+    let mics = |devices: &[Device], lid_closed| {
+      let mics = (devices, &headphones, lid_closed);
+      let items = menu(None, &s, &[], &[], mics, (&[], &pick), None).items;
+      let label = |id| items.iter().find(|i| i.id == id).map(|i| i.label.clone());
+      let sub = &items.iter().find(|i| i.id == "mic").unwrap().submenu.as_ref().unwrap().items;
+      let checked = sub.iter().find(|i| i.checked).map(|i| i.label.clone());
+      (label("mic").unwrap(), label("mic-note"), checked)
+    };
+
+    let rode =
+      [device("MacBook Pro Microphone", false, BuiltIn), device("RØDE PodMic USB", true, Usb)];
+    let mac =
+      [device("MacBook Pro Microphone", true, BuiltIn), device("Elgato Wave:3", false, Usb)];
+    let alsa = [device("HDA Intel PCH", false, Unknown)];
+    let none = if cfg!(target_os = "linux") { "System Default" } else { "No Microphone" };
+    let cases = [
+      (&rode[..], false, "RØDE PodMic USB"),
+      // The system's input, not Automatic's USB one; under a closed lid that one hears nothing:
+      // the menu says so.
+      (&mac, false, "MacBook Pro Microphone"),
+      (&mac, true, "MacBook Pro Microphone (the lid is closed)"),
+      // The system's input named by no listed device (ALSA's), or none listed: Linux has ALSA's
+      // `default` all the same, elsewhere there is no input at all.
+      (&alsa, false, "System Default"),
+      (&[], false, none),
+    ];
+    let note = Some("WH-1000XM5 isn’t connected".to_owned());
+    let checked = Some("WH-1000XM5 (not connected)".to_owned());
+    for (devices, lid_closed, title) in cases {
+      let want = (title.to_owned(), note.clone(), checked.clone());
+      assert_eq!(mics(devices, lid_closed), want);
+    }
+
+    // Back again: in use, no note.
+    let back = [wh, device("RØDE PodMic USB", true, Usb)];
+    let want = ("WH-1000XM5".into(), None, Some("WH-1000XM5".into()));
+    assert_eq!(mics(&back, false), want);
   }
 
   /// An update shows under the header and the warnings; Check for Updates… sits above Quit.
