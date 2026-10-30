@@ -401,6 +401,10 @@ const SECURE_INPUT_NOTE: &str = "Secure Input is on (a password field, or a term
   Keyboard Entry): the shortcut works through a backup path, and Esc may not cancel.";
 const ACTIVATION_HELP: &str = "How the hotkey records: while you hold it, from one press to the \
   next, or both (a short tap latches the recording on).";
+const MIC_HELP: &str = "Automatic uses the system’s input, but not a Bluetooth headset’s while \
+  another microphone is there: the built-in one first, then a USB or wired one. Recording through \
+  a headset turns its sound to call quality and loses the first words. System Default uses \
+  whatever the system picks.";
 // Where the person turns launch at login back on, which the system turned off.
 const LOGIN_APPROVAL: &str = if cfg!(windows) {
   "Turn Wavo on in Task Manager › Startup apps."
@@ -433,7 +437,7 @@ impl Prefs {
       let (devices, saved) = (&self.devices, &self.settings.microphone);
       let (mics, at) = microphones(devices, saved, self.lid_closed);
       let labels: Vec<&str> = mics.iter().map(|m| m.0.as_str()).collect();
-      let mut row = FormRow::new("Microphone");
+      let mut row = FormRow::new("Microphone").info(MIC_HELP);
       if let Some(note) = bluetooth_only(devices, saved, self.lid_closed) {
         row = row.caption(note);
       }
@@ -634,6 +638,7 @@ const EXPORT_HELP: &str = "The history, its recordings and the settings, into a 
 
 const UPDATE_HELP: &str = "Wavo looks for a new version at launch and once a day; the menu says \
   when there is one. Off, it looks only when you choose Check for Updates.";
+const NO_UPDATES: &str = "This copy of Wavo doesn’t update itself.";
 
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
@@ -660,6 +665,7 @@ const RETENTIONS: [(Retention, &str); 7] = [
 
 impl Prefs {
   fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    // The pop-ups first, then the switches.
     ui.form_section(fs, "App", |ui| {
       ui.form_row(fs, FormRow::new("Show the HUD at"), |ui| {
         let mut cur = self.settings.hud_position;
@@ -668,17 +674,24 @@ impl Prefs {
         }
       });
 
-      ui.form_row(fs, FormRow::new("Show the transcription time").info(TOOK_HELP), |ui| {
-        let mut on = self.settings.show_transcription_time;
-        if ui.id("took").toggle(&mut on, "").changed {
-          self.edit(move |s| s.show_transcription_time = on);
-        }
-      });
-
       ui.form_row(fs, FormRow::new("Unload the model").info(UNLOAD_HELP), |ui| {
         let mut cur = self.settings.unload_after_minutes;
         if Select::new(&mut cur, &UNLOADS).separators(&[0]).show(ui.id("unload")).changed {
           self.edit(move |s| s.unload_after_minutes = cur);
+        }
+      });
+
+      ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
+        let mut cur = self.settings.history_retention;
+        if ui.id("retention").select(&mut cur, &RETENTIONS).changed {
+          self.edit(move |s| s.history_retention = cur);
+        }
+      });
+
+      ui.form_row(fs, FormRow::new("Show the transcription time").info(TOOK_HELP), |ui| {
+        let mut on = self.settings.show_transcription_time;
+        if ui.id("took").toggle(&mut on, "").changed {
+          self.edit(move |s| s.show_transcription_time = on);
         }
       });
 
@@ -692,22 +705,19 @@ impl Prefs {
         });
       }
 
-      ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
-        let mut cur = self.settings.history_retention;
-        if ui.id("retention").select(&mut cur, &RETENTIONS).changed {
-          self.edit(move |s| s.history_retention = cur);
+      // Off and disabled where the app can't update, the setting kept.
+      let updates = self.shell.updates();
+      let mut row = FormRow::new("Check for updates").info(UPDATE_HELP).disabled(!updates);
+      if !updates {
+        row = row.caption(NO_UPDATES);
+      }
+
+      ui.form_row(fs, row, |ui| {
+        let mut on = updates && self.settings.auto_update;
+        if ui.id("auto-update").toggle(&mut on, "").changed {
+          self.edit(move |s| s.auto_update = on);
         }
       });
-
-      // Only where the app can update.
-      if self.shell.updates() {
-        ui.form_row(fs, FormRow::new("Check for updates").info(UPDATE_HELP), |ui| {
-          let mut on = self.settings.auto_update;
-          if ui.id("auto-update").toggle(&mut on, "").changed {
-            self.edit(move |s| s.auto_update = on);
-          }
-        });
-      }
     });
 
     let models = self.hub.root().to_owned();
@@ -2248,8 +2258,8 @@ mod tests {
   }
 
   /// Every page in both looks, as high as its content or [SCROLLING] high; with `WAVO_SHOTS` set
-  /// (`make shots`), written there: also Models asking before a delete and General at the first
-  /// launch.
+  /// (`make shots`), written there: also Advanced in a build that doesn't update, Models asking
+  /// before a delete and General at the first launch.
   #[test]
   fn every_page_renders_in_both_looks() {
     let home =
@@ -2311,6 +2321,10 @@ mod tests {
         assert_eq!(ground[0] < 100, appearance.dark, "{name} {look}: {ground:?}");
       }
 
+      fake.log().updates = false;
+      tab(&mut h, Page::Advanced);
+      shot(&mut h, &format!("advanced-no-updates-{look}"));
+
       tab(&mut h, Page::History);
       click(&mut h, Id::of(("text", ids[6])));
       shot(&mut h, &format!("history-selected-{look}"));
@@ -2367,20 +2381,32 @@ mod tests {
   }
 
   /// About's Check for Updates… opens the update's window, Advanced turns the automatic checks off;
-  /// neither shows in a build that doesn't update.
+  /// in a build that doesn't update About has no button and Advanced's switch is off and disabled,
+  /// the setting kept.
   #[test]
   fn about_checks_for_updates() {
     let home = Home::new("window-update", &TWO);
     let fake = Fake::default();
     let mut h = home.harness(&fake, Settings::default());
+    // The switch as assistive technology reads it.
+    let switch = |h: &Harness<Prefs>| {
+      let tree = h.a11y();
+      let line =
+        tree.lines().map(str::trim).find(|l| l.starts_with(r#"switch "Check for updates""#));
+      line.map(str::to_owned)
+    };
     tab(&mut h, Page::About);
     assert!(h.rect(Id::of("updates")).is_none());
     tab(&mut h, Page::Advanced);
-    assert!(h.rect(Id::of("auto-update")).is_none());
+    let off = format!(r#"switch "Check for updates" off disabled desc {NO_UPDATES:?}"#);
+    assert_eq!(switch(&h), Some(off));
+    click(&mut h, Id::of("auto-update"));
+    assert!(fake.log().settings.auto_update);
 
     fake.log().updates = true;
     h.app_mut();
     h.frame();
+    assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" on"#));
     click(&mut h, Id::of("auto-update"));
     assert!(!fake.log().settings.auto_update);
     tab(&mut h, Page::About);
