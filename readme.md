@@ -94,15 +94,15 @@ The app's `uninstall` command removes all Wavo left: the history, settings and c
 
 Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md).
 
-## 🤖 How it's made
-
-Wavo is written by AI agents following [agents.md](agents.md); I choose what to build and review every pull request. Its speech engine, [wavo](https://github.com/vladkens/wavo), and its UI toolkit, [nimbo](https://github.com/vladkens/nimbo), are made the same way, each with its own tests. This isn't a weekend prompt: I've written software by hand for years — [macmon](https://github.com/vladkens/macmon) (Rust, Apple Silicon system monitor), [twscrape](https://github.com/vladkens/twscrape) (Python, X/Twitter scraping) and [ecloop](https://github.com/vladkens/ecloop) (C, low-level elliptic-curve math) — and agents are how I build now.
-
 ## 🙏 Credits
 
 - [Handy](https://github.com/cjpais/Handy): the app that inspired Wavo.
 - [wavo](https://github.com/vladkens/wavo): the speech recognition, built on [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)'s reference and the GGUF conversions [handy-computer](https://huggingface.co/handy-computer) publishes. Wavo ships no weights: each model is downloaded under its own license, listed in [wavo's credits](https://github.com/vladkens/wavo#-credits).
 - [nimbo](https://github.com/vladkens/nimbo): the UI toolkit Wavo is drawn with.
+
+## 🤖 How it's made
+
+Wavo is written by AI agents (Claude Code, Codex) following [agents.md](agents.md); I choose what to build and review every pull request. The HUD, the settings and the update windows are tested headless in nimbo's harness, and `make test-models` transcribes Russian and English speech fixtures with real models, failing above a 15% word error rate. I've written software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)); agents are how I build now. Releases are rare, and an update doesn't break what you rely on: the CLI, the config and your data stay compatible; a breaking change waits for a major version.
 
 ## 📝 License
 
