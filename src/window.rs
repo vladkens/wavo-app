@@ -915,7 +915,7 @@ pub fn microphones(
 }
 
 /// While the `saved` microphone isn't connected: its name, and what records in its place, the
-/// system's input ([audio::in_use]). Here and in the menu.
+/// system's input ([audio::in_use]), [Auto::Nothing] when there is no input. Here and in the menu.
 pub fn not_connected<'a>(
   devices: &[audio::Device],
   saved: &'a Microphone,
@@ -926,6 +926,15 @@ pub fn not_connected<'a>(
   missing.then(|| (choice.name.as_str(), audio::in_use(devices, saved, lid_closed)))
 }
 
+/// A listed microphone's name, the built-in one's under a closed lid saying so, as Automatic's
+/// does: it hears nothing.
+pub fn mic_name(device: &audio::Device, lid_closed: bool) -> String {
+  match lid_closed && device.transport == Transport::BuiltIn {
+    true => format!("{} (the lid is closed)", device.name),
+    false => device.name.clone(),
+  }
+}
+
 /// The Microphone row's caption: the one chosen isn't connected, and what records instead; or
 /// Automatic has only a Bluetooth one.
 fn mic_caption(devices: &[audio::Device], saved: &Microphone, lid_closed: bool) -> Option<String> {
@@ -934,9 +943,11 @@ fn mic_caption(devices: &[audio::Device], saved: &Microphone, lid_closed: bool) 
   };
 
   Some(match instead {
-    Auto::Device(i) => format!("{name} isn’t connected: Wavo records with {}.", devices[i].name),
-    _ if devices.is_empty() => format!("{name} isn’t connected, and there is no other microphone."),
-    _ => format!("{name} isn’t connected: Wavo records with the system’s input."),
+    Auto::Device(i) => {
+      format!("{name} isn’t connected: Wavo records with {}", mic_name(&devices[i], lid_closed))
+    }
+    Auto::System => format!("{name} isn’t connected: Wavo records with the system’s input"),
+    Auto::Nothing => format!("{name} isn’t connected, and there is no other microphone"),
   })
 }
 
@@ -2425,14 +2436,16 @@ mod tests {
     assert_eq!(fake.log().paused, [true, false, true, false]);
   }
 
-  /// About's Check for Updates… opens the update's window, Advanced turns the automatic checks on;
+  /// About's Check for Updates… opens the update's window, Advanced turns the automatic checks off;
   /// in a build that doesn't update About has no button and Advanced's switch is off and disabled,
-  /// the setting kept.
+  /// the setting kept on.
   #[test]
   fn about_checks_for_updates() {
     let home = Home::new("window-update", &TWO);
     let fake = Fake::default();
-    let mut h = home.harness(&fake, Settings { auto_update: false, ..Settings::default() });
+    // On, as by default.
+    let mut h = home.harness(&fake, Settings::default());
+    assert!(fake.log().settings.auto_update);
     // The switch as assistive technology reads it.
     let switch = |h: &Harness<Prefs>| {
       let tree = h.a11y();
@@ -2446,14 +2459,14 @@ mod tests {
     let off = format!(r#"switch "Check for updates" off disabled desc {NO_UPDATES:?}"#);
     assert_eq!(switch(&h), Some(off));
     click(&mut h, Id::of("auto-update"));
-    assert!(!fake.log().settings.auto_update);
+    assert!(fake.log().settings.auto_update, "kept");
 
     fake.log().updates = true;
     h.app_mut();
     h.frame();
-    assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" off"#));
+    assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" on"#));
     click(&mut h, Id::of("auto-update"));
-    assert!(fake.log().settings.auto_update);
+    assert!(!fake.log().settings.auto_update);
     tab(&mut h, Page::About);
     click(&mut h, Id::of("updates"));
     assert_eq!(fake.log().checks, 1);
@@ -2517,7 +2530,7 @@ mod tests {
     let wh = Choice { id: Some("wh-1000xm5".into()), name: "WH-1000XM5".into() };
     let wh = Microphone::Device(wh);
     let h = home.harness(&fake, Settings { microphone: wh.clone(), ..Settings::default() });
-    let caption = "WH-1000XM5 isn’t connected: Wavo records with MacBook Pro Microphone.";
+    let caption = "WH-1000XM5 isn’t connected: Wavo records with MacBook Pro Microphone";
     let want =
       format!(r#"pop up button "Microphone" value "WH-1000XM5 (not connected)" desc {caption:?}"#);
     assert_eq!(row(&h), Some(want));
@@ -2525,11 +2538,19 @@ mod tests {
     let auto = r#"pop up button "Microphone" value "Automatic (USB Mic)""#;
     assert_eq!(row(&h).as_deref(), Some(auto), "no caption");
 
-    // The system's input named by no listed device (ALSA's), or no input at all.
+    // Under a closed lid that one hears nothing: the caption says so.
+    let lid = format!("{caption} (the lid is closed)");
+    assert_eq!(mic_caption(&fake.devices(), &wh, true), Some(lid));
+
+    // The system's input named by no listed device (ALSA's), or none listed: Linux has ALSA's
+    // `default` all the same, elsewhere there is no input at all.
     let alsa = [audio::Device { default: false, ..fake.devices()[1].clone() }];
-    let unnamed = "WH-1000XM5 isn’t connected: Wavo records with the system’s input.";
+    let unnamed = "WH-1000XM5 isn’t connected: Wavo records with the system’s input";
     assert_eq!(mic_caption(&alsa, &wh, false).as_deref(), Some(unnamed));
-    let none = "WH-1000XM5 isn’t connected, and there is no other microphone.";
+    let none = match cfg!(target_os = "linux") {
+      true => unnamed,
+      false => "WH-1000XM5 isn’t connected, and there is no other microphone",
+    };
     assert_eq!(mic_caption(&[], &wh, false).as_deref(), Some(none));
   }
 

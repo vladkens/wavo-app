@@ -93,11 +93,12 @@ pub struct Device {
   pub transport: Transport,
 }
 
-struct Input {
+/// A cpal input, or the tests' stand-in for one.
+struct Input<D = cpal::Device> {
   id: Option<String>,
   name: String,
   transport: Transport,
-  device: cpal::Device,
+  device: D,
 }
 
 impl Input {
@@ -108,7 +109,11 @@ impl Input {
     let name = description.name().to_owned();
     Some(Self { id: id.map(|id| id.to_string()), name, transport, device })
   }
+}
 
+impl<D> Input<D> {
+  /// `choice` by its ID, by its name only when it has none: before any listing, which a stale ID
+  /// needs ([open_input]).
   fn is(&self, choice: &Choice) -> bool {
     match &choice.id {
       Some(id) => self.id.as_ref() == Some(id),
@@ -135,7 +140,7 @@ fn card_ids() -> Vec<(String, String)> {
 
 /// The inputs the settings list: ALSA's (Linux) one per capture device ([cards]), other systems'
 /// all.
-fn listed(all: Vec<Input>) -> Vec<Input> {
+fn listed<D>(all: Vec<Input<D>>) -> Vec<Input<D>> {
   // cpal's ALSA IDs are `alsa:<PCM>`.
   let pcms: Vec<&str> = all.iter().filter_map(|x| x.id.as_deref()?.strip_prefix("alsa:")).collect();
   if pcms.len() != all.len() {
@@ -204,8 +209,8 @@ pub fn devices() -> Vec<Device> {
 
 /// The default by its ID: on Windows cpal's default device is a handle of its own that follows
 /// the system's, equal to no listed one, though its ID is the endpoint's.
-fn as_devices(inputs: &[Input], default: Option<&str>) -> Vec<Device> {
-  let device = |x: &Input| Device {
+fn as_devices<D>(inputs: &[Input<D>], default: Option<&str>) -> Vec<Device> {
+  let device = |x: &Input<D>| Device {
     id: x.id.clone(),
     name: x.name.clone(),
     default: default.is_some() && x.id.as_deref() == default,
@@ -243,9 +248,15 @@ pub enum Auto {
   /// The system default as it is: none of the listed is it (ALSA's), none is listed, or Automatic
   /// has only virtual ones.
   System,
-  /// No microphone Automatic takes: only a closed lid's (virtual ones aside), which hears nothing.
+  /// No microphone Automatic takes: only a closed lid's (virtual ones aside), which hears nothing;
+  /// for the system's input ([in_use]), there is no input at all.
   Nothing,
 }
+
+/// The system's input is there with none listed: ALSA's `default` (Linux), which cpal always has
+/// and PipeWire or PulseAudio pass any microphone to. Elsewhere the default is a listed one, and
+/// with none listed there is no input.
+const UNLISTED_DEFAULT: bool = cfg!(target_os = "linux");
 
 /// A USB microphone first, then the built-in one (not under a closed lid: Apple's laptops cut it
 /// off), a wired or other one, and a Bluetooth one only when nothing else is there (recording
@@ -290,11 +301,21 @@ pub fn position(devices: &[Device], choice: &Choice) -> Option<usize> {
 /// input, a chosen one; one that isn't connected gives way to the system's input, as System
 /// Default does (Automatic is a mode of its own), and stays chosen for when it is back.
 pub fn in_use(devices: &[Device], mic: &Microphone, lid_closed: bool) -> Auto {
-  let system = || devices.iter().position(|d| d.default).map_or(Auto::System, Auto::Device);
+  let system = || system_input(devices, UNLISTED_DEFAULT);
   match mic {
     Microphone::Automatic => automatic(devices, lid_closed),
     Microphone::System => system(),
     Microphone::Device(choice) => position(devices, choice).map_or_else(system, Auto::Device),
+  }
+}
+
+/// The system's input: the listed default, else the system's as it is, but none when nothing is
+/// listed and the system has no input apart from them (`unlisted`, [UNLISTED_DEFAULT]).
+fn system_input(devices: &[Device], unlisted: bool) -> Auto {
+  match devices.iter().position(|d| d.default) {
+    Some(i) => Auto::Device(i),
+    None if devices.is_empty() && !unlisted => Auto::Nothing,
+    None => Auto::System,
   }
 }
 
@@ -354,19 +375,41 @@ fn open_device<T>(
   let host = cpal::default_host();
   // The default first: usually it is the one, and listing every device is slower.
   let default = host.default_input_device().and_then(Input::new);
+  // In a chosen one's place the system's input, as System Default: Automatic is a mode of its own.
+  let instead = |default| match mic {
+    Microphone::Automatic => automatic_input(&host, default),
+    Microphone::System | Microphone::Device(_) => Ok(default),
+  };
+  open_input(mic, default, || inputs(&host), instead, open)
+}
+
+/// [open_device] with the system's `default` input and `all` the inputs, listed only when the
+/// default isn't the chosen one; `instead`: what records for the setting, or in a chosen one's
+/// place.
+fn open_input<D: Clone, T>(
+  mic: &Microphone,
+  default: Option<Input<D>>,
+  all: impl FnOnce() -> Vec<Input<D>>,
+  instead: impl FnOnce(Option<Input<D>>) -> Result<Option<Input<D>>>,
+  open: impl Fn(&D) -> Result<T>,
+) -> Result<(String, T, Option<String>)> {
   let mut gave_way = None;
   if let Microphone::Device(choice) = mic {
-    let found = match &default {
-      Some(d) if d.is(choice) => Some((d.device.clone(), d.name.clone())),
-      _ => {
+    // The chosen one, and whether it is the system's input.
+    let (found, system) = match default.as_ref().filter(|d| d.is(choice)) {
+      Some(d) => (Some((d.device.clone(), d.name.clone())), true),
+      None => {
         // By ID among all, an unlisted one too; by name among the listed: ALSA names a card's PCMs
         // after the card, and the one listed is the best.
-        let mut all = inputs(&host);
+        let mut all = all();
         let found = match all.iter().position(|x| x.id.is_some() && x.id == choice.id) {
           Some(i) => Some(all.swap_remove(i)),
           None => listed(all).into_iter().find(|x| x.name == choice.name),
         };
-        found.map(|x| (x.device, x.name))
+        // Found by its name, its ID gone stale, it may be the system's input all the same.
+        let same = |(x, d): (&Input<D>, &Input<D>)| x.id.is_some() && x.id == d.id;
+        let system = found.as_ref().zip(default.as_ref()).is_some_and(same);
+        (found.map(|x| (x.device, x.name)), system)
       }
     };
 
@@ -380,18 +423,13 @@ fn open_device<T>(
 
     // The one that failed is the system's: none is left to take its place.
     if let Some(w) = &gave_way
-      && default.as_ref().is_some_and(|d| d.is(choice))
+      && system
     {
       bail!("{w}");
     }
   }
 
-  // In a chosen one's place the system's input, as System Default: Automatic is a mode of its own.
-  let fallback = match mic {
-    Microphone::Automatic => automatic_input(&host, default)?,
-    Microphone::System | Microphone::Device(_) => default,
-  };
-  let Some(Input { name, device, .. }) = fallback else {
+  let Some(Input { name, device, .. }) = instead(default)? else {
     match gave_way {
       Some(w) => bail!("{w}, and there is no default microphone"),
       None => bail!("no microphone found"),
@@ -1415,10 +1453,12 @@ mod tests {
       assert_eq!(in_use(&devices, &mic, false), want, "{mic:?}");
     }
 
-    // The system's as it is when none of the listed is it (ALSA's), or none is listed.
+    // The system's as it is when none of the listed is it (ALSA's), or none is listed but the
+    // system has one apart (ALSA's `default`); none when there is no input at all.
     let alsa = [Device { default: false, ..devices[1].clone() }];
     assert_eq!(in_use(&alsa, &missing, false), Auto::System);
-    assert_eq!(in_use(&[], &missing, false), Auto::System);
+    assert_eq!((system_input(&[], true), system_input(&[], false)), (Auto::System, Auto::Nothing));
+    assert_eq!(in_use(&[], &missing, false), system_input(&[], cfg!(target_os = "linux")));
   }
 
   /// A chosen one that did not open warns, naming the one in its place; one not connected only
@@ -1431,6 +1471,46 @@ mod tests {
     let missing = GaveWay::NotConnected("WH-1000XM5".into());
     assert_eq!(missing.warning("RØDE PodMic USB"), None);
     assert_eq!(missing.to_string(), r#"the microphone "WH-1000XM5" is not connected"#);
+  }
+
+  /// A chosen one that fails gives way to the system's input, unless it is that one: found by its
+  /// ID, or by its name under a stale one, it is opened once and stops the dictation with its
+  /// error, as System Default would.
+  #[test]
+  fn a_chosen_mic_that_is_the_systems_and_fails_stops() {
+    let input = |id: &'static str, name: &str| Input {
+      id: Some(id.into()),
+      name: name.into(),
+      transport: Transport::Unknown,
+      device: id,
+    };
+    let all = || vec![input("mac", "MacBook Pro Microphone"), input("rode", "RØDE PodMic USB")];
+    // The RØDE is busy: what records and its warning, or the error; the devices opened.
+    let run = |default: usize, id: &str, name: &str| {
+      let mic = Microphone::Device(Choice { id: Some(id.into()), name: name.into() });
+      let tried = std::cell::RefCell::new(Vec::new());
+      let open = |d: &&'static str| {
+        tried.borrow_mut().push(*d);
+        match *d {
+          "rode" => bail!("busy"),
+          _ => Ok(()),
+        }
+      };
+      let got = open_input(&mic, all().into_iter().nth(default), all, Ok, open);
+      let got = got.map(|(name, (), warning)| (name, warning)).map_err(|e| format!("{e:#}"));
+      (got, tried.into_inner())
+    };
+
+    let busy = r#"could not open the microphone "RØDE PodMic USB": busy"#;
+    assert_eq!(run(1, "rode", "RØDE PodMic USB"), (Err(busy.into()), vec!["rode"]));
+    assert_eq!(run(1, "gone", "RØDE PodMic USB"), (Err(busy.into()), vec!["rode"]));
+    let warning = format!(r#"{busy}; using "MacBook Pro Microphone""#);
+    let want = Ok(("MacBook Pro Microphone".into(), Some(warning)));
+    assert_eq!(run(0, "rode", "RØDE PodMic USB"), (want, vec!["rode", "mac"]));
+    // Not connected, and the system's input busy.
+    let both = "the microphone \"WH-1000XM5\" is not connected, and the default microphone \
+      \"RØDE PodMic USB\" failed too: busy";
+    assert_eq!(run(1, "wh", "WH-1000XM5"), (Err(both.into()), vec!["rode"]));
   }
 
   #[test]
