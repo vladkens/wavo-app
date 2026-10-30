@@ -43,7 +43,7 @@ pub struct Choice {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(from = "Option<Stored>", into = "Option<Stored>")]
 pub enum Microphone {
-  /// The system's input, unless it is a Bluetooth one and another is there ([automatic]).
+  /// The best one there: USB, built-in, wired, Bluetooth ([automatic]).
   #[default]
   Automatic,
   /// The system's input, whatever it is.
@@ -242,43 +242,35 @@ pub enum Auto {
   Device(usize),
   /// The system default as it is: none of the listed is it (ALSA's), or none is listed.
   System,
-  /// Only a closed lid's microphone is there, which hears nothing.
+  /// No microphone it takes: only a closed lid's, which hears nothing, or virtual ones.
   Nothing,
 }
 
-/// The system's input, unless it is a Bluetooth one (recording turns those headphones to their call
-/// profile: worse sound, the first moments lost) or the built-in one under a closed lid (Apple's
-/// laptops cut it off): then another, the built-in one first, a USB one, anything else, a
-/// Bluetooth one. Bluetooth when it is all there is; never a virtual one the system did not pick.
+/// A USB microphone first, then the built-in one (not under a closed lid: Apple's laptops cut it
+/// off), a wired or other one, and a Bluetooth one only when nothing else is there (recording
+/// turns those headphones to their call profile: worse sound, the first moments lost); never a
+/// virtual one. Within a rank the system's input, else the first listed. With no listed default
+/// (ALSA's is no device, and Linux tells no transport) the system's as it is.
 pub fn automatic(devices: &[Device], lid_closed: bool) -> Auto {
-  let usable = |d: &Device| !(lid_closed && d.transport == Transport::BuiltIn);
-  let Some(i) = devices.iter().position(|d| d.default) else { return Auto::System };
-  let default = &devices[i];
-  if default.transport != Transport::Bluetooth && usable(default) {
-    return Auto::Device(i);
+  if !devices.iter().any(|d| d.default) {
+    return Auto::System;
   }
 
-  match best(devices, lid_closed, Some(i)) {
-    Some(j) if devices[j].transport != Transport::Bluetooth => Auto::Device(j),
-    _ if usable(default) => Auto::Device(i),
-    Some(j) => Auto::Device(j),
-    None => Auto::Nothing,
-  }
+  best(devices, lid_closed).map_or(Auto::Nothing, Auto::Device)
 }
 
-/// The best of `devices` but `except`: the built-in one (not under a closed lid), a USB one,
-/// anything else, a Bluetooth one; never a virtual one.
-fn best(devices: &[Device], lid_closed: bool, except: Option<usize>) -> Option<usize> {
+/// The best of `devices` by [automatic]'s order, the default first within a rank.
+fn best(devices: &[Device], lid_closed: bool) -> Option<usize> {
   let rank = |d: &Device| match d.transport {
+    Transport::Usb => Some(0),
     Transport::BuiltIn if lid_closed => None,
-    Transport::BuiltIn => Some(0),
-    Transport::Usb => Some(1),
+    Transport::BuiltIn => Some(1),
     Transport::Other | Transport::Unknown => Some(2),
     Transport::Bluetooth => Some(3),
     Transport::Virtual => None,
   };
-  let ranked = devices.iter().enumerate().filter(|&(j, _)| Some(j) != except);
-  ranked.filter_map(|(j, d)| Some((rank(d)?, j))).min().map(|(_, j)| j)
+  let ranked = devices.iter().enumerate().filter_map(|(i, d)| Some((rank(d)?, !d.default, i)));
+  ranked.min().map(|(_, _, i)| i)
 }
 
 /// A laptop's lid is closed (macOS: its built-in microphone is cut off then); `false` without one.
@@ -286,25 +278,22 @@ pub fn lid_closed() -> bool {
   nimbo::hardware::lid_closed() == Some(true)
 }
 
-/// The input [Microphone::Automatic] records with: the default without listing every device when
-/// it will do, else the listed ones by [automatic], never `failed` (a chosen one that did not
-/// open); `None` when there is no input at all.
+/// The input [Microphone::Automatic] records with: a USB default without listing every device
+/// (none outranks it), else the listed ones by [automatic], never `failed` (a chosen one that did
+/// not open); `None` when there is none it takes.
 fn automatic_input(host: &cpal::Host, failed: Option<&Choice>) -> Result<Option<Input>> {
-  let lid = lid_closed();
   let default = host.default_input_device().and_then(Input::new);
   let failed = |d: &Input| failed.is_some_and(|c| d.is(c));
-  let fits = |d: &Input| {
-    d.transport != Transport::Bluetooth && !(lid && d.transport == Transport::BuiltIn) && !failed(d)
-  };
-  if default.as_ref().is_some_and(fits) {
+  if default.as_ref().is_some_and(|d| d.transport == Transport::Usb && !failed(d)) {
     return Ok(default);
   }
 
+  let lid = lid_closed();
   let inputs: Vec<Input> = listed(inputs(host)).into_iter().filter(|d| !failed(d)).collect();
   let devices = as_devices(&inputs, default.as_ref().and_then(|d| d.id.as_deref()));
   let pick = match default.as_ref().is_some_and(failed) {
     // The failed one is the system's: the best of the rest.
-    true => best(&devices, lid, None).map_or(Auto::Nothing, Auto::Device),
+    true => best(&devices, lid).map_or(Auto::Nothing, Auto::Device),
     false => automatic(&devices, lid),
   };
   match pick {
@@ -1308,7 +1297,7 @@ mod tests {
 
   /// Automatic's pick by the devices' transports, which one is the system default, and the lid.
   #[test]
-  fn automatic_avoids_a_bluetooth_mic_and_a_closed_lid() {
+  fn automatic_takes_usb_then_built_in_then_wired_then_bluetooth() {
     use Transport::*;
 
     let devices = |list: &[(Transport, bool)]| -> Vec<Device> {
@@ -1321,35 +1310,42 @@ mod tests {
       list.iter().enumerate().map(device).collect()
     };
     let cases = [
-      // The system's input when it will do.
-      (&[(BuiltIn, true), (Bluetooth, false)][..], false, Auto::Device(0)),
+      // A USB one first, over a built-in default; the built-in one over a wired or other one.
+      (&[(BuiltIn, true), (Usb, false)][..], false, Auto::Device(1)),
       (&[(Usb, true), (BuiltIn, false)], false, Auto::Device(0)),
-      (&[(Virtual, true), (BuiltIn, false)], false, Auto::Device(0)),
-      // A Bluetooth one: the built-in one, else a USB one, else anything but virtual.
-      (&[(Bluetooth, true), (Usb, false), (BuiltIn, false)], false, Auto::Device(2)),
-      (&[(Bluetooth, true), (Virtual, false), (Usb, false)], false, Auto::Device(2)),
-      (&[(Bluetooth, true), (Unknown, false)], false, Auto::Device(1)),
-      // Bluetooth when it is all there is, or all that is left.
-      (&[(Bluetooth, true)], false, Auto::Device(0)),
-      (&[(Bluetooth, true), (Virtual, false)], false, Auto::Device(0)),
-      (&[(Bluetooth, true), (Bluetooth, false)], false, Auto::Device(0)),
+      (&[(Unknown, true), (BuiltIn, false)], false, Auto::Device(1)),
+      (&[(Other, true), (Unknown, false), (Usb, false)], false, Auto::Device(2)),
+      (&[(Bluetooth, true), (Other, false), (BuiltIn, false)], false, Auto::Device(2)),
       // A closed lid: not the built-in one.
-      (&[(Bluetooth, true), (BuiltIn, false)], true, Auto::Device(0)),
-      (&[(BuiltIn, true), (Usb, false)], true, Auto::Device(1)),
+      (&[(BuiltIn, true), (Other, false)], true, Auto::Device(1)),
       (&[(BuiltIn, true), (Bluetooth, false)], true, Auto::Device(1)),
       (&[(BuiltIn, true)], true, Auto::Nothing),
-      // No listed default (ALSA's), or nothing at all: the system's.
-      (&[(Unknown, false), (Bluetooth, false)], false, Auto::System),
+      // Bluetooth only when nothing else is there; never a virtual one.
+      (&[(Bluetooth, true), (Unknown, false)], false, Auto::Device(1)),
+      (&[(Virtual, true), (Bluetooth, false)], false, Auto::Device(1)),
+      (&[(Bluetooth, true), (Virtual, false)], false, Auto::Device(0)),
+      (&[(Virtual, true), (BuiltIn, false)], false, Auto::Device(1)),
+      (&[(Virtual, true)], false, Auto::Nothing),
+      // Within a rank the system's input, else the first listed.
+      (&[(Usb, false), (Usb, true)], false, Auto::Device(1)),
+      (&[(Other, false), (Unknown, true)], false, Auto::Device(1)),
+      (&[(Bluetooth, false), (Bluetooth, true)], false, Auto::Device(1)),
+      (&[(Virtual, true), (Usb, false), (Usb, false)], false, Auto::Device(1)),
+      // No listed default (ALSA's, where every transport is unknown), or nothing at all: the
+      // system's.
+      (&[(Unknown, false), (Unknown, false)], false, Auto::System),
+      (&[(Usb, false), (Bluetooth, false)], false, Auto::System),
       (&[], false, Auto::System),
     ];
     for (list, lid_closed, want) in cases {
       assert_eq!(automatic(&devices(list), lid_closed), want, "{list:?}, lid closed: {lid_closed}");
     }
 
-    // A chosen one that failed and was the system's: the best of the rest, even without a default.
-    let rest = devices(&[(Bluetooth, false), (Usb, false), (BuiltIn, false)]);
-    assert_eq!((best(&rest, false, None), best(&rest, true, None)), (Some(2), Some(1)));
-    assert_eq!(best(&devices(&[(Virtual, false)]), false, None), None);
+    // A chosen one that failed and was the system's: the best of the rest, without a default.
+    let rest = devices(&[(Bluetooth, false), (BuiltIn, false), (Usb, false)]);
+    assert_eq!(best(&rest, false), Some(2));
+    assert_eq!((best(&rest[..2], false), best(&rest[..2], true)), (Some(1), Some(0)));
+    assert_eq!(best(&devices(&[(Virtual, false)]), false), None);
   }
 
   #[test]

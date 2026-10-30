@@ -367,7 +367,7 @@ mod tests {
     assert_eq!(mic.label, "Elgato Wave:3 Microphone Array");
     let sub = &mic.submenu.as_ref().unwrap().items;
     let got: Vec<_> = sub.iter().map(|i| (i.label.as_str(), i.checked)).collect();
-    assert_eq!(got[0], ("Automatic (MacBook Pro Microphone)", false));
+    assert_eq!(got[0], ("Automatic (Elgato Wave:3 Microphone Array)", false));
     assert_eq!(got[1], ("System Default (MacBook Pro Microphone)", false));
     let devices_got = &got[3..];
     assert_eq!(devices_got, [("MacBook Pro Microphone", false), (devices[1].name.as_str(), true)]);
@@ -379,16 +379,21 @@ mod tests {
     };
     let system = mic_label(&devices, &Microphone::System, false);
     assert_eq!(system, ("System Default (MacBook Pro Microphone)".into(), None));
-    // Automatic: the built-in one, the USB one under a closed lid; a lone Bluetooth one with a
-    // note.
+    // Automatic: the USB one over the built-in default; the built-in one over a Bluetooth one, but
+    // not under a closed lid, and a Bluetooth one left alone has a note; never a virtual one.
     let auto = Microphone::Automatic;
-    assert_eq!(mic_label(&devices, &auto, false).0, "Automatic (MacBook Pro Microphone)");
-    assert_eq!(mic_label(&devices, &auto, true).0, "Automatic (Elgato Wave:3 Microphone Array)");
-    let airpods = [device("AirPods Pro", true, Transport::Bluetooth)];
+    assert_eq!(mic_label(&devices, &auto, false).0, "Automatic (Elgato Wave:3 Microphone Array)");
+    let mac = device("MacBook Pro Microphone", true, Transport::BuiltIn);
+    let both = [mac, device("AirPods Pro", false, Transport::Bluetooth)];
+    assert_eq!(mic_label(&both, &auto, false).0, "Automatic (MacBook Pro Microphone)");
     let note = Some("Only a Bluetooth mic: the sound is worse".into());
+    assert_eq!(mic_label(&both, &auto, true), ("Automatic (AirPods Pro)".into(), note.clone()));
+    let airpods = [device("AirPods Pro", true, Transport::Bluetooth)];
     assert_eq!(mic_label(&airpods, &auto, false), ("Automatic (AirPods Pro)".into(), note));
     let lid = [device("MacBook Pro Microphone", true, Transport::BuiltIn)];
     assert_eq!(mic_label(&lid, &auto, true).0, "Automatic (none: the lid is closed)");
+    let loopback = [device("BlackHole 2ch", true, Transport::Virtual)];
+    assert_eq!(mic_label(&loopback, &auto, false).0, "Automatic (none)");
     assert!(!items.iter().any(|i| i.id.starts_with("update")), "a build that doesn't update");
   }
 

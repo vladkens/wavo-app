@@ -401,19 +401,19 @@ const SECURE_INPUT_NOTE: &str = "Secure Input is on (a password field, or a term
   Keyboard Entry): the shortcut works through a backup path, and Esc may not cancel.";
 const ACTIVATION_HELP: &str = "How the hotkey records: while you hold it, from one press to the \
   next, or both (a short tap latches the recording on).";
-// What Automatic does here ([audio::automatic]): only macOS tells the lid, Linux (ALSA) no device's
-// transport.
+// What Automatic does here ([audio::automatic]): macOS tells the built-in microphone from a
+// headset on its jack, and the lid; Windows tells USB and Bluetooth, and counts its board's sound
+// (HDAUDIO), the jack too, as built-in; Linux (ALSA) tells no transport and lists no default.
 const MIC_HELP: &str = match () {
   _ if cfg!(target_os = "macos") => {
-    "Automatic uses the system’s input, but not a Bluetooth headset, which records at call \
-     quality and loses the first words, nor the built-in microphone with the lid closed. Instead \
-     it takes the built-in one while the lid is open, then a USB or wired one, a Bluetooth one \
-     last. System Default uses whatever the system picks."
+    "Automatic takes a USB microphone first, then the built-in one while the lid is open, then a \
+     wired one, and a Bluetooth headset only when there is no other: it records at call quality \
+     and loses the first words. System Default uses whatever the system picks."
   }
   _ if cfg!(windows) => {
-    "Automatic uses the system’s input, but not a Bluetooth headset while another microphone is \
-     there: a headset records at call quality and loses the first words. System Default uses \
-     whatever the system picks."
+    "Automatic takes a USB microphone first, then the computer’s own or a wired one, and a \
+     Bluetooth headset only when there is no other: it records at call quality and loses the \
+     first words. System Default uses whatever the system picks."
   }
   _ => {
     "Automatic and System Default both use the system’s input. Linux doesn’t tell Wavo how a \
@@ -884,7 +884,8 @@ pub fn microphones(
   let automatic = match audio::automatic(devices, lid_closed) {
     Auto::Device(i) => format!("Automatic ({})", devices[i].name),
     Auto::System => "Automatic".to_owned(),
-    Auto::Nothing => "Automatic (none: the lid is closed)".to_owned(),
+    Auto::Nothing if lid_closed => "Automatic (none: the lid is closed)".to_owned(),
+    Auto::Nothing => "Automatic (none)".to_owned(),
   };
   let default = match devices.iter().find(|d| d.default) {
     Some(d) => format!("System Default ({})", d.name),
