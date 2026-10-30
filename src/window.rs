@@ -453,10 +453,12 @@ impl Prefs {
       let (mics, at) = microphones(devices, saved, self.lid_closed);
       let labels: Vec<&str> = mics.iter().map(|m| m.0.as_str()).collect();
       let warning = mic_warning(devices, saved, self.lid_closed);
-      let mut row = FormRow::new("Microphone").info(MIC_HELP);
-      if let Some(warning) = &warning {
-        row = row.warning(warning);
-      }
+      // The warning alone in the ⓘ's place: what is wrong matters then, not how the modes choose.
+      let row = FormRow::new("Microphone");
+      let row = match &warning {
+        Some(warning) => row.warning(warning),
+        None => row.info(MIC_HELP),
+      };
 
       ui.id("mic-row").form_row(fs, row, |ui| {
         // ALSA's names run past 60 characters: a longer one ends in "…" beside its label.
@@ -2530,28 +2532,30 @@ mod tests {
 
   /// A chosen microphone that isn't connected stays the pop-up's choice, and the warning in its
   /// row's ⓘ's place names the one that records instead: the system's input, not Automatic's USB
-  /// one. Its tooltip has the ⓘ's under it; no caption under the label.
+  /// one. Its tooltip is the warning alone; no caption under the label. With no warning, the ⓘ.
   #[test]
   fn a_mic_not_connected_says_what_records() {
     let home = Home::new("window-mic", &TWO);
     let fake = Fake::default();
     let row = |h: &Harness<Prefs>| a11y_line(h, r#"pop up button "Microphone""#);
     let mark = |h: &Harness<Prefs>| a11y_line(h, r#"button "Warning""#);
+    let info = format!(r#"button "Info" desc {MIC_HELP:?}"#);
     let wh = Choice { id: Some("wh-1000xm5".into()), name: "WH-1000XM5".into() };
     let wh = Microphone::Device(wh);
     let mut h = home.harness(&fake, Settings { microphone: wh.clone(), ..Settings::default() });
     let warning = "WH-1000XM5 isn’t connected: Wavo records with MacBook Pro Microphone";
     let pop = r#"pop up button "Microphone" value "WH-1000XM5 (not connected)""#;
     assert_eq!(row(&h).as_deref(), Some(pop), "no caption");
-    let both = format!("{warning}\n\n{MIC_HELP}");
-    assert_eq!(mark(&h), Some(format!(r#"button "Warning" desc {both:?}"#)));
-    assert_eq!(tip(&mut h, "mic-row"), both);
+    assert_eq!(mark(&h), Some(format!(r#"button "Warning" desc {warning:?}"#)));
+    assert_eq!(a11y_line(&h, &info), None, "no ⓘ beside the warning");
+    assert_eq!(tip(&mut h, "mic-row"), warning);
     assert!(h.rect(Id::of("mic-row").key("caption")).is_none());
 
     let mut h = home.harness(&fake, Settings::default());
     let auto = r#"pop up button "Microphone" value "Automatic (USB Mic)""#;
     assert_eq!(row(&h).as_deref(), Some(auto));
     assert_eq!(mark(&h), None, "the ⓘ alone");
+    assert_eq!(a11y_line(&h, &info).as_ref(), Some(&info));
     assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
 
     // Under a closed lid that one hears nothing: the warning says so.
@@ -2570,8 +2574,8 @@ mod tests {
     assert_eq!(mic_warning(&[], &wh, false).as_deref(), Some(none));
   }
 
-  /// Automatic with only a Bluetooth microphone left warns in the row's ⓘ's place, the ⓘ's tip
-  /// under the warning; with another one there, the ⓘ alone.
+  /// Automatic with only a Bluetooth microphone left warns in the row's ⓘ's place, the warning
+  /// alone in its tip; with another one there, the ⓘ and its tip.
   #[test]
   fn only_a_bluetooth_mic_warns() {
     let home = Home::new("window-bluetooth", &TWO);
@@ -2586,7 +2590,7 @@ mod tests {
     h.app_mut().devices = vec![airpods];
     h.frame();
     let warning = "Only a Bluetooth mic: the sound is worse";
-    assert_eq!(tip(&mut h, "mic-row"), format!("{warning}\n\n{MIC_HELP}"));
+    assert_eq!(tip(&mut h, "mic-row"), warning);
 
     h.app_mut().devices = fake.devices();
     h.frame();
