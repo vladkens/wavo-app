@@ -452,13 +452,13 @@ impl Prefs {
       let (devices, saved) = (&self.devices, &self.settings.microphone);
       let (mics, at) = microphones(devices, saved, self.lid_closed);
       let labels: Vec<&str> = mics.iter().map(|m| m.0.as_str()).collect();
-      let caption = mic_caption(devices, saved, self.lid_closed);
+      let warning = mic_warning(devices, saved, self.lid_closed);
       let mut row = FormRow::new("Microphone").info(MIC_HELP);
-      if let Some(caption) = &caption {
-        row = row.caption(caption);
+      if let Some(warning) = &warning {
+        row = row.warning(warning);
       }
 
-      ui.form_row(fs, row, |ui| {
+      ui.id("mic-row").form_row(fs, row, |ui| {
         // ALSA's names run past 60 characters: a longer one ends in "…" beside its label.
         let mut cur = at;
         let pop = PopUp::new(&mut cur, &labels).separators(&[1]).max_width(MIC_WIDTH);
@@ -721,15 +721,11 @@ impl Prefs {
         });
       }
 
-      // Off and disabled where the app can't update, the setting kept.
+      // Off and disabled where the app can't update, the setting kept; its ⓘ says why.
       let updates = self.shell.updates();
-      let row = FormRow::new("Check for updates").disabled(!updates);
-      let row = match updates {
-        true => row.info(UPDATE_HELP),
-        false => row.caption(NO_UPDATES),
-      };
-
-      ui.form_row(fs, row, |ui| {
+      let help = if updates { UPDATE_HELP } else { NO_UPDATES };
+      let row = FormRow::new("Check for updates").info(help).disabled(!updates);
+      ui.id("auto-update-row").form_row(fs, row, |ui| {
         let mut on = updates && self.settings.auto_update;
         if ui.id("auto-update").toggle(&mut on, "").changed {
           self.edit(move |s| s.auto_update = on);
@@ -935,9 +931,9 @@ pub fn mic_name(device: &audio::Device, lid_closed: bool) -> String {
   }
 }
 
-/// The Microphone row's caption: the one chosen isn't connected, and what records instead; or
+/// The Microphone row's warning: the one chosen isn't connected, and what records instead; or
 /// Automatic has only a Bluetooth one.
-fn mic_caption(devices: &[audio::Device], saved: &Microphone, lid_closed: bool) -> Option<String> {
+fn mic_warning(devices: &[audio::Device], saved: &Microphone, lid_closed: bool) -> Option<String> {
   let Some((name, instead)) = not_connected(devices, saved, lid_closed) else {
     return bluetooth_only(devices, saved, lid_closed).map(str::to_owned);
   };
@@ -2291,6 +2287,21 @@ mod tests {
     tree.lines().map(str::trim).find(|l| l.starts_with(prefix)).map(str::to_owned)
   }
 
+  /// Rests the pointer on the mark of the row `row` (its ⓘ, or the warning in its place) until
+  /// its tooltip shows; the tooltip's text.
+  fn tip(h: &mut Harness<Prefs>, row: &str) -> String {
+    let mark = Id::of(row).key("info");
+    let r = h.rect(mark).unwrap_or_else(|| panic!("no mark in {row}"));
+    h.move_to(r.x + r.w / 2.0, r.y + r.h / 2.0);
+    h.wait(Duration::from_millis(400));
+    let tip = mark.key("tip");
+    assert!(h.rect(tip).is_some(), "no tooltip on the mark of {row}");
+    let text = h.text(tip.nth(0)).unwrap_or_default().to_owned();
+    h.leave();
+    h.frame();
+    text
+  }
+
   /// The dictation in progress shows as being transcribed, not as one without text.
   #[test]
   fn the_dictation_in_progress_is_transcribing() {
@@ -2444,7 +2455,7 @@ mod tests {
 
   /// About's Check for Updates… opens the update's window, Advanced turns the automatic checks off;
   /// in a build that doesn't update About has no button and Advanced's switch is off and disabled,
-  /// the setting kept on.
+  /// the setting kept on, its row's ⓘ enabled and saying why.
   #[test]
   fn about_checks_for_updates() {
     let home = Home::new("window-update", &TWO);
@@ -2456,8 +2467,10 @@ mod tests {
     tab(&mut h, Page::About);
     assert!(h.rect(Id::of("updates")).is_none());
     tab(&mut h, Page::Advanced);
-    let off = format!(r#"switch "Check for updates" off disabled desc {NO_UPDATES:?}"#);
-    assert_eq!(switch(&h), Some(off));
+    assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" off disabled"#));
+    let info = format!(r#"button "Info" desc {NO_UPDATES:?}"#);
+    assert_eq!(a11y_line(&h, &info), Some(info), "enabled");
+    assert_eq!(tip(&mut h, "auto-update-row"), NO_UPDATES);
     click(&mut h, Id::of("auto-update"));
     assert!(fake.log().settings.auto_update, "kept");
 
@@ -2465,6 +2478,7 @@ mod tests {
     h.app_mut();
     h.frame();
     assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" on"#));
+    assert_eq!(tip(&mut h, "auto-update-row"), UPDATE_HELP);
     click(&mut h, Id::of("auto-update"));
     assert!(!fake.log().settings.auto_update);
     tab(&mut h, Page::About);
@@ -2514,39 +2528,69 @@ mod tests {
     assert_eq!(h.app().login.error.as_deref(), Some("Couldn't turn it on: not permitted"));
   }
 
-  /// A chosen microphone that isn't connected stays the pop-up's choice, and the caption under it
-  /// names the one that records in its place: the system's input, not Automatic's USB one.
+  /// A chosen microphone that isn't connected stays the pop-up's choice, and the warning in its
+  /// row's ⓘ's place names the one that records instead: the system's input, not Automatic's USB
+  /// one. Its tooltip has the ⓘ's under it; no caption under the label.
   #[test]
   fn a_mic_not_connected_says_what_records() {
     let home = Home::new("window-mic", &TWO);
     let fake = Fake::default();
-    // The caption is the pop-up's description.
     let row = |h: &Harness<Prefs>| a11y_line(h, r#"pop up button "Microphone""#);
+    let mark = |h: &Harness<Prefs>| a11y_line(h, r#"button "Warning""#);
     let wh = Choice { id: Some("wh-1000xm5".into()), name: "WH-1000XM5".into() };
     let wh = Microphone::Device(wh);
-    let h = home.harness(&fake, Settings { microphone: wh.clone(), ..Settings::default() });
-    let caption = "WH-1000XM5 isn’t connected: Wavo records with MacBook Pro Microphone";
-    let want =
-      format!(r#"pop up button "Microphone" value "WH-1000XM5 (not connected)" desc {caption:?}"#);
-    assert_eq!(row(&h), Some(want));
-    let h = home.harness(&fake, Settings::default());
-    let auto = r#"pop up button "Microphone" value "Automatic (USB Mic)""#;
-    assert_eq!(row(&h).as_deref(), Some(auto), "no caption");
+    let mut h = home.harness(&fake, Settings { microphone: wh.clone(), ..Settings::default() });
+    let warning = "WH-1000XM5 isn’t connected: Wavo records with MacBook Pro Microphone";
+    let pop = r#"pop up button "Microphone" value "WH-1000XM5 (not connected)""#;
+    assert_eq!(row(&h).as_deref(), Some(pop), "no caption");
+    let both = format!("{warning}\n\n{MIC_HELP}");
+    assert_eq!(mark(&h), Some(format!(r#"button "Warning" desc {both:?}"#)));
+    assert_eq!(tip(&mut h, "mic-row"), both);
+    assert!(h.rect(Id::of("mic-row").key("caption")).is_none());
 
-    // Under a closed lid that one hears nothing: the caption says so.
-    let lid = format!("{caption} (the lid is closed)");
-    assert_eq!(mic_caption(&fake.devices(), &wh, true), Some(lid));
+    let mut h = home.harness(&fake, Settings::default());
+    let auto = r#"pop up button "Microphone" value "Automatic (USB Mic)""#;
+    assert_eq!(row(&h).as_deref(), Some(auto));
+    assert_eq!(mark(&h), None, "the ⓘ alone");
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
+
+    // Under a closed lid that one hears nothing: the warning says so.
+    let lid = format!("{warning} (the lid is closed)");
+    assert_eq!(mic_warning(&fake.devices(), &wh, true), Some(lid));
 
     // The system's input named by no listed device (ALSA's), or none listed: Linux has ALSA's
     // `default` all the same, elsewhere there is no input at all.
     let alsa = [audio::Device { default: false, ..fake.devices()[1].clone() }];
     let unnamed = "WH-1000XM5 isn’t connected: Wavo records with the system’s input";
-    assert_eq!(mic_caption(&alsa, &wh, false).as_deref(), Some(unnamed));
+    assert_eq!(mic_warning(&alsa, &wh, false).as_deref(), Some(unnamed));
     let none = match cfg!(target_os = "linux") {
       true => unnamed,
       false => "WH-1000XM5 isn’t connected, and there is no other microphone",
     };
-    assert_eq!(mic_caption(&[], &wh, false).as_deref(), Some(none));
+    assert_eq!(mic_warning(&[], &wh, false).as_deref(), Some(none));
+  }
+
+  /// Automatic with only a Bluetooth microphone left warns in the row's ⓘ's place, the ⓘ's tip
+  /// under the warning; with another one there, the ⓘ alone.
+  #[test]
+  fn only_a_bluetooth_mic_warns() {
+    let home = Home::new("window-bluetooth", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    let airpods = audio::Device {
+      id: Some("airpods".into()),
+      name: "AirPods Pro".into(),
+      default: true,
+      transport: Transport::Bluetooth,
+    };
+    h.app_mut().devices = vec![airpods];
+    h.frame();
+    let warning = "Only a Bluetooth mic: the sound is worse";
+    assert_eq!(tip(&mut h, "mic-row"), format!("{warning}\n\n{MIC_HELP}"));
+
+    h.app_mut().devices = fake.devices();
+    h.frame();
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
   }
 
   /// Export asks the save panel where; it is disabled while it runs; Finder shows the archive only
