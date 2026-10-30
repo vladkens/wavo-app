@@ -2640,7 +2640,8 @@ mod tests {
 
     let mac = fake.devices()[0].clone();
     fake.log().devices = Some(vec![mac]);
-    h.frame();
+    h.app_mut();
+    assert!(h.frame());
     assert_eq!(row(&h), pop("USB Mic"), "not read again before the change");
     assert!(h.event(Event::System(Change::AudioInputs)));
     h.frame();
