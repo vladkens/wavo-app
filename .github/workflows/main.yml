@@ -98,16 +98,7 @@ jobs:
         with:
           name: release
           pattern: release-*
-      # shipo's latest release binary, checked against its build attestation: no build scripts run
-      # in this job.
-      - run: |
-          sudo apt-get update && sudo apt-get install -y nsis
-          gh release download -R vladkens/shipo -p 'shipo-*-x86_64-unknown-linux-musl.tar.gz' -D "$RUNNER_TEMP/shipo"
-          gh attestation verify "$RUNNER_TEMP"/shipo/*.tar.gz -R vladkens/shipo
-          tar -xzf "$RUNNER_TEMP"/shipo/*.tar.gz -C "$RUNNER_TEMP/shipo" shipo
-          echo "$RUNNER_TEMP/shipo" >> "$GITHUB_PATH"
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - run: sudo apt-get update && sudo apt-get install -y nsis && cargo install --locked shipo
       - uses: vladkens/actions/rust-publish@v1
         with:
           name: Wavo

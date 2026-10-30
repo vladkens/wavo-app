@@ -9,7 +9,7 @@ The dictation app (`wavo-app`, `publish = false`) for macOS, Windows and Linux: 
 - The packer is the [shipo](https://github.com/vladkens/shipo) CLI, installed by `cargo install --locked shipo`; Cargo.toml's `[package.metadata.shipo]` is its config.
 - Build and test with the `release` profile (`--release --locked`, as the Makefile does) so everything builds once; the `dist` profile is only for `make dist` in CI.
 - zig is only for the lint: `cargo-zigbuild` runs only in `make check CROSS=…` (CI's cross clippy of the macOS and Windows code from Linux); never use zig or `cargo-zigbuild` to build binaries or release files or to pick the glibc version (a glibc floor goes through a pinned old-Debian sysroot with the normal toolchain).
-- Release CI: the build jobs only compile and get no secrets (third-party build scripts run there); packing and signing happen only in the one publish job on Ubuntu (`make pack`, run by vladkens/actions rust-publish), never as an installer or signing step per build runner; no Wine.
+- Release CI: the build jobs only compile and get no secrets (third-party build scripts run there); packing and signing happen only in the one publish job on Ubuntu (`make pack`, run by vladkens/actions rust-publish), never as an installer or signing step per build runner; the publish job builds only the packer, the person's own crate shipo (`cargo install --locked shipo`); no Wine.
 
 ## Rules
 
