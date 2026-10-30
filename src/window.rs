@@ -2247,7 +2247,7 @@ mod tests {
       let cfg = config(Page::General);
       let mut h = Harness::new(prefs, cfg.size, 2.0);
       // As high as macOS 26's, as nimbo's own shots draw it.
-      h.rt.set_titlebar(Some((32.0, cfg.title)));
+      h.set_titlebar(Some((32.0, cfg.title)));
       h.event(Event::Appearance(Appearance::LIGHT));
       h.frame();
       h.frame();
@@ -2402,8 +2402,8 @@ mod tests {
       for (page, _, name) in PAGES {
         tab(&mut h, page);
         shot(&mut h, &format!("{}-{look}", name.to_lowercase()));
-        let size = h.rt.size;
-        let sc = h.rt.ui.scroll(Id::of(("page", page as u8))).expect("the page's scroll area");
+        let size = h.size();
+        let sc = h.scroll(Id::of(("page", page as u8))).expect("the page's scroll area");
         match page.scrolls() {
           true => assert_eq!(size, Size::new(WIDTH, SCROLLING + 32.0), "{name}: and the title bar"),
           false => {
@@ -2426,14 +2426,14 @@ mod tests {
       shot(&mut h, &format!("history-selected-{look}"));
       // The panel's long text scrolls under the wheel.
       let panel = Id::of("history-text");
-      let sc = h.rt.ui.scroll(panel).expect("the panel's scroll area");
+      let sc = h.scroll(panel).expect("the panel's scroll area");
       assert!(sc.content.h > sc.viewport.h, "{look}: the text overflows: {sc:?}");
       let v = sc.viewport;
       let (pos, delta) = (Point::new(v.x + v.w / 2.0, v.y + v.h / 2.0), Point::new(0.0, -40.0));
       let (phase, momentum, mods) = (Phase::None, Phase::None, Modifiers::default());
       h.event(Event::Scroll { pos, delta, precise: true, phase, momentum, mods });
       h.frame();
-      assert!(h.rt.ui.scroll(panel).unwrap().offset.y > 0.0, "{look}: it scrolled");
+      assert!(h.scroll(panel).unwrap().offset.y > 0.0, "{look}: it scrolled");
 
       tab(&mut h, Page::Models);
       click(&mut h, Id::of(("delete", "whisper-turbo")));
@@ -2751,7 +2751,7 @@ mod tests {
     let mut h = home.harness(&fake, Settings::default());
     tab(&mut h, Page::History);
     click(&mut h, Id::of(("copy", ids[1])));
-    assert_eq!(h.rt.clipboard().read().as_deref(), Some("Send the invoice to Anna."));
+    assert_eq!(h.clipboard().read().as_deref(), Some("Send the invoice to Anna."));
     // Said under the panel for a while, the search keeping its width; then the totals again.
     assert_eq!(h.text(Id::of("history-total")), Some("Copied to the clipboard"));
     let search = h.rect(Id::of("history-search")).unwrap();
@@ -2785,7 +2785,7 @@ mod tests {
     let settings = h.app().settings.clone();
     let status = Status { restorable: vec![ids[0]], ..Status::default() };
     h.app_mut().update(&settings, &status, 2);
-    h.rt.waker().wake();
+    h.waker().wake();
     h.frame();
     click(&mut h, Id::of(("restore", ids[0])));
     click(&mut h, Id::of(("delete", ids[0])));
@@ -2833,7 +2833,7 @@ mod tests {
     let update = |h: &mut Harness<Prefs>, status: Status, n| {
       let settings = h.app().settings.clone();
       h.app_mut().update(&settings, &status, n);
-      h.rt.waker().wake();
+      h.waker().wake();
       h.frame();
     };
 
@@ -2848,7 +2848,7 @@ mod tests {
     ]);
     assert_eq!(menu(&mut h, ids[1], Some("copy")), all);
     assert_eq!(h.app().history.selected, Some(ids[1]), "selected by the right-click");
-    assert_eq!(h.rt.clipboard().read().as_deref(), Some("Send the invoice to Anna."));
+    assert_eq!(h.clipboard().read().as_deref(), Some("Send the invoice to Anna."));
     menu(&mut h, ids[1], None);
     assert_eq!(h.app().history.selected, Some(ids[1]), "kept selected by another one");
 
