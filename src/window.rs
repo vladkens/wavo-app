@@ -18,8 +18,8 @@ use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
 use nimbo::{
   Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
-  FormStyle, Hotkey, Icon, Id, Key, NamedKey, PopUp, Select, Style, TextStyle, Tile, Ui, Weight,
-  grow, open, paths, px,
+  FormStyle, Hotkey, Icon, Id, Item, Key, Menu, NamedKey, PopUp, Select, Style, TextStyle, Tile,
+  Ui, Weight, grow, open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -1606,6 +1606,14 @@ enum Act {
   Delete { id: i64, start: String, audio: bool },
 }
 
+impl Act {
+  /// Deleting `e`, asked first ([Prefs::history_act]) with the start of its text.
+  fn delete(e: &Entry) -> Act {
+    let start = crate::history::shorten(&first_line(e), 60);
+    Act::Delete { id: e.id, start, audio: e.audio_path.is_some() }
+  }
+}
+
 /// The panel under the list, with the selected dictation's whole text and its actions.
 const FOOT_H: f32 = 150.0;
 /// The line under it with the whole history.
@@ -1641,12 +1649,12 @@ impl Prefs {
     }
 
     // A plate a day, built only where it shows (nimbo's form list).
-    let (now, mut act) = (now_ms(), None);
+    let (h, now, mut act) = (&self.history, now_ms(), None);
     let fs = &FormStyle { caption: fs.caption.ellipsis(), pad_y: fs.pad_y + 4.0, ..*fs };
     let titles: Vec<String> = h.days.iter().map(|(day, ..)| day_title(*day, now)).collect();
     let groups: Vec<(&str, usize)> =
       titles.iter().zip(&h.days).map(|(t, (_, r, _))| (t.as_str(), r.len())).collect();
-    let (entries, days, status) = (&h.entries, &h.days, &self.status);
+    let (entries, days) = (&h.entries, &h.days);
     let entry = |g: usize, i: usize| &entries[days[g].1.start + i];
     let key = |g, i| entry(g, i).id as u64;
     let note = |ui: &mut Ui, g: usize| {
@@ -1655,10 +1663,7 @@ impl Prefs {
     };
     let row = |ui: &mut Ui, g, i| {
       let e = entry(g, i);
-      let selected = h.selected == Some(e.id);
-      let playing = h.playing.as_ref().is_some_and(|(id, _)| *id == e.id);
-      let working = status.current == Some(e.id) || status.retranscribing.contains(&e.id);
-      if let Some(a) = entry_row(ui, fs, e, selected, playing, working) {
+      if let Some(a) = entry_row(ui, fs, e, &RowState::of(self, e)) {
         act = Some(a);
       }
     };
@@ -1671,7 +1676,6 @@ impl Prefs {
   /// Restore the Previous Text and Delete.
   fn history_foot(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let t = ui.theme();
-    let transcribes = self.transcribes();
     let h = &self.history;
     let e = h.selected.and_then(|id| h.entries.iter().find(|e| e.id == id));
     let mut act = None;
@@ -1689,25 +1693,22 @@ impl Prefs {
       ui.id("history-text").scroll_area(area, |ui| {
         ui.col(Style::new().w(grow()), |ui| ui.text(&text, t.body()));
       });
-      let busy = self.status.retranscribing.contains(&e.id);
-      let audio = e.audio_path.is_some();
+      let st = RowState::of(self, e);
       ui.row(Style::new().w(grow()).gap(8.0), |ui| {
-        let off = busy || !transcribes || !audio;
+        let off = !st.retranscribes(e);
         if ui.disabled(off).id(("retranscribe", e.id)).button("Transcribe Again").clicked {
           act = Some(Act::Request(Request::Retranscribe(e.id)));
         }
 
-        if self.status.restorable.contains(&e.id)
-          && ui.disabled(busy).id(("restore", e.id)).button("Restore the Previous Text").clicked
+        if st.restorable
+          && ui.disabled(st.busy).id(("restore", e.id)).button("Restore the Previous Text").clicked
         {
           act = Some(Act::Request(Request::Restore(e.id)));
         }
 
         ui.el(Style::new().w(grow()));
-        // Not while it is transcribed again: the session refuses then.
-        if ui.disabled(busy).id(("delete", e.id)).button("Delete…").clicked {
-          let start = crate::history::shorten(&first_line(e), 60);
-          act = Some(Act::Delete { id: e.id, start, audio });
+        if ui.disabled(st.busy).id(("delete", e.id)).button("Delete…").clicked {
+          act = Some(Act::delete(e));
         }
       });
     });
@@ -1792,18 +1793,45 @@ impl Prefs {
   }
 }
 
-/// A dictation's row (`working`: being recorded or transcribed now), all of one height: its text on
-/// a line and the details under it, Play and Copy centred at its right. A click on it selects it
-/// (tinted), for the panel under the list.
-fn entry_row(
-  ui: &mut Ui,
-  fs: &FormStyle,
-  e: &Entry,
+/// A dictation as its row, its menu and the panel under the list show it: `working`, being
+/// recorded or transcribed now; the model `transcribes`; `busy`, being transcribed again, when the
+/// session refuses to change it; its previous text `restorable`.
+#[derive(Default)]
+struct RowState {
   selected: bool,
   playing: bool,
   working: bool,
-) -> Option<Act> {
-  let line = row_line(e, working);
+  transcribes: bool,
+  busy: bool,
+  restorable: bool,
+}
+
+impl RowState {
+  fn of(p: &Prefs, e: &Entry) -> RowState {
+    let (h, status) = (&p.history, &p.status);
+    let busy = status.retranscribing.contains(&e.id);
+    RowState {
+      selected: h.selected == Some(e.id),
+      playing: h.playing.as_ref().is_some_and(|(id, _)| *id == e.id),
+      working: busy || status.current == Some(e.id),
+      transcribes: p.transcribes(),
+      busy,
+      restorable: status.restorable.contains(&e.id),
+    }
+  }
+
+  /// Transcribe Again is on: the model transcribes, the recording is there, and it isn't busy.
+  fn retranscribes(&self, e: &Entry) -> bool {
+    self.transcribes && !self.busy && e.audio_path.is_some()
+  }
+}
+
+/// A dictation's row, all of one height: its text on a line and the details under it, Play and
+/// Copy centred at its right. A click on it selects it (tinted), for the panel under the list; a
+/// right-click selects it too and opens its menu ([row_menu]).
+fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, st: &RowState) -> Option<Act> {
+  let (selected, playing) = (st.selected, st.playing);
+  let line = row_line(e, st.working);
   let caption = details(e);
   let mut fs = *fs;
   fs.row = fs.row.hit();
@@ -1840,7 +1868,46 @@ fn entry_row(
     });
   });
 
-  act.or((r.clicked || on_text).then_some(Act::Select(e.id)))
+  // The menu's answer comes in a later pass than the press that selects the row.
+  let at = ui.context_press(r.id);
+  let chosen = ui.context_menu_at(r.id, at, || row_menu(e, st));
+  if let Some(a) = chosen.and_then(|item| row_act(&item, e)) {
+    return Some(a);
+  }
+
+  let select = r.clicked || on_text || at.is_some() && !selected;
+  act.or(select.then_some(Act::Select(e.id)))
+}
+
+/// A row's context menu: what its buttons and the panel under the list do.
+fn row_menu(e: &Entry, st: &RowState) -> Menu {
+  let (play, label) = if st.playing { ("stop", "Stop") } else { ("play", "Play the Recording") };
+  let mut items = vec![
+    Item::new("copy", "Copy Text").enabled(!e.text.is_empty()),
+    Item::new(play, label).enabled(e.audio_path.is_some()),
+    Item::separator(),
+    Item::new("retranscribe", "Transcribe Again").enabled(st.retranscribes(e)),
+  ];
+  if st.restorable {
+    items.push(Item::new("restore", "Restore the Previous Text").enabled(!st.busy));
+  }
+
+  items.extend([Item::separator(), Item::new("delete", "Delete…").destructive().enabled(!st.busy)]);
+  Menu::new(items)
+}
+
+/// The act of the row menu's item `item`, whatever the row is when the answer comes: Stop, chosen
+/// as the playback ended, doesn't play it again.
+fn row_act(item: &str, e: &Entry) -> Option<Act> {
+  Some(match item {
+    "copy" => Act::Copy(e.text.clone()),
+    "play" => Act::Play(e.id),
+    "stop" => Act::Stop,
+    "retranscribe" => Act::Request(Request::Retranscribe(e.id)),
+    "restore" => Act::Request(Request::Restore(e.id)),
+    "delete" => Act::delete(e),
+    _ => return None,
+  })
 }
 
 // MARK: About
@@ -1927,7 +1994,7 @@ mod tests {
   use std::cell::{RefCell, RefMut};
   use std::rc::Rc;
 
-  use nimbo::{Appearance, Event, Harness, Modifiers, Phase, Point, Size};
+  use nimbo::{Appearance, Event, Harness, Modifiers, MouseButton, Os, Phase, Point, Size};
 
   use super::*;
   use crate::testing::TempDir;
@@ -2506,6 +2573,106 @@ mod tests {
     assert!(
       h.rect(Id::of(("copy", ids[1]))).is_some() && h.rect(Id::of(("copy", ids[0]))).is_none()
     );
+  }
+
+  /// A right-click on a row selects it and opens its menu, which does what the row's buttons and
+  /// the panel under the list do; on the Mac a Control-click opens it too, on Windows it opens as
+  /// the button is let go.
+  #[test]
+  fn a_rows_menu_copies_transcribes_again_and_deletes() {
+    let home = Home::new("window-row-menu", &TWO);
+    let ids =
+      home.dictations(&[("Let's move the design review.", 3), ("Send the invoice to Anna.", 2)]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    h.native_menus();
+    tab(&mut h, Page::History);
+    // The menu of row `id` by a right-click, answered `answer`: its items' ids, each on or off.
+    let menu = |h: &mut Harness<Prefs>, id: i64, answer: Option<&str>| {
+      let r = h.rect(Id::of(("text", id))).unwrap();
+      h.right_click(r.x + 20.0, r.y + r.h / 2.0);
+      let (_, menu) = h.context_menu(answer).expect("the row's menu");
+      h.frame();
+      menu.items.into_iter().map(|i| (i.id, i.enabled)).collect::<Vec<_>>()
+    };
+    let items = |want: &[(&str, bool)]| -> Vec<(String, bool)> {
+      want.iter().map(|&(id, on)| (id.into(), on)).collect()
+    };
+    let update = |h: &mut Harness<Prefs>, status: Status, n| {
+      let settings = h.app().settings.clone();
+      h.app_mut().update(&settings, &status, n);
+      h.rt.waker().wake();
+      h.frame();
+    };
+
+    // Selected by the right-click; one on the selected row keeps it selected, as in Finder.
+    let all = items(&[
+      ("copy", true),
+      ("play", true),
+      ("", true),
+      ("retranscribe", true),
+      ("", true),
+      ("delete", true),
+    ]);
+    assert_eq!(menu(&mut h, ids[1], Some("copy")), all);
+    assert_eq!(h.app().history.selected, Some(ids[1]), "selected by the right-click");
+    assert_eq!(h.rt.clipboard().read().as_deref(), Some("Send the invoice to Anna."));
+    menu(&mut h, ids[1], None);
+    assert_eq!(h.app().history.selected, Some(ids[1]), "kept selected by another one");
+
+    // While it is transcribed again only Copy and Play are on; then its text before comes back.
+    menu(&mut h, ids[0], Some("retranscribe"));
+    assert_eq!(h.app().history.selected, Some(ids[0]), "the other row selected");
+    let restorable = vec![ids[0]];
+    update(&mut h, Status { retranscribing: vec![ids[0]], restorable, ..Status::default() }, 2);
+    let busy = items(&[
+      ("copy", true),
+      ("play", true),
+      ("", true),
+      ("retranscribe", false),
+      ("restore", false),
+      ("", true),
+      ("delete", false),
+    ]);
+    assert_eq!(menu(&mut h, ids[0], None), busy);
+    update(&mut h, Status { restorable: vec![ids[0]], ..Status::default() }, 3);
+    let got = menu(&mut h, ids[0], Some("restore"));
+    assert_eq!(got[3..5], items(&[("retranscribe", true), ("restore", true)]));
+
+    menu(&mut h, ids[0], Some("delete"));
+    let want = "“Let's move the design review.” and its recording are removed from the history.";
+    assert_eq!(h.app().ask.as_ref().map(|a| a.message.as_str()), Some(want));
+    confirm(&mut h);
+    let want = [Request::Retranscribe(ids[0]), Request::Restore(ids[0]), Request::Delete(ids[0])];
+    assert_eq!(fake.log().requests, want);
+
+    // A Control-click on the Mac asks for it as the button goes down; Windows as it is let go.
+    let control = (Os::Mac, MouseButton::Left, Modifiers::CONTROL, ids[1]);
+    let windows = (Os::Windows, MouseButton::Right, Modifiers::empty(), ids[0]);
+    for (os, button, mods, id) in [control, windows] {
+      h.set_os(os);
+      let r = h.rect(Id::of(("text", id))).unwrap();
+      let pos = Point::new(r.x + 20.0, r.y + r.h / 2.0);
+      h.event(Event::MouseDown { pos, button, clicks: 1, mods });
+      h.frame();
+      let down = h.context_menu(None).is_some();
+      h.event(Event::MouseUp { pos, button, mods });
+      let up = h.context_menu(None).is_some();
+      h.frame();
+      assert_eq!((down, up), (os == Os::Mac, os == Os::Windows), "{os:?}: the menu, once");
+      assert_eq!(h.app().history.selected, Some(id), "{os:?}: selected");
+    }
+  }
+
+  /// The menu's answer acts as the item it chose, whatever the row is by then: its Stop doesn't
+  /// play again a recording that ended meanwhile.
+  #[test]
+  fn a_rows_menu_stops_as_it_says() {
+    let e = Entry { id: 7, audio_path: Some("a.wav".into()), ..Entry::default() };
+    let st = RowState { playing: true, ..RowState::default() };
+    assert_eq!(row_menu(&e, &st).items[1].id, "stop");
+    assert!(matches!(row_act("stop", &e), Some(Act::Stop)));
+    assert!(matches!(row_act("play", &e), Some(Act::Play(7))));
   }
 
   #[test]
