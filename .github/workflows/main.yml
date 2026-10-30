@@ -96,7 +96,7 @@ jobs:
         with:
           name: release
           pattern: release-*
-      - run: sudo apt-get update && sudo apt-get install -y nsis hfsprogs
+      - run: sudo apt-get update && sudo apt-get install -y nsis && cargo install --locked shipo
       - uses: vladkens/actions/rust-publish@v1
         with:
           name: Wavo
@@ -108,4 +108,4 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          UPDATE_KEY: ${{ secrets.UPDATE_KEY }}
+          SHIPO_UPDATE_KEY: ${{ secrets.SHIPO_UPDATE_KEY }}

@@ -8,16 +8,16 @@ license = "MIT"
 repository = "https://github.com/vladkens/wavo-app"
 publish = false
 
-# The app as nimbo's scripts/pack.py makes it: the macOS app and disk image, the Windows
+# The app as shipo (the Makefile's packer) makes it: the macOS app and disk image, the Windows
 # installer, the AppImage and the .deb.
-[package.metadata.nimbo]
+[package.metadata.shipo]
 id = "me.vladkens.wavo"
 name = "Wavo"
 icon = "assets/icon.png"
 comment = "Local dictation: hold a hotkey, speak, and the text lands where you were typing"
 publisher = "vladkens"
 
-[package.metadata.nimbo.macos]
+[package.metadata.shipo.macos]
 accessory = true
 entitlements = "assets/wavo.entitlements"
 plist.NSMicrophoneUsageDescription = "Wavo records your voice while you dictate and turns it into text on this Mac. Nothing leaves your computer."
@@ -28,14 +28,25 @@ plist.NSSupportsSuddenTermination = false
 # at once, or malloc keeps the large blocks a model frees after its unload. LaunchServices sets it.
 plist.LSEnvironment.MallocSpaceEfficient = "1"
 
-[package.metadata.nimbo.windows]
+[package.metadata.shipo.windows]
 app-id = "314a56a8-8a8b-4c18-954d-b930203f086d"
 
-# The binary links glibc and libasound; pack.py recommends what nimbo loads at run time.
-[package.metadata.nimbo.linux]
+# The binary links glibc and libasound: shipo puts the libc6 of the binary's glibc first in
+# Depends. The .deb recommends what nimbo loads at run time: GTK, its layer shell, the text
+# stack, X11.
+[package.metadata.shipo.linux]
 categories = ["Utility", "Accessibility"]
 deb-package = "wavo"
-deb-depends = ["libc6 (>= 2.35)", "libasound2 | libasound2t64"]
+deb-depends = ["libasound2 | libasound2t64"]
+deb-recommends = [
+  "libgtk-3-0 | libgtk-3-0t64",
+  "libgtk-layer-shell0",
+  "libfontconfig1",
+  "libfreetype6",
+  "libharfbuzz0b",
+  "libx11-6",
+  "libxtst6",
+]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -52,6 +63,7 @@ rubato = "5.0.1"
 rusqlite = { version = "0.41.0", features = ["bundled", "functions"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+shipo = { version = "0.1.0", default-features = false }
 thiserror = "2.0.21"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
