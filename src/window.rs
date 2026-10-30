@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
+use nimbo::system::Change;
 use nimbo::{
   Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
   FormStyle, Hotkey, Icon, Id, Item, Key, Menu, NamedKey, PopUp, Select, Style, TextStyle, Tile,
@@ -357,10 +358,19 @@ impl App for Prefs {
   }
 
   /// The file Export's or Import's panel picked; Esc, or a click on nothing above the panel
-  /// under the history, unselects its dictation.
+  /// under the history, unselects its dictation; the microphones or the lid changed: read again
+  /// for the Microphone row.
   fn event(&mut self, cx: &mut Cx, ev: &Event) -> bool {
     let history = self.page == Page::History;
     match ev {
+      Event::System(Change::AudioInputs | Change::DefaultInput) => {
+        self.devices = self.shell.devices();
+        true
+      }
+      Event::System(Change::Lid) => {
+        self.lid_closed = self.shell.lid_closed();
+        true
+      }
       Event::FileDialog(answer) => {
         match (self.panel.take(), answer) {
           // GNOME's save panel adds no extension: Import's *.zip would not show it.
@@ -2067,6 +2077,9 @@ mod tests {
   struct Log {
     settings: Settings,
     paused: Vec<bool>,
+    /// A MacBook's microphone and a USB one unless set.
+    devices: Option<Vec<audio::Device>>,
+    lid_closed: bool,
     /// All allowed unless set.
     access: Option<Access>,
     allowed: Vec<Pane>,
@@ -2108,6 +2121,10 @@ mod tests {
     }
 
     fn devices(&self) -> Vec<audio::Device> {
+      if let Some(devices) = &self.log().devices {
+        return devices.clone();
+      }
+
       let device = |name: &str, default, transport| audio::Device {
         id: Some(name.to_lowercase()),
         name: name.into(),
@@ -2116,6 +2133,10 @@ mod tests {
       };
       let mac = device("MacBook Pro Microphone", true, Transport::BuiltIn);
       vec![mac, device("USB Mic", false, Transport::Usb)]
+    }
+
+    fn lid_closed(&self) -> bool {
+      self.log().lid_closed
     }
 
     fn access(&self) -> Access {
@@ -2575,7 +2596,8 @@ mod tests {
   }
 
   /// Automatic with only a Bluetooth microphone left warns in the row's ⓘ's place, the warning
-  /// alone in its tip; with another one there, the ⓘ and its tip.
+  /// alone in its tip; with another one there, the ⓘ and its tip. The open window reads the
+  /// microphones again on either audio change.
   #[test]
   fn only_a_bluetooth_mic_warns() {
     let home = Home::new("window-bluetooth", &TWO);
@@ -2587,13 +2609,55 @@ mod tests {
       default: true,
       transport: Transport::Bluetooth,
     };
-    h.app_mut().devices = vec![airpods];
+    fake.log().devices = Some(vec![airpods]);
+    assert!(h.event(Event::System(Change::DefaultInput)));
     h.frame();
     let warning = "Only a Bluetooth mic: the sound is worse";
     assert_eq!(tip(&mut h, "mic-row"), warning);
 
-    h.app_mut().devices = fake.devices();
+    fake.log().devices = None;
+    assert!(h.event(Event::System(Change::AudioInputs)));
     h.frame();
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
+  }
+
+  /// The chosen microphone unplugged while the window is open: on the change, not before, the
+  /// pop-up says it isn't connected and the warning names the one that records instead; the lid
+  /// closed, that one hears nothing; plugged in again, the warning goes and the ⓘ is back.
+  #[test]
+  fn devices_and_the_lid_redraw_the_mic_row() {
+    let home = Home::new("window-system", &TWO);
+    let fake = Fake::default();
+    let usb = Choice { id: Some("usb mic".into()), name: "USB Mic".into() };
+    let settings = Settings { microphone: Microphone::Device(usb), ..Settings::default() };
+    let mut h = home.harness(&fake, settings);
+    let row = |h: &Harness<Prefs>| a11y_line(h, r#"pop up button "Microphone""#);
+    let mark = |h: &Harness<Prefs>| a11y_line(h, r#"button "Warning""#);
+    let pop = |value: &str| Some(format!(r#"pop up button "Microphone" value {value:?}"#));
+    let warns = |w: &str| Some(format!(r#"button "Warning" desc {w:?}"#));
+    assert_eq!(row(&h), pop("USB Mic"));
+    assert_eq!(mark(&h), None);
+
+    let mac = fake.devices()[0].clone();
+    fake.log().devices = Some(vec![mac]);
+    h.frame();
+    assert_eq!(row(&h), pop("USB Mic"), "not read again before the change");
+    assert!(h.event(Event::System(Change::AudioInputs)));
+    h.frame();
+    let gone = "USB Mic isn’t connected: Wavo records with MacBook Pro Microphone";
+    assert_eq!(row(&h), pop("USB Mic (not connected)"));
+    assert_eq!(mark(&h), warns(gone));
+
+    fake.log().lid_closed = true;
+    assert!(h.event(Event::System(Change::Lid)));
+    h.frame();
+    assert_eq!(mark(&h), warns(&format!("{gone} (the lid is closed)")));
+
+    fake.log().devices = None;
+    assert!(h.event(Event::System(Change::AudioInputs)));
+    h.frame();
+    assert_eq!(row(&h), pop("USB Mic"));
+    assert_eq!(mark(&h), None);
     assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
   }
 

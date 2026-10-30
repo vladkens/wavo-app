@@ -322,9 +322,11 @@ fn system_input(devices: &[Device], unlisted: bool) -> Auto {
   }
 }
 
-/// A laptop's lid is closed (macOS: its built-in microphone is cut off then); `false` without one.
+/// A Mac's lid is closed: its built-in microphone is cut off then; `false` without one, and
+/// elsewhere: Windows counts its board's sound, the jack too, as built-in, and Linux lists no
+/// default for [automatic] to rank.
 pub fn lid_closed() -> bool {
-  nimbo::hardware::lid_closed() == Some(true)
+  cfg!(target_os = "macos") && nimbo::hardware::lid_closed() == Some(true)
 }
 
 /// The input [Microphone::Automatic] records with, `default` the system's: a USB default without

@@ -23,6 +23,7 @@ use nimbo::hotkey::{Hotkeys, Listener};
 use nimbo::instance::{self, Claim, Instance};
 use nimbo::paste::{self, PORTAL_WAIT, Paste};
 use nimbo::permissions::{self, Access, Pane};
+use nimbo::system::Change;
 use nimbo::tray::{Menu, Tray};
 use nimbo::{Clipboard, Main, Proxy, SystemClipboard, Window, autostart};
 use shipo::{Release, Staged};
@@ -45,6 +46,12 @@ const ACCESS_POLL: Duration = Duration::from_secs(2);
 // How long the session waits for the main thread to paste or copy; on Wayland nimbo's PORTAL_WAIT,
 // as the first paste waits for the desktop's dialog there.
 const MAIN_WAIT: Duration = Duration::from_secs(3);
+// The system's changes the settings window shows (its Microphone row): the microphones, and on
+// macOS the lid, which cuts the built-in one off ([audio::lid_closed]).
+const WATCHED: &[Change] = match cfg!(target_os = "macos") {
+  true => &[Change::AudioInputs, Change::DefaultInput, Change::Lid],
+  false => &[Change::AudioInputs, Change::DefaultInput],
+};
 
 thread_local! {
   static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -260,6 +267,13 @@ fn start(
   let missing = missing && !may_launch_at_login();
   APP.with(|cell| *cell.borrow_mut() = Some(app));
   main.on_reopen(|main| open_window(main, None));
+  // Only the open windows read them again ([Prefs]'s event). The menu reads them as it opens, and
+  // its `mic:i` items index the list it shows: read again while it is open, a click would pick
+  // from another list.
+  if let Err(e) = main.watch(WATCHED, |_, _| {}) {
+    warn!("system changes: {e}");
+  }
+
   if missing {
     proxy().post(|main| open_window(main, Some(Page::General)));
   }
