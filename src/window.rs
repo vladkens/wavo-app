@@ -116,6 +116,9 @@ pub trait Shell {
   fn import_state(&self) -> Option<Import>;
   fn open_url(&self, _url: &str) {}
   fn reveal(&self, _dir: &Path) {}
+  /// Plays `file` on the speakers until the [Playback] is dropped: [Prefs::played] once it has
+  /// played to its end or could not play.
+  fn play(&self, file: &Path) -> anyhow::Result<Playback>;
   /// This Mac has a Neural Engine wavo can use.
   fn has_neural_engine(&self) -> bool {
     false
@@ -165,7 +168,6 @@ pub struct Prefs {
   login: Login,
   /// The shortcut recorder records: the hotkey is paused.
   recording: bool,
-  focused: bool,
   ask: Option<Ask>,
   /// The file panel open: its answer goes to it.
   panel: Option<Panel>,
@@ -199,7 +201,6 @@ impl Prefs {
       access,
       login: Login { state: Err(String::new()), busy: None, error: None },
       recording: false,
-      focused: false,
       ask: None,
       panel: None,
       model_search: String::new(),
@@ -299,21 +300,6 @@ impl Prefs {
 
 impl App for Prefs {
   fn view(&mut self, ui: &mut Ui) {
-    // Back from another app (System Settings, where a permission was given).
-    let focused = ui.window_focused();
-    if focused && !self.focused {
-      self.refresh();
-    }
-
-    self.focused = focused;
-    // A recording played to its end lets the speakers go, whatever page shows.
-    let h = &mut self.history;
-    if let Some((_, p)) = h.playing.take_if(|(_, p)| !p.playing())
-      && let Some(e) = p.error()
-    {
-      h.note = Some((format!("Could not play the recording: {e}"), ui.now()));
-    }
-
     // The title bar is part of the window's content.
     let bar = ui.titlebar().map_or(0.0, |(h, _)| h);
     match self.page.scrolls() {
@@ -350,7 +336,7 @@ impl App for Prefs {
     self.confirm(ui);
 
     // Also when the recorder lost its focus with the page, or the window lost the keys.
-    let recording = ui.focused(Id::of("hotkey")) && focused;
+    let recording = ui.focused(Id::of("hotkey")) && ui.window_focused();
     if recording != self.recording {
       self.recording = recording;
       self.shell.pause_hotkey(recording);
@@ -359,10 +345,15 @@ impl App for Prefs {
 
   /// The file Export's or Import's panel picked; Esc, or a click on nothing above the panel
   /// under the history, unselects its dictation; the microphones or the lid changed: read again
-  /// for the Microphone row.
+  /// for the Microphone row; back in front, from another app (System Settings, where a permission
+  /// was given): [Prefs::refresh].
   fn event(&mut self, cx: &mut Cx, ev: &Event) -> bool {
     let history = self.page == Page::History;
     match ev {
+      Event::Focus(true) => {
+        self.refresh();
+        true
+      }
       Event::System(Change::AudioInputs | Change::DefaultInput) => {
         self.devices = self.shell.devices();
         true
@@ -1523,19 +1514,25 @@ struct HistoryPage {
   /// What the line under the panel says for [NOTE_TIME], and since when ([Ui::now]): an error,
   /// "Copied".
   note: Option<(String, Duration)>,
-  /// A note from outside a frame (a request that failed on its thread), stamped at the next one.
+  /// A note from outside a frame (a request that failed on its thread, a recording that could not
+  /// play), stamped at the next one.
   said: Option<String>,
 }
 
 impl HistoryPage {
+  /// The search field changed: its wait starts again, unless only spaces around it did.
+  fn typed(&mut self, now: Duration) {
+    let search = self.search.trim();
+    if self.typed.as_ref().is_none_or(|(s, _)| s != search) {
+      self.typed = Some((search.to_owned(), now));
+    }
+  }
+
   /// Reads the history again when it or the search changed; a search being typed keeps the last
-  /// result until it stays the same for [SEARCH_WAIT]. Returns how long it still waits.
+  /// result until it stays the same for [SEARCH_WAIT]. Returns how long it still waits. The
+  /// selected dictation is unselected when it is not read again: deleted, or out of the search.
   fn load(&mut self, now: Duration) -> Option<Duration> {
     let search = self.search.trim().to_owned();
-    if self.typed.as_ref().is_none_or(|(s, _)| *s != search) {
-      self.typed = Some((search.clone(), now));
-    }
-
     let since = self.typed.as_ref().map_or(SEARCH_WAIT, |(_, at)| now.saturating_sub(*at));
     let other = self.loaded.as_ref().is_some_and(|(s, _)| *s != search);
     if other && since < SEARCH_WAIT {
@@ -1562,7 +1559,10 @@ impl HistoryPage {
 
     // All of them: 86k entries read in about 0.1 s.
     match db.get_page(&key.0, i64::MAX as usize) {
-      Ok(entries) => (self.days, self.entries) = (days(&entries), entries),
+      Ok(entries) => {
+        self.selected = self.selected.filter(|id| entries.iter().any(|e| e.id == *id));
+        (self.days, self.entries) = (days(&entries), entries);
+      }
       Err(e) => self.note = Some((format!("Could not read the history: {e:#}"), now)),
     }
 
@@ -1695,8 +1695,12 @@ const TOTAL_H: f32 = 30.0;
 
 impl Prefs {
   fn history_head(&mut self, ui: &mut Ui, s: Style) {
-    let search = &mut self.history.search;
-    ui.row(s, |ui| _ = ui.id("history-search").search(search, "Search dictations"));
+    let h = &mut self.history;
+    ui.row(s, |ui| {
+      if ui.id("history-search").search(&mut h.search, "Search dictations").changed {
+        h.typed(ui.now());
+      }
+    });
   }
 
   /// The dictations, newest first, in a plate a day, a page at a time.
@@ -1708,10 +1712,6 @@ impl Prefs {
 
     if let Some(wait) = h.load(ui.now()) {
       ui.request_frame_in(wait);
-    }
-    // Deleted, or out of the search.
-    if h.selected.is_some_and(|id| !h.entries.iter().any(|e| e.id == id)) {
-      h.selected = None;
     }
 
     if h.entries.is_empty() {
@@ -1845,8 +1845,7 @@ impl Prefs {
           return;
         };
 
-        let waker = ui.waker().clone();
-        match Playback::start(&path, move || waker.wake()) {
+        match self.shell.play(&path) {
           Ok(p) => h.playing = Some((id, p)),
           Err(e) => h.note = Some((format!("Could not play the recording: {e:#}"), ui.now())),
         }
@@ -1863,6 +1862,17 @@ impl Prefs {
         self.ask = Some(Ask { title, message, delete: Delete::Entry(id) });
       }
       None => {}
+    }
+  }
+
+  /// The recording playing ended, or could not play ([Shell::play]): the speakers are let go
+  /// whatever page shows, and why it could not play is said under the panel.
+  pub fn played(&mut self) {
+    let h = &mut self.history;
+    if let Some((_, p)) = h.playing.take_if(|(_, p)| !p.playing())
+      && let Some(e) = p.error()
+    {
+      h.said = Some(format!("Could not play the recording: {e}"));
     }
   }
 }
@@ -2079,6 +2089,8 @@ mod tests {
     paused: Vec<bool>,
     /// A MacBook's microphone and a USB one unless set.
     devices: Option<Vec<audio::Device>>,
+    /// Times the devices were read.
+    looks: usize,
     lid_closed: bool,
     /// All allowed unless set.
     access: Option<Access>,
@@ -2096,6 +2108,7 @@ mod tests {
     imports: Vec<PathBuf>,
     updates: bool,
     checks: usize,
+    played: Vec<PathBuf>,
   }
 
   #[derive(Clone, Default)]
@@ -2121,7 +2134,9 @@ mod tests {
     }
 
     fn devices(&self) -> Vec<audio::Device> {
-      if let Some(devices) = &self.log().devices {
+      let mut log = self.log();
+      log.looks += 1;
+      if let Some(devices) = &log.devices {
         return devices.clone();
       }
 
@@ -2211,6 +2226,12 @@ mod tests {
 
     fn reveal(&self, dir: &Path) {
       self.log().revealed.push(dir.to_owned());
+    }
+
+    /// No speakers in tests.
+    fn play(&self, file: &Path) -> anyhow::Result<Playback> {
+      self.log().played.push(file.to_owned());
+      Err(anyhow::anyhow!("no speakers"))
     }
 
     fn updates(&self) -> bool {
@@ -2800,11 +2821,29 @@ mod tests {
     h.type_text("INVOICE");
     h.frame();
     assert!(h.rect(Id::of(("copy", ids[0]))).is_some(), "the last result while it is typed");
+    assert_eq!(h.app().history.selected, Some(ids[0]));
     h.wait(SEARCH_WAIT);
     h.frame();
     assert!(
       h.rect(Id::of(("copy", ids[1]))).is_some() && h.rect(Id::of(("copy", ids[0]))).is_none()
     );
+    assert_eq!(h.app().history.selected, None, "out of the search");
+  }
+
+  /// Play goes to the shell, which calls [Prefs::played] when it ends; a recording that could not
+  /// play says why under the panel.
+  #[test]
+  fn play_asks_the_shell() {
+    let home = Home::new("window-play", &TWO);
+    let ids = home.dictations(&[("Send the invoice to Anna.", 2)]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::History);
+    click(&mut h, Id::of(("play", ids[0])));
+    let file = fake.log().played.clone();
+    assert!(file.len() == 1 && file[0].is_file(), "{file:?}");
+    assert_eq!(h.text(Id::of("history-total")), Some("Could not play the recording: no speakers"));
+    assert!(h.app().history.playing.is_none());
   }
 
   /// A right-click on a row selects it and opens its menu, which does what the row's buttons and
@@ -2959,5 +2998,28 @@ mod tests {
 
     click(&mut h, Id::of("download-model"));
     assert_eq!(h.app().page, Page::Models);
+  }
+
+  /// The devices, the permissions, launch at login and the models are read as the window opens
+  /// and comes to the front, at once on the event; never because a view ran.
+  #[test]
+  fn only_the_window_in_front_reads_the_system() {
+    let home = Home::new("window-front", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    assert_eq!(fake.log().looks, 1, "as it opened");
+    for page in [Page::Advanced, Page::History, Page::General] {
+      tab(&mut h, page);
+    }
+
+    h.redraw();
+    h.frame();
+    assert_eq!(fake.log().looks, 1, "not by the frames");
+
+    h.event(Event::Focus(false));
+    h.frame();
+    assert_eq!(fake.log().looks, 1, "not in the back");
+    h.event(Event::Focus(true));
+    assert_eq!(fake.log().looks, 2, "in front again, before a frame");
   }
 }

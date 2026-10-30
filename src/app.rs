@@ -1138,6 +1138,10 @@ impl window::Shell for AppShell {
     }
   }
 
+  fn play(&self, file: &Path) -> Result<audio::Playback> {
+    audio::Playback::start(file, || with_window(Prefs::played))
+  }
+
   fn has_neural_engine(&self) -> bool {
     crate::engine::has_neural_engine()
   }
