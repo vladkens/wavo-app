@@ -395,19 +395,24 @@ mod tests {
     // Automatic: the USB one over the built-in default; the built-in one over a Bluetooth one, but
     // not under a closed lid, and a Bluetooth one left alone has a note; a virtual one only when
     // it is all there is, as the system's.
-    let auto = Microphone::Automatic;
-    assert_eq!(mic_label(&devices, &auto, false).0, "Automatic (Elgato Wave:3 Microphone Array)");
-    let mac = device("MacBook Pro Microphone", true, Transport::BuiltIn);
-    let both = [mac, device("AirPods Pro", false, Transport::Bluetooth)];
-    assert_eq!(mic_label(&both, &auto, false).0, "Automatic (MacBook Pro Microphone)");
-    let note = Some("Only a Bluetooth mic: the sound is worse".into());
-    assert_eq!(mic_label(&both, &auto, true), ("Automatic (AirPods Pro)".into(), note.clone()));
+    let mac = [device("MacBook Pro Microphone", true, Transport::BuiltIn)];
+    let both = [mac[0].clone(), device("AirPods Pro", false, Transport::Bluetooth)];
     let airpods = [device("AirPods Pro", true, Transport::Bluetooth)];
-    assert_eq!(mic_label(&airpods, &auto, false), ("Automatic (AirPods Pro)".into(), note));
-    let lid = [device("MacBook Pro Microphone", true, Transport::BuiltIn)];
-    assert_eq!(mic_label(&lid, &auto, true).0, "Automatic (none: the lid is closed)");
     let loopback = [device("BlackHole 2ch", true, Transport::Virtual)];
-    assert_eq!(mic_label(&loopback, &auto, false), ("Automatic (BlackHole 2ch)".into(), None));
+    let note = Some("Only a Bluetooth mic: the sound is worse");
+    let cases = [
+      (&devices[..], false, "Automatic (Elgato Wave:3 Microphone Array)", None),
+      (&both, false, "Automatic (MacBook Pro Microphone)", None),
+      (&both, true, "Automatic (AirPods Pro)", note),
+      (&airpods, false, "Automatic (AirPods Pro)", note),
+      (&mac, true, "Automatic (none: the lid is closed)", None),
+      (&loopback, false, "Automatic (BlackHole 2ch)", None),
+    ];
+    for (devices, lid_closed, label, note) in cases {
+      let got = mic_label(devices, &Microphone::Automatic, lid_closed);
+      assert_eq!(got, (label.to_owned(), note.map(str::to_owned)), "lid closed: {lid_closed}");
+    }
+
     assert!(!items.iter().any(|i| i.id.starts_with("update")), "a build that doesn't update");
   }
 
@@ -417,47 +422,51 @@ mod tests {
   fn a_mic_not_connected_names_the_one_that_records() {
     use Transport::*;
 
-    let (s, pick) = (Status::default(), Pick::default());
-    let mics_lid = |devices: &[Device], saved: &Microphone, lid_closed| {
-      let mics = (devices, saved, lid_closed);
-      let items = menu(None, &s, &[], &[], mics, (&[], &pick), None).items;
-      let label = |id| items.iter().find(|i| i.id == id).map(|i| i.label.clone());
-      let sub = &items.iter().find(|i| i.id == "mic").unwrap().submenu.as_ref().unwrap().items;
-      let checked = sub.iter().find(|i| i.checked).map(|i| i.label.clone());
-      (label("mic").unwrap(), label("mic-note"), checked)
-    };
-    let mics = |devices: &[Device], saved: &Microphone| mics_lid(devices, saved, false);
     let device = |name: &str, default, transport| {
       let (id, name) = (Some(name.into()), name.into());
       Device { id, name, default, transport }
     };
     let wh = device("WH-1000XM5", false, Bluetooth);
     let headphones = Microphone::Device(Choice { id: wh.id.clone(), name: wh.name.clone() });
-    let note = Some("WH-1000XM5 isn’t connected".to_owned());
-    let checked = Some("WH-1000XM5 (not connected)".to_owned());
+    let (s, pick) = (Status::default(), Pick::default());
+    // The menu's title and note, the submenu's checked item.
+    let mics = |devices: &[Device], lid_closed| {
+      let mics = (devices, &headphones, lid_closed);
+      let items = menu(None, &s, &[], &[], mics, (&[], &pick), None).items;
+      let label = |id| items.iter().find(|i| i.id == id).map(|i| i.label.clone());
+      let sub = &items.iter().find(|i| i.id == "mic").unwrap().submenu.as_ref().unwrap().items;
+      let checked = sub.iter().find(|i| i.checked).map(|i| i.label.clone());
+      (label("mic").unwrap(), label("mic-note"), checked)
+    };
 
     let rode =
       [device("MacBook Pro Microphone", false, BuiltIn), device("RØDE PodMic USB", true, Usb)];
-    let want = ("RØDE PodMic USB".into(), note.clone(), checked.clone());
-    assert_eq!(mics(&rode, &headphones), want);
-    // The system's input, not Automatic's USB one.
     let mac =
       [device("MacBook Pro Microphone", true, BuiltIn), device("Elgato Wave:3", false, Usb)];
-    assert_eq!(mics(&mac, &headphones).0, "MacBook Pro Microphone");
-    // Under a closed lid that one hears nothing: the menu says so.
-    let lid = "MacBook Pro Microphone (the lid is closed)".to_owned();
-    assert_eq!(mics_lid(&mac, &headphones, true), (lid, note.clone(), checked.clone()));
-    // The system's input named by no listed device (ALSA's), or none listed: Linux has ALSA's
-    // `default` all the same, elsewhere there is no input at all.
     let alsa = [device("HDA Intel PCH", false, Unknown)];
-    let want = ("System Default".into(), note.clone(), checked.clone());
-    assert_eq!(mics(&alsa, &headphones), want);
     let none = if cfg!(target_os = "linux") { "System Default" } else { "No Microphone" };
-    assert_eq!(mics(&[], &headphones), (none.into(), note, checked));
+    let cases = [
+      (&rode[..], false, "RØDE PodMic USB"),
+      // The system's input, not Automatic's USB one; under a closed lid that one hears nothing:
+      // the menu says so.
+      (&mac, false, "MacBook Pro Microphone"),
+      (&mac, true, "MacBook Pro Microphone (the lid is closed)"),
+      // The system's input named by no listed device (ALSA's), or none listed: Linux has ALSA's
+      // `default` all the same, elsewhere there is no input at all.
+      (&alsa, false, "System Default"),
+      (&[], false, none),
+    ];
+    let note = Some("WH-1000XM5 isn’t connected".to_owned());
+    let checked = Some("WH-1000XM5 (not connected)".to_owned());
+    for (devices, lid_closed, title) in cases {
+      let want = (title.to_owned(), note.clone(), checked.clone());
+      assert_eq!(mics(devices, lid_closed), want);
+    }
+
     // Back again: in use, no note.
     let back = [wh, device("RØDE PodMic USB", true, Usb)];
     let want = ("WH-1000XM5".into(), None, Some("WH-1000XM5".into()));
-    assert_eq!(mics(&back, &headphones), want);
+    assert_eq!(mics(&back, false), want);
   }
 
   /// An update shows under the header and the warnings; Check for Updates… sits above Quit.

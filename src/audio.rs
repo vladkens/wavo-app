@@ -356,12 +356,13 @@ impl GaveWay {
   /// menu and the settings tell with the one that records: only the log keeps that.
   pub fn warning(&self, used: &str) -> Option<String> {
     let text = format!("{self}; using {used:?}");
-    if let Self::NotConnected(_) = self {
-      info!("{text}");
-      return None;
+    match self {
+      Self::NotConnected(_) => {
+        info!("{text}");
+        None
+      }
+      Self::Failed(..) => Some(text),
     }
-
-    Some(text)
   }
 }
 
@@ -396,9 +397,9 @@ fn open_input<D: Clone, T>(
   let mut gave_way = None;
   if let Microphone::Device(choice) = mic {
     // The chosen one, and whether it is the system's input.
-    let (found, system) = match default.as_ref().filter(|d| d.is(choice)) {
-      Some(d) => (Some((d.device.clone(), d.name.clone())), true),
-      None => {
+    let (found, system) = match &default {
+      Some(d) if d.is(choice) => (Some((d.device.clone(), d.name.clone())), true),
+      _ => {
         // By ID among all, an unlisted one too; by name among the listed: ALSA names a card's PCMs
         // after the card, and the one listed is the best.
         let mut all = all();
@@ -413,20 +414,20 @@ fn open_input<D: Clone, T>(
       }
     };
 
-    gave_way = Some(match found {
+    let why = match found {
       Some((device, name)) => match open(&device) {
         Ok(value) => return Ok((name, value, None)),
         Err(e) => GaveWay::Failed(choice.name.clone(), format!("{e:#}")),
       },
       None => GaveWay::NotConnected(choice.name.clone()),
-    });
+    };
 
     // The one that failed is the system's: none is left to take its place.
-    if let Some(w) = &gave_way
-      && system
-    {
-      bail!("{w}");
+    if system {
+      bail!("{why}");
     }
+
+    gave_way = Some(why);
   }
 
   let Some(Input { name, device, .. }) = instead(default)? else {
@@ -1502,15 +1503,20 @@ mod tests {
     };
 
     let busy = r#"could not open the microphone "RØDE PodMic USB": busy"#;
-    assert_eq!(run(1, "rode", "RØDE PodMic USB"), (Err(busy.into()), vec!["rode"]));
-    assert_eq!(run(1, "gone", "RØDE PodMic USB"), (Err(busy.into()), vec!["rode"]));
     let warning = format!(r#"{busy}; using "MacBook Pro Microphone""#);
-    let want = Ok(("MacBook Pro Microphone".into(), Some(warning)));
-    assert_eq!(run(0, "rode", "RØDE PodMic USB"), (want, vec!["rode", "mac"]));
-    // Not connected, and the system's input busy.
+    let used = Ok(("MacBook Pro Microphone".into(), Some(warning)));
     let both = "the microphone \"WH-1000XM5\" is not connected, and the default microphone \
       \"RØDE PodMic USB\" failed too: busy";
-    assert_eq!(run(1, "wh", "WH-1000XM5"), (Err(both.into()), vec!["rode"]));
+    let cases = [
+      (1, "rode", "RØDE PodMic USB", Err(busy.into()), vec!["rode"]),
+      (1, "gone", "RØDE PodMic USB", Err(busy.into()), vec!["rode"]),
+      (0, "rode", "RØDE PodMic USB", used, vec!["rode", "mac"]),
+      // Not connected, and the system's input busy.
+      (1, "wh", "WH-1000XM5", Err(both.into()), vec!["rode"]),
+    ];
+    for (default, id, name, want, tried) in cases {
+      assert_eq!(run(default, id, name), (want, tried), "{id:?} {name:?}, default {default}");
+    }
   }
 
   #[test]

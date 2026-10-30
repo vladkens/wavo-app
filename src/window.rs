@@ -2285,6 +2285,12 @@ mod tests {
     click(h, Id::of(CONFIRM).key("action"));
   }
 
+  /// The accessibility tree's line that starts with `prefix`, as assistive technology reads it.
+  fn a11y_line(h: &Harness<Prefs>, prefix: &str) -> Option<String> {
+    let tree = h.a11y();
+    tree.lines().map(str::trim).find(|l| l.starts_with(prefix)).map(str::to_owned)
+  }
+
   /// The dictation in progress shows as being transcribed, not as one without text.
   #[test]
   fn the_dictation_in_progress_is_transcribing() {
@@ -2446,13 +2452,7 @@ mod tests {
     // On, as by default.
     let mut h = home.harness(&fake, Settings::default());
     assert!(fake.log().settings.auto_update);
-    // The switch as assistive technology reads it.
-    let switch = |h: &Harness<Prefs>| {
-      let tree = h.a11y();
-      let line =
-        tree.lines().map(str::trim).find(|l| l.starts_with(r#"switch "Check for updates""#));
-      line.map(str::to_owned)
-    };
+    let switch = |h: &Harness<Prefs>| a11y_line(h, r#"switch "Check for updates""#);
     tab(&mut h, Page::About);
     assert!(h.rect(Id::of("updates")).is_none());
     tab(&mut h, Page::Advanced);
@@ -2520,13 +2520,8 @@ mod tests {
   fn a_mic_not_connected_says_what_records() {
     let home = Home::new("window-mic", &TWO);
     let fake = Fake::default();
-    // The pop-up as assistive technology reads it, the caption its description.
-    let row = |h: &Harness<Prefs>| {
-      let tree = h.a11y();
-      let line =
-        tree.lines().map(str::trim).find(|l| l.starts_with(r#"pop up button "Microphone""#));
-      line.map(str::to_owned)
-    };
+    // The caption is the pop-up's description.
+    let row = |h: &Harness<Prefs>| a11y_line(h, r#"pop up button "Microphone""#);
     let wh = Choice { id: Some("wh-1000xm5".into()), name: "WH-1000XM5".into() };
     let wh = Microphone::Device(wh);
     let h = home.harness(&fake, Settings { microphone: wh.clone(), ..Settings::default() });
