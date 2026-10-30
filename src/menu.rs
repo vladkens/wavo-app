@@ -300,7 +300,7 @@ fn state(status: &Status) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::audio::{Choice, Transport};
+  use crate::audio::{Choice, GaveWay, Transport};
 
   #[test]
   fn every_icon_is_an_18_point_even_odd_path() {
@@ -449,6 +449,30 @@ mod tests {
     let back = [wh, device("RØDE PodMic USB", true, Usb)];
     let want = ("WH-1000XM5".into(), None, Some("WH-1000XM5".into()));
     assert_eq!(mics(&back, &headphones), want);
+  }
+
+  /// A dictation with the chosen microphone not connected leaves no warning that says it again:
+  /// the note under the one that records does; the recording's other warnings show.
+  #[test]
+  fn a_dictation_without_the_chosen_mic_leaves_the_note_only() {
+    let (wh, rode) = ("WH-1000XM5", "RØDE PodMic USB");
+    let devices =
+      [Device { id: None, name: rode.into(), default: true, transport: Transport::Usb }];
+    let headphones = Microphone::Device(Choice { id: Some("wh".into()), name: wh.into() });
+    // What the recording leaves, as the session publishes it.
+    let gave_way = GaveWay::NotConnected(wh.into()).warning(rode);
+    let stopped = "the recording stopped: unplugged".to_owned();
+    let s =
+      Status { warnings: gave_way.into_iter().chain([stopped]).collect(), ..Status::default() };
+    let list = warnings(&System { accessibility: true, ..System::default() }, "f5", &s);
+    let (mics, pick) = ((&devices[..], &headphones, false), Pick::default());
+    let items = menu(None, &s, &list, &[], mics, (&[], &pick), None).items;
+
+    let label = |id| items.iter().find(|i| i.id == id).map(|i| i.label.as_str());
+    let shown: Vec<_> =
+      items.iter().filter(|i| i.id.starts_with("warn:")).map(|i| &i.label).collect();
+    assert_eq!(shown, ["⚠︎ The recording stopped: unplugged"]);
+    assert_eq!((label("mic"), label("mic-note")), (Some(rode), Some("WH-1000XM5 isn’t connected")));
   }
 
   /// An update shows under the header and the warnings; Check for Updates… sits above Quit.

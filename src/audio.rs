@@ -23,7 +23,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// The engine's sample rate: every model takes 16 kHz mono.
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -321,9 +321,32 @@ fn automatic_input(host: &cpal::Host, default: Option<Input>) -> Result<Option<I
   }
 }
 
-/// Opens `mic` with `open`: its name, what `open` made, and a warning when a chosen device is
-/// missing or fails and the system's input records instead ([in_use]). The choice stays: once the
-/// device is back, the next recording uses it.
+/// Why a chosen microphone, by its name, gave way to the system's input.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GaveWay {
+  #[error("the microphone {0:?} is not connected")]
+  NotConnected(String),
+  #[error("could not open the microphone {0:?}: {1}")]
+  Failed(String, String),
+}
+
+impl GaveWay {
+  /// The recording's warning with `used` in its place; none when it isn't connected, which the
+  /// menu and the settings tell with the one that records: only the log keeps that.
+  pub fn warning(&self, used: &str) -> Option<String> {
+    let text = format!("{self}; using {used:?}");
+    if let Self::NotConnected(_) = self {
+      info!("{text}");
+      return None;
+    }
+
+    Some(text)
+  }
+}
+
+/// Opens `mic` with `open`: its name, what `open` made, and a warning when a chosen device fails
+/// and the system's input records instead ([in_use]), as when it is missing ([GaveWay]). The
+/// choice stays: once the device is back, the next recording uses it.
 fn open_device<T>(
   mic: &Microphone,
   open: impl Fn(&cpal::Device) -> Result<T>,
@@ -331,7 +354,7 @@ fn open_device<T>(
   let host = cpal::default_host();
   // The default first: usually it is the one, and listing every device is slower.
   let default = host.default_input_device().and_then(Input::new);
-  let mut warning = None;
+  let mut gave_way = None;
   if let Microphone::Device(choice) = mic {
     let found = match &default {
       Some(d) if d.is(choice) => Some((d.device.clone(), d.name.clone())),
@@ -347,16 +370,16 @@ fn open_device<T>(
       }
     };
 
-    match found {
+    gave_way = Some(match found {
       Some((device, name)) => match open(&device) {
         Ok(value) => return Ok((name, value, None)),
-        Err(e) => warning = Some(format!("could not open the microphone {:?}: {e:#}", choice.name)),
+        Err(e) => GaveWay::Failed(choice.name.clone(), format!("{e:#}")),
       },
-      None => warning = Some(format!("the microphone {:?} is not connected", choice.name)),
-    }
+      None => GaveWay::NotConnected(choice.name.clone()),
+    });
 
     // The one that failed is the system's: none is left to take its place.
-    if let Some(w) = &warning
+    if let Some(w) = &gave_way
       && default.as_ref().is_some_and(|d| d.is(choice))
     {
       bail!("{w}");
@@ -369,17 +392,17 @@ fn open_device<T>(
     Microphone::System | Microphone::Device(_) => default,
   };
   let Some(Input { name, device, .. }) = fallback else {
-    match warning {
+    match gave_way {
       Some(w) => bail!("{w}, and there is no default microphone"),
       None => bail!("no microphone found"),
     }
   };
 
-  let value = open(&device).map_err(|e| match &warning {
+  let value = open(&device).map_err(|e| match &gave_way {
     Some(w) => anyhow!("{w}, and the default microphone {name:?} failed too: {e:#}"),
     None => anyhow!("could not open the microphone {name:?}: {e:#}"),
   })?;
-  let warning = warning.map(|w| format!("{w}; using {name:?}"));
+  let warning = gave_way.and_then(|w| w.warning(&name));
   Ok((name, value, warning))
 }
 
@@ -1396,6 +1419,18 @@ mod tests {
     let alsa = [Device { default: false, ..devices[1].clone() }];
     assert_eq!(in_use(&alsa, &missing, false), Auto::System);
     assert_eq!(in_use(&[], &missing, false), Auto::System);
+  }
+
+  /// A chosen one that did not open warns, naming the one in its place; one not connected only
+  /// logs, as the menu and the settings tell it, and the errors with none in its place say why.
+  #[test]
+  fn only_a_chosen_mic_that_did_not_open_warns() {
+    let failed = GaveWay::Failed("WH-1000XM5".into(), "busy".into());
+    let want = r#"could not open the microphone "WH-1000XM5": busy; using "RØDE PodMic USB""#;
+    assert_eq!(failed.warning("RØDE PodMic USB").as_deref(), Some(want));
+    let missing = GaveWay::NotConnected("WH-1000XM5".into());
+    assert_eq!(missing.warning("RØDE PodMic USB"), None);
+    assert_eq!(missing.to_string(), r#"the microphone "WH-1000XM5" is not connected"#);
   }
 
   #[test]
