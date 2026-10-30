@@ -11,7 +11,6 @@
 //! the update's check, download and install ([updater]).
 
 use std::cell::RefCell;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,9 +24,8 @@ use nimbo::instance::{self, Claim, Instance};
 use nimbo::paste::{self, PORTAL_WAIT, Paste};
 use nimbo::permissions::{self, Access, Pane};
 use nimbo::tray::{Menu, Tray};
-use nimbo::update::dialog::{self, About, Act, State, Updater};
-use nimbo::update::{self, Release, Staged};
-use nimbo::{Clipboard, Main, Png, Proxy, SystemClipboard, Window, autostart};
+use nimbo::{Clipboard, Main, Proxy, SystemClipboard, Window, autostart};
+use shipo::{Release, Staged};
 use tracing::{error, info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
@@ -36,6 +34,7 @@ use crate::hud::{self, Hud, Mode, Show};
 use crate::menu::{self, Icon, Warning};
 use crate::session::{self, Handle, NotPasted, Phase, Request, Session, TextOutput, Update};
 use crate::settings::{self, HudPosition, Settings};
+use crate::updater::{Act, State, UpdateWindow, Updater};
 use crate::window::{
   self, Download, Downloads, Export, Found, Import, Page, Pick, Prefs, Transfer, no_text,
 };
@@ -112,14 +111,14 @@ struct App {
   session: Session,
 }
 
-/// How long a dictation the installer found running may go on: nimbo's installer waits 30 s for
+/// How long a dictation the installer found running may go on: shipo's installer waits 30 s for
 /// the app to quit.
 const QUIT_WAIT: Duration = Duration::from_secs(25);
 
 /// Returns at once when another instance runs for the same home (it opens its settings), else when
-/// the app quits. `updated`: the failure of the update that started this app, from nimbo's
-/// [update::finish].
-pub fn run(updated: Option<io::Error>) -> Result<()> {
+/// the app quits. `updated`: the failure of the update that started this app, from
+/// [shipo::finish].
+pub fn run(updated: Option<shipo::Error>) -> Result<()> {
   let config = session::Config::from_env();
   let home = config.home.clone();
   std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
@@ -155,7 +154,7 @@ fn start(
   main: &mut Main,
   config: session::Config,
   instance: Instance,
-  updated: Option<io::Error>,
+  updated: Option<shipo::Error>,
 ) -> Result<()> {
   let _ = PROXY.set(main.proxy());
   // Linux only: the dock, Wayland's window icon and the portals' dialogs find the app by it.
@@ -167,11 +166,11 @@ fn start(
     }
   }
 
-  // Asked once: nimbo tries a staging folder beside the app.
+  // Asked once: shipo tries a staging folder beside the app.
   let supported = updater::fake().is_some()
     || installed()
-      && !update::dev(crate::VERSION)
-      && update::supported().inspect_err(|e| info!("updates: {e}")).is_ok();
+      && !updater::dev(crate::VERSION)
+      && shipo::supported().inspect_err(|e| info!("updates: {e}")).is_ok();
   let fake_mic = config.fake_mic.is_some();
   let (home, hub) = (config.home.clone(), config.hub.clone());
   let observer = Box::new(|update: Update| {
@@ -245,7 +244,7 @@ fn start(
   };
   if let Some(e) = updated {
     warn!("update: {e}");
-    app.updater.lock().unwrap().relaunched(&e);
+    app.updater.lock().unwrap().relaunched(updater::why(&e));
   }
 
   app.check_access();
@@ -781,7 +780,8 @@ fn open_update(main: &mut Main) {
   match open {
     Some(w) => w.front(),
     None => {
-      let w = main.open(&update_config(), UpdateWindow { updater });
+      let chosen = |act| proxy().post(move |_| _ = with_app(|app| app.update_act(act)));
+      let w = main.open(&updater::config(), UpdateWindow::new(updater, chosen));
       w.on_close(|_| {
         with_app(|app| {
           app.update_window = None;
@@ -802,60 +802,41 @@ fn open_update(main: &mut Main) {
   });
 }
 
-/// The update's window: a fixed size, the app's icon in its title bar off macOS.
-fn update_config() -> nimbo::Config {
-  crate::with_icon(dialog::config("Software Update"))
-}
-
-/// The update's window: nimbo's [dialog::view] over the app's [Updater]; what the person chooses
-/// goes to the app.
-struct UpdateWindow {
-  updater: Arc<Mutex<Updater>>,
-}
-
-impl nimbo::App for UpdateWindow {
-  fn view(&mut self, ui: &mut nimbo::Ui) {
-    let state = self.updater.lock().unwrap().state.clone();
-    let about = About { name: "Wavo", version: crate::VERSION, icon: Some(Png::new(crate::ICON)) };
-    let Some(act) = dialog::view(ui, &about, &state) else { return };
-    proxy().post(move |_| _ = with_app(|app| app.update_act(act)));
-  }
-}
-
 impl App {
-  /// At launch and every [dialog::TICK]: an automatic check when one is due and they are on.
+  /// At launch and every [updater::TICK]: an automatic check when one is due and they are on.
   fn update_tick(&mut self) {
     let due = self.updater.lock().unwrap().due(SystemTime::now());
     if self.settings().auto_update && due && self.updater.lock().unwrap().check(false) {
       App::spawn_check();
     }
 
-    proxy().after(dialog::TICK, |_| _ = with_app(App::update_tick));
+    proxy().after(updater::TICK, |_| _ = with_app(App::update_tick));
   }
 
   /// The check, on a thread, its answer to [App::update_checked].
   fn spawn_check() {
     spawn("update-check", || {
-      let found = match updater::fake() {
+      let checked = match updater::fake() {
         Some(version) => {
           std::thread::sleep(Duration::from_secs(1));
           updater::fake_check(&version)
         }
-        None => update::check(&updater::FEED, crate::VERSION),
+        None => shipo::check(&updater::FEED, crate::VERSION),
       };
-      proxy().post(|_| _ = with_app(|app| app.update_checked(found)));
+      proxy().post(|_| _ = with_app(|app| app.update_checked(checked)));
     });
   }
 
-  fn update_checked(&mut self, found: io::Result<Option<Release>>) {
-    match &found {
+  /// Logged as it came; the updater takes it as [updater::found] says.
+  fn update_checked(&mut self, checked: shipo::Result<Option<Release>>) {
+    match &checked {
       Ok(Some(r)) => info!("update: {} is out", r.version),
       Ok(None) => info!("update: none"),
-      Err(e) if e.kind() == io::ErrorKind::Unsupported => info!("update: {e}"),
+      Err(e @ shipo::Error::Unsupported(_)) => info!("update: {e}"),
       Err(e) => warn!("update check: {e}"),
     }
 
-    let skipped = self.settings().skipped_update;
+    let (found, skipped) = (updater::found(checked), self.settings().skipped_update);
     self.updater.lock().unwrap().checked(found, skipped.as_deref(), SystemTime::now());
     self.update_changed();
   }
@@ -872,7 +853,7 @@ impl App {
             // Told to the main thread only when the whole percent changes.
             let mut told = 0;
             let progress = |done, total| {
-              let done = dialog::percent(done, total);
+              let done = updater::percent(done, total);
               if done != told {
                 told = done;
                 proxy().post(move |_| _ = with_app(|app| app.update_progress(done)));
@@ -883,11 +864,11 @@ impl App {
               return proxy().post(|_| _ = with_app(App::update_fake_downloaded));
             }
 
-            let staged = update::download(&release, progress);
+            let staged = shipo::download(&release, progress);
             proxy().post(|_| _ = with_app(|app| app.update_downloaded(staged)));
           });
         } else if updater.check(true) {
-          // Retry after a check that failed.
+          // Retry after a check, or the update that started this app, failed.
           App::spawn_check();
         }
       }
@@ -904,8 +885,9 @@ impl App {
         close = true;
       }
       Act::Notes => {
-        if let State::Available(r) | State::Failed(Some(r), _) = &updater.state
-          && let Err(e) = nimbo::open::url(&updater::notes_url(&r.version))
+        if let State::Available(r) = &updater.state
+          && let Some(notes) = &r.notes
+          && let Err(e) = nimbo::open::url(notes)
         {
           warn!("the release notes: {e}");
         }
@@ -930,7 +912,7 @@ impl App {
     self.update_changed();
   }
 
-  fn update_downloaded(&mut self, staged: io::Result<Staged>) {
+  fn update_downloaded(&mut self, staged: shipo::Result<Staged>) {
     match staged {
       Ok(staged) => {
         self.updater.lock().unwrap().downloaded();
@@ -939,7 +921,7 @@ impl App {
       }
       Err(e) => {
         warn!("update download: {e}");
-        self.updater.lock().unwrap().failed(&e);
+        self.updater.lock().unwrap().failed(updater::why(&e));
       }
     }
 
@@ -952,7 +934,7 @@ impl App {
     self.update_changed();
     proxy().after(Duration::from_secs(3), |_| {
       _ = with_app(|app| {
-        app.updater.lock().unwrap().failed(&io::Error::other(updater::FAKE_INSTALL));
+        app.updater.lock().unwrap().failed(updater::FAKE_INSTALL.into());
         app.update_changed();
       })
     });
@@ -965,17 +947,17 @@ impl App {
     };
 
     spawn("update", || {
-      let installed = update::install(staged);
+      let installed = shipo::install(staged);
       proxy().post(|_| _ = with_app(|app| app.update_installed(installed)));
     });
   }
 
   /// Its installer runs: it waits for this app to quit, puts the new one in and starts it. Else
   /// why not, and dictations start again.
-  fn update_installed(&mut self, installed: io::Result<()>) {
+  fn update_installed(&mut self, installed: shipo::Result<()>) {
     if let Err(e) = installed {
       warn!("update install: {e}");
-      self.updater.lock().unwrap().failed(&e);
+      self.updater.lock().unwrap().failed(updater::why(&e));
       return self.update_changed();
     }
 

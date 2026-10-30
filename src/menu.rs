@@ -7,12 +7,12 @@
 
 use nimbo::Hotkey;
 use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
-use nimbo::update::dialog::{self, State};
 
 use crate::audio::{Device, Microphone};
 use crate::engine::Phase as EnginePhase;
 use crate::history::{local_time, shorten};
 use crate::session::{NoModel, Outcome, Phase, Status};
+use crate::updater::{self, State};
 use crate::window::{Found, Pick, bluetooth_only, microphones as mic_choices};
 
 pub const RECENT: usize = 10;
@@ -192,7 +192,7 @@ pub fn menu(
     items.push(Item::new(w.id, &format!("{mark}{}", w.text)).enabled(w.action));
   }
 
-  items.extend(update.and_then(|s| dialog::menu_item(UPDATE, s)));
+  items.extend(update.and_then(update_item));
 
   let last = status.last.as_ref().is_some_and(|l| !l.text.is_empty());
   let loaded = status.engine.phase != EnginePhase::Stopped && status.state == Phase::Idle;
@@ -220,9 +220,30 @@ pub fn menu(
     // nothing.
     with_key(Item::new("settings", "Settings…"), "cmd+comma"),
   ]);
-  items.extend(update.map(|s| dialog::check_item(CHECK_UPDATES, s)));
+  items.extend(update.map(check_item));
   items.extend([Item::separator(), with_key(Item::new("quit", "Quit Wavo"), "cmd+q")]);
   Menu::new(items)
+}
+
+/// The update's row while it has news: a release on offer, its download, the restart, a failure.
+fn update_item(state: &State) -> Option<Item> {
+  let label = match state {
+    State::Available(r) => format!("Update Available: {}…", updater::shown(&r.version)),
+    State::Downloading(_, done) => format!("Downloading Update: {done}%"),
+    State::Restarting(_) => "Restarting to Update…".to_owned(),
+    State::Failed(..) | State::Relaunched(_) => "Update Failed…".to_owned(),
+    State::Idle | State::Checking | State::UpToDate => return None,
+  };
+
+  Some(Item::new(UPDATE, &label))
+}
+
+/// Check for Updates…, which opens the window ([updater::Updater::open]): Checking while the
+/// person's check runs.
+fn check_item(state: &State) -> Item {
+  let label =
+    if *state == State::Checking { "Checking for Updates…" } else { "Check for Updates…" };
+  Item::new(CHECK_UPDATES, label)
 }
 
 fn with_key(item: Item, key: &str) -> Item {
@@ -288,6 +309,8 @@ fn state(status: &Status) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+  use shipo::Release;
+
   use super::*;
   use crate::audio::{Choice, Transport};
 
@@ -407,7 +430,24 @@ mod tests {
     assert_eq!(ids, ["settings", CHECK_UPDATES, "", "quit"]);
     assert_eq!(idle[idle.len() - 3].1, "Check for Updates…");
     assert!(!idle.iter().any(|(id, _)| id == UPDATE), "no news");
-    let available = items(State::Available(nimbo::update::Release::test("1.2.0")));
+    let available = items(State::Available(Release::test("1.2.0")));
     assert_eq!(available[1], (UPDATE.into(), "Update Available: v1.2.0…".into()));
+  }
+
+  #[test]
+  fn the_update_items_say_what_goes_on() {
+    let r = || Release::test("1.2.0");
+    let label = |s: State| update_item(&s).map(|i| i.label);
+    assert_eq!([State::Idle, State::Checking, State::UpToDate].map(label), [None, None, None]);
+    assert_eq!(label(State::Available(r())).unwrap(), "Update Available: v1.2.0…");
+    assert_eq!(label(State::Downloading(r(), 42)).unwrap(), "Downloading Update: 42%");
+    assert_eq!(label(State::Restarting(r())).unwrap(), "Restarting to Update…");
+    assert_eq!(label(State::Failed(None, "offline".into())).unwrap(), "Update Failed…");
+    assert_eq!(label(State::Relaunched("the swap failed".into())).unwrap(), "Update Failed…");
+
+    let check = |s: State| check_item(&s).label;
+    assert_eq!(check(State::Idle), "Check for Updates…");
+    assert_eq!(check(State::Checking), "Checking for Updates…");
+    assert_eq!(check(State::Available(r())), "Check for Updates…");
   }
 }

@@ -1,5 +1,5 @@
 # macOS 14 is the least nimbo runs on (its readme): the binary is built for it, here only, so make
-# and cargo build alike; the bundle's Info.plist takes it from the binary (nimbo's scripts/pack.py).
+# and cargo build alike; the bundle's Info.plist takes it from the binary (shipo).
 [env]
 MACOSX_DEPLOYMENT_TARGET = "14.0"
 
