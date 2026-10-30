@@ -119,8 +119,8 @@ pub trait Shell {
   fn has_neural_engine(&self) -> bool {
     false
   }
-  /// The app can update itself: not where nimbo's `update::supported` says no, a dev build, a run
-  /// with its own `WAVO_HOME`.
+  /// The app can update itself: not where [shipo::supported] says no, a dev build, a run with its
+  /// own `WAVO_HOME`.
   fn updates(&self) -> bool {
     false
   }

@@ -33,33 +33,24 @@ clean:
 
 APP := target/Wavo.app
 PROFILE := release
-# Windows has python, where python3 may be the Store's stub.
-PY := $(if $(filter Windows_NT,$(OS)),python,python3)
-# nimbo's checkout at the rev Cargo.lock pins: its scripts/pack.py makes the app and the release
-# files from Cargo.toml's [package.metadata.nimbo].
-NIMBO = $(shell cargo metadata --format-version 1 --locked | $(PY) -c 'import json, os, sys; \
-  print(next(os.path.dirname(p["manifest_path"]) for p in json.load(sys.stdin)["packages"] \
-  if p["name"] == "nimbo"))')
 # dist's target: this machine's, or T.
 T ?= $(shell rustc -vV | sed -n 's/^host: //p')
 
-# Signed with a Developer ID in the keychain, else "Wavo Local Signing", made in the login keychain
-# before the first bundle, so macOS keeps the grants across rebuilds; no bundle when it can't sign
-# (CI: ad hoc). Built, never opened.
+# shipo, the packer (`cargo install --locked shipo`), makes the app and the release files from
+# Cargo.toml's [package.metadata.shipo]. The app is signed with a Developer ID in the keychain, else
+# "Wavo Local Signing", which shipo makes in the login keychain before the first bundle, so macOS
+# keeps the grants across rebuilds; no bundle when it can't sign (CI: ad hoc). Built, never opened.
 bundle: # target/Wavo.app from the release profile, or PROFILE
 	cargo build --locked --profile $(PROFILE)
-	$(PY) "$(NIMBO)/scripts/pack.py" app --bin target/$(PROFILE)/wavo-app
+	shipo app --bin target/$(PROFILE)/wavo-app
 
 dist: # T's binary in target/distrib/T, for CI (vladkens/actions/rust-build); pack makes the files
 	cargo build --locked --profile dist --target $(T)
 	mkdir -p target/distrib/$(T)
 	cp target/$(T)/dist/wavo-app$(EXE) target/distrib/$(T)/
 
-NIMBO_REV = $(shell sed -n 's|^source = "git+https://github.com/vladkens/nimbo?.*\([0-9a-f]\{40\}\)"$$|\1|p' Cargo.lock)
-
-pack: # the release files from target/distrib's binaries, signed with the secrets in env, else ad hoc
-	curl -fsSL --create-dirs -o target/pack.py https://raw.githubusercontent.com/vladkens/nimbo/$(NIMBO_REV)/scripts/pack.py
-	$(PY) target/pack.py release target/distrib $(if $(TAG),--tag $(TAG))
+pack: # the release files of target/distrib's binaries, signed by env's secrets, else ad hoc
+	shipo release target/distrib $(if $(TAG),--tag $(TAG))
 
 # scripts/run.py: Wavo's permissions are reset first when the bundle's signature is not the one
 # they were granted to.
@@ -77,8 +68,8 @@ INSTALLED := /Applications/Wavo.app/Contents/MacOS/wavo-app
 uninstall: # remove Wavo and all it left (data, models, permissions, the app): then a clean install
 	$(or $(wildcard $(INSTALLED)),target/release/wavo-app) uninstall $(ARGS)
 
-shots: # the settings window's pages, headless, into target/shots/
-	WAVO_SHOTS=$(CURDIR)/target/shots cargo test $(CARGO_FLAGS) every_page_renders
+shots: # the settings window's pages and the update window's states, headless, into target/shots/
+	WAVO_SHOTS=$(CURDIR)/target/shots cargo test $(CARGO_FLAGS) -- every_page_renders every_state_renders
 
 # WAV fixtures and reference transcripts in target/fixtures/ (scripts/fixtures.py, macOS
 # voices and ffmpeg); regenerated when the script or a text changes.

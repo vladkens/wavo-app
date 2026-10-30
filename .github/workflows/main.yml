@@ -30,10 +30,11 @@ jobs:
       - run: make check CROSS="aarch64-apple-darwin x86_64-pc-windows-gnu"
       - run: make test
 
-  # A job per OS; aarch64 cross-compiled. Linux on the oldest LTS for its glibc.
+  # A job per OS; aarch64 cross-compiled. Linux on the oldest LTS for its glibc. Also on release PRs,
+  # which rust-build checks.
   build:
     name: build ${{ matrix.os }}
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: "github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || startsWith(github.event.pull_request.title, 'release: v')"
     strategy:
       fail-fast: false
       matrix:
@@ -96,7 +97,7 @@ jobs:
         with:
           name: release
           pattern: release-*
-      - run: sudo apt-get update && sudo apt-get install -y nsis hfsprogs
+      - run: sudo apt-get update && sudo apt-get install -y nsis && cargo install --locked shipo
       - uses: vladkens/actions/rust-publish@v1
         with:
           name: Wavo
@@ -108,4 +109,4 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          UPDATE_KEY: ${{ secrets.UPDATE_KEY }}
+          SHIPO_UPDATE_KEY: ${{ secrets.SHIPO_UPDATE_KEY }}

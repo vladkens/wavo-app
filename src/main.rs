@@ -50,7 +50,7 @@ const LOG_FILE: &str = "wavo.log";
 const LOG_MAX: u64 = 5 << 20;
 
 /// The launcher entry on Linux, as the AppImage's .desktop has it (Cargo.toml's
-/// `[package.metadata.nimbo]`).
+/// `[package.metadata.shipo]`).
 const LAUNCHER: Launcher = Launcher {
   comment: "Local dictation: hold a hotkey, speak, and the text lands where you were typing",
   categories: &["Utility", "Accessibility"],
@@ -93,7 +93,7 @@ enum Command {
 fn main() -> Result<()> {
   // First, before any thread: run as an update's installer it never returns; else the failure of
   // the update that started this app.
-  let updated = nimbo::update::finish();
+  let updated = shipo::finish();
   // Windows: only for arguments (a command, `--help`, a mistake), which print. Attached, the app
   // would print its logs after the prompt, and closing that console would end it without its quit
   // hook.
