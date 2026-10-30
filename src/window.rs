@@ -401,10 +401,25 @@ const SECURE_INPUT_NOTE: &str = "Secure Input is on (a password field, or a term
   Keyboard Entry): the shortcut works through a backup path, and Esc may not cancel.";
 const ACTIVATION_HELP: &str = "How the hotkey records: while you hold it, from one press to the \
   next, or both (a short tap latches the recording on).";
-const MIC_HELP: &str = "Automatic uses the system’s input, but not a Bluetooth headset’s while \
-  another microphone is there: the built-in one first, then a USB or wired one. Recording through \
-  a headset turns its sound to call quality and loses the first words. System Default uses \
-  whatever the system picks.";
+// What Automatic does here ([audio::automatic]): only macOS tells the lid, Linux (ALSA) no device's
+// transport.
+const MIC_HELP: &str = match () {
+  _ if cfg!(target_os = "macos") => {
+    "Automatic uses the system’s input, but not a Bluetooth headset, which records at call \
+     quality and loses the first words, nor the built-in microphone with the lid closed. Instead \
+     it takes the built-in one while the lid is open, then a USB or wired one, a Bluetooth one \
+     last. System Default uses whatever the system picks."
+  }
+  _ if cfg!(windows) => {
+    "Automatic uses the system’s input, but not a Bluetooth headset while another microphone is \
+     there: a headset records at call quality and loses the first words. System Default uses \
+     whatever the system picks."
+  }
+  _ => {
+    "Automatic and System Default both use the system’s input. Linux doesn’t tell Wavo how a \
+     microphone is attached, so neither skips a Bluetooth headset."
+  }
+};
 // Where the person turns launch at login back on, which the system turned off.
 const LOGIN_APPROVAL: &str = if cfg!(windows) {
   "Turn Wavo on in Task Manager › Startup apps."
@@ -707,10 +722,11 @@ impl Prefs {
 
       // Off and disabled where the app can't update, the setting kept.
       let updates = self.shell.updates();
-      let mut row = FormRow::new("Check for updates").info(UPDATE_HELP).disabled(!updates);
-      if !updates {
-        row = row.caption(NO_UPDATES);
-      }
+      let row = FormRow::new("Check for updates").disabled(!updates);
+      let row = match updates {
+        true => row.info(UPDATE_HELP),
+        false => row.caption(NO_UPDATES),
+      };
 
       ui.form_row(fs, row, |ui| {
         let mut on = updates && self.settings.auto_update;
@@ -2380,14 +2396,14 @@ mod tests {
     assert_eq!(fake.log().paused, [true, false, true, false]);
   }
 
-  /// About's Check for Updates… opens the update's window, Advanced turns the automatic checks off;
+  /// About's Check for Updates… opens the update's window, Advanced turns the automatic checks on;
   /// in a build that doesn't update About has no button and Advanced's switch is off and disabled,
   /// the setting kept.
   #[test]
   fn about_checks_for_updates() {
     let home = Home::new("window-update", &TWO);
     let fake = Fake::default();
-    let mut h = home.harness(&fake, Settings::default());
+    let mut h = home.harness(&fake, Settings { auto_update: false, ..Settings::default() });
     // The switch as assistive technology reads it.
     let switch = |h: &Harness<Prefs>| {
       let tree = h.a11y();
@@ -2401,14 +2417,14 @@ mod tests {
     let off = format!(r#"switch "Check for updates" off disabled desc {NO_UPDATES:?}"#);
     assert_eq!(switch(&h), Some(off));
     click(&mut h, Id::of("auto-update"));
-    assert!(fake.log().settings.auto_update);
+    assert!(!fake.log().settings.auto_update);
 
     fake.log().updates = true;
     h.app_mut();
     h.frame();
-    assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" on"#));
+    assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" off"#));
     click(&mut h, Id::of("auto-update"));
-    assert!(!fake.log().settings.auto_update);
+    assert!(fake.log().settings.auto_update);
     tab(&mut h, Page::About);
     click(&mut h, Id::of("updates"));
     assert_eq!(fake.log().checks, 1);
