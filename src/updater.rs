@@ -62,12 +62,6 @@ pub fn shown(version: &str) -> String {
   format!("v{}", version.trim_start_matches('v'))
 }
 
-/// An error's text as a sentence: its first letter capital.
-fn sentence(s: &str) -> String {
-  let mut chars = s.chars();
-  chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
-}
-
 /// The whole percent of `done` bytes of `total`: a download tells the app only when it changes.
 pub fn percent(done: u64, total: u64) -> u8 {
   (done.saturating_mul(100) / total.max(1)).min(100) as u8
@@ -313,23 +307,18 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
   let t = ui.theme();
   let current = shown(crate::VERSION);
   let (title, text) = match state {
-    State::Idle | State::Checking => ("Checking for updates…".to_owned(), String::new()),
-    State::UpToDate => {
-      ("You're up to date!".to_owned(), format!("Wavo {current} is the newest version."))
-    }
+    State::Idle | State::Checking => ("Checking for updates…", String::new()),
+    State::UpToDate => ("You're up to date!", format!("Wavo {current} is the newest version.")),
     State::Available(r) => (
-      "A new version of Wavo is available!".to_owned(),
+      "A new version of Wavo is available!",
       format!("Wavo {} is out, you have {current}. Install it now?", shown(&r.version)),
     ),
-    State::Downloading(..) => ("Downloading the update…".to_owned(), String::new()),
-    State::Restarting(r) => (
-      "Installing the update…".to_owned(),
-      format!("Wavo restarts as {} once it can.", shown(&r.version)),
-    ),
-    State::Failed(Some(_), why) | State::Relaunched(why) => {
-      ("The update failed".to_owned(), sentence(why))
+    State::Downloading(..) => ("Downloading the update…", String::new()),
+    State::Restarting(r) => {
+      ("Installing the update…", format!("Wavo restarts as {} once it can.", shown(&r.version)))
     }
-    State::Failed(None, why) => ("Couldn't check for updates".to_owned(), sentence(why)),
+    State::Failed(Some(_), why) | State::Relaunched(why) => ("The update failed", sentence(why)),
+    State::Failed(None, why) => ("Couldn't check for updates", sentence(why)),
   };
 
   let mut act = None;
@@ -338,7 +327,7 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
     ui.row(Style::new().w(grow()).gap(16.0), |ui| {
       ui.png_image(ICON, Style::new().w(px(64.0)).h(px(64.0)));
       ui.col(Style::new().w(grow()).gap(6.0), |ui| {
-        ui.text(&title, TextStyle::new(t.bold, t.text).ellipsis());
+        ui.text(title, TextStyle::new(t.bold, t.text).ellipsis());
         if !text.is_empty() {
           ui.text(&text, t.body());
         }
@@ -409,6 +398,12 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
   act
 }
 
+/// An error's text as a sentence: its first letter capital.
+fn sentence(s: &str) -> String {
+  let mut chars = s.chars();
+  chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
 // MARK: Fake
 
 const RELEASES: &str = "https://github.com/vladkens/wavo-app/releases";
@@ -475,10 +470,10 @@ mod tests {
     u: &mut Updater,
     manual: bool,
     found: Result<Option<Release>, String>,
-    skip: Option<&str>,
+    skipped: Option<&str>,
   ) {
     assert!(u.check(manual));
-    u.checked(found, skip, NOW);
+    u.checked(found, skipped, NOW);
   }
 
   #[test]
