@@ -885,7 +885,7 @@ pub fn microphones(
   let default = devices.iter().find(|d| d.default);
   let automatic = match (audio::automatic(devices, lid_closed), default) {
     (Auto::Device(i), _) => format!("Automatic ({})", devices[i].name),
-    // Only virtual ones: the system's.
+    // Only virtual ones, or a closed lid's with a virtual default: the system's.
     (Auto::System, Some(d)) => format!("Automatic ({})", d.name),
     (Auto::System, None) => "Automatic".to_owned(),
     (Auto::Nothing, _) => "Automatic (none: the lid is closed)".to_owned(),

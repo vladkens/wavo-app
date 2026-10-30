@@ -394,11 +394,15 @@ mod tests {
     assert_eq!(system, ("System Default (MacBook Pro Microphone)".into(), None));
     // Automatic: the USB one over the built-in default; the built-in one over a Bluetooth one, but
     // not under a closed lid, and a Bluetooth one left alone has a note; a virtual one only when
-    // it is all there is, as the system's.
+    // no other is there, as the system's, also under a closed lid.
     let mac = [device("MacBook Pro Microphone", true, Transport::BuiltIn)];
     let both = [mac[0].clone(), device("AirPods Pro", false, Transport::Bluetooth)];
     let airpods = [device("AirPods Pro", true, Transport::Bluetooth)];
     let loopback = [device("BlackHole 2ch", true, Transport::Virtual)];
+    let krisp = [
+      device("MacBook Pro Microphone", false, Transport::BuiltIn),
+      device("Krisp Microphone", true, Transport::Virtual),
+    ];
     let note = Some("Only a Bluetooth mic: the sound is worse");
     let cases = [
       (&devices[..], false, "Automatic (Elgato Wave:3 Microphone Array)", None),
@@ -407,6 +411,7 @@ mod tests {
       (&airpods, false, "Automatic (AirPods Pro)", note),
       (&mac, true, "Automatic (none: the lid is closed)", None),
       (&loopback, false, "Automatic (BlackHole 2ch)", None),
+      (&krisp, true, "Automatic (Krisp Microphone)", None),
     ];
     for (devices, lid_closed, label, note) in cases {
       let got = mic_label(devices, &Microphone::Automatic, lid_closed);

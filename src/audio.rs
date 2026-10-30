@@ -246,10 +246,12 @@ pub enum Auto {
   /// The listed device at this index.
   Device(usize),
   /// The system default as it is: none of the listed is it (ALSA's), none is listed, or Automatic
-  /// has only virtual ones.
+  /// takes none of the listed (only virtual ones, or a closed lid's) and the default isn't the
+  /// closed lid's.
   System,
-  /// No microphone Automatic takes: only a closed lid's (virtual ones aside), which hears nothing;
-  /// for the system's input ([in_use]), there is no input at all.
+  /// No microphone Automatic takes: the system's input is a closed lid's, which hears nothing, and
+  /// there is no other but virtual ones; for the system's input ([in_use]), there is no input at
+  /// all.
   Nothing,
 }
 
@@ -261,15 +263,16 @@ const UNLISTED_DEFAULT: bool = cfg!(target_os = "linux");
 /// A USB microphone first, then the built-in one (not under a closed lid: Apple's laptops cut it
 /// off), a wired or other one, and a Bluetooth one only when nothing else is there (recording
 /// turns those headphones to their call profile: worse sound, the first moments lost); a virtual
-/// one never, but with only those the system's input as it is (one may pass a real microphone
-/// on). Within a rank the system's input, else the first listed. With no listed default (ALSA's
-/// is no device, and Linux tells no transport) the system's as it is.
+/// one never, but with none of those the system's input as it is (a virtual one may pass a real
+/// microphone on), unless it is the closed lid's. Within a rank the system's input, else the first
+/// listed. With no listed default (ALSA's is no device, and Linux tells no transport) the system's
+/// as it is.
 pub fn automatic(devices: &[Device], lid_closed: bool) -> Auto {
   if !devices.iter().any(|d| d.default) {
     return Auto::System;
   }
 
-  let cut_off = |d: &Device| lid_closed && d.transport == Transport::BuiltIn;
+  let cut_off = |d: &Device| d.default && lid_closed && d.transport == Transport::BuiltIn;
   match best(devices, lid_closed) {
     Some(i) => Auto::Device(i),
     None if devices.iter().any(cut_off) => Auto::Nothing,
@@ -1397,11 +1400,13 @@ mod tests {
       (&[(Unknown, true), (BuiltIn, false)], false, Auto::Device(1)),
       (&[(Other, true), (Unknown, false), (Usb, false)], false, Auto::Device(2)),
       (&[(Bluetooth, true), (Other, false), (BuiltIn, false)], false, Auto::Device(2)),
-      // A closed lid: not the built-in one.
+      // A closed lid: not the built-in one; with no other but virtual ones none when it is the
+      // system's input, else the system's (a virtual one may pass a real microphone on).
       (&[(BuiltIn, true), (Other, false)], true, Auto::Device(1)),
       (&[(BuiltIn, true), (Bluetooth, false)], true, Auto::Device(1)),
       (&[(BuiltIn, true)], true, Auto::Nothing),
-      (&[(Virtual, true), (BuiltIn, false)], true, Auto::Nothing),
+      (&[(BuiltIn, true), (Virtual, false)], true, Auto::Nothing),
+      (&[(Virtual, true), (BuiltIn, false)], true, Auto::System),
       // Bluetooth only when nothing else is there; a virtual one never, but with only those the
       // system's.
       (&[(Bluetooth, true), (Unknown, false)], false, Auto::Device(1)),
