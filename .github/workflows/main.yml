@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, edited] # edited: a PR renamed to `release: v…`
   workflow_dispatch:
 
 permissions:
