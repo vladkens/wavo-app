@@ -452,9 +452,10 @@ impl Prefs {
       let (devices, saved) = (&self.devices, &self.settings.microphone);
       let (mics, at) = microphones(devices, saved, self.lid_closed);
       let labels: Vec<&str> = mics.iter().map(|m| m.0.as_str()).collect();
+      let caption = mic_caption(devices, saved, self.lid_closed);
       let mut row = FormRow::new("Microphone").info(MIC_HELP);
-      if let Some(note) = bluetooth_only(devices, saved, self.lid_closed) {
-        row = row.caption(note);
+      if let Some(caption) = &caption {
+        row = row.caption(caption);
       }
 
       ui.form_row(fs, row, |ui| {
@@ -881,13 +882,15 @@ pub fn microphones(
   saved: &Microphone,
   lid_closed: bool,
 ) -> (Vec<(String, Microphone)>, usize) {
-  let automatic = match audio::automatic(devices, lid_closed) {
-    Auto::Device(i) => format!("Automatic ({})", devices[i].name),
-    Auto::System => "Automatic".to_owned(),
-    Auto::Nothing if lid_closed => "Automatic (none: the lid is closed)".to_owned(),
-    Auto::Nothing => "Automatic (none)".to_owned(),
+  let default = devices.iter().find(|d| d.default);
+  let automatic = match (audio::automatic(devices, lid_closed), default) {
+    (Auto::Device(i), _) => format!("Automatic ({})", devices[i].name),
+    // Only virtual ones: the system's.
+    (Auto::System, Some(d)) => format!("Automatic ({})", d.name),
+    (Auto::System, None) => "Automatic".to_owned(),
+    (Auto::Nothing, _) => "Automatic (none: the lid is closed)".to_owned(),
   };
-  let default = match devices.iter().find(|d| d.default) {
+  let default = match default {
     Some(d) => format!("System Default ({})", d.name),
     None => "System Default".to_owned(),
   };
@@ -902,14 +905,39 @@ pub fn microphones(
     Microphone::System => return (items, 1),
     Microphone::Device(choice) => choice,
   };
-  let by_id = devices.iter().position(|d| saved.id.is_some() && d.id == saved.id);
-  if let Some(i) = by_id.or_else(|| devices.iter().position(|d| d.name == saved.name)) {
+  if let Some(i) = audio::position(devices, saved) {
     return (items, i + 2);
   }
 
   items.push((format!("{} (not connected)", saved.name), Microphone::Device(saved.clone())));
   let at = items.len() - 1;
   (items, at)
+}
+
+/// While the `saved` microphone isn't connected: its name, and what records in its place, the
+/// system's input ([audio::in_use]). Here and in the menu.
+pub fn not_connected<'a>(
+  devices: &[audio::Device],
+  saved: &'a Microphone,
+  lid_closed: bool,
+) -> Option<(&'a str, Auto)> {
+  let Microphone::Device(choice) = saved else { return None };
+  let missing = audio::position(devices, choice).is_none();
+  missing.then(|| (choice.name.as_str(), audio::in_use(devices, saved, lid_closed)))
+}
+
+/// The Microphone row's caption: the one chosen isn't connected, and what records instead; or
+/// Automatic has only a Bluetooth one.
+fn mic_caption(devices: &[audio::Device], saved: &Microphone, lid_closed: bool) -> Option<String> {
+  let Some((name, instead)) = not_connected(devices, saved, lid_closed) else {
+    return bluetooth_only(devices, saved, lid_closed).map(str::to_owned);
+  };
+
+  Some(match instead {
+    Auto::Device(i) => format!("{name} isn’t connected: Wavo records with {}.", devices[i].name),
+    _ if devices.is_empty() => format!("{name} isn’t connected, and there is no other microphone."),
+    _ => format!("{name} isn’t connected: Wavo records with the system’s input."),
+  })
 }
 
 /// Under Automatic when the device it picks is a Bluetooth one: there is no other.
@@ -2471,6 +2499,38 @@ mod tests {
     h.app_mut().autostart_set(true, Err("not permitted".into()));
     assert!(!h.app().settings.autostart);
     assert_eq!(h.app().login.error.as_deref(), Some("Couldn't turn it on: not permitted"));
+  }
+
+  /// A chosen microphone that isn't connected stays the pop-up's choice, and the caption under it
+  /// names the one that records in its place: the system's input, not Automatic's USB one.
+  #[test]
+  fn a_mic_not_connected_says_what_records() {
+    let home = Home::new("window-mic", &TWO);
+    let fake = Fake::default();
+    // The pop-up as assistive technology reads it, the caption its description.
+    let row = |h: &Harness<Prefs>| {
+      let tree = h.a11y();
+      let line =
+        tree.lines().map(str::trim).find(|l| l.starts_with(r#"pop up button "Microphone""#));
+      line.map(str::to_owned)
+    };
+    let wh = Choice { id: Some("wh-1000xm5".into()), name: "WH-1000XM5".into() };
+    let wh = Microphone::Device(wh);
+    let h = home.harness(&fake, Settings { microphone: wh.clone(), ..Settings::default() });
+    let caption = "WH-1000XM5 isn’t connected: Wavo records with MacBook Pro Microphone.";
+    let want =
+      format!(r#"pop up button "Microphone" value "WH-1000XM5 (not connected)" desc {caption:?}"#);
+    assert_eq!(row(&h), Some(want));
+    let h = home.harness(&fake, Settings::default());
+    let auto = r#"pop up button "Microphone" value "Automatic (USB Mic)""#;
+    assert_eq!(row(&h).as_deref(), Some(auto), "no caption");
+
+    // The system's input named by no listed device (ALSA's), or no input at all.
+    let alsa = [audio::Device { default: false, ..fake.devices()[1].clone() }];
+    let unnamed = "WH-1000XM5 isn’t connected: Wavo records with the system’s input.";
+    assert_eq!(mic_caption(&alsa, &wh, false).as_deref(), Some(unnamed));
+    let none = "WH-1000XM5 isn’t connected, and there is no other microphone.";
+    assert_eq!(mic_caption(&[], &wh, false).as_deref(), Some(none));
   }
 
   /// Export asks the save panel where; it is disabled while it runs; Finder shows the archive only
