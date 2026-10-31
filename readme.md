@@ -6,6 +6,9 @@
 
 **Local dictation for macOS, Windows and Linux**
 
+[<img src="https://badges.ws/badge/-/macOS%2014.2%2B/424a53?logo=apple&label" alt="macOS 14.2+" />](#-usage)
+[<img src="https://badges.ws/badge/-/Windows%2010%2B/0969da?logo=windows11&label" alt="Windows 10+" />](#-usage)
+[<img src="https://badges.ws/badge/-/Linux%20%C2%B7%20X11%20%C2%B7%20Wayland/875a00?logo=linux&label" alt="Linux, X11 and Wayland" />](#-usage)
 [<img src="https://badges.ws/github/license/vladkens/wavo-app" alt="license" />](https://github.com/vladkens/wavo-app/blob/main/LICENSE)
 [<img src="https://badges.ws/badge/follow-@uid127-black" alt="follow @uid127" />](https://x.com/uid127)
 [<img src="https://badges.ws/badge/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
@@ -90,19 +93,19 @@ The app's `uninstall` command removes all Wavo left: the history, settings and c
 
 </details>
 
-## 🤝 Contributing
-
-Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md).
-
-## 🤖 How it's made
-
-Wavo is written by AI agents following [agents.md](agents.md); I choose what to build and review every pull request. Its speech engine, [wavo](https://github.com/vladkens/wavo), and its UI toolkit, [nimbo](https://github.com/vladkens/nimbo), are made the same way, each with its own tests. This isn't a weekend prompt: I've written software by hand for years — [macmon](https://github.com/vladkens/macmon) (Rust, Apple Silicon system monitor), [twscrape](https://github.com/vladkens/twscrape) (Python, X/Twitter scraping) and [ecloop](https://github.com/vladkens/ecloop) (C, low-level elliptic-curve math) — and agents are how I build now.
-
 ## 🙏 Credits
 
 - [Handy](https://github.com/cjpais/Handy): the app that inspired Wavo.
 - [wavo](https://github.com/vladkens/wavo): the speech recognition, built on [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)'s reference and the GGUF conversions [handy-computer](https://huggingface.co/handy-computer) publishes. Wavo ships no weights: each model is downloaded under its own license, listed in [wavo's credits](https://github.com/vladkens/wavo#-credits).
 - [nimbo](https://github.com/vladkens/nimbo): the UI toolkit Wavo is drawn with.
+
+## 🤖 How it's made
+
+Wavo is built with AI agents following [agents.md](agents.md): I choose what to build, review the changes and test them on real machines. Before agents, I wrote software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)). Releases are rare on purpose: I'd rather test and polish a set of changes than ship each one as it lands, and I try not to break your config or data.
+
+## 🤝 Contributing
+
+Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md).
 
 ## 📝 License
 

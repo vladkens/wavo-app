@@ -398,7 +398,7 @@ impl Hud {
     // The contents keep their place as the pill narrows: centred at the recording's width.
     let x = (f.size.w - width.max(WIDTH)) / 2.0;
     let mid = pill.y + HEIGHT / 2.0;
-    let baseline = |f: &mut Frame, font| mid + (f.text.metrics(font).cap_height / 2.0).round();
+    let baseline = |f: &mut Frame, font| mid + (f.metrics(font).cap_height / 2.0).round();
     let dot = |f: &mut Frame, k: f32| {
       let rect = Rect::new(x + PAD, mid - DOT / 2.0, DOT, DOT);
       f.rect(rect, fade(th.danger, k), DOT / 2.0);
@@ -638,7 +638,7 @@ mod tests {
     let count = hidden.clone();
     let config = config(HudPosition::Bottom);
     let mut h = Harness::new(Hud::new(move || count.set(count.get() + 1)), config.size, 2.0);
-    h.cpu.transparent = true;
+    h.set_transparent(true);
     h.event(Event::Appearance(Appearance::DARK));
     (h, hidden)
   }
@@ -664,7 +664,7 @@ mod tests {
     h.app_mut().show(Show::Collapse);
     h.wait(COLLAPSE + ms(100));
     assert_eq!((h.app().mode(), hidden.get()), (Mode::Hidden, 1));
-    assert!(!h.rt.needs_frame(), "no frames once hidden");
+    assert!(!h.needs_frame(), "no frames once hidden");
   }
 
   /// With the setting, a dictation's time to text shows instead of the plain collapse; an error
