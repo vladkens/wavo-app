@@ -45,7 +45,7 @@ Wavo is inspired by [Handy](https://github.com/cjpais/Handy) and runs the same G
 
 ## 🚀 Usage
 
-**Download** the file for your system from the [latest release](https://github.com/vladkens/wavo-app/releases/latest) and run it. Then pick a model in Settings › Models: **Parakeet Ultra** is the recommended one.
+**Download** the file for your system from the [latest release](https://github.com/vladkens/wavo-app/releases/latest) and run it. Then pick a model in Settings › Models: **Parakeet Ultra** is the recommended one, about 0.7 GB, downloaded once.
 
 <details>
 <summary>Which file, and the first launch</summary>
@@ -66,6 +66,8 @@ The [dev pre-release](https://github.com/vladkens/wavo-app/releases/tag/dev) has
 On Wayland the desktop asks once to let Wavo paste (at the first paste, or earlier from the menu's "Allow Paste…") and once for the hotkey (from the menu's "Allow the Hotkey…"). The hotkey needs a desktop that offers global shortcuts: KDE Plasma 6, GNOME 48 and later, Hyprland. Elsewhere, as on GNOME before 48 (Ubuntu 24.04) or Sway, add a shortcut in the desktop's keyboard settings that runs `/path/to/Wavo-<version>-linux-<arch>.AppImage toggle` (with the .deb, `wavo-app toggle`): one press starts a dictation, the next stops it.
 
 Wavo's icon goes in the tray, which GNOME needs the AppIndicator extension for (Ubuntu ships it); KDE, Xfce, Cinnamon and MATE have a tray of their own.
+
+The GPU needs a Vulkan driver (`mesa-vulkan-drivers` on Debian and Ubuntu); without one Wavo runs on the CPU, much slower.
 
 </details>
 
@@ -92,41 +94,6 @@ curl -fsSL https://raw.githubusercontent.com/vladkens/wavo-app/main/scripts/hand
 It writes `~/Downloads/handy-export.zip`: bring it in with Advanced › Data › Import…. Dictations Wavo already has are left, so importing twice adds nothing. `HANDY_DIR=<folder>` before `python3` reads Handy's data from another folder.
 
 </details>
-
-<details>
-<summary>Removing Wavo</summary>
-
-On macOS drag Wavo from Applications to the Trash; on Windows remove it in Settings › Apps; on Linux delete the AppImage, or `sudo apt remove wavo`. Delete a model you no longer need in Settings › Models.
-
-`wavo-app uninstall` removes Wavo with all it left: its history, settings, caches and models, launch at login, and on macOS its permissions; `--dry-run` lists them first. On macOS run `/Applications/Wavo.app/Contents/MacOS/wavo-app uninstall`, on Windows `Wavo.exe uninstall --yes`, on Linux the AppImage with `uninstall`.
-
-</details>
-
-## ❓ Questions
-
-**Is it free?**\
-Yes, and open source under the MIT License.
-
-**Does anything leave my computer?**\
-No: your voice and its text stay there. Wavo only downloads the model from Hugging Face and looks for its own updates on GitHub.
-
-**How big is the model?**\
-Parakeet Ultra is about 0.7 GB, downloaded once.
-
-**Which permissions does it need on a Mac?**\
-Microphone, and Accessibility for the paste and the hotkey. On macOS 15.4 and later, Paste from Other Apps lets it put back what the clipboard held.
-
-**Does it run on an Intel Mac?**\
-No, only on Apple Silicon.
-
-**What does Linux need?**\
-A Vulkan driver for the GPU (`mesa-vulkan-drivers` on Debian and Ubuntu) and your user in the `render` group; without a driver for your GPU it runs on the CPU, 10–50 times slower.
-
-**Sway or Hyprland?**\
-The paste needs the desktop's RemoteDesktop portal, which their portals don't have yet, so copy the text from the history. The hotkey works through Hyprland's global shortcuts; on Sway bind a key to `wavo-app toggle`.
-
-**Option-Space clashes with Alfred or ChatGPT?**\
-Pick another shortcut in Settings › General.
 
 ## 🤖 How it's made
 
