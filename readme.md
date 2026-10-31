@@ -34,21 +34,23 @@
 
 ## 🚀 Usage
 
-**Download** the file for your system from the [dev pre-release](https://github.com/vladkens/wavo-app/releases/tag/dev), the newest build (there is no release yet), and run it. Then pick a model in Settings › Models: **Parakeet Ultra** is the recommended one.
+**Download** the file for your system from the [latest release](https://github.com/vladkens/wavo-app/releases/latest) and run it; the [dev pre-release](https://github.com/vladkens/wavo-app/releases/tag/dev) has the newest build of `main`, its files named `Wavo-dev-…` instead. Then pick a model in Settings › Models: **Parakeet Ultra** is the recommended one.
 
 <details>
 <summary>Which file, and the first launch</summary>
 
-- **macOS** 14.2 or later, Apple Silicon: `Wavo-dev-macos-aarch64.dmg`; open it and drag Wavo into Applications. The dev build is signed ad hoc, so macOS refuses the first launch: right-click → Open (on macOS 15 and later: System Settings › Privacy & Security › Open Anyway), or run `xattr -dr com.apple.quarantine /Applications/Wavo.app`. After an update macOS asks for Accessibility and the microphone again.
-- **Windows** 10 or 11: `Wavo-dev-windows-x64-setup.exe`, or `-arm64-setup.exe` for Windows on Arm: it installs Wavo for you alone, no administrator needed, with a Start menu entry, and Settings › Apps removes it. It is not signed yet: SmartScreen says "Windows protected your PC", More info → Run anyway. Its icon is in the notification area, perhaps under the ^ arrow.
-- **Linux**, x86_64 or aarch64: `Wavo-dev-linux-<arch>.AppImage`; make it executable (`chmod +x`) and run it. On Debian and Ubuntu `Wavo-dev-linux-<arch>.deb` installs it instead: `sudo apt install ./Wavo-dev-linux-<arch>.deb`.
+Each file is named for the release, such as `Wavo-v0.1.0-macos-aarch64.dmg`.
+
+- **macOS** 14.2 or later, Apple Silicon: `Wavo-<version>-macos-aarch64.dmg`; open it and drag Wavo into Applications. It is signed and notarized by Apple, so it opens like any other app.
+- **Windows** 10 or 11: `Wavo-<version>-windows-x64-setup.exe`, or `-arm64-setup.exe` for Windows on Arm: it installs Wavo for you alone, no administrator needed, with a Start menu entry, and Settings › Apps removes it. It is not signed yet: SmartScreen says "Windows protected your PC", More info → Run anyway. Its icon is in the notification area, perhaps under the ^ arrow.
+- **Linux**, x86_64 or aarch64: `Wavo-<version>-linux-<arch>.AppImage`; make it executable (`chmod +x`) and run it. On Debian and Ubuntu `Wavo-<version>-linux-<arch>.deb` installs it instead: `sudo apt install ./Wavo-<version>-linux-<arch>.deb`.
 
 </details>
 
 <details>
 <summary>Linux: Wayland, GNOME and the tray</summary>
 
-On Wayland the paste goes through the desktop's RemoteDesktop portal, which asks once, at the first paste or earlier through the menu's "Allow Paste…"; the hotkey needs its GlobalShortcuts portal (KDE Plasma 6, GNOME 48 and later), and the menu's "Allow the Hotkey…" lets the desktop ask for it. Where there is no such portal (GNOME before 48 on Wayland, as in Ubuntu 24.04, where the paste still works), add a shortcut in the desktop's own keyboard settings that runs `/path/to/Wavo-dev-linux-<arch>.AppImage toggle`: it starts a dictation and the next one stops it.
+On Wayland the paste goes through the desktop's RemoteDesktop portal, which asks once, at the first paste or earlier through the menu's "Allow Paste…"; the hotkey needs its GlobalShortcuts portal (KDE Plasma 6, GNOME 48 and later), and the menu's "Allow the Hotkey…" lets the desktop ask for it. Where there is no such portal (GNOME before 48 on Wayland, as in Ubuntu 24.04, where the paste still works), add a shortcut in the desktop's own keyboard settings that runs `/path/to/Wavo-<version>-linux-<arch>.AppImage toggle` (with the .deb, `wavo-app toggle`): it starts a dictation and the next one stops it.
 
 The tray icon needs a panel that shows StatusNotifierItems: KDE, Xfce, Cinnamon, MATE, or GNOME with the AppIndicator extension, which Ubuntu ships.
 
@@ -58,7 +60,7 @@ The tray icon needs a panel that shows StatusNotifierItems: KDE, Xfce, Cinnamon,
 
 The menu-bar icon opens the recent dictations, the model and the microphone. **Settings** changes the shortcut, the language and the rest, and keeps the **History**: search it, play a recording back, transcribe it again with another model.
 
-A release keeps itself up to date: it looks for a new version at launch and once a day, and the menu says when there is one, under its header. That item and **Check for Updates…** open the update's window, where **Install Update** puts it in place and restarts Wavo; Advanced › Check for updates turns the daily look off. The dev pre-release doesn't update.
+A release keeps itself up to date: it looks for a new version at launch and once a day, and the menu says when there is one, under its header. That item and **Check for Updates…** open the update's window, where **Install Update** puts it in place and restarts Wavo; Advanced › Check for updates turns the daily look off. The .deb and the dev pre-release don't update themselves.
 
 <details>
 <summary>Moving to another computer</summary>
@@ -88,7 +90,7 @@ The app's `uninstall` command removes all Wavo left: the history, settings and c
 ```sh
 /Applications/Wavo.app/Contents/MacOS/wavo-app uninstall      # macOS
 & "$env:LOCALAPPDATA\Programs\Wavo\Wavo.exe" uninstall --yes  # Windows, then Settings › Apps
-./Wavo-dev-linux-<arch>.AppImage uninstall                    # Linux (the .deb: wavo-app uninstall, then apt remove wavo)
+./Wavo-<version>-linux-<arch>.AppImage uninstall              # Linux (the .deb: wavo-app uninstall, then apt remove wavo)
 ```
 
 </details>
@@ -101,7 +103,7 @@ The app's `uninstall` command removes all Wavo left: the history, settings and c
 
 ## 🤖 How it's made
 
-Wavo is built with AI agents following [agents.md](agents.md): I choose what to build, review the changes and test them on real machines. Before agents, I wrote software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)). Releases are rare on purpose: I'd rather test and polish a set of changes than ship each one as it lands, and I try not to break your config or data.
+Wavo is built with AI agents following [agents.md](agents.md): I choose what to build, review the changes and test them on real machines. Before agents, I wrote software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)). Releases are rare on purpose: I'd rather test and polish a set of changes than ship each one as it lands, and I try not to break your config or data; when something has to break, [changelog.md](changelog.md) says so.
 
 ## 🤝 Contributing
 
