@@ -15,52 +15,63 @@
 
 </div>
 
-**Hold a hotkey, speak, release**, and the text lands where you were typing: a chat, an editor, a terminal, any app. Speech is recognized **on your computer** by [wavo](https://github.com/vladkens/wavo), on the GPU or a Mac's Neural Engine: no account, no subscription, and your voice never leaves the machine. Wavo lives in the menu bar or the tray, and its windows are drawn by [nimbo](https://github.com/vladkens/nimbo).
+**Hold a hotkey, speak, release**, and the text lands where you were typing: a chat, an editor, a terminal, any app. Speech is recognized **on your computer**, on the GPU or a Mac's Neural Engine: no account, no subscription, and your voice never leaves the machine. Wavo lives in the menu bar or the tray.
 
 <p align="center">
   <a href="https://github.com/user-attachments/assets/1826b949-3c28-47e8-a6f4-9affad10cc09"><img src="https://github.com/vladkens/wavo-app/blob/assets/wavo-greeting.webp?raw=true" width="640" alt="A dictation typed into TextEdit, then found in Wavo's history; click for the video with sound" /></a>
 </p>
+
+## 💡 Why
+
+Wavo is inspired by [Handy](https://github.com/cjpais/Handy) and runs the same GGUF models, the ones [handy-computer](https://huggingface.co/handy-computer) publishes. I built it for the technology: with agents around, there's no reason to put up with apps that aren't native and waste memory and compute.
+
+- Handy is a webview app (Tauri) on its own engine, transcribe.cpp. Wavo draws a native UI on each OS with [nimbo](https://github.com/vladkens/nimbo), light on memory, and runs its own engine, [`wavo-cli`](https://github.com/vladkens/wavo), in pure Rust on the GPU.
+- On a Mac with macOS 15 or later, Parakeet and GigaAM run on the Neural Engine at about a sixth of the GPU's energy. On an M2, Parakeet turns 11 s of speech into text in 61 ms there, 151 ms on the GPU and 269 ms with transcribe.cpp ([measured](https://github.com/vladkens/wavo#-speed)).
+- It adds what I missed in Handy: an automatic microphone choice, and a history that can be exported with its recordings.
+- Most alternatives are paid at the time of writing, and many are built on Whisper, whose last model came out in 2024. Wavo is free, works offline on macOS, Windows and Linux, and uses newer models: Parakeet Ultra, and GigaAM for Russian.
 
 ## 🌟 Features
 
 - 🎙️ **Hold to talk**: hold the hotkey and speak, or tap it to start and stop; Esc cancels
 - ⌨️ **Pastes where you type**: into any app, and the clipboard keeps what it held
 - 🔒 **Fully local**: no account, no cloud; only the model is downloaded, once
-- ⚡ **Fast**: 11 s of speech becomes text in about 60 ms on an M2's Neural Engine
-- 🌍 **100 languages**: Parakeet Ultra for 25 European ones, GigaAM for Russian, Whisper for the rest
-- 💊 **A quiet HUD**: a small pill shows the level while you speak and never takes the focus
-- 📜 **History**: every dictation with its recording, searchable; play it back or transcribe it again
-- 🖥️ **Every desktop**: macOS, Windows and Linux on X11 and Wayland, in a 6 MB download
+- ⚡ **Fast**: with Parakeet on macOS 15 or later, 11 s of speech becomes text in about 60 ms on an M2's Neural Engine
+- 🌍 **100 languages**: Parakeet Ultra for 25 European ones, Russian and Ukrainian among them, GigaAM for Russian, Whisper for the rest
+- 💊 **A quiet indicator**: a small pill shows the level while you speak and never takes the focus
+- 🎧 **Picks the microphone**: a USB one first, then the built-in one, a Bluetooth headset only when there is nothing else
+- 📜 **History**: every dictation with its recording, searchable; play it back, transcribe it again, export it
+- 📦 **Shared models**: kept in the standard Hugging Face cache, so other tools that use the same models share them
+- 🖥️ **Every desktop**: macOS, Windows and Linux on X11 and Wayland, in about 10 MB
 
 ## 🚀 Usage
 
-**Download** the file for your system from the [latest release](https://github.com/vladkens/wavo-app/releases/latest) and run it; the [dev pre-release](https://github.com/vladkens/wavo-app/releases/tag/dev) has the newest build of `main`, its files named `Wavo-dev-…` instead. Then pick a model in Settings › Models: **Parakeet Ultra** is the recommended one.
+**Download** the file for your system from the [latest release](https://github.com/vladkens/wavo-app/releases/latest) and run it. Then pick a model in Settings › Models: **Parakeet Ultra** is the recommended one.
 
 <details>
 <summary>Which file, and the first launch</summary>
 
-Each file is named for the release, such as `Wavo-v0.1.0-macos-aarch64.dmg`.
+ARM64 is Apple Silicon and other ARM chips; AMD64 is a usual Intel or AMD PC. `<version>` is the release's, such as `v0.1.0`.
 
-- **macOS** 14.2 or later, Apple Silicon: `Wavo-<version>-macos-aarch64.dmg`; open it and drag Wavo into Applications. It is signed and notarized by Apple, so it opens like any other app.
-- **Windows** 10 or 11: `Wavo-<version>-windows-x64-setup.exe`, or `-arm64-setup.exe` for Windows on Arm: it installs Wavo for you alone, no administrator needed, with a Start menu entry, and Settings › Apps removes it. It is not signed yet: SmartScreen says "Windows protected your PC", More info → Run anyway. Its icon is in the notification area, perhaps under the ^ arrow.
-- **Linux**, x86_64 or aarch64: `Wavo-<version>-linux-<arch>.AppImage`; make it executable (`chmod +x`) and run it. On Debian and Ubuntu `Wavo-<version>-linux-<arch>.deb` installs it instead: `sudo apt install ./Wavo-<version>-linux-<arch>.deb`.
+- **macOS** 14.2 or later, ARM64: `Wavo-<version>-macos-aarch64.dmg`; open it and drag Wavo into Applications. It is signed and notarized by Apple, so it opens like any other app.
+- **Windows** 10 or 11, AMD64: `Wavo-<version>-windows-x64-setup.exe`; ARM64: `Wavo-<version>-windows-arm64-setup.exe`. It installs Wavo for you alone, no administrator needed, with a Start menu entry. It is not signed yet: SmartScreen says "Windows protected your PC", More info → Run anyway. Its icon is in the notification area, perhaps under the ^ arrow.
+- **Linux** AMD64: `Wavo-<version>-linux-x86_64.AppImage`; ARM64: `Wavo-<version>-linux-aarch64.AppImage`. Make it executable (`chmod +x`) and run it. On Debian and Ubuntu the `.deb` of the same name installs it instead: `sudo apt install ./Wavo-<version>-linux-x86_64.deb`.
+
+The [dev pre-release](https://github.com/vladkens/wavo-app/releases/tag/dev) has the newest build of `main`, its files named `Wavo-dev-…`.
 
 </details>
 
 <details>
 <summary>Linux: Wayland, GNOME and the tray</summary>
 
-On Wayland the paste goes through the desktop's RemoteDesktop portal, which asks once, at the first paste or earlier through the menu's "Allow Paste…"; the hotkey needs its GlobalShortcuts portal (KDE Plasma 6, GNOME 48 and later), and the menu's "Allow the Hotkey…" lets the desktop ask for it. Where there is no such portal (GNOME before 48 on Wayland, as in Ubuntu 24.04, where the paste still works), add a shortcut in the desktop's own keyboard settings that runs `/path/to/Wavo-<version>-linux-<arch>.AppImage toggle` (with the .deb, `wavo-app toggle`): it starts a dictation and the next one stops it.
+On Wayland the desktop asks once to let Wavo paste (at the first paste, or earlier from the menu's "Allow Paste…") and once for the hotkey (from the menu's "Allow the Hotkey…"). The hotkey needs a desktop that offers global shortcuts: KDE Plasma 6, GNOME 48 and later, Hyprland. Elsewhere, as on GNOME before 48 (Ubuntu 24.04) or Sway, add a shortcut in the desktop's keyboard settings that runs `/path/to/Wavo-<version>-linux-<arch>.AppImage toggle` (with the .deb, `wavo-app toggle`): one press starts a dictation, the next stops it.
 
-The tray icon needs a panel that shows StatusNotifierItems: KDE, Xfce, Cinnamon, MATE, or GNOME with the AppIndicator extension, which Ubuntu ships.
+Wavo's icon goes in the tray, which GNOME needs the AppIndicator extension for (Ubuntu ships it); KDE, Xfce, Cinnamon and MATE have a tray of their own.
 
 </details>
 
-**Hold the hotkey** (Option-Space on macOS, Ctrl+Alt+Space elsewhere), speak and let go: the HUD shows the level while you speak, and the text is pasted where the cursor was. **A short tap** starts a dictation that the next press ends, for longer talks; **Esc** cancels.
+**Hold the hotkey** (Option-Space on macOS, Ctrl+Alt+Space elsewhere), speak and let go: a small indicator shows the level while you speak, and the text is pasted where the cursor was. **A short tap** starts a dictation that the next press ends, for longer talks; **Esc** cancels.
 
 The menu-bar icon opens the recent dictations, the model and the microphone. **Settings** changes the shortcut, the language and the rest, and keeps the **History**: search it, play a recording back, transcribe it again with another model.
-
-A release keeps itself up to date: it looks for a new version at launch and once a day, and the menu says when there is one, under its header. That item and **Check for Updates…** open the update's window, where **Install Update** puts it in place and restarts Wavo; Advanced › Check for updates turns the daily look off. The .deb and the dev pre-release don't update themselves.
 
 <details>
 <summary>Moving to another computer</summary>
@@ -72,7 +83,7 @@ Export the history with its recordings on the old computer with Advanced › Dat
 <details>
 <summary>Moving from Handy</summary>
 
-The history of [Handy](https://github.com/cjpais/Handy), with its recordings, comes over through an archive; Handy itself is only read. Quit Handy, then run:
+Handy's history, with its recordings, comes over through an archive; Handy itself is only read. Quit Handy, then run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/vladkens/wavo-app/main/scripts/handy.py | python3 -
@@ -85,20 +96,34 @@ It writes `~/Downloads/handy-export.zip`: bring it in with Advanced › Data ›
 <details>
 <summary>Removing Wavo</summary>
 
-The app's `uninstall` command removes all Wavo left: the history, settings and caches, the models it downloaded, and on macOS its permissions and the app itself. `--dry-run` lists them first.
+On macOS drag Wavo from Applications to the Trash; on Windows remove it in Settings › Apps; on Linux delete the AppImage, or `sudo apt remove wavo`. Delete a model you no longer need in Settings › Models.
 
-```sh
-/Applications/Wavo.app/Contents/MacOS/wavo-app uninstall      # macOS
-& "$env:LOCALAPPDATA\Programs\Wavo\Wavo.exe" uninstall --yes  # Windows, then Settings › Apps
-./Wavo-<version>-linux-<arch>.AppImage uninstall              # Linux (the .deb: wavo-app uninstall, then apt remove wavo)
-```
+`wavo-app uninstall` removes Wavo with all it left: its history, settings, caches and models, launch at login, and on macOS its permissions; `--dry-run` lists them first. On macOS run `/Applications/Wavo.app/Contents/MacOS/wavo-app uninstall`, on Windows `Wavo.exe uninstall --yes`, on Linux the AppImage with `uninstall`.
 
 </details>
+
+## ❓ Questions
+
+**Is it free?** Yes, and open source under the MIT License.
+
+**Does anything leave my computer?** No: your voice and its text stay there. Wavo only downloads the model from Hugging Face and looks for its own updates on GitHub.
+
+**How big is the model?** Parakeet Ultra is about 0.7 GB and GigaAM about 0.3 GB, downloaded once.
+
+**Which permissions does it need on a Mac?** Microphone, and Accessibility for the paste and the hotkey. On macOS 15.4 and later, Paste from Other Apps lets it put back what the clipboard held.
+
+**Does it run on an Intel Mac?** No, only on Apple Silicon.
+
+**What does Linux need?** A Vulkan driver for the GPU (`mesa-vulkan-drivers` on Debian and Ubuntu) and your user in the `render` group; without a driver for your GPU it runs on the CPU, 10–50 times slower.
+
+**Sway or Hyprland?** The paste needs the desktop's RemoteDesktop portal, which their portals don't have yet, so copy the text from the history. The hotkey works through Hyprland's global shortcuts; on Sway bind a key to `wavo-app toggle`.
+
+**Option-Space clashes with Alfred or ChatGPT?** Pick another shortcut in Settings › General.
 
 ## 🙏 Credits
 
 - [Handy](https://github.com/cjpais/Handy): the app that inspired Wavo.
-- [wavo](https://github.com/vladkens/wavo): the speech recognition, built on [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)'s reference and the GGUF conversions [handy-computer](https://huggingface.co/handy-computer) publishes. Wavo ships no weights: each model is downloaded under its own license, listed in [wavo's credits](https://github.com/vladkens/wavo#-credits).
+- [`wavo-cli`](https://github.com/vladkens/wavo): the speech recognition, built on [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)'s reference and the GGUF conversions [handy-computer](https://huggingface.co/handy-computer) publishes. Wavo ships no weights: each model is downloaded under its own license, listed in [its credits](https://github.com/vladkens/wavo#-credits).
 - [nimbo](https://github.com/vladkens/nimbo): the UI toolkit Wavo is drawn with.
 
 ## 🤖 How it's made
