@@ -18,11 +18,12 @@ use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use earshot::Detector;
 use hound::{WavReader, WavSpec, WavWriter};
+pub use nimbo::hardware::Transport;
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// The engine's sample rate: every model takes 16 kHz mono.
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -37,26 +38,82 @@ pub struct Choice {
   pub name: String,
 }
 
+/// The microphone that records. Stored as `"automatic"`, `null` (the system default, as files
+/// written before Automatic have it) or a [Choice].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "Option<Stored>", into = "Option<Stored>")]
+pub enum Microphone {
+  /// The best one there: USB, built-in, wired, Bluetooth ([automatic]).
+  #[default]
+  Automatic,
+  /// The system's input, whatever it is.
+  System,
+  Device(Choice),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Stored {
+  Device(Choice),
+  Word(Word),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Word {
+  Automatic,
+}
+
+impl From<Option<Stored>> for Microphone {
+  fn from(stored: Option<Stored>) -> Self {
+    match stored {
+      None => Self::System,
+      Some(Stored::Word(Word::Automatic)) => Self::Automatic,
+      Some(Stored::Device(choice)) => Self::Device(choice),
+    }
+  }
+}
+
+impl From<Microphone> for Option<Stored> {
+  fn from(mic: Microphone) -> Self {
+    match mic {
+      Microphone::Automatic => Some(Stored::Word(Word::Automatic)),
+      Microphone::System => None,
+      Microphone::Device(choice) => Some(Stored::Device(choice)),
+    }
+  }
+}
+
 /// An input device as the settings list it.
 #[derive(Debug, Clone)]
 pub struct Device {
   pub id: Option<String>,
   pub name: String,
   pub default: bool,
+  pub transport: Transport,
 }
 
-struct Input {
+/// A cpal input, or the tests' stand-in for one.
+struct Input<D = cpal::Device> {
   id: Option<String>,
   name: String,
-  device: cpal::Device,
+  transport: Transport,
+  device: D,
 }
 
 impl Input {
   fn new(device: cpal::Device) -> Option<Self> {
-    let name = device.description().ok()?.name().to_owned(); // `None`: unplugged while listed
-    Some(Self { id: device.id().ok().map(|id| id.to_string()), name, device })
+    let description = device.description().ok()?; // `None`: unplugged while listed
+    let id = device.id().ok();
+    let transport = transport(id.as_ref().map(|id| id.id()), &description);
+    let name = description.name().to_owned();
+    Some(Self { id: id.map(|id| id.to_string()), name, transport, device })
   }
+}
 
+impl<D> Input<D> {
+  /// `choice` by its ID, by its name only when it has none: before any listing, which a stale ID
+  /// needs ([open_input]).
   fn is(&self, choice: &Choice) -> bool {
     match &choice.id {
       Some(id) => self.id.as_ref() == Some(id),
@@ -83,7 +140,7 @@ fn card_ids() -> Vec<(String, String)> {
 
 /// The inputs the settings list: ALSA's (Linux) one per capture device ([cards]), other systems'
 /// all.
-fn listed(all: Vec<Input>) -> Vec<Input> {
+fn listed<D>(all: Vec<Input<D>>) -> Vec<Input<D>> {
   // cpal's ALSA IDs are `alsa:<PCM>`.
   let pcms: Vec<&str> = all.iter().filter_map(|x| x.id.as_deref()?.strip_prefix("alsa:")).collect();
   if pcms.len() != all.len() {
@@ -146,60 +203,250 @@ fn cards(pcms: &[&str], ids: &[(String, String)]) -> Vec<usize> {
 /// not listed: on Linux the System Default item names none.
 pub fn devices() -> Vec<Device> {
   let host = cpal::default_host();
-  let default = host.default_input_device();
-  let inputs = listed(inputs(&host)).into_iter();
-  inputs
-    .map(|x| Device { default: default.as_ref() == Some(&x.device), id: x.id, name: x.name })
-    .collect()
+  let default = host.default_input_device().and_then(|d| d.id().ok()).map(|id| id.to_string());
+  as_devices(&listed(inputs(&host)), default.as_deref())
 }
 
-/// Opens `choice` (`None`: the system default) with `open`: its name, what `open` made, and a
-/// warning when the chosen device is missing or fails and the default is used. The choice stays:
-/// once the device is back, the next recording uses it.
+/// The default by its ID: on Windows cpal's default device is a handle of its own that follows
+/// the system's, equal to no listed one, though its ID is the endpoint's.
+fn as_devices<D>(inputs: &[Input<D>], default: Option<&str>) -> Vec<Device> {
+  let device = |x: &Input<D>| Device {
+    id: x.id.clone(),
+    name: x.name.clone(),
+    default: default.is_some() && x.id.as_deref() == default,
+    transport: x.transport,
+  };
+  inputs.iter().map(device).collect()
+}
+
+/// The transport as the OS tells it ([nimbo::hardware::transport]), else as cpal does: Linux's
+/// all, Windows' besides Bluetooth and USB.
+fn transport(id: Option<&str>, description: &cpal::DeviceDescription) -> Transport {
+  use cpal::{DeviceType, InterfaceType};
+
+  let by_os = id.map_or(Transport::Unknown, nimbo::hardware::transport);
+  if by_os != Transport::Unknown {
+    return by_os;
+  }
+
+  match (description.interface_type(), description.device_type()) {
+    (InterfaceType::Bluetooth, _) => Transport::Bluetooth,
+    (InterfaceType::BuiltIn, _) => Transport::BuiltIn,
+    (InterfaceType::Usb, _) => Transport::Usb,
+    (InterfaceType::Virtual | InterfaceType::Aggregate, _) | (_, DeviceType::Virtual) => {
+      Transport::Virtual
+    }
+    _ => Transport::Unknown,
+  }
+}
+
+/// What records: [Microphone::Automatic]'s pick ([automatic]), or any setting's ([in_use]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Auto {
+  /// The listed device at this index.
+  Device(usize),
+  /// The system default as it is: none of the listed is it (ALSA's), none is listed, or Automatic
+  /// takes none of the listed (only virtual ones, or a closed lid's) and the default isn't the
+  /// closed lid's.
+  System,
+  /// No microphone Automatic takes: the system's input is a closed lid's, which hears nothing, and
+  /// there is no other but virtual ones; for the system's input ([in_use]), there is no input at
+  /// all.
+  Nothing,
+}
+
+/// The system's input is there with none listed: ALSA's `default` (Linux), which cpal always has
+/// and PipeWire or PulseAudio pass any microphone to. Elsewhere the default is a listed one, and
+/// with none listed there is no input.
+const UNLISTED_DEFAULT: bool = cfg!(target_os = "linux");
+
+/// A USB microphone first, then the built-in one (not under a closed lid: Apple's laptops cut it
+/// off), a wired or other one, and a Bluetooth one only when nothing else is there (recording
+/// turns those headphones to their call profile: worse sound, the first moments lost); a virtual
+/// one never, but with none of those the system's input as it is (a virtual one may pass a real
+/// microphone on), unless it is the closed lid's. Within a rank the system's input, else the first
+/// listed. With no listed default (ALSA's is no device, and Linux tells no transport) the system's
+/// as it is.
+pub fn automatic(devices: &[Device], lid_closed: bool) -> Auto {
+  if !devices.iter().any(|d| d.default) {
+    return Auto::System;
+  }
+
+  let cut_off = |d: &Device| d.default && lid_closed && d.transport == Transport::BuiltIn;
+  match best(devices, lid_closed) {
+    Some(i) => Auto::Device(i),
+    None if devices.iter().any(cut_off) => Auto::Nothing,
+    None => Auto::System,
+  }
+}
+
+/// The best of `devices` by [automatic]'s order, the default first within a rank.
+fn best(devices: &[Device], lid_closed: bool) -> Option<usize> {
+  let rank = |d: &Device| match d.transport {
+    Transport::Usb => Some(0),
+    Transport::BuiltIn if lid_closed => None,
+    Transport::BuiltIn => Some(1),
+    Transport::Other | Transport::Unknown => Some(2),
+    Transport::Bluetooth => Some(3),
+    Transport::Virtual => None,
+  };
+  let ranked = devices.iter().enumerate().filter_map(|(i, d)| Some((rank(d)?, !d.default, i)));
+  ranked.min().map(|(_, _, i)| i)
+}
+
+/// Where `choice` is among `devices`: by its ID, else by its name, as [open_device] finds it.
+pub fn position(devices: &[Device], choice: &Choice) -> Option<usize> {
+  let by_id = devices.iter().position(|d| choice.id.is_some() && d.id == choice.id);
+  by_id.or_else(|| devices.iter().position(|d| d.name == choice.name))
+}
+
+/// What records for `mic`, as [open_device] picks it: Automatic's by [automatic], the system's
+/// input, a chosen one; one that isn't connected gives way to the system's input, as System
+/// Default does (Automatic is a mode of its own), and stays chosen for when it is back.
+pub fn in_use(devices: &[Device], mic: &Microphone, lid_closed: bool) -> Auto {
+  let system = || system_input(devices, UNLISTED_DEFAULT);
+  match mic {
+    Microphone::Automatic => automatic(devices, lid_closed),
+    Microphone::System => system(),
+    Microphone::Device(choice) => position(devices, choice).map_or_else(system, Auto::Device),
+  }
+}
+
+/// The system's input: the listed default, else the system's as it is, but none when nothing is
+/// listed and the system has no input apart from them (`unlisted`, [UNLISTED_DEFAULT]).
+fn system_input(devices: &[Device], unlisted: bool) -> Auto {
+  match devices.iter().position(|d| d.default) {
+    Some(i) => Auto::Device(i),
+    None if devices.is_empty() && !unlisted => Auto::Nothing,
+    None => Auto::System,
+  }
+}
+
+/// A Mac's lid is closed: its built-in microphone is cut off then; `false` without one, and
+/// elsewhere: Windows counts its board's sound, the jack too, as built-in, and Linux lists no
+/// default for [automatic] to rank.
+pub fn lid_closed() -> bool {
+  cfg!(target_os = "macos") && nimbo::hardware::lid_closed() == Some(true)
+}
+
+/// The input [Microphone::Automatic] records with, `default` the system's: a USB default without
+/// listing every device (none outranks it), else the listed ones by [automatic]; `None` when there
+/// is no input at all.
+fn automatic_input(host: &cpal::Host, default: Option<Input>) -> Result<Option<Input>> {
+  if default.as_ref().is_some_and(|d| d.transport == Transport::Usb) {
+    return Ok(default);
+  }
+
+  let lid = lid_closed();
+  let inputs = listed(inputs(host));
+  let devices = as_devices(&inputs, default.as_ref().and_then(|d| d.id.as_deref()));
+  match automatic(&devices, lid) {
+    Auto::Device(i) => Ok(inputs.into_iter().nth(i)),
+    Auto::System => Ok(default),
+    Auto::Nothing => bail!("no microphone: the lid is closed"),
+  }
+}
+
+/// Why a chosen microphone, by its name, gave way to the system's input.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GaveWay {
+  #[error("the microphone {0:?} is not connected")]
+  NotConnected(String),
+  #[error("could not open the microphone {0:?}: {1}")]
+  Failed(String, String),
+}
+
+impl GaveWay {
+  /// The recording's warning with `used` in its place; none when it isn't connected, which the
+  /// menu and the settings tell with the one that records: only the log keeps that.
+  pub fn warning(&self, used: &str) -> Option<String> {
+    let text = format!("{self}; using {used:?}");
+    match self {
+      Self::NotConnected(_) => {
+        info!("{text}");
+        None
+      }
+      Self::Failed(..) => Some(text),
+    }
+  }
+}
+
+/// Opens `mic` with `open`: its name, what `open` made, and a warning when a chosen device fails
+/// and the system's input records instead ([in_use]), as when it is missing ([GaveWay]). The
+/// choice stays: once the device is back, the next recording uses it.
 fn open_device<T>(
-  choice: Option<&Choice>,
+  mic: &Microphone,
   open: impl Fn(&cpal::Device) -> Result<T>,
 ) -> Result<(String, T, Option<String>)> {
   let host = cpal::default_host();
+  // The default first: usually it is the one, and listing every device is slower.
   let default = host.default_input_device().and_then(Input::new);
-  let mut warning = None;
-  if let Some(choice) = choice {
-    // The default first: usually it is the one, and listing every device is slower.
-    let found = match &default {
-      Some(d) if d.is(choice) => Some((d.device.clone(), d.name.clone())),
+  // In a chosen one's place the system's input, as System Default: Automatic is a mode of its own.
+  let instead = |default| match mic {
+    Microphone::Automatic => automatic_input(&host, default),
+    Microphone::System | Microphone::Device(_) => Ok(default),
+  };
+  open_input(mic, default, || inputs(&host), instead, open)
+}
+
+/// [open_device] with the system's `default` input and `all` the inputs, listed only when the
+/// default isn't the chosen one; `instead`: what records for the setting, or in a chosen one's
+/// place.
+fn open_input<D: Clone, T>(
+  mic: &Microphone,
+  default: Option<Input<D>>,
+  all: impl FnOnce() -> Vec<Input<D>>,
+  instead: impl FnOnce(Option<Input<D>>) -> Result<Option<Input<D>>>,
+  open: impl Fn(&D) -> Result<T>,
+) -> Result<(String, T, Option<String>)> {
+  let mut gave_way = None;
+  if let Microphone::Device(choice) = mic {
+    // The chosen one, and whether it is the system's input.
+    let (found, system) = match &default {
+      Some(d) if d.is(choice) => (Some((d.device.clone(), d.name.clone())), true),
       _ => {
         // By ID among all, an unlisted one too; by name among the listed: ALSA names a card's PCMs
         // after the card, and the one listed is the best.
-        let mut all = inputs(&host);
+        let mut all = all();
         let found = match all.iter().position(|x| x.id.is_some() && x.id == choice.id) {
           Some(i) => Some(all.swap_remove(i)),
           None => listed(all).into_iter().find(|x| x.name == choice.name),
         };
-        found.map(|x| (x.device, x.name))
+        // Found by its name, its ID gone stale, it may be the system's input all the same.
+        let same = |(x, d): (&Input<D>, &Input<D>)| x.id.is_some() && x.id == d.id;
+        let system = found.as_ref().zip(default.as_ref()).is_some_and(same);
+        (found.map(|x| (x.device, x.name)), system)
       }
     };
 
-    match found {
+    let why = match found {
       Some((device, name)) => match open(&device) {
         Ok(value) => return Ok((name, value, None)),
-        Err(e) => warning = Some(format!("could not open the microphone {:?}: {e:#}", choice.name)),
+        Err(e) => GaveWay::Failed(choice.name.clone(), format!("{e:#}")),
       },
-      None => warning = Some(format!("the microphone {:?} is not connected", choice.name)),
+      None => GaveWay::NotConnected(choice.name.clone()),
+    };
+
+    // The one that failed is the system's: none is left to take its place.
+    if system {
+      bail!("{why}");
     }
+
+    gave_way = Some(why);
   }
 
-  let Some(Input { name, device, .. }) = default else {
-    match warning {
+  let Some(Input { name, device, .. }) = instead(default)? else {
+    match gave_way {
       Some(w) => bail!("{w}, and there is no default microphone"),
       None => bail!("no microphone found"),
     }
   };
 
-  let value = open(&device).map_err(|e| match &warning {
+  let value = open(&device).map_err(|e| match &gave_way {
     Some(w) => anyhow!("{w}, and the default microphone {name:?} failed too: {e:#}"),
     None => anyhow!("could not open the microphone {name:?}: {e:#}"),
   })?;
-  let warning = warning.map(|w| format!("{w}; using {name:?}"));
+  let warning = gave_way.and_then(|w| w.warning(&name));
   Ok((name, value, warning))
 }
 
@@ -246,16 +493,16 @@ const RING_SECONDS: usize = 2;
 /// What a recording captures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-  /// The chosen microphone, the system default for `None`.
-  Mic(Option<Choice>),
+  /// The chosen microphone.
+  Mic(Microphone),
   /// A WAV file played in real time, then silence.
   File(PathBuf),
 }
 
 impl Source {
   /// The fake microphone ([fake_mic]) if there is one, else the microphone `choice`.
-  pub fn new(fake: Option<PathBuf>, choice: Option<Choice>) -> Self {
-    fake.map_or(Self::Mic(choice), Self::File)
+  pub fn new(fake: Option<PathBuf>, mic: Microphone) -> Self {
+    fake.map_or(Self::Mic(mic), Self::File)
   }
 }
 
@@ -282,12 +529,12 @@ enum Feed {
 }
 
 fn capture(source: &Source) -> Result<(Capture, Consumer<f32>)> {
-  let choice = match source {
+  let mic = match source {
     Source::File(path) => return fake_capture(path),
-    Source::Mic(choice) => choice.as_ref(),
+    Source::Mic(mic) => mic,
   };
 
-  let (device, (mut capture, ring), warning) = open_device(choice, open_stream)?;
+  let (device, (mut capture, ring), warning) = open_device(mic, open_stream)?;
   (capture.device, capture.warning) = (device, warning);
   Ok((capture, ring))
 }
@@ -414,12 +661,12 @@ struct Live {
   /// RMS of the last window as `f32` bits.
   level: AtomicU32,
   silent: AtomicBool,
-  /// VAD frames since the last that was not a pause ([PAUSE]).
+  /// VAD frames since the last that was not the tail's pause ([TAIL_QUIET]).
   pause: AtomicU32,
 }
 
 /// The recording's level and whether the microphone sends any sound, for another thread.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Meter(Arc<Live>);
 
 impl Meter {
@@ -437,6 +684,12 @@ impl Meter {
   pub fn pause(&self) -> Duration {
     let frames = self.0.pause.load(Ordering::Relaxed);
     Duration::from_millis(u64::from(frames) * FRAME as u64 * 1000 / u64::from(SAMPLE_RATE))
+  }
+
+  /// A test's microphone going silent or sounding again.
+  #[cfg(test)]
+  pub fn set_silent(&self, silent: bool) {
+    self.0.silent.store(silent, Ordering::Relaxed);
   }
 }
 
@@ -753,6 +1006,10 @@ const VOICED: f32 = 0.5;
 /// A frame scoring below this is a pause; between the two it is neither: never speech, never cut
 /// out. Digital silence scores 0.1–0.3, quiet noise up to 0.4, speech mostly above 0.8.
 const PAUSE: f32 = 0.35;
+/// A frame scoring below this counts toward the tail's pause after the stop. After a word the
+/// scores fall slowly: on a real microphone (1,500 recordings) the silence after speech still
+/// scores 0.35–0.5 a few hundred ms on, but below 0.6 within 130 ms in three of four.
+const TAIL_QUIET: f32 = 0.6;
 /// Speech needs at least this much voiced audio; with less the engine is not called.
 const MIN_SPEECH_MS: usize = 150;
 /// Silence kept before the first and after the last speech in the engine's input.
@@ -810,10 +1067,38 @@ impl Vad {
     // Earshot wants [-1, 1]; resampling can overshoot a full-scale signal a little.
     self.pending.iter_mut().for_each(|s| *s = s.clamp(-1.0, 1.0));
     let score = self.detector.predict_f32(&self.pending);
-    self.pause = if score < PAUSE { self.pause + 1 } else { 0 };
+    self.pause = if score < TAIL_QUIET { self.pause + 1 } else { 0 };
     self.scores.push(score);
     self.pending.clear();
   }
+}
+
+/// The meter's [pause](Meter::pause) at every [POLL], with the time, while `pcm` (16 kHz) plays in
+/// real time from a 48 kHz device in 512-frame callbacks, drained as a recorder drains it: what the
+/// session's tail sees, about 40 ms behind the sound.
+#[cfg(test)]
+pub fn pauses(pcm: &[f32]) -> Vec<(Duration, Duration)> {
+  let (rate, callback) = (48_000, 512);
+  let mut device = Vec::new();
+  let mut up = Resample::new(SAMPLE_RATE, rate).unwrap();
+  up.push(pcm, &mut device);
+  up.finish(&mut device);
+
+  let mut down = Resample::new(rate, SAMPLE_RATE).unwrap();
+  let (mut vad, mut out, mut fed) = (Vad::default(), Vec::new(), 0);
+  let frame_ms = FRAME as u64 * 1000 / u64::from(SAMPLE_RATE);
+  let polls = device.len() as u32 / (rate * POLL.as_millis() as u32 / 1000);
+  (0..polls)
+    .map(|i| {
+      let at = POLL * i;
+      let delivered = (at.as_millis() as usize * rate as usize / 1000) / callback * callback;
+      out.clear();
+      down.push(&device[fed..delivered], &mut out);
+      fed = delivered;
+      vad.push(&out);
+      (at, Duration::from_millis(vad.pause as u64 * frame_ms))
+    })
+    .collect()
 }
 
 /// 16 kHz mono audio with its VAD scores, one per [FRAME] (the last frame may be partial).
@@ -1093,6 +1378,151 @@ mod tests {
       assert!(crossings.abs_diff(1_584) <= 4, "{from} → {to} Hz: {crossings} crossings");
       let peak = mid.iter().fold(0.0f32, |m, s| m.max(s.abs()));
       assert!((peak - 0.5).abs() < 0.02, "{from} → {to} Hz: peak {peak}");
+    }
+  }
+
+  /// Automatic's pick by the devices' transports, which one is the system default, and the lid.
+  #[test]
+  fn automatic_takes_usb_then_built_in_then_wired_then_bluetooth() {
+    use Transport::*;
+
+    let devices = |list: &[(Transport, bool)]| -> Vec<Device> {
+      let device = |(i, &(transport, default)): (usize, &(Transport, bool))| Device {
+        id: Some(format!("d{i}")),
+        name: format!("d{i}"),
+        default,
+        transport,
+      };
+      list.iter().enumerate().map(device).collect()
+    };
+    let cases = [
+      // A USB one first, over a built-in default; the built-in one over a wired or other one.
+      (&[(BuiltIn, true), (Usb, false)][..], false, Auto::Device(1)),
+      (&[(Usb, true), (BuiltIn, false)], false, Auto::Device(0)),
+      (&[(Unknown, true), (BuiltIn, false)], false, Auto::Device(1)),
+      (&[(Other, true), (Unknown, false), (Usb, false)], false, Auto::Device(2)),
+      (&[(Bluetooth, true), (Other, false), (BuiltIn, false)], false, Auto::Device(2)),
+      // A closed lid: not the built-in one; with no other but virtual ones none when it is the
+      // system's input, else the system's (a virtual one may pass a real microphone on).
+      (&[(BuiltIn, true), (Other, false)], true, Auto::Device(1)),
+      (&[(BuiltIn, true), (Bluetooth, false)], true, Auto::Device(1)),
+      (&[(BuiltIn, true)], true, Auto::Nothing),
+      (&[(BuiltIn, true), (Virtual, false)], true, Auto::Nothing),
+      (&[(Virtual, true), (BuiltIn, false)], true, Auto::System),
+      // Bluetooth only when nothing else is there; a virtual one never, but with only those the
+      // system's.
+      (&[(Bluetooth, true), (Unknown, false)], false, Auto::Device(1)),
+      (&[(Virtual, true), (Bluetooth, false)], false, Auto::Device(1)),
+      (&[(Bluetooth, true), (Virtual, false)], false, Auto::Device(0)),
+      (&[(Virtual, true), (BuiltIn, false)], false, Auto::Device(1)),
+      (&[(Virtual, true)], false, Auto::System),
+      (&[(Virtual, false), (Virtual, true)], true, Auto::System),
+      // Within a rank the system's input, else the first listed.
+      (&[(Usb, false), (Usb, true)], false, Auto::Device(1)),
+      (&[(Other, false), (Unknown, true)], false, Auto::Device(1)),
+      (&[(Bluetooth, false), (Bluetooth, true)], false, Auto::Device(1)),
+      (&[(Virtual, true), (Usb, false), (Usb, false)], false, Auto::Device(1)),
+      // No listed default (ALSA's, where every transport is unknown), or nothing at all: the
+      // system's.
+      (&[(Unknown, false), (Unknown, false)], false, Auto::System),
+      (&[(Usb, false), (Bluetooth, false)], false, Auto::System),
+      (&[], false, Auto::System),
+    ];
+    for (list, lid_closed, want) in cases {
+      assert_eq!(automatic(&devices(list), lid_closed), want, "{list:?}, lid closed: {lid_closed}");
+    }
+  }
+
+  /// What records for each setting: a chosen one that isn't connected gives way to the system's
+  /// input, not to Automatic's pick.
+  #[test]
+  fn a_chosen_mic_not_connected_gives_way_to_the_systems() {
+    let device = |name: &str, default, transport| {
+      let (id, name) = (Some(name.to_lowercase()), name.into());
+      Device { id, name, default, transport }
+    };
+    let devices = [
+      device("MacBook Pro Microphone", true, Transport::BuiltIn),
+      device("RØDE PodMic USB", false, Transport::Usb),
+    ];
+    let chosen =
+      |id: &str, name: &str| Microphone::Device(Choice { id: Some(id.into()), name: name.into() });
+    let missing = chosen("wh-1000xm5", "WH-1000XM5");
+    let cases = [
+      (Microphone::Automatic, Auto::Device(1)),
+      (Microphone::System, Auto::Device(0)),
+      (chosen("røde podmic usb", "RØDE PodMic USB"), Auto::Device(1)),
+      // By its ID once renamed; by its name when the ID is gone.
+      (chosen("røde podmic usb", "PodMic"), Auto::Device(1)),
+      (chosen("gone", "RØDE PodMic USB"), Auto::Device(1)),
+      (missing.clone(), Auto::Device(0)),
+    ];
+    for (mic, want) in cases {
+      assert_eq!(in_use(&devices, &mic, false), want, "{mic:?}");
+    }
+
+    // The system's as it is when none of the listed is it (ALSA's), or none is listed but the
+    // system has one apart (ALSA's `default`); none when there is no input at all.
+    let alsa = [Device { default: false, ..devices[1].clone() }];
+    assert_eq!(in_use(&alsa, &missing, false), Auto::System);
+    assert_eq!((system_input(&[], true), system_input(&[], false)), (Auto::System, Auto::Nothing));
+    assert_eq!(in_use(&[], &missing, false), system_input(&[], cfg!(target_os = "linux")));
+  }
+
+  /// A chosen one that did not open warns, naming the one in its place; one not connected only
+  /// logs, as the menu and the settings tell it, and the errors with none in its place say why.
+  #[test]
+  fn only_a_chosen_mic_that_did_not_open_warns() {
+    let failed = GaveWay::Failed("WH-1000XM5".into(), "busy".into());
+    let want = r#"could not open the microphone "WH-1000XM5": busy; using "RØDE PodMic USB""#;
+    assert_eq!(failed.warning("RØDE PodMic USB").as_deref(), Some(want));
+    let missing = GaveWay::NotConnected("WH-1000XM5".into());
+    assert_eq!(missing.warning("RØDE PodMic USB"), None);
+    assert_eq!(missing.to_string(), r#"the microphone "WH-1000XM5" is not connected"#);
+  }
+
+  /// A chosen one that fails gives way to the system's input, unless it is that one: found by its
+  /// ID, or by its name under a stale one, it is opened once and stops the dictation with its
+  /// error, as System Default would.
+  #[test]
+  fn a_chosen_mic_that_is_the_systems_and_fails_stops() {
+    let input = |id: &'static str, name: &str| Input {
+      id: Some(id.into()),
+      name: name.into(),
+      transport: Transport::Unknown,
+      device: id,
+    };
+    let all = || vec![input("mac", "MacBook Pro Microphone"), input("rode", "RØDE PodMic USB")];
+    // The RØDE is busy: what records and its warning, or the error; the devices opened.
+    let run = |default: usize, id: &str, name: &str| {
+      let mic = Microphone::Device(Choice { id: Some(id.into()), name: name.into() });
+      let tried = std::cell::RefCell::new(Vec::new());
+      let open = |d: &&'static str| {
+        tried.borrow_mut().push(*d);
+        match *d {
+          "rode" => bail!("busy"),
+          _ => Ok(()),
+        }
+      };
+      let got = open_input(&mic, all().into_iter().nth(default), all, Ok, open);
+      let got = got.map(|(name, (), warning)| (name, warning)).map_err(|e| format!("{e:#}"));
+      (got, tried.into_inner())
+    };
+
+    let busy = r#"could not open the microphone "RØDE PodMic USB": busy"#;
+    let warning = format!(r#"{busy}; using "MacBook Pro Microphone""#);
+    let used = Ok(("MacBook Pro Microphone".into(), Some(warning)));
+    let both = "the microphone \"WH-1000XM5\" is not connected, and the default microphone \
+      \"RØDE PodMic USB\" failed too: busy";
+    let cases = [
+      (1, "rode", "RØDE PodMic USB", Err(busy.into()), vec!["rode"]),
+      (1, "gone", "RØDE PodMic USB", Err(busy.into()), vec!["rode"]),
+      (0, "rode", "RØDE PodMic USB", used, vec!["rode", "mac"]),
+      // Not connected, and the system's input busy.
+      (1, "wh", "WH-1000XM5", Err(both.into()), vec!["rode"]),
+    ];
+    for (default, id, name, want, tried) in cases {
+      assert_eq!(run(default, id, name), (want, tried), "{id:?} {name:?}, default {default}");
     }
   }
 

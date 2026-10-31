@@ -16,15 +16,16 @@ use std::time::{Duration, Instant};
 
 use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
+use nimbo::system::Change;
 use nimbo::{
   Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
-  FormStyle, Hotkey, Icon, Id, Key, NamedKey, PopUp, Select, Style, TextStyle, Tile, Ui, Weight,
-  grow, open, paths, px,
+  FormStyle, Hotkey, Icon, Id, Item, Key, Menu, NamedKey, PopUp, Select, Style, TextStyle, Tile,
+  Ui, Weight, grow, open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
-use crate::audio::{self, Choice, Playback};
+use crate::audio::{self, Auto, Choice, Microphone, Playback, Transport};
 use crate::history::{Entry, History, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms};
 use crate::session::{NoModel, Request, Status, label};
 use crate::settings::{Activation, HudPosition, Settings, language_name};
@@ -88,6 +89,11 @@ pub trait Shell {
   /// The shortcut recorder records: the current hotkey is not matched meanwhile.
   fn pause_hotkey(&self, _paused: bool) {}
   fn devices(&self) -> Vec<audio::Device>;
+  /// [audio::lid_closed], for Automatic's microphone.
+  fn lid_closed(&self) -> bool {
+    false
+  }
+
   fn access(&self) -> Access;
   /// The system's prompt while it can still ask ([Prefs::access_changed]), else its pane.
   fn allow(&self, _pane: Pane) {}
@@ -110,10 +116,20 @@ pub trait Shell {
   fn import_state(&self) -> Option<Import>;
   fn open_url(&self, _url: &str) {}
   fn reveal(&self, _dir: &Path) {}
+  /// Plays `file` on the speakers until the [Playback] is dropped: [Prefs::played] once it has
+  /// played to its end or could not play.
+  fn play(&self, file: &Path) -> anyhow::Result<Playback>;
   /// This Mac has a Neural Engine wavo can use.
   fn has_neural_engine(&self) -> bool {
     false
   }
+  /// The app can update itself: not where [shipo::supported] says no, a dev build, a run with its
+  /// own `WAVO_HOME`, unless shipo is [faking](shipo::faking).
+  fn updates(&self) -> bool {
+    false
+  }
+  /// The update's window, with a check when it has nothing else to show.
+  fn check_updates(&self) {}
 }
 
 enum Delete {
@@ -144,13 +160,14 @@ pub struct Prefs {
   hub: Hub,
   home: PathBuf,
   devices: Vec<audio::Device>,
+  /// A laptop's lid is closed: its built-in microphone hears nothing ([audio::automatic]).
+  lid_closed: bool,
   found: Vec<Found>,
   pick: Pick,
   access: Access,
   login: Login,
   /// The shortcut recorder records: the hotkey is paused.
   recording: bool,
-  focused: bool,
   ask: Option<Ask>,
   /// The file panel open: its answer goes to it.
   panel: Option<Panel>,
@@ -178,12 +195,12 @@ impl Prefs {
       hub,
       home: home.to_owned(),
       devices: Vec::new(),
+      lid_closed: false,
       found: Vec::new(),
       pick: Pick::default(),
       access,
       login: Login { state: Err(String::new()), busy: None, error: None },
       recording: false,
-      focused: false,
       ask: None,
       panel: None,
       model_search: String::new(),
@@ -207,6 +224,7 @@ impl Prefs {
   /// Looks again at what the session does not push: when the window opens or comes to the front.
   pub fn refresh(&mut self) {
     self.devices = self.shell.devices();
+    self.lid_closed = self.shell.lid_closed();
     self.access = self.shell.access();
     self.login.state = self.shell.autostart();
     self.models_changed();
@@ -282,21 +300,6 @@ impl Prefs {
 
 impl App for Prefs {
   fn view(&mut self, ui: &mut Ui) {
-    // Back from another app (System Settings, where a permission was given).
-    let focused = ui.window_focused();
-    if focused && !self.focused {
-      self.refresh();
-    }
-
-    self.focused = focused;
-    // A recording played to its end lets the speakers go, whatever page shows.
-    let h = &mut self.history;
-    if let Some((_, p)) = h.playing.take_if(|(_, p)| !p.playing())
-      && let Some(e) = p.error()
-    {
-      h.note = Some((format!("Could not play the recording: {e}"), ui.now()));
-    }
-
     // The title bar is part of the window's content.
     let bar = ui.titlebar().map_or(0.0, |(h, _)| h);
     match self.page.scrolls() {
@@ -333,7 +336,7 @@ impl App for Prefs {
     self.confirm(ui);
 
     // Also when the recorder lost its focus with the page, or the window lost the keys.
-    let recording = ui.focused(Id::of("hotkey")) && focused;
+    let recording = ui.focused(Id::of("hotkey")) && ui.window_focused();
     if recording != self.recording {
       self.recording = recording;
       self.shell.pause_hotkey(recording);
@@ -341,10 +344,24 @@ impl App for Prefs {
   }
 
   /// The file Export's or Import's panel picked; Esc, or a click on nothing above the panel
-  /// under the history, unselects its dictation.
+  /// under the history, unselects its dictation; the microphones or the lid changed: read again
+  /// for the Microphone row; back in front, from another app (System Settings, where a permission
+  /// was given): [Prefs::refresh].
   fn event(&mut self, cx: &mut Cx, ev: &Event) -> bool {
     let history = self.page == Page::History;
     match ev {
+      Event::Focus(true) => {
+        self.refresh();
+        true
+      }
+      Event::System(Change::AudioInputs | Change::DefaultInput) => {
+        self.devices = self.shell.devices();
+        true
+      }
+      Event::System(Change::Lid) => {
+        self.lid_closed = self.shell.lid_closed();
+        true
+      }
       Event::FileDialog(answer) => {
         match (self.panel.take(), answer) {
           // GNOME's save panel adds no extension: Import's *.zip would not show it.
@@ -385,6 +402,25 @@ const SECURE_INPUT_NOTE: &str = "Secure Input is on (a password field, or a term
   Keyboard Entry): the shortcut works through a backup path, and Esc may not cancel.";
 const ACTIVATION_HELP: &str = "How the hotkey records: while you hold it, from one press to the \
   next, or both (a short tap latches the recording on).";
+// What Automatic does here ([audio::automatic]): macOS tells the built-in microphone from a
+// headset on its jack, and the lid; Windows tells USB and Bluetooth, and counts its board's sound
+// (HDAUDIO), the jack too, as built-in; Linux (ALSA) tells no transport and lists no default.
+const MIC_HELP: &str = match () {
+  _ if cfg!(target_os = "macos") => {
+    "Automatic takes a USB microphone first, then the built-in one while the lid is open, then a \
+     wired one, and a Bluetooth headset only when there is no other: it records at call quality \
+     and loses the first words. System Default uses whatever the system picks."
+  }
+  _ if cfg!(windows) => {
+    "Automatic takes a USB microphone first, then the computer’s own or a wired one, and a \
+     Bluetooth headset only when there is no other: it records at call quality and loses the \
+     first words. System Default uses whatever the system picks."
+  }
+  _ => {
+    "Automatic and System Default both use the system’s input. Linux doesn’t tell Wavo how a \
+     microphone is attached, so neither skips a Bluetooth headset."
+  }
+};
 // Where the person turns launch at login back on, which the system turned off.
 const LOGIN_APPROVAL: &str = if cfg!(windows) {
   "Turn Wavo on in Task Manager › Startup apps."
@@ -414,12 +450,21 @@ impl Prefs {
     self.permissions(ui, fs);
     // By what matters most: the microphone, the model and its language, then the shortcut.
     ui.form_section(fs, "Dictation", |ui| {
-      let (mics, at) = microphones(&self.devices, self.settings.microphone.as_ref());
+      let (devices, saved) = (&self.devices, &self.settings.microphone);
+      let (mics, at) = microphones(devices, saved, self.lid_closed);
       let labels: Vec<&str> = mics.iter().map(|m| m.0.as_str()).collect();
-      ui.form_row(fs, FormRow::new("Microphone"), |ui| {
+      let warning = mic_warning(devices, saved, self.lid_closed);
+      // The warning alone in the ⓘ's place: what is wrong matters then, not how the modes choose.
+      let row = FormRow::new("Microphone");
+      let row = match &warning {
+        Some(warning) => row.warning(warning),
+        None => row.info(MIC_HELP),
+      };
+
+      ui.id("mic-row").form_row(fs, row, |ui| {
         // ALSA's names run past 60 characters: a longer one ends in "…" beside its label.
         let mut cur = at;
-        let pop = PopUp::new(&mut cur, &labels).separators(&[0]).max_width(MIC_WIDTH);
+        let pop = PopUp::new(&mut cur, &labels).separators(&[1]).max_width(MIC_WIDTH);
         if pop.show(ui.id("mic")).changed {
           let choice = mics[cur].1.clone();
           self.edit(move |s| s.microphone = choice.clone());
@@ -610,6 +655,10 @@ const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another compute
 const EXPORT_HELP: &str = "The history, its recordings and the settings, into a .zip archive: \
   Import brings it back, here or on another computer.";
 
+const UPDATE_HELP: &str = "Wavo looks for a new version at launch and once a day; the menu says \
+  when there is one. Off, it looks only when you choose Check for Updates.";
+const NO_UPDATES: &str = "This copy of Wavo doesn’t update itself.";
+
 const HUDS: [(HudPosition, &str); 2] =
   [(HudPosition::Bottom, "Bottom of the screen"), (HudPosition::Top, "Top of the screen")];
 
@@ -635,6 +684,7 @@ const RETENTIONS: [(Retention, &str); 7] = [
 
 impl Prefs {
   fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    // The pop-ups first, then the switches.
     ui.form_section(fs, "App", |ui| {
       ui.form_row(fs, FormRow::new("Show the HUD at"), |ui| {
         let mut cur = self.settings.hud_position;
@@ -643,17 +693,24 @@ impl Prefs {
         }
       });
 
-      ui.form_row(fs, FormRow::new("Show the transcription time").info(TOOK_HELP), |ui| {
-        let mut on = self.settings.show_transcription_time;
-        if ui.id("took").toggle(&mut on, "").changed {
-          self.edit(move |s| s.show_transcription_time = on);
-        }
-      });
-
       ui.form_row(fs, FormRow::new("Unload the model").info(UNLOAD_HELP), |ui| {
         let mut cur = self.settings.unload_after_minutes;
         if Select::new(&mut cur, &UNLOADS).separators(&[0]).show(ui.id("unload")).changed {
           self.edit(move |s| s.unload_after_minutes = cur);
+        }
+      });
+
+      ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
+        let mut cur = self.settings.history_retention;
+        if ui.id("retention").select(&mut cur, &RETENTIONS).changed {
+          self.edit(move |s| s.history_retention = cur);
+        }
+      });
+
+      ui.form_row(fs, FormRow::new("Show the transcription time").info(TOOK_HELP), |ui| {
+        let mut on = self.settings.show_transcription_time;
+        if ui.id("took").toggle(&mut on, "").changed {
+          self.edit(move |s| s.show_transcription_time = on);
         }
       });
 
@@ -667,10 +724,14 @@ impl Prefs {
         });
       }
 
-      ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
-        let mut cur = self.settings.history_retention;
-        if ui.id("retention").select(&mut cur, &RETENTIONS).changed {
-          self.edit(move |s| s.history_retention = cur);
+      // Off and disabled where the app can't update, the setting kept; its ⓘ says why.
+      let updates = self.shell.updates();
+      let help = if updates { UPDATE_HELP } else { NO_UPDATES };
+      let row = FormRow::new("Check for updates").info(help).disabled(!updates);
+      ui.id("auto-update-row").form_row(fs, row, |ui| {
+        let mut on = updates && self.settings.auto_update;
+        if ui.id("auto-update").toggle(&mut on, "").changed {
+          self.edit(move |s| s.auto_update = on);
         }
       });
     });
@@ -780,18 +841,18 @@ impl Prefs {
     });
   }
 
-  /// [Shell::set_autostart] to `on` ended: the system's state after it, or why not.
   /// A history request the session refused: said under the panel.
   pub fn history_failed(&mut self, req: Request, error: &str) {
     let what = match req {
       Request::Delete(_) => "Could not delete the dictation",
       Request::Retranscribe(_) => "Could not transcribe it again",
       Request::Restore(_) => "Could not put the previous text back",
-      Request::Unload | Request::Imported => return,
+      Request::Unload | Request::Imported | Request::Close => return,
     };
     self.history.said = Some(format!("{what}: {error}"));
   }
 
+  /// [Shell::set_autostart] to `on` ended: the system's state after it, or why not.
   pub fn autostart_set(&mut self, on: bool, result: Result<Autostart, String>) {
     self.login.busy = None;
     match result {
@@ -813,30 +874,95 @@ impl Prefs {
 /// A downloaded model: wavo's, and its file.
 pub type Found = (&'static ModelInfo, PathBuf);
 
-/// The system default, the `devices`, and the `saved` one when it is not connected; the index of
-/// the current one. Here and in the menu.
+/// Automatic with the device it picks, the system default, the `devices`, and the `saved` one when
+/// it is not connected; the index of the current one. Here and in the menu.
 pub fn microphones(
   devices: &[audio::Device],
-  saved: Option<&Choice>,
-) -> (Vec<(String, Option<Choice>)>, usize) {
-  let default = match devices.iter().find(|d| d.default) {
+  saved: &Microphone,
+  lid_closed: bool,
+) -> (Vec<(String, Microphone)>, usize) {
+  let default = devices.iter().find(|d| d.default);
+  let automatic = match (audio::automatic(devices, lid_closed), default) {
+    (Auto::Device(i), _) => format!("Automatic ({})", devices[i].name),
+    // Only virtual ones, or a closed lid's with a virtual default: the system's.
+    (Auto::System, Some(d)) => format!("Automatic ({})", d.name),
+    (Auto::System, None) => "Automatic".to_owned(),
+    (Auto::Nothing, _) => "Automatic (none: the lid is closed)".to_owned(),
+  };
+  let default = match default {
     Some(d) => format!("System Default ({})", d.name),
     None => "System Default".to_owned(),
   };
-  let mut items = vec![(default, None)];
+  let mut items = vec![(automatic, Microphone::Automatic), (default, Microphone::System)];
   for d in devices {
-    items.push((d.name.clone(), Some(Choice { id: d.id.clone(), name: d.name.clone() })));
+    let choice = Choice { id: d.id.clone(), name: d.name.clone() };
+    items.push((d.name.clone(), Microphone::Device(choice)));
   }
 
-  let Some(saved) = saved else { return (items, 0) };
-  let by_id = devices.iter().position(|d| saved.id.is_some() && d.id == saved.id);
-  if let Some(i) = by_id.or_else(|| devices.iter().position(|d| d.name == saved.name)) {
-    return (items, i + 1);
+  let saved = match saved {
+    Microphone::Automatic => return (items, 0),
+    Microphone::System => return (items, 1),
+    Microphone::Device(choice) => choice,
+  };
+  if let Some(i) = audio::position(devices, saved) {
+    return (items, i + 2);
   }
 
-  items.push((format!("{} (not connected)", saved.name), Some(saved.clone())));
+  items.push((format!("{} (not connected)", saved.name), Microphone::Device(saved.clone())));
   let at = items.len() - 1;
   (items, at)
+}
+
+/// While the `saved` microphone isn't connected: its name, and what records in its place, the
+/// system's input ([audio::in_use]), [Auto::Nothing] when there is no input. Here and in the menu.
+pub fn not_connected<'a>(
+  devices: &[audio::Device],
+  saved: &'a Microphone,
+  lid_closed: bool,
+) -> Option<(&'a str, Auto)> {
+  let Microphone::Device(choice) = saved else { return None };
+  let missing = audio::position(devices, choice).is_none();
+  missing.then(|| (choice.name.as_str(), audio::in_use(devices, saved, lid_closed)))
+}
+
+/// A listed microphone's name, the built-in one's under a closed lid saying so, as Automatic's
+/// does: it hears nothing.
+pub fn mic_name(device: &audio::Device, lid_closed: bool) -> String {
+  match lid_closed && device.transport == Transport::BuiltIn {
+    true => format!("{} (the lid is closed)", device.name),
+    false => device.name.clone(),
+  }
+}
+
+/// The Microphone row's warning: the one chosen isn't connected, and what records instead; or
+/// Automatic has only a Bluetooth one.
+fn mic_warning(devices: &[audio::Device], saved: &Microphone, lid_closed: bool) -> Option<String> {
+  let Some((name, instead)) = not_connected(devices, saved, lid_closed) else {
+    return bluetooth_only(devices, saved, lid_closed).map(str::to_owned);
+  };
+
+  Some(match instead {
+    Auto::Device(i) => {
+      format!("{name} isn’t connected: Wavo records with {}", mic_name(&devices[i], lid_closed))
+    }
+    Auto::System => format!("{name} isn’t connected: Wavo records with the system’s input"),
+    Auto::Nothing => format!("{name} isn’t connected, and there is no other microphone"),
+  })
+}
+
+/// Under Automatic when the device it picks is a Bluetooth one: there is no other.
+pub fn bluetooth_only(
+  devices: &[audio::Device],
+  saved: &Microphone,
+  lid_closed: bool,
+) -> Option<&'static str> {
+  let auto = (*saved == Microphone::Automatic).then(|| audio::automatic(devices, lid_closed))?;
+  match auto {
+    Auto::Device(i) if devices[i].transport == Transport::Bluetooth => {
+      Some("Only a Bluetooth mic: the sound is worse")
+    }
+    _ => None,
+  }
 }
 
 /// `740 MB`, `16.0 GB`; `48 KB` under a megabyte (an empty history's archive).
@@ -1388,19 +1514,25 @@ struct HistoryPage {
   /// What the line under the panel says for [NOTE_TIME], and since when ([Ui::now]): an error,
   /// "Copied".
   note: Option<(String, Duration)>,
-  /// A note from outside a frame (a request that failed on its thread), stamped at the next one.
+  /// A note from outside a frame (a request that failed on its thread, a recording that could not
+  /// play), stamped when History shows next.
   said: Option<String>,
 }
 
 impl HistoryPage {
+  /// The search field changed: its wait starts again, unless only spaces around it did.
+  fn typed(&mut self, now: Duration) {
+    let search = self.search.trim();
+    if self.typed.as_ref().is_none_or(|(s, _)| s != search) {
+      self.typed = Some((search.to_owned(), now));
+    }
+  }
+
   /// Reads the history again when it or the search changed; a search being typed keeps the last
-  /// result until it stays the same for [SEARCH_WAIT]. Returns how long it still waits.
+  /// result until it stays the same for [SEARCH_WAIT]. Returns how long it still waits. The
+  /// selected dictation is unselected when it is not read again: deleted, or out of the search.
   fn load(&mut self, now: Duration) -> Option<Duration> {
     let search = self.search.trim().to_owned();
-    if self.typed.as_ref().is_none_or(|(s, _)| *s != search) {
-      self.typed = Some((search.clone(), now));
-    }
-
     let since = self.typed.as_ref().map_or(SEARCH_WAIT, |(_, at)| now.saturating_sub(*at));
     let other = self.loaded.as_ref().is_some_and(|(s, _)| *s != search);
     if other && since < SEARCH_WAIT {
@@ -1427,7 +1559,10 @@ impl HistoryPage {
 
     // All of them: 86k entries read in about 0.1 s.
     match db.get_page(&key.0, i64::MAX as usize) {
-      Ok(entries) => (self.days, self.entries) = (days(&entries), entries),
+      Ok(entries) => {
+        self.selected = self.selected.filter(|id| entries.iter().any(|e| e.id == *id));
+        (self.days, self.entries) = (days(&entries), entries);
+      }
       Err(e) => self.note = Some((format!("Could not read the history: {e:#}"), now)),
     }
 
@@ -1545,6 +1680,14 @@ enum Act {
   Delete { id: i64, start: String, audio: bool },
 }
 
+impl Act {
+  /// Deleting `e`, asked first ([Prefs::history_act]) with the start of its text.
+  fn delete(e: &Entry) -> Act {
+    let start = crate::history::shorten(&first_line(e), 60);
+    Act::Delete { id: e.id, start, audio: e.audio_path.is_some() }
+  }
+}
+
 /// The panel under the list, with the selected dictation's whole text and its actions.
 const FOOT_H: f32 = 150.0;
 /// The line under it with the whole history.
@@ -1552,8 +1695,12 @@ const TOTAL_H: f32 = 30.0;
 
 impl Prefs {
   fn history_head(&mut self, ui: &mut Ui, s: Style) {
-    let search = &mut self.history.search;
-    ui.row(s, |ui| _ = ui.id("history-search").search(search, "Search dictations"));
+    let h = &mut self.history;
+    ui.row(s, |ui| {
+      if ui.id("history-search").search(&mut h.search, "Search dictations").changed {
+        h.typed(ui.now());
+      }
+    });
   }
 
   /// The dictations, newest first, in a plate a day, a page at a time.
@@ -1566,10 +1713,6 @@ impl Prefs {
     if let Some(wait) = h.load(ui.now()) {
       ui.request_frame_in(wait);
     }
-    // Deleted, or out of the search.
-    if h.selected.is_some_and(|id| !h.entries.iter().any(|e| e.id == id)) {
-      h.selected = None;
-    }
 
     if h.entries.is_empty() {
       let empty = match h.search.trim().is_empty() {
@@ -1580,12 +1723,12 @@ impl Prefs {
     }
 
     // A plate a day, built only where it shows (nimbo's form list).
-    let (now, mut act) = (now_ms(), None);
+    let (h, now, mut act) = (&self.history, now_ms(), None);
     let fs = &FormStyle { caption: fs.caption.ellipsis(), pad_y: fs.pad_y + 4.0, ..*fs };
     let titles: Vec<String> = h.days.iter().map(|(day, ..)| day_title(*day, now)).collect();
     let groups: Vec<(&str, usize)> =
       titles.iter().zip(&h.days).map(|(t, (_, r, _))| (t.as_str(), r.len())).collect();
-    let (entries, days, status) = (&h.entries, &h.days, &self.status);
+    let (entries, days) = (&h.entries, &h.days);
     let entry = |g: usize, i: usize| &entries[days[g].1.start + i];
     let key = |g, i| entry(g, i).id as u64;
     let note = |ui: &mut Ui, g: usize| {
@@ -1594,10 +1737,7 @@ impl Prefs {
     };
     let row = |ui: &mut Ui, g, i| {
       let e = entry(g, i);
-      let selected = h.selected == Some(e.id);
-      let playing = h.playing.as_ref().is_some_and(|(id, _)| *id == e.id);
-      let working = status.current == Some(e.id) || status.retranscribing.contains(&e.id);
-      if let Some(a) = entry_row(ui, fs, e, selected, playing, working) {
+      if let Some(a) = entry_row(ui, fs, e, &RowState::of(self, e)) {
         act = Some(a);
       }
     };
@@ -1610,7 +1750,6 @@ impl Prefs {
   /// Restore the Previous Text and Delete.
   fn history_foot(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let t = ui.theme();
-    let transcribes = self.transcribes();
     let h = &self.history;
     let e = h.selected.and_then(|id| h.entries.iter().find(|e| e.id == id));
     let mut act = None;
@@ -1628,25 +1767,22 @@ impl Prefs {
       ui.id("history-text").scroll_area(area, |ui| {
         ui.col(Style::new().w(grow()), |ui| ui.text(&text, t.body()));
       });
-      let busy = self.status.retranscribing.contains(&e.id);
-      let audio = e.audio_path.is_some();
+      let st = RowState::of(self, e);
       ui.row(Style::new().w(grow()).gap(8.0), |ui| {
-        let off = busy || !transcribes || !audio;
+        let off = !st.retranscribes(e);
         if ui.disabled(off).id(("retranscribe", e.id)).button("Transcribe Again").clicked {
           act = Some(Act::Request(Request::Retranscribe(e.id)));
         }
 
-        if self.status.restorable.contains(&e.id)
-          && ui.disabled(busy).id(("restore", e.id)).button("Restore the Previous Text").clicked
+        if st.restorable
+          && ui.disabled(st.busy).id(("restore", e.id)).button("Restore the Previous Text").clicked
         {
           act = Some(Act::Request(Request::Restore(e.id)));
         }
 
         ui.el(Style::new().w(grow()));
-        // Not while it is transcribed again: the session refuses then.
-        if ui.disabled(busy).id(("delete", e.id)).button("Delete…").clicked {
-          let start = crate::history::shorten(&first_line(e), 60);
-          act = Some(Act::Delete { id: e.id, start, audio });
+        if ui.disabled(st.busy).id(("delete", e.id)).button("Delete…").clicked {
+          act = Some(Act::delete(e));
         }
       });
     });
@@ -1709,8 +1845,7 @@ impl Prefs {
           return;
         };
 
-        let waker = ui.waker().clone();
-        match Playback::start(&path, move || waker.wake()) {
+        match self.shell.play(&path) {
           Ok(p) => h.playing = Some((id, p)),
           Err(e) => h.note = Some((format!("Could not play the recording: {e:#}"), ui.now())),
         }
@@ -1729,20 +1864,58 @@ impl Prefs {
       None => {}
     }
   }
+
+  /// The recording playing ended, or could not play ([Shell::play]): the speakers are let go
+  /// whatever page shows, and why it could not play is said under the panel.
+  pub fn played(&mut self) {
+    let h = &mut self.history;
+    if let Some((_, p)) = h.playing.take_if(|(_, p)| !p.playing())
+      && let Some(e) = p.error()
+    {
+      h.said = Some(format!("Could not play the recording: {e}"));
+    }
+  }
 }
 
-/// A dictation's row (`working`: being recorded or transcribed now), all of one height: its text on
-/// a line and the details under it, Play and Copy centred at its right. A click on it selects it
-/// (tinted), for the panel under the list.
-fn entry_row(
-  ui: &mut Ui,
-  fs: &FormStyle,
-  e: &Entry,
+/// A dictation as its row, its menu and the panel under the list show it: `working`, being
+/// recorded or transcribed now; the model `transcribes`; `busy`, being transcribed again, when the
+/// session refuses to change it; its previous text `restorable`.
+#[derive(Default)]
+struct RowState {
   selected: bool,
   playing: bool,
   working: bool,
-) -> Option<Act> {
-  let line = row_line(e, working);
+  transcribes: bool,
+  busy: bool,
+  restorable: bool,
+}
+
+impl RowState {
+  fn of(p: &Prefs, e: &Entry) -> RowState {
+    let (h, status) = (&p.history, &p.status);
+    let busy = status.retranscribing.contains(&e.id);
+    RowState {
+      selected: h.selected == Some(e.id),
+      playing: h.playing.as_ref().is_some_and(|(id, _)| *id == e.id),
+      working: busy || status.current == Some(e.id),
+      transcribes: p.transcribes(),
+      busy,
+      restorable: status.restorable.contains(&e.id),
+    }
+  }
+
+  /// Transcribe Again is on: the model transcribes, the recording is there, and it isn't busy.
+  fn retranscribes(&self, e: &Entry) -> bool {
+    self.transcribes && !self.busy && e.audio_path.is_some()
+  }
+}
+
+/// A dictation's row, all of one height: its text on a line and the details under it, Play and
+/// Copy centred at its right. A click on it selects it (tinted), for the panel under the list; a
+/// right-click selects it too and opens its menu ([row_menu]).
+fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, st: &RowState) -> Option<Act> {
+  let (selected, playing) = (st.selected, st.playing);
+  let line = row_line(e, st.working);
   let caption = details(e);
   let mut fs = *fs;
   fs.row = fs.row.hit();
@@ -1779,7 +1952,46 @@ fn entry_row(
     });
   });
 
-  act.or((r.clicked || on_text).then_some(Act::Select(e.id)))
+  // The menu's answer comes in a later pass than the press that selects the row.
+  let at = ui.context_press(r.id);
+  let chosen = ui.context_menu_at(r.id, at, || row_menu(e, st));
+  if let Some(a) = chosen.and_then(|item| row_act(&item, e)) {
+    return Some(a);
+  }
+
+  let select = r.clicked || on_text || at.is_some() && !selected;
+  act.or(select.then_some(Act::Select(e.id)))
+}
+
+/// A row's context menu: what its buttons and the panel under the list do.
+fn row_menu(e: &Entry, st: &RowState) -> Menu {
+  let (play, label) = if st.playing { ("stop", "Stop") } else { ("play", "Play the Recording") };
+  let mut items = vec![
+    Item::new("copy", "Copy Text").enabled(!e.text.is_empty()),
+    Item::new(play, label).enabled(e.audio_path.is_some()),
+    Item::separator(),
+    Item::new("retranscribe", "Transcribe Again").enabled(st.retranscribes(e)),
+  ];
+  if st.restorable {
+    items.push(Item::new("restore", "Restore the Previous Text").enabled(!st.busy));
+  }
+
+  items.extend([Item::separator(), Item::new("delete", "Delete…").destructive().enabled(!st.busy)]);
+  Menu::new(items)
+}
+
+/// The act of the row menu's item `item`, whatever the row is when the answer comes: Stop, chosen
+/// as the playback ended, doesn't play it again.
+fn row_act(item: &str, e: &Entry) -> Option<Act> {
+  Some(match item {
+    "copy" => Act::Copy(e.text.clone()),
+    "play" => Act::Play(e.id),
+    "stop" => Act::Stop,
+    "retranscribe" => Act::Request(Request::Retranscribe(e.id)),
+    "restore" => Act::Request(Request::Restore(e.id)),
+    "delete" => Act::delete(e),
+    _ => return None,
+  })
 }
 
 // MARK: About
@@ -1809,16 +2021,15 @@ const ACKS: [(&str, &str, &str); 6] = [
   ),
 ];
 
-/// `assets/icon.png` at 128 px (64 points at 2x) as RGBA, from build.rs.
-static ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/about-icon.rgba"));
-
 impl Prefs {
   fn about(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let t = ui.theme();
     let head =
       Style::new().w(grow()).pads([10.0, 0.0, 6.0, 0.0]).align(Align::Center, Align::Start);
     ui.col(head, |ui| {
-      ui.rgba_image(128, 128, ICON, Style::new().w(px(64.0)).h(px(64.0)));
+      // 128 px: 64 points at 2x.
+      let icon = nimbo::Png::new(crate::ICON).side(128);
+      ui.png_image(icon, Style::new().w(px(64.0)).h(px(64.0)));
       ui.el(Style::new().h(px(10.0)));
       ui.text("Wavo", TextStyle::new(Font { size: 20.0, ..t.bold }, t.text).ellipsis());
       ui.el(Style::new().h(px(2.0)));
@@ -1833,6 +2044,11 @@ impl Prefs {
 
         if ui.id(("link", "coffee")).button("Buy Me a Coffee").clicked {
           self.shell.open_url(COFFEE);
+        }
+
+        // Only where the app can update.
+        if self.shell.updates() && ui.id("updates").button("Check for Updates…").clicked {
+          self.shell.check_updates();
         }
       });
     });
@@ -1862,7 +2078,7 @@ mod tests {
   use std::cell::{RefCell, RefMut};
   use std::rc::Rc;
 
-  use nimbo::{Appearance, Event, Harness, Modifiers, Phase, Point, Size};
+  use nimbo::{Appearance, Event, Harness, Modifiers, MouseButton, Os, Phase, Point, Size};
 
   use super::*;
   use crate::testing::TempDir;
@@ -1871,6 +2087,11 @@ mod tests {
   struct Log {
     settings: Settings,
     paused: Vec<bool>,
+    /// A MacBook's microphone and a USB one unless set.
+    devices: Option<Vec<audio::Device>>,
+    /// Times the devices were read.
+    looks: usize,
+    lid_closed: bool,
     /// All allowed unless set.
     access: Option<Access>,
     allowed: Vec<Pane>,
@@ -1885,6 +2106,9 @@ mod tests {
     revealed: Vec<PathBuf>,
     import: Option<Import>,
     imports: Vec<PathBuf>,
+    updates: bool,
+    checks: usize,
+    played: Vec<PathBuf>,
   }
 
   #[derive(Clone, Default)]
@@ -1910,12 +2134,24 @@ mod tests {
     }
 
     fn devices(&self) -> Vec<audio::Device> {
-      let device = |name: &str, default| audio::Device {
+      let mut log = self.log();
+      log.looks += 1;
+      if let Some(devices) = &log.devices {
+        return devices.clone();
+      }
+
+      let device = |name: &str, default, transport| audio::Device {
         id: Some(name.to_lowercase()),
         name: name.into(),
         default,
+        transport,
       };
-      vec![device("MacBook Pro Microphone", true), device("USB Mic", false)]
+      let mac = device("MacBook Pro Microphone", true, Transport::BuiltIn);
+      vec![mac, device("USB Mic", false, Transport::Usb)]
+    }
+
+    fn lid_closed(&self) -> bool {
+      self.log().lid_closed
     }
 
     fn access(&self) -> Access {
@@ -1991,6 +2227,20 @@ mod tests {
     fn reveal(&self, dir: &Path) {
       self.log().revealed.push(dir.to_owned());
     }
+
+    /// No speakers in tests.
+    fn play(&self, file: &Path) -> anyhow::Result<Playback> {
+      self.log().played.push(file.to_owned());
+      Err(anyhow::anyhow!("no speakers"))
+    }
+
+    fn updates(&self) -> bool {
+      self.log().updates
+    }
+
+    fn check_updates(&self) {
+      self.log().checks += 1;
+    }
   }
 
   /// A home in a temp dir with a Hugging Face cache in it that has `models`.
@@ -2018,7 +2268,7 @@ mod tests {
       let cfg = config(Page::General);
       let mut h = Harness::new(prefs, cfg.size, 2.0);
       // As high as macOS 26's, as nimbo's own shots draw it.
-      h.rt.set_titlebar(Some((32.0, cfg.title)));
+      h.set_titlebar(Some((32.0, cfg.title)));
       h.event(Event::Appearance(Appearance::LIGHT));
       h.frame();
       h.frame();
@@ -2075,6 +2325,27 @@ mod tests {
     click(h, Id::of(CONFIRM).key("action"));
   }
 
+  /// The accessibility tree's line that starts with `prefix`, as assistive technology reads it.
+  fn a11y_line(h: &Harness<Prefs>, prefix: &str) -> Option<String> {
+    let tree = h.a11y();
+    tree.lines().map(str::trim).find(|l| l.starts_with(prefix)).map(str::to_owned)
+  }
+
+  /// Rests the pointer on the mark of the row `row` (its ⓘ, or the warning in its place) until
+  /// its tooltip shows; the tooltip's text.
+  fn tip(h: &mut Harness<Prefs>, row: &str) -> String {
+    let mark = Id::of(row).key("info");
+    let r = h.rect(mark).unwrap_or_else(|| panic!("no mark in {row}"));
+    h.move_to(r.x + r.w / 2.0, r.y + r.h / 2.0);
+    h.wait(Duration::from_millis(400));
+    let tip = mark.key("tip");
+    assert!(h.rect(tip).is_some(), "no tooltip on the mark of {row}");
+    let text = h.text(tip.nth(0)).unwrap_or_default().to_owned();
+    h.leave();
+    h.frame();
+    text
+  }
+
   /// The dictation in progress shows as being transcribed, not as one without text.
   #[test]
   fn the_dictation_in_progress_is_transcribing() {
@@ -2104,8 +2375,8 @@ mod tests {
   }
 
   /// Every page in both looks, as high as its content or [SCROLLING] high; with `WAVO_SHOTS` set
-  /// (`make shots`), written there: also Models asking before a delete and General at the first
-  /// launch.
+  /// (`make shots`), written there: also Advanced in a build that doesn't update, Models asking
+  /// before a delete and General at the first launch.
   #[test]
   fn every_page_renders_in_both_looks() {
     let home =
@@ -2146,13 +2417,14 @@ mod tests {
       let fake = Fake::default();
       let running = Download::Running { done: 114_000_000, total: 272_000_000, rate: Some(3.2e6) };
       fake.log().states.insert("gigaam-v3-e2e-ctc", running);
+      fake.log().updates = true;
       let mut h = home.harness(&fake, Settings::default());
       h.event(Event::Appearance(appearance));
       for (page, _, name) in PAGES {
         tab(&mut h, page);
         shot(&mut h, &format!("{}-{look}", name.to_lowercase()));
-        let size = h.rt.size;
-        let sc = h.rt.ui.scroll(Id::of(("page", page as u8))).expect("the page's scroll area");
+        let size = h.size();
+        let sc = h.scroll(Id::of(("page", page as u8))).expect("the page's scroll area");
         match page.scrolls() {
           true => assert_eq!(size, Size::new(WIDTH, SCROLLING + 32.0), "{name}: and the title bar"),
           false => {
@@ -2166,19 +2438,23 @@ mod tests {
         assert_eq!(ground[0] < 100, appearance.dark, "{name} {look}: {ground:?}");
       }
 
+      fake.log().updates = false;
+      tab(&mut h, Page::Advanced);
+      shot(&mut h, &format!("advanced-no-updates-{look}"));
+
       tab(&mut h, Page::History);
       click(&mut h, Id::of(("text", ids[6])));
       shot(&mut h, &format!("history-selected-{look}"));
       // The panel's long text scrolls under the wheel.
       let panel = Id::of("history-text");
-      let sc = h.rt.ui.scroll(panel).expect("the panel's scroll area");
+      let sc = h.scroll(panel).expect("the panel's scroll area");
       assert!(sc.content.h > sc.viewport.h, "{look}: the text overflows: {sc:?}");
       let v = sc.viewport;
       let (pos, delta) = (Point::new(v.x + v.w / 2.0, v.y + v.h / 2.0), Point::new(0.0, -40.0));
       let (phase, momentum, mods) = (Phase::None, Phase::None, Modifiers::default());
       h.event(Event::Scroll { pos, delta, precise: true, phase, momentum, mods });
       h.frame();
-      assert!(h.rt.ui.scroll(panel).unwrap().offset.y > 0.0, "{look}: it scrolled");
+      assert!(h.scroll(panel).unwrap().offset.y > 0.0, "{look}: it scrolled");
 
       tab(&mut h, Page::Models);
       click(&mut h, Id::of(("delete", "whisper-turbo")));
@@ -2221,12 +2497,46 @@ mod tests {
     assert_eq!(fake.log().paused, [true, false, true, false]);
   }
 
+  /// About's Check for Updates… opens the update's window, Advanced turns the automatic checks off;
+  /// in a build that doesn't update About has no button and Advanced's switch is off and disabled,
+  /// the setting kept on, its row's ⓘ enabled and saying why.
+  #[test]
+  fn about_checks_for_updates() {
+    let home = Home::new("window-update", &TWO);
+    let fake = Fake::default();
+    // On, as by default.
+    let mut h = home.harness(&fake, Settings::default());
+    assert!(fake.log().settings.auto_update);
+    let switch = |h: &Harness<Prefs>| a11y_line(h, r#"switch "Check for updates""#);
+    tab(&mut h, Page::About);
+    assert!(h.rect(Id::of("updates")).is_none());
+    tab(&mut h, Page::Advanced);
+    assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" off disabled"#));
+    let info = format!(r#"button "Info" desc {NO_UPDATES:?}"#);
+    assert_eq!(a11y_line(&h, &info), Some(info), "enabled");
+    assert_eq!(tip(&mut h, "auto-update-row"), NO_UPDATES);
+    click(&mut h, Id::of("auto-update"));
+    assert!(fake.log().settings.auto_update, "kept");
+
+    fake.log().updates = true;
+    h.app_mut();
+    h.frame();
+    assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" on"#));
+    assert_eq!(tip(&mut h, "auto-update-row"), UPDATE_HELP);
+    click(&mut h, Id::of("auto-update"));
+    assert!(!fake.log().settings.auto_update);
+    tab(&mut h, Page::About);
+    click(&mut h, Id::of("updates"));
+    assert_eq!(fake.log().checks, 1);
+  }
+
   #[test]
   fn selects_and_switches_edit_the_settings() {
     let home = Home::new("window-selects", &TWO);
     let fake = Fake::default();
     let mut h = home.harness(&fake, Settings::default());
-    for (id, item) in [("activation", 2), ("mic", 2), ("model", 1)] {
+    // The microphone's items: Automatic, the system default, then the devices.
+    for (id, item) in [("activation", 2), ("mic", 3), ("model", 1)] {
       click(&mut h, Id::of(id));
       click(&mut h, Id::of(id).key(("item", item)));
     }
@@ -2236,7 +2546,7 @@ mod tests {
     let s = fake.log().settings.clone();
     assert_eq!(
       (s.activation, s.microphone, s.model.as_deref()),
-      (Activation::Toggle, Some(usb), Some(TWO[1]))
+      (Activation::Toggle, Microphone::Device(usb), Some(TWO[1]))
     );
     assert!(!s.auto_paste);
 
@@ -2260,6 +2570,117 @@ mod tests {
     h.app_mut().autostart_set(true, Err("not permitted".into()));
     assert!(!h.app().settings.autostart);
     assert_eq!(h.app().login.error.as_deref(), Some("Couldn't turn it on: not permitted"));
+  }
+
+  /// A chosen microphone that isn't connected stays the pop-up's choice, and the warning in its
+  /// row's ⓘ's place names the one that records instead: the system's input, not Automatic's USB
+  /// one. Its tooltip is the warning alone; no caption under the label. With no warning, the ⓘ.
+  #[test]
+  fn a_mic_not_connected_says_what_records() {
+    let home = Home::new("window-mic", &TWO);
+    let fake = Fake::default();
+    let row = |h: &Harness<Prefs>| a11y_line(h, r#"pop up button "Microphone""#);
+    let mark = |h: &Harness<Prefs>| a11y_line(h, r#"button "Warning""#);
+    let info = format!(r#"button "Info" desc {MIC_HELP:?}"#);
+    let wh = Choice { id: Some("wh-1000xm5".into()), name: "WH-1000XM5".into() };
+    let wh = Microphone::Device(wh);
+    let mut h = home.harness(&fake, Settings { microphone: wh.clone(), ..Settings::default() });
+    let warning = "WH-1000XM5 isn’t connected: Wavo records with MacBook Pro Microphone";
+    let pop = r#"pop up button "Microphone" value "WH-1000XM5 (not connected)""#;
+    assert_eq!(row(&h).as_deref(), Some(pop), "no caption");
+    assert_eq!(mark(&h), Some(format!(r#"button "Warning" desc {warning:?}"#)));
+    assert_eq!(a11y_line(&h, &info), None, "no ⓘ beside the warning");
+    assert_eq!(tip(&mut h, "mic-row"), warning);
+    assert!(h.rect(Id::of("mic-row").key("caption")).is_none());
+
+    let mut h = home.harness(&fake, Settings::default());
+    let auto = r#"pop up button "Microphone" value "Automatic (USB Mic)""#;
+    assert_eq!(row(&h).as_deref(), Some(auto));
+    assert_eq!(mark(&h), None, "the ⓘ alone");
+    assert_eq!(a11y_line(&h, &info).as_ref(), Some(&info));
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
+
+    // Under a closed lid that one hears nothing: the warning says so.
+    let lid = format!("{warning} (the lid is closed)");
+    assert_eq!(mic_warning(&fake.devices(), &wh, true), Some(lid));
+
+    // The system's input named by no listed device (ALSA's), or none listed: Linux has ALSA's
+    // `default` all the same, elsewhere there is no input at all.
+    let alsa = [audio::Device { default: false, ..fake.devices()[1].clone() }];
+    let unnamed = "WH-1000XM5 isn’t connected: Wavo records with the system’s input";
+    assert_eq!(mic_warning(&alsa, &wh, false).as_deref(), Some(unnamed));
+    let none = match cfg!(target_os = "linux") {
+      true => unnamed,
+      false => "WH-1000XM5 isn’t connected, and there is no other microphone",
+    };
+    assert_eq!(mic_warning(&[], &wh, false).as_deref(), Some(none));
+  }
+
+  /// Automatic with only a Bluetooth microphone left warns in the row's ⓘ's place, the warning
+  /// alone in its tip; with another one there, the ⓘ and its tip. The open window reads the
+  /// microphones again on either audio change.
+  #[test]
+  fn only_a_bluetooth_mic_warns() {
+    let home = Home::new("window-bluetooth", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    let airpods = audio::Device {
+      id: Some("airpods".into()),
+      name: "AirPods Pro".into(),
+      default: true,
+      transport: Transport::Bluetooth,
+    };
+    fake.log().devices = Some(vec![airpods]);
+    assert!(h.event(Event::System(Change::DefaultInput)));
+    h.frame();
+    let warning = "Only a Bluetooth mic: the sound is worse";
+    assert_eq!(tip(&mut h, "mic-row"), warning);
+
+    fake.log().devices = None;
+    assert!(h.event(Event::System(Change::AudioInputs)));
+    h.frame();
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
+  }
+
+  /// The chosen microphone unplugged while the window is open: on the change, not before, the
+  /// pop-up says it isn't connected and the warning names the one that records instead; the lid
+  /// closed, that one hears nothing; plugged in again, the warning goes and the ⓘ is back.
+  #[test]
+  fn devices_and_the_lid_redraw_the_mic_row() {
+    let home = Home::new("window-system", &TWO);
+    let fake = Fake::default();
+    let usb = Choice { id: Some("usb mic".into()), name: "USB Mic".into() };
+    let settings = Settings { microphone: Microphone::Device(usb), ..Settings::default() };
+    let mut h = home.harness(&fake, settings);
+    let row = |h: &Harness<Prefs>| a11y_line(h, r#"pop up button "Microphone""#);
+    let mark = |h: &Harness<Prefs>| a11y_line(h, r#"button "Warning""#);
+    let pop = |value: &str| Some(format!(r#"pop up button "Microphone" value {value:?}"#));
+    let warns = |w: &str| Some(format!(r#"button "Warning" desc {w:?}"#));
+    assert_eq!(row(&h), pop("USB Mic"));
+    assert_eq!(mark(&h), None);
+
+    let mac = fake.devices()[0].clone();
+    fake.log().devices = Some(vec![mac]);
+    h.app_mut();
+    assert!(h.frame());
+    assert_eq!(row(&h), pop("USB Mic"), "not read again before the change");
+    assert!(h.event(Event::System(Change::AudioInputs)));
+    h.frame();
+    let gone = "USB Mic isn’t connected: Wavo records with MacBook Pro Microphone";
+    assert_eq!(row(&h), pop("USB Mic (not connected)"));
+    assert_eq!(mark(&h), warns(gone));
+
+    fake.log().lid_closed = true;
+    assert!(h.event(Event::System(Change::Lid)));
+    h.frame();
+    assert_eq!(mark(&h), warns(&format!("{gone} (the lid is closed)")));
+
+    fake.log().devices = None;
+    assert!(h.event(Event::System(Change::AudioInputs)));
+    h.frame();
+    assert_eq!(row(&h), pop("USB Mic"));
+    assert_eq!(mark(&h), None);
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
   }
 
   /// Export asks the save panel where; it is disabled while it runs; Finder shows the archive only
@@ -2351,7 +2772,7 @@ mod tests {
     let mut h = home.harness(&fake, Settings::default());
     tab(&mut h, Page::History);
     click(&mut h, Id::of(("copy", ids[1])));
-    assert_eq!(h.rt.clipboard().read().as_deref(), Some("Send the invoice to Anna."));
+    assert_eq!(h.clipboard().read().as_deref(), Some("Send the invoice to Anna."));
     // Said under the panel for a while, the search keeping its width; then the totals again.
     assert_eq!(h.text(Id::of("history-total")), Some("Copied to the clipboard"));
     let search = h.rect(Id::of("history-search")).unwrap();
@@ -2385,7 +2806,7 @@ mod tests {
     let settings = h.app().settings.clone();
     let status = Status { restorable: vec![ids[0]], ..Status::default() };
     h.app_mut().update(&settings, &status, 2);
-    h.rt.waker().wake();
+    h.waker().wake();
     h.frame();
     click(&mut h, Id::of(("restore", ids[0])));
     click(&mut h, Id::of(("delete", ids[0])));
@@ -2400,11 +2821,129 @@ mod tests {
     h.type_text("INVOICE");
     h.frame();
     assert!(h.rect(Id::of(("copy", ids[0]))).is_some(), "the last result while it is typed");
+    assert_eq!(h.app().history.selected, Some(ids[0]));
     h.wait(SEARCH_WAIT);
     h.frame();
     assert!(
       h.rect(Id::of(("copy", ids[1]))).is_some() && h.rect(Id::of(("copy", ids[0]))).is_none()
     );
+    assert_eq!(h.app().history.selected, None, "out of the search");
+  }
+
+  /// Play goes to the shell, which calls [Prefs::played] when it ends; a recording that could not
+  /// play says why under the panel.
+  #[test]
+  fn play_asks_the_shell() {
+    let home = Home::new("window-play", &TWO);
+    let ids = home.dictations(&[("Send the invoice to Anna.", 2)]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::History);
+    click(&mut h, Id::of(("play", ids[0])));
+    let file = fake.log().played.clone();
+    assert!(file.len() == 1 && file[0].is_file(), "{file:?}");
+    assert_eq!(h.text(Id::of("history-total")), Some("Could not play the recording: no speakers"));
+    assert!(h.app().history.playing.is_none());
+  }
+
+  /// A right-click on a row selects it and opens its menu, which does what the row's buttons and
+  /// the panel under the list do; on the Mac a Control-click opens it too, on Windows it opens as
+  /// the button is let go.
+  #[test]
+  fn a_rows_menu_copies_transcribes_again_and_deletes() {
+    let home = Home::new("window-row-menu", &TWO);
+    let ids =
+      home.dictations(&[("Let's move the design review.", 3), ("Send the invoice to Anna.", 2)]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    h.native_menus();
+    tab(&mut h, Page::History);
+    // The menu of row `id` by a right-click, answered `answer`: its items' ids, each on or off.
+    let menu = |h: &mut Harness<Prefs>, id: i64, answer: Option<&str>| {
+      let r = h.rect(Id::of(("text", id))).unwrap();
+      h.right_click(r.x + 20.0, r.y + r.h / 2.0);
+      let (_, menu) = h.context_menu(answer).expect("the row's menu");
+      h.frame();
+      menu.items.into_iter().map(|i| (i.id, i.enabled)).collect::<Vec<_>>()
+    };
+    let items = |want: &[(&str, bool)]| -> Vec<(String, bool)> {
+      want.iter().map(|&(id, on)| (id.into(), on)).collect()
+    };
+    let update = |h: &mut Harness<Prefs>, status: Status, n| {
+      let settings = h.app().settings.clone();
+      h.app_mut().update(&settings, &status, n);
+      h.waker().wake();
+      h.frame();
+    };
+
+    // Selected by the right-click; one on the selected row keeps it selected, as in Finder.
+    let all = items(&[
+      ("copy", true),
+      ("play", true),
+      ("", true),
+      ("retranscribe", true),
+      ("", true),
+      ("delete", true),
+    ]);
+    assert_eq!(menu(&mut h, ids[1], Some("copy")), all);
+    assert_eq!(h.app().history.selected, Some(ids[1]), "selected by the right-click");
+    assert_eq!(h.clipboard().read().as_deref(), Some("Send the invoice to Anna."));
+    menu(&mut h, ids[1], None);
+    assert_eq!(h.app().history.selected, Some(ids[1]), "kept selected by another one");
+
+    // While it is transcribed again only Copy and Play are on; then its text before comes back.
+    menu(&mut h, ids[0], Some("retranscribe"));
+    assert_eq!(h.app().history.selected, Some(ids[0]), "the other row selected");
+    let restorable = vec![ids[0]];
+    update(&mut h, Status { retranscribing: vec![ids[0]], restorable, ..Status::default() }, 2);
+    let busy = items(&[
+      ("copy", true),
+      ("play", true),
+      ("", true),
+      ("retranscribe", false),
+      ("restore", false),
+      ("", true),
+      ("delete", false),
+    ]);
+    assert_eq!(menu(&mut h, ids[0], None), busy);
+    update(&mut h, Status { restorable: vec![ids[0]], ..Status::default() }, 3);
+    let got = menu(&mut h, ids[0], Some("restore"));
+    assert_eq!(got[3..5], items(&[("retranscribe", true), ("restore", true)]));
+
+    menu(&mut h, ids[0], Some("delete"));
+    let want = "“Let's move the design review.” and its recording are removed from the history.";
+    assert_eq!(h.app().ask.as_ref().map(|a| a.message.as_str()), Some(want));
+    confirm(&mut h);
+    let want = [Request::Retranscribe(ids[0]), Request::Restore(ids[0]), Request::Delete(ids[0])];
+    assert_eq!(fake.log().requests, want);
+
+    // A Control-click on the Mac asks for it as the button goes down; Windows as it is let go.
+    let control = (Os::Mac, MouseButton::Left, Modifiers::CONTROL, ids[1]);
+    let windows = (Os::Windows, MouseButton::Right, Modifiers::empty(), ids[0]);
+    for (os, button, mods, id) in [control, windows] {
+      h.set_os(os);
+      let r = h.rect(Id::of(("text", id))).unwrap();
+      let pos = Point::new(r.x + 20.0, r.y + r.h / 2.0);
+      h.event(Event::MouseDown { pos, button, clicks: 1, mods });
+      h.frame();
+      let down = h.context_menu(None).is_some();
+      h.event(Event::MouseUp { pos, button, mods });
+      let up = h.context_menu(None).is_some();
+      h.frame();
+      assert_eq!((down, up), (os == Os::Mac, os == Os::Windows), "{os:?}: the menu, once");
+      assert_eq!(h.app().history.selected, Some(id), "{os:?}: selected");
+    }
+  }
+
+  /// The menu's answer acts as the item it chose, whatever the row is by then: its Stop doesn't
+  /// play again a recording that ended meanwhile.
+  #[test]
+  fn a_rows_menu_stops_as_it_says() {
+    let e = Entry { id: 7, audio_path: Some("a.wav".into()), ..Entry::default() };
+    let st = RowState { playing: true, ..RowState::default() };
+    assert_eq!(row_menu(&e, &st).items[1].id, "stop");
+    assert!(matches!(row_act("stop", &e), Some(Act::Stop)));
+    assert!(matches!(row_act("play", &e), Some(Act::Play(7))));
   }
 
   #[test]
@@ -2459,5 +2998,28 @@ mod tests {
 
     click(&mut h, Id::of("download-model"));
     assert_eq!(h.app().page, Page::Models);
+  }
+
+  /// The devices, the permissions, launch at login and the models are read as the window opens
+  /// and comes to the front, at once on the event; never because a view ran.
+  #[test]
+  fn only_the_window_in_front_reads_the_system() {
+    let home = Home::new("window-front", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    assert_eq!(fake.log().looks, 1, "as it opened");
+    for page in [Page::Advanced, Page::History, Page::General] {
+      tab(&mut h, page);
+    }
+
+    h.redraw();
+    h.frame();
+    assert_eq!(fake.log().looks, 1, "not by the frames");
+
+    h.event(Event::Focus(false));
+    h.frame();
+    assert_eq!(fake.log().looks, 1, "not in the back");
+    h.event(Event::Focus(true));
+    assert_eq!(fake.log().looks, 2, "in front again, before a frame");
   }
 }

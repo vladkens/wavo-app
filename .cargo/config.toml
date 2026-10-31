@@ -1,7 +1,8 @@
-# macOS 14 is the least nimbo runs on (its readme): the binary is built for it, here only, so make
-# and cargo build alike; the bundle's Info.plist takes it from the binary (scripts/bundle.py).
+# macOS 14.2 is the least the app runs on (nimbo's is 11): cpal links CoreAudio's process-tap API,
+# new in 14.2. The binary is built for it, here only, so make and cargo build alike; the bundle's
+# Info.plist takes it from the binary (shipo).
 [env]
-MACOSX_DEPLOYMENT_TARGET = "14.0"
+MACOSX_DEPLOYMENT_TARGET = "14.2"
 
 # The C runtime linked in on Windows: Wavo.exe runs without the Visual C++ Redistributable.
 [target.'cfg(all(windows, target_env = "msvc"))']

@@ -31,12 +31,14 @@ use crate::settings::{self, Activation, Settings, language_name};
 
 /// The microphone stays open at least this long after the stop, for the end of a word the key-up
 /// cut.
-const POST_ROLL: Duration = Duration::from_millis(200);
+const POST_ROLL: Duration = Duration::from_millis(150);
 /// While the voice goes on after the stop, the microphone stays open until it pauses this long
-/// ([tail_end]).
-const TAIL_PAUSE: Duration = Duration::from_millis(300);
-/// The microphone closes this long after the stop at the latest.
-const TAIL_MAX: Duration = Duration::from_millis(1500);
+/// ([tail_end]): the end of a word. The VAD's scores fall below a pause 50–100 ms after the
+/// speech, and its count runs about 40 ms behind the microphone.
+const TAIL_PAUSE: Duration = Duration::from_millis(120);
+/// The microphone closes this long after the stop at the latest: after speech the VAD takes a
+/// breath or a fan's hiss for voice for seconds.
+const TAIL_MAX: Duration = Duration::from_millis(450);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 // MARK: Machine
@@ -410,6 +412,9 @@ pub enum Request {
   Unload,
   /// An import added dictations: the update after it carries the history's change.
   Imported,
+  /// The app quits for an update: no dictation runs, as the session stands after what was sent
+  /// before it, and none starts from then on; an error while one runs, which ends as usual.
+  Close,
 }
 
 enum Msg {
@@ -453,6 +458,7 @@ impl Session {
       retranscribing: Vec::new(),
       originals: BTreeMap::new(),
       untried: false,
+      closed: false,
       model_path: None,
       model_error: None,
       model_fallback: None,
@@ -585,6 +591,8 @@ struct Controller<O: TextOutput> {
   originals: BTreeMap<i64, Original>,
   /// Entries without text may wait for the model now found.
   untried: bool,
+  /// The app quits for an update ([Request::Close]): no dictation starts.
+  closed: bool,
   /// The model [`Controller::check_model`] last found.
   model_path: Option<PathBuf>,
   model_error: Option<NoModel>,
@@ -659,6 +667,7 @@ impl<O: TextOutput> Controller<O> {
 
   fn on_msg(&mut self, msg: Msg) {
     match msg {
+      Msg::Input(Input::KeyDown { .. } | Input::Toggle) if self.closed => {}
       Msg::Input(input) => {
         // A press is a new attempt: the last one's error goes.
         if matches!(input, Input::KeyDown { repeat: false, .. }) && self.error.take().is_some() {
@@ -728,6 +737,15 @@ impl<O: TextOutput> Controller<O> {
         Ok(())
       }
       Request::Imported => Ok(()),
+      Request::Close => {
+        if self.dictation.is_some() {
+          bail!("a dictation runs");
+        }
+
+        info!("closed for the update: no dictation starts");
+        self.closed = true;
+        Ok(())
+      }
     }
   }
 
@@ -955,8 +973,12 @@ impl<O: TextOutput> Controller<O> {
   fn on_tail(&mut self) {
     let d = self.dictation.as_ref().unwrap();
     let (Some(recorder), Some(stopped)) = (&d.recorder, d.stopped) else { return };
-    let now = Instant::now();
-    if tail_end(stopped, now, recorder.meter().pause()) <= now {
+    let (now, pause) = (Instant::now(), recorder.meter().pause());
+    if tail_end(stopped, now, pause) <= now {
+      // Without the pause the cap ended it.
+      let capped = if pause < TAIL_PAUSE { ", at its cap" } else { "" };
+      let tail = (now - stopped).as_millis();
+      info!("dictation {}: the tail ran {tail} ms after the stop{capped}", d.last.take);
       self.transcribe();
     }
   }
@@ -1145,7 +1167,7 @@ impl<O: TextOutput> Controller<O> {
       loaded.engine.release();
     }
 
-    let after_stop = d.stopped.map(|s| format!(", {:.0?} after the stop", s.elapsed()));
+    let after_stop = d.stopped.map(|s| format!(", {} ms after the stop", s.elapsed().as_millis()));
     let seconds = d.duration_ms as f64 / 1000.0;
     let (take, outcome) = (d.last.take, d.last.outcome);
     info!("dictation {take}: {outcome:?} ({seconds:.1} s{})", after_stop.unwrap_or_default());
@@ -1732,6 +1754,21 @@ mod tests {
 
   /// Escape while recording or transcribing keeps nothing; the next dictation has the same warm
   /// engine.
+  /// The update closes the session before the app quits: a dictation that runs, or whose key came
+  /// first, ends first; once closed, no key starts one.
+  #[test]
+  fn closing_waits_for_the_dictation_then_starts_none() {
+    let s = InProcess::start("session-close", &Settings::default(), Some(&loud(20.0)), "hi", &[]);
+    s.press();
+    assert!(s.handle.request(Request::Close).is_err(), "the key came first");
+    s.handle.input(Input::Escape);
+    s.finished(1);
+    assert_eq!(s.handle.request(Request::Close), Ok(()));
+    s.press();
+    s.handle.input(Input::Toggle);
+    assert_eq!(s.handle.request(Request::Close), Ok(()), "no dictation started");
+  }
+
   #[test]
   fn escape_keeps_nothing() {
     let s = InProcess::start(
@@ -1746,7 +1783,9 @@ mod tests {
     assert_eq!(s.finished(1).last.unwrap().outcome, Outcome::Cancelled);
 
     let gate = s.models.hold();
+    // Enough of the tone for speech: the tail no longer adds it.
     s.record(0.3);
+    thread::sleep(Duration::from_millis(300));
     s.press();
     s.update_where("a run", |u| u.status.engine.phase == engine::Phase::Running);
     s.handle.input(Input::Escape);
@@ -1760,10 +1799,10 @@ mod tests {
   #[test]
   fn the_tail_waits_for_a_pause() {
     let (stop, ms) = (Instant::now(), Duration::from_millis);
-    assert_eq!(tail_end(stop, stop, ms(500)), stop + POST_ROLL, "silent at the stop");
-    assert_eq!(tail_end(stop, stop + ms(400), ms(0)), stop + ms(700), "speaking: a pause on");
-    assert_eq!(tail_end(stop, stop + ms(600), ms(100)), stop + ms(800));
-    assert_eq!(tail_end(stop, stop + ms(1400), ms(0)), stop + TAIL_MAX, "at most");
+    assert_eq!(tail_end(stop, stop, ms(200)), stop + POST_ROLL, "silent at the stop");
+    assert_eq!(tail_end(stop, stop + ms(100), ms(0)), stop + ms(220), "speaking: a pause on");
+    assert_eq!(tail_end(stop, stop + ms(250), ms(50)), stop + ms(320));
+    assert_eq!(tail_end(stop, stop + ms(400), ms(0)), stop + TAIL_MAX, "at most");
   }
 
   /// A dictation of `voice` seconds of speech and then silence, stopped `stop` seconds after it
@@ -1791,8 +1830,8 @@ mod tests {
   /// A word finished after the stop is kept: the recording goes on until the voice pauses.
   #[test]
   fn the_recording_goes_on_while_the_voice_does() {
-    let got = recorded("session-tail-voice", 1.6, 1.0);
-    about(got, Duration::from_secs_f64(1.6) + TAIL_PAUSE, "speech 600 ms past the stop");
+    let got = recorded("session-tail-voice", 1.2, 1.0);
+    about(got, Duration::from_secs_f64(1.2) + TAIL_PAUSE, "speech 200 ms past the stop");
   }
 
   #[test]
@@ -1805,6 +1844,54 @@ mod tests {
   fn the_tail_ends_at_its_cap() {
     let got = recorded("session-tail-cap", 5.0, 1.0);
     about(got, Duration::from_secs(1) + TAIL_MAX, "speech past the cap");
+  }
+
+  /// The tail after real speech, as the session's timer runs on the meter ([audio::pauses]):
+  /// stopped as the voice ends, it closes once the word has ended; silent at the stop, after the
+  /// post-roll; speaking on, at the cap; a hiss after speech, by the cap at the latest.
+  #[test]
+  #[ignore = "needs the fixtures: make test-models"]
+  fn the_tail_after_speech() {
+    let ms = Duration::from_millis;
+    // White noise at -40 dBFS RMS: alone the VAD scores it 0.2, after speech above 0.5.
+    let mut seed = 0x2545_f491_u32;
+    let hiss: Vec<f32> = (0..48_000)
+      .map(|_| {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed as f32 / u32::MAX as f32 * 2.0 - 1.0) * 0.01 * 3f32.sqrt()
+      })
+      .collect();
+    for name in ["ru-short", "en-short", "ru-typical", "en-paragraph"] {
+      let speech = crate::testing::fixture_pcm(name);
+      let last = speech.iter().rposition(|s| s.abs() > 0.02).unwrap();
+      let end = ms(last as u64 * 1000 / u64::from(audio::SAMPLE_RATE));
+      let with = |after: &[f32]| [&speech[..last], after].concat();
+      let (quiet, hissing) = (audio::pauses(&with(&[0.0; 48_000])), audio::pauses(&with(&hiss)));
+      // The first poll at or after the stop at which the tail is due.
+      let tail = |pauses: &[(Duration, Duration)], stop: Duration| {
+        let at = Instant::now();
+        let mut polls = pauses.iter().filter(|(t, _)| *t >= stop);
+        let (t, _) = polls.find(|(t, p)| tail_end(at + stop, at + *t, *p) <= at + *t).unwrap();
+        *t - stop
+      };
+      let got = [
+        tail(&quiet, end),
+        tail(&quiet, end + ms(500)),
+        tail(&quiet, end - ms(1000)),
+        tail(&hissing, end),
+      ];
+      println!(
+        "{name}: as the voice ends {:?}, silent {:?}, speaking on {:?}, hiss {:?}",
+        got[0], got[1], got[2], got[3]
+      );
+      // A slow voice's scores take up to 200 ms to fall to a pause.
+      assert!(got[0] >= TAIL_PAUSE && got[0] < TAIL_MAX, "{name}: {:?}", got[0]);
+      assert!(got[1] >= POST_ROLL && got[1] <= POST_ROLL + ms(20), "{name}: {:?}", got[1]);
+      assert!(got[2] >= TAIL_MAX, "{name}: {got:?}");
+      assert!(got.iter().all(|&t| t <= TAIL_MAX + ms(10)), "{name}: {got:?}");
+    }
   }
 
   /// Escape gets no tail.

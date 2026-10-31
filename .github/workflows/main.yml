@@ -25,36 +25,16 @@ jobs:
       # ALSA for cpal; fonts and text libraries for the HUD's tests in nimbo's harness.
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libfontconfig1 libfreetype6 libharfbuzz0b fonts-dejavu-core
       - run: rustup toolchain install nightly --profile minimal --component rustfmt
-      - run: make check
+      - run: rustup target add aarch64-apple-darwin x86_64-pc-windows-gnu
+      - run: python3 -m venv ~/zig && ~/zig/bin/pip install -q cargo-zigbuild==0.23.4 ziglang==0.16.0 && echo ~/zig/bin >> "$GITHUB_PATH"
+      - run: make check CROSS="aarch64-apple-darwin x86_64-pc-windows-gnu"
       - run: make test
 
-  # Each OS's own code: clippy and the tests on macOS and Windows too.
-  macos:
-    runs-on: macos-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - run: cargo clippy --release --all-targets -- -D warnings
-      - run: make test
-
-  windows:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - run: cargo clippy --release --locked --all-targets -- -D warnings
-      - run: cargo test --release --locked
-
-  # Release files, a job per OS; aarch64 cross-compiled. Linux on the oldest LTS for its glibc.
+  # A job per OS; aarch64 cross-compiled. Linux on the oldest LTS for its glibc. Also on release PRs,
+  # which rust-build checks.
   build:
     name: build ${{ matrix.os }}
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: "github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || startsWith(github.event.pull_request.title, 'release: v')"
     strategy:
       fail-fast: false
       matrix:
@@ -64,10 +44,10 @@ jobs:
             dist: make dist
           - os: Windows
             runner: windows-latest
-            dist: python scripts/dist.py x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+            dist: make dist T=x86_64-pc-windows-msvc && make dist T=aarch64-pc-windows-msvc
           - os: Linux
             runner: ubuntu-22.04
-            dist: python3 scripts/dist.py x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+            dist: make dist T=x86_64-unknown-linux-gnu && make dist T=aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     env:
       # Linux aarch64 cross-build.
@@ -89,8 +69,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libasound2-dev libasound2-dev:arm64 gcc-aarch64-linux-gnu
           rustup target add aarch64-unknown-linux-gnu
+      # The runner image has no make.
       - if: runner.os == 'Windows'
-        run: rustup target add aarch64-pc-windows-msvc
+        run: |
+          rustup target add aarch64-pc-windows-msvc
+          choco install make --no-progress -y
       - uses: vladkens/actions/rust-build@v1
         with:
           name: Wavo
@@ -101,7 +84,7 @@ jobs:
 
   publish:
     if: github.ref == 'refs/heads/main'
-    needs: [test, macos, windows, build]
+    needs: [test, build]
     runs-on: ubuntu-latest
     permissions:
       attestations: write
@@ -114,7 +97,16 @@ jobs:
         with:
           name: release
           pattern: release-*
+      - run: sudo apt-get update && sudo apt-get install -y nsis && cargo install --locked shipo
       - uses: vladkens/actions/rust-publish@v1
         with:
           name: Wavo
           crates: false
+          pack: make pack
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          SHIPO_UPDATE_KEY: ${{ secrets.SHIPO_UPDATE_KEY }}

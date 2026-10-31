@@ -17,6 +17,7 @@ mod settings;
 #[cfg(test)]
 mod testing;
 mod transfer;
+mod updater;
 mod window;
 
 use std::fs::{self, File};
@@ -27,7 +28,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use nimbo::desktop::Launcher;
-use nimbo::{AppInfo, Config, Presence};
+use nimbo::{AppInfo, Config, Png, Presence};
 use tracing::warn;
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt;
@@ -39,8 +40,8 @@ const VERSION: &str = concat!("v", env!("WAVO_VERSION"));
 const INFO: AppInfo =
   AppInfo { id: "me.vladkens.wavo", name: "Wavo", presence: Presence::Accessory };
 
-/// `assets/icon.png` at 256 px from build.rs, raw RGBA.
-const ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/window-icon.rgba"));
+/// The app's icon, decoded by nimbo when first shown.
+const ICON: &[u8] = include_bytes!("../assets/icon.png");
 
 /// The app's log in its home, [home]: `~/Library/Application Support/me.vladkens.wavo/wavo.log`,
 /// `%LOCALAPPDATA%\me.vladkens.wavo\wavo.log`, `~/.local/share/me.vladkens.wavo/wavo.log`.
@@ -48,17 +49,18 @@ const LOG_FILE: &str = "wavo.log";
 /// A log past this at launch is started over.
 const LOG_MAX: u64 = 5 << 20;
 
-/// The launcher entry on Linux, as the AppImage's .desktop has it (scripts/dist.py).
+/// The launcher entry on Linux, as the AppImage's .desktop has it (Cargo.toml's
+/// `[package.metadata.shipo]`).
 const LAUNCHER: Launcher = Launcher {
   comment: "Local dictation: hold a hotkey, speak, and the text lands where you were typing",
   categories: &["Utility", "Accessibility"],
-  icon: (256, ICON),
+  icon: Png::icon(ICON),
 };
 
 /// `cfg` with the app's icon in the title bar and taskbar; macOS shows the bundle's.
 fn with_icon(cfg: Config) -> Config {
   #[cfg(not(target_os = "macos"))]
-  let cfg = cfg.icon(256, ICON);
+  let cfg = cfg.png_icon(Png::icon(ICON));
 
   cfg
 }
@@ -89,6 +91,9 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+  // First, before any thread: run as an update's installer it never returns; else the failure of
+  // the update that started this app.
+  let updated = shipo::finish();
   // Windows: only for arguments (a command, `--help`, a mistake), which print. Attached, the app
   // would print its logs after the prompt, and closing that console would end it without its quit
   // hook.
@@ -100,7 +105,7 @@ fn main() -> Result<()> {
   // The app logs into a file too: launched from the desktop it has no stderr.
   init_tracing(cli.command.is_none().then(home).as_deref());
   match cli.command {
-    None => app::run(),
+    None => app::run(updated),
     Some(Command::Uninstall { dry_run, yes }) => cli::uninstall(dry_run, yes),
     Some(Command::Toggle) => cli::send("toggle"),
     Some(Command::Quit) => cli::send("quit"),

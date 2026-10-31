@@ -7,14 +7,15 @@
 //! log.
 //!
 //! The main thread owns the app (`APP`); other threads reach it through nimbo's [Proxy]. The main
-//! thread never waits for the session: what needs its answer runs on a thread of its own.
+//! thread never waits for the session: what needs its answer runs on a thread of its own, as do
+//! the update's check, download and install ([updater]).
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use nimbo::focus::{self, Focused};
@@ -22,8 +23,10 @@ use nimbo::hotkey::{Hotkeys, Listener};
 use nimbo::instance::{self, Claim, Instance};
 use nimbo::paste::{self, PORTAL_WAIT, Paste};
 use nimbo::permissions::{self, Access, Pane};
+use nimbo::system::Change;
 use nimbo::tray::{Menu, Tray};
 use nimbo::{Clipboard, Main, Proxy, SystemClipboard, Window, autostart};
+use shipo::{Release, Staged};
 use tracing::{error, info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
@@ -32,16 +35,23 @@ use crate::hud::{self, Hud, Mode, Show};
 use crate::menu::{self, Icon, Warning};
 use crate::session::{self, Handle, NotPasted, Phase, Request, Session, TextOutput, Update};
 use crate::settings::{self, HudPosition, Settings};
+use crate::updater::{Act, State, UpdateWindow, Updater};
 use crate::window::{
   self, Download, Downloads, Export, Found, Import, Page, Pick, Prefs, Transfer, no_text,
 };
-use crate::{INFO, audio, transfer};
+use crate::{INFO, audio, transfer, updater};
 
 // How often Accessibility is checked while it is missing or the event tap is not running.
 const ACCESS_POLL: Duration = Duration::from_secs(2);
 // How long the session waits for the main thread to paste or copy; on Wayland nimbo's PORTAL_WAIT,
 // as the first paste waits for the desktop's dialog there.
 const MAIN_WAIT: Duration = Duration::from_secs(3);
+// The system's changes the settings window shows (its Microphone row): the microphones, and on
+// macOS the lid, which cuts the built-in one off ([audio::lid_closed]).
+const WATCHED: &[Change] = match cfg!(target_os = "macos") {
+  true => &[Change::AudioInputs, Change::DefaultInput, Change::Lid],
+  false => &[Change::AudioInputs, Change::DefaultInput],
+};
 
 thread_local! {
   static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -84,6 +94,7 @@ struct App {
   found: Vec<Found>,
   pick: Pick,
   devices: Vec<audio::Device>,
+  lid_closed: bool,
   recent: Vec<Entry>,
   /// What the menu's Recent and the window read: one connection on the main thread, besides the
   /// session's.
@@ -97,12 +108,24 @@ struct App {
   // The paste may read the clipboard to restore it.
   clipboard: bool,
   fake_mic: bool,
+  /// Shared with the update's window.
+  updater: Arc<Mutex<Updater>>,
+  update_window: Option<Window<UpdateWindow>>,
+  /// The update downloaded, put in place once no dictation runs.
+  staged: Option<Staged>,
+  /// The installer runs: the app quits once no dictation runs, [QUIT_WAIT] at the latest.
+  quitting: bool,
   session: Session,
 }
 
+/// How long a dictation the installer found running may go on: shipo's installer waits 30 s for
+/// the app to quit.
+const QUIT_WAIT: Duration = Duration::from_secs(25);
+
 /// Returns at once when another instance runs for the same home (it opens its settings), else when
-/// the app quits.
-pub fn run() -> Result<()> {
+/// the app quits. `updated`: the failure of the update that started this app, from
+/// [shipo::finish].
+pub fn run(updated: Option<shipo::Error>) -> Result<()> {
   let config = session::Config::from_env();
   let home = config.home.clone();
   std::fs::create_dir_all(&home).with_context(|| format!("create {}", home.display()))?;
@@ -125,7 +148,7 @@ pub fn run() -> Result<()> {
   nimbo::app(INFO, |main| {
     // Also on a quit the system asks for (logout), after which `nimbo::app` does not return.
     main.on_quit(|_| shutdown());
-    if let Err(e) = start(main, config, instance) {
+    if let Err(e) = start(main, config, instance, updated) {
       error!("Wavo could not start: {e:#}");
       started = Err(e);
       main.quit();
@@ -134,7 +157,12 @@ pub fn run() -> Result<()> {
   started
 }
 
-fn start(main: &mut Main, config: session::Config, instance: Instance) -> Result<()> {
+fn start(
+  main: &mut Main,
+  config: session::Config,
+  instance: Instance,
+  updated: Option<shipo::Error>,
+) -> Result<()> {
   let _ = PROXY.set(main.proxy());
   // Linux only: the dock, Wayland's window icon and the portals' dialogs find the app by it.
   if installed() {
@@ -145,6 +173,11 @@ fn start(main: &mut Main, config: session::Config, instance: Instance) -> Result
     }
   }
 
+  // Asked once: shipo tries a staging folder beside the app.
+  let supported = shipo::faking()
+    || installed()
+      && !updater::dev(crate::VERSION)
+      && shipo::supported().inspect_err(|e| info!("updates: {e}")).is_ok();
   let fake_mic = config.fake_mic.is_some();
   let (home, hub) = (config.home.clone(), config.hub.clone());
   let observer = Box::new(|update: Update| {
@@ -201,6 +234,7 @@ fn start(main: &mut Main, config: session::Config, instance: Instance) -> Result
     found: Vec::new(),
     pick: Pick::default(),
     devices: audio::devices(),
+    lid_closed: audio::lid_closed(),
     recent: Vec::new(),
     history,
     accessibility: false,
@@ -209,10 +243,22 @@ fn start(main: &mut Main, config: session::Config, instance: Instance) -> Result
     asked_microphone: false,
     clipboard: SystemClipboard.readable(),
     fake_mic,
+    updater: Arc::new(Mutex::new(Updater::new(supported))),
+    update_window: None,
+    staged: None,
+    quitting: false,
     session,
   };
+  if let Some(e) = updated {
+    warn!("update: {e}");
+    app.updater.lock().unwrap().relaunched(updater::why(&e));
+  }
+
   app.check_access();
   app.read_models();
+  if supported {
+    proxy().post(|_| _ = with_app(App::update_tick));
+  }
 
   // Nothing is asked at launch: General's buttons ask. Never at a launch at login.
   let pick = Pick::new(&app.hub, saved.model.as_deref(), &app.found);
@@ -221,6 +267,13 @@ fn start(main: &mut Main, config: session::Config, instance: Instance) -> Result
   let missing = missing && !may_launch_at_login();
   APP.with(|cell| *cell.borrow_mut() = Some(app));
   main.on_reopen(|main| open_window(main, None));
+  // Only the open windows read them again ([Prefs]'s event). The menu reads them as it opens, and
+  // its `mic:i` items index the list it shows: read again while it is open, a click would pick
+  // from another list.
+  if let Err(e) = main.watch(WATCHED, |_, _| {}) {
+    warn!("system changes: {e}");
+  }
+
   if missing {
     proxy().post(|main| open_window(main, Some(Page::General)));
   }
@@ -260,6 +313,10 @@ fn chosen(main: &mut Main, id: &str) {
   if let Some(i) = id.strip_prefix("mic:").and_then(|i| i.parse().ok()) {
     with_app(|app| app.choose_mic(i));
     return;
+  }
+
+  if id == menu::UPDATE || id == menu::CHECK_UPDATES {
+    return open_update(main);
   }
 
   if let Some(name) = id.strip_prefix("model:") {
@@ -317,6 +374,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
       downloads: app.downloads.clone(),
       export: app.export.clone(),
       import: app.import.clone(),
+      updater: app.updater.clone(),
     };
     (shell, app.update.clone(), app.hub.clone(), app.home.clone(), app.history.clone())
   }) else {
@@ -384,6 +442,11 @@ fn installed() -> bool {
   std::env::var_os("WAVO_HOME").is_none()
 }
 
+/// No dictation runs.
+fn idle(update: &Update) -> bool {
+  update.status.state == Phase::Idle
+}
+
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
   std::thread::Builder::new().name(name.into()).spawn(f).unwrap();
 }
@@ -435,7 +498,7 @@ impl App {
         }
 
         // A permission missing shows here and in the menu: no window opens by itself. A denied
-        // microphone sends silence, which would say "no sound" instead.
+        // microphone sends silence: no level to show.
         let denied = matches!(self.mic(), Access::Denied | Access::Restricted);
         let hint = match () {
           _ if denied => Some("allow the microphone to record".to_owned()),
@@ -477,6 +540,8 @@ impl App {
       self.repick();
     }
 
+    self.install_staged();
+    self.quit_when_idle();
     self.refresh();
   }
 
@@ -607,6 +672,7 @@ impl App {
   fn menu_opening(&mut self) {
     self.microphone = permissions::microphone();
     self.devices = audio::devices();
+    self.lid_closed = audio::lid_closed();
     self.clipboard = SystemClipboard.readable();
     self.read_models();
     self.read_recent();
@@ -640,8 +706,8 @@ impl App {
 
   /// The menu's microphone `i`, as [App::refresh] listed them.
   fn choose_mic(&mut self, i: usize) {
-    let saved = self.update.as_ref().and_then(|u| u.settings.microphone.clone());
-    let (mics, _) = window::microphones(&self.devices, saved.as_ref());
+    let saved = self.update.as_ref().map(|u| u.settings.microphone.clone()).unwrap_or_default();
+    let (mics, _) = window::microphones(&self.devices, &saved, self.lid_closed);
     if let Some((name, choice)) = mics.into_iter().nth(i) {
       info!("microphone {name} chosen in the menu");
       self.handle.edit_settings(move |s| s.microphone = choice);
@@ -699,9 +765,12 @@ impl App {
         menu::recent_title(empty.as_deref().unwrap_or(&e.text), e.created_at, now)
       })
       .collect();
-    let mics = (&self.devices[..], update.settings.microphone.as_ref());
+    let mics = (&self.devices[..], &update.settings.microphone, self.lid_closed);
     let (status, found, pick) = (&update.status, &self.found, &self.pick);
-    let menu = menu::menu(hotkey.as_deref(), status, &warnings, &recent, mics, found, pick);
+    let updating = self.updater.lock().unwrap().showing().cloned();
+    let models = (&found[..], pick);
+    let menu =
+      menu::menu(hotkey.as_deref(), status, &warnings, &recent, mics, models, updating.as_ref());
     if menu != self.menu {
       self.tray.set_menu(&menu);
       self.menu = menu;
@@ -709,11 +778,225 @@ impl App {
   }
 }
 
+// MARK: Updates
+
+/// The menu's items: the update's window ([UpdateWindow]), brought to the front if open, with a
+/// check when there is nothing else to show.
+fn open_update(main: &mut Main) {
+  let Some((start, open, updater)) = with_app(|app| {
+    let start = app.updater.lock().unwrap().open();
+    let open = app.update_window.clone().filter(Window::is_open);
+    (start, open, app.updater.clone())
+  }) else {
+    return;
+  };
+
+  match open {
+    Some(w) => w.front(),
+    None => {
+      let chosen = |act| proxy().post(move |_| _ = with_app(|app| app.update_act(act)));
+      let w = main.open(&updater::config(), UpdateWindow::new(updater, chosen));
+      w.on_close(|_| {
+        with_app(|app| {
+          app.update_window = None;
+          app.updater.lock().unwrap().closed();
+          app.update_changed();
+        });
+      });
+      with_app(|app| app.update_window = Some(w));
+    }
+  }
+
+  with_app(|app| {
+    if start {
+      App::spawn_check();
+    }
+
+    app.update_changed();
+  });
+}
+
+impl App {
+  /// At launch and every [updater::TICK]: an automatic check when one is due and they are on.
+  fn update_tick(&mut self) {
+    let due = self.updater.lock().unwrap().due(SystemTime::now());
+    if self.settings().auto_update && due && self.updater.lock().unwrap().check(false) {
+      App::spawn_check();
+    }
+
+    proxy().after(updater::TICK, |_| _ = with_app(App::update_tick));
+  }
+
+  /// The check, on a thread, its answer to [App::update_checked].
+  fn spawn_check() {
+    spawn("update-check", || {
+      let checked = shipo::check(&updater::FEED, crate::VERSION);
+      proxy().post(|_| _ = with_app(|app| app.update_checked(checked)));
+    });
+  }
+
+  /// Logged as it came; the updater takes it as [updater::found] says.
+  fn update_checked(&mut self, checked: shipo::Result<Option<Release>>) {
+    match &checked {
+      Ok(Some(r)) => info!("update: {} is out", r.version),
+      Ok(None) => info!("update: none"),
+      Err(e @ shipo::Error::Unsupported(_)) => info!("update: {e}"),
+      Err(e) => warn!("update check: {e}"),
+    }
+
+    let (found, skipped) = (updater::found(checked), self.settings().skipped_update);
+    self.updater.lock().unwrap().checked(found, skipped.as_deref(), SystemTime::now());
+    self.update_changed();
+  }
+
+  /// From the update's window.
+  fn update_act(&mut self, act: Act) {
+    let mut updater = self.updater.lock().unwrap();
+    let mut close = false;
+    match act {
+      Act::Install | Act::Retry => {
+        if let Some(release) = updater.install() {
+          info!("update: downloading {}", release.version);
+          spawn("update", move || {
+            // Told to the main thread only when the whole percent changes.
+            let mut told = 0;
+            let progress = |done, total| {
+              let done = updater::percent(done, total);
+              if done != told {
+                told = done;
+                proxy().post(move |_| _ = with_app(|app| app.update_progress(done)));
+              }
+            };
+            let staged = shipo::download(&release, progress);
+            proxy().post(|_| _ = with_app(|app| app.update_downloaded(staged)));
+          });
+        } else if updater.check(true) {
+          // Retry after a check, or the update that started this app, failed.
+          App::spawn_check();
+        }
+      }
+      Act::Later => {
+        updater.later();
+        close = true;
+      }
+      Act::Skip => {
+        if let Some(version) = updater.skip() {
+          info!("update: {version} skipped");
+          self.handle.edit_settings(move |s| s.skipped_update = Some(version));
+        }
+
+        close = true;
+      }
+      Act::Notes => {
+        if let State::Available(r) = &updater.state
+          && let Some(notes) = &r.notes
+          && let Err(e) = nimbo::open::url(notes)
+        {
+          warn!("the release notes: {e}");
+        }
+      }
+      Act::Close => close = true,
+    }
+
+    drop(updater);
+    if close {
+      proxy().post(|_| {
+        if let Some(w) = with_app(|app| app.update_window.clone()).flatten() {
+          w.close();
+        }
+      });
+    }
+
+    self.update_changed();
+  }
+
+  fn update_progress(&mut self, done: u8) {
+    self.updater.lock().unwrap().progress(done);
+    self.update_changed();
+  }
+
+  fn update_downloaded(&mut self, staged: shipo::Result<Staged>) {
+    match staged {
+      Ok(staged) => {
+        self.updater.lock().unwrap().downloaded();
+        self.staged = Some(staged);
+        self.install_staged();
+      }
+      Err(e) => {
+        warn!("update download: {e}");
+        self.updater.lock().unwrap().failed(updater::why(&e));
+      }
+    }
+
+    self.update_changed();
+  }
+
+  /// The update downloaded goes in place once no dictation runs, and none starts meanwhile.
+  fn install_staged(&mut self) {
+    let Some(staged) = self.staged.take_if(|_| self.update.as_ref().is_none_or(idle)) else {
+      return;
+    };
+
+    spawn("update", || {
+      let installed = shipo::install(staged);
+      proxy().post(|_| _ = with_app(|app| app.update_installed(installed)));
+    });
+  }
+
+  /// Its installer runs: it waits for this app to quit, puts the new one in and starts it. Else
+  /// why not, and dictations start again.
+  fn update_installed(&mut self, installed: shipo::Result<()>) {
+    if let Err(e) = installed {
+      warn!("update install: {e}");
+      self.updater.lock().unwrap().failed(updater::why(&e));
+      return self.update_changed();
+    }
+
+    info!("update: the installer runs, quitting once no dictation runs");
+    self.quitting = true;
+    self.quit_when_idle();
+    proxy().after(QUIT_WAIT, |main| main.quit());
+  }
+
+  /// The app quits once the session itself says no dictation runs and closes to new ones: one whose
+  /// key was on its way as the update went in ends first.
+  fn quit_when_idle(&self) {
+    if !self.quitting || !self.update.as_ref().is_none_or(idle) {
+      return;
+    }
+
+    let handle = self.handle.clone();
+    spawn("update-quit", move || {
+      if handle.request(Request::Close).is_ok() {
+        proxy().post(|main| main.quit());
+      }
+    });
+  }
+
+  /// The menu's items, and the update's window if it shows.
+  fn update_changed(&mut self) {
+    self.refresh();
+    proxy().post(|_| {
+      if let Some(w) = with_app(|app| app.update_window.clone()).flatten() {
+        w.redraw();
+      }
+    });
+  }
+
+  /// As the session last told them, else as saved (before its first update).
+  fn settings(&self) -> Settings {
+    match &self.update {
+      Some(u) => u.settings.clone(),
+      None => Settings::load(&self.home.join(settings::FILE)).0,
+    }
+  }
+}
+
 // MARK: Shell
 
 /// The settings window's way to the app. What may wait (the system's login items, a deletion, an
-/// export) runs on a thread of its own: the window keeps drawing. A download's, the export's and
-/// the import's state are the app's: a window opened again shows them.
+/// export) runs on a thread of its own: the window keeps drawing. A download's, the export's, the
+/// import's and the update's state are the app's: a window opened again shows them.
 struct AppShell {
   home: PathBuf,
   handle: Handle,
@@ -721,6 +1004,7 @@ struct AppShell {
   downloads: Downloads,
   export: Arc<Mutex<Option<Export>>>,
   import: Arc<Mutex<Option<Import>>>,
+  updater: Arc<Mutex<Updater>>,
 }
 
 impl window::Shell for AppShell {
@@ -734,6 +1018,10 @@ impl window::Shell for AppShell {
 
   fn devices(&self) -> Vec<audio::Device> {
     audio::devices()
+  }
+
+  fn lid_closed(&self) -> bool {
+    audio::lid_closed()
   }
 
   fn download(&self, model: &'static ModelInfo) {
@@ -827,6 +1115,10 @@ impl window::Shell for AppShell {
     }
   }
 
+  fn play(&self, file: &Path) -> Result<audio::Playback> {
+    audio::Playback::start(file, || with_window(Prefs::played))
+  }
+
   fn has_neural_engine(&self) -> bool {
     crate::engine::has_neural_engine()
   }
@@ -897,6 +1189,14 @@ impl window::Shell for AppShell {
   fn import_state(&self) -> Option<Import> {
     self.import.lock().unwrap().clone()
   }
+
+  fn updates(&self) -> bool {
+    self.updater.lock().unwrap().showing().is_some()
+  }
+
+  fn check_updates(&self) {
+    proxy().post(open_update);
+  }
 }
 
 /// The calling thread runs as the person's own action, not as background work: macOS gives it
@@ -956,8 +1256,11 @@ impl TextOutput for GuiOutput {
   /// `target` or sits in a password field; `keep` leaves the text on the clipboard.
   fn paste(&mut self, text: &str, target: &Option<Focused>, keep: bool) -> Result<(), NotPasted> {
     // Given up after MAIN_WAIT (PORTAL_WAIT on Wayland): when the main thread gets to it, it is not
-    // pasted any more.
-    let opts = Paste { restore: !keep, target: target.clone() };
+    // pasted any more, and nimbo's paste stops just before then, as a clipboard or a focus that
+    // doesn't answer holds it (no ⌘V a minute late).
+    let wait = if focus::hidden() { PORTAL_WAIT } else { MAIN_WAIT };
+    let deadline = Some(Instant::now() + wait - Duration::from_millis(100));
+    let opts = Paste { restore: !keep, target: target.clone(), deadline };
     let (text, late) = (text.to_owned(), Arc::new(AtomicBool::new(false)));
     let gave_up = late.clone();
     let paste = move |_: &mut Main| {
@@ -969,10 +1272,9 @@ impl TextOutput for GuiOutput {
       info!("paste: {} chars", text.chars().count());
       Ok(())
     };
-    let wait = if focus::hidden() { PORTAL_WAIT } else { MAIN_WAIT };
     proxy().call(paste, wait).unwrap_or_else(|| {
       late.store(true, Ordering::Release);
-      Err(NotPasted::Failed("the app was too busy to paste".into()))
+      Err(busy())
     })
   }
 
@@ -999,6 +1301,12 @@ fn not_pasted(e: paste::NotPasted) -> NotPasted {
       NotPasted::FocusChanged
     }
     paste::NotPasted::SecureField => NotPasted::SecureField,
+    paste::NotPasted::Late => busy(),
     e => NotPasted::Failed(e.to_string()),
   }
+}
+
+/// The main thread didn't get to the paste in time, or the paste ran out of it.
+fn busy() -> NotPasted {
+  NotPasted::Failed("the app was too busy to paste".into())
 }

@@ -11,6 +11,8 @@ prepare:
 check:
 	cargo +nightly fmt --check
 	cargo clippy $(CARGO_FLAGS) --all-targets -- -D warnings
+	$(if $(CROSS),cargo-zigbuild clippy $(CARGO_FLAGS) --keep-going --all-targets \
+	  $(addprefix --target ,$(CROSS)) -- -D warnings)
 
 test:
 	cargo test $(CARGO_FLAGS)
@@ -27,20 +29,28 @@ clean:
 	cargo clean
 
 # wavo-app
-.PHONY: bundle dist run install uninstall shots fixtures test-models
+.PHONY: bundle dist pack run install uninstall shots fixtures test-models
 
 APP := target/Wavo.app
 PROFILE := release
+# dist's target: this machine's, or T.
+T ?= $(shell rustc -vV | sed -n 's/^host: //p')
 
-# target/Wavo.app (scripts/bundle.py), signed with Wavo's own identity, "Wavo Local Signing",
-# made in the login keychain before the first bundle; no bundle when it can't sign (CI: ad hoc).
-# Built, never opened.
+# shipo, the packer (`cargo install --locked shipo`), makes the app and the release files from
+# Cargo.toml's [package.metadata.shipo]. The app is signed with a Developer ID in the keychain, else
+# "Wavo Local Signing", which shipo makes in the login keychain before the first bundle, so macOS
+# keeps the grants across rebuilds; no bundle when it can't sign (CI: ad hoc). Built, never opened.
 bundle: # target/Wavo.app from the release profile, or PROFILE
 	cargo build --locked --profile $(PROFILE)
-	python3 scripts/bundle.py target/$(PROFILE)/wavo-app assets/icon.png $(APP)
+	shipo app --bin target/$(PROFILE)/wavo-app
 
-dist: # this OS's release file in target/distrib from the dist profile, for CI (vladkens/actions/rust-build)
-	python3 scripts/dist.py
+dist: # T's binary in target/distrib/T, for CI (vladkens/actions/rust-build); pack makes the files
+	cargo build --locked --profile dist --target $(T)
+	mkdir -p target/distrib/$(T)
+	cp target/$(T)/dist/wavo-app$(EXE) target/distrib/$(T)/
+
+pack: # the release files of target/distrib's binaries, signed by env's secrets, else ad hoc
+	shipo release target/distrib $(if $(TAG),--tag $(TAG))
 
 # scripts/run.py: Wavo's permissions are reset first when the bundle's signature is not the one
 # they were granted to.
@@ -58,8 +68,8 @@ INSTALLED := /Applications/Wavo.app/Contents/MacOS/wavo-app
 uninstall: # remove Wavo and all it left (data, models, permissions, the app): then a clean install
 	$(or $(wildcard $(INSTALLED)),target/release/wavo-app) uninstall $(ARGS)
 
-shots: # the settings window's pages, headless, into target/shots/
-	WAVO_SHOTS=$(CURDIR)/target/shots cargo test $(CARGO_FLAGS) every_page_renders
+shots: # the settings window's pages and the update window's states, headless, into target/shots/
+	WAVO_SHOTS=$(CURDIR)/target/shots cargo test $(CARGO_FLAGS) -- every_page_renders every_state_renders
 
 # WAV fixtures and reference transcripts in target/fixtures/ (scripts/fixtures.py, macOS
 # voices and ffmpeg); regenerated when the script or a text changes.
@@ -74,7 +84,7 @@ $(FIXTURES): scripts/fixtures.py $(wildcard scripts/fixtures/*.txt)
 # The ignored tests that need real models from the Hugging Face cache or the fixtures, by module
 # (not those that need a microphone); WAVO_TEST_MODEL_RU and WAVO_TEST_MODEL_EN pick the models by
 # path.
-MODEL_TESTS := engine::tests:: audio::tests::fixtures
+MODEL_TESTS := engine::tests:: audio::tests::fixtures session::tests::the_tail_after_speech
 
 test-models: fixtures # the ignored tests on real models
 	cargo test $(CARGO_FLAGS) -- --ignored --test-threads=1 --nocapture $(MODEL_TESTS)

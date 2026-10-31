@@ -3,7 +3,7 @@
 
   scripts/run.py <Wavo.app> [<dest, e.g. /Applications/Wavo.app>]
 
-The bundle has to be signed with a certificate (scripts/bundle.py), never ad hoc: the permissions
+The bundle has to be signed with a certificate (`make bundle`), never ad hoc: the permissions
 macOS grants are kept for its designated requirement. The requirement they were last granted to
 is kept in Wavo's data home; when the bundle's differs (another identity, or the first run of this
 script), Wavo's permissions are reset first, so System Settings has no stale Wavo whose switch is
@@ -25,6 +25,9 @@ ID = "me.vladkens.wavo"
 RUNNING = "Wavo.app/Contents/MacOS/wavo-app"
 # In the data home, which `wavo-app uninstall` deletes along with the permissions.
 GRANTED = Path.home() / "Library/Application Support" / ID / "permissions-requirement"
+# The fakes passed to the app, which `open` starts without this shell's environment: the
+# microphone's, and shipo's update and failed relaunch (its readme's Fake update).
+FAKES = ("WAVO_FAKE_MIC", "SHIPO_FAKE_UPDATE", "SHIPO_UPDATE_ERROR")
 
 
 def running() -> bool:
@@ -72,8 +75,10 @@ def main() -> int:
         subprocess.run(["ditto", app, dest], check=True)
         app = dest
 
-    env = "WAVO_LOG=warn,wavo_app=debug"
-    subprocess.run(["open", "--stderr", log, "--env", env, app], check=True)
+    env = ["WAVO_LOG=warn,wavo_app=debug"]
+    env += [f"{k}={v}" for k in FAKES if (v := os.environ.get(k))]
+    flags = [a for e in env for a in ("--env", e)]
+    subprocess.run(["open", "--stderr", log, *flags, app], check=True)
     print(f"started {app}, log in {log}")
     return 0
 

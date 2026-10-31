@@ -143,6 +143,8 @@ fn short(error: &str) -> String {
   let known = [
     (&["no speech model", "no model"][..], "download a model"),
     // audio.rs's: none plugged in, or the chosen one gone with no default to fall back to.
+    // Automatic's, when only a closed lid's microphone is there.
+    (&["the lid is closed"][..], "no microphone: lid closed"),
     (&["no microphone found", "no default microphone"][..], "no microphone"),
     (&["could not open the microphone"][..], "microphone failed"),
     (&["password", "secure"][..], "password field"),
@@ -166,7 +168,7 @@ fn short(error: &str) -> String {
 // MARK: Hud
 
 pub enum Show {
-  /// `seconds` in so far; `warning` takes the level's place while the microphone sends sound.
+  /// `seconds` in so far; `warning` takes the level's place, over no sound too.
   Recording {
     meter: Option<Meter>,
     device: String,
@@ -339,13 +341,11 @@ impl Hud {
     self.width = (width, width, now);
   }
 
-  /// While recording: no sound first (the recording's own), else the shell's warning.
+  /// While recording: the shell's warning first, as it blocks the dictation (no model, a
+  /// permission), so the pill keeps it through the recording; no sound only without one.
   fn warn(&mut self, f: &mut Frame) {
-    let warning = match self.silent {
-      true => Some(format!("no sound from {}", self.device)),
-      false => self.warning.clone(),
-    };
-    let warning = warning.map(|w| fit(f, w));
+    let silent = self.silent.then(|| format!("no sound from {}", self.device));
+    let warning = self.warning.clone().or(silent).map(|w| fit(f, w));
     if self.mode != Mode::Recording || self.text == warning {
       return;
     }
@@ -398,7 +398,7 @@ impl Hud {
     // The contents keep their place as the pill narrows: centred at the recording's width.
     let x = (f.size.w - width.max(WIDTH)) / 2.0;
     let mid = pill.y + HEIGHT / 2.0;
-    let baseline = |f: &mut Frame, font| mid + (f.text.metrics(font).cap_height / 2.0).round();
+    let baseline = |f: &mut Frame, font| mid + (f.metrics(font).cap_height / 2.0).round();
     let dot = |f: &mut Frame, k: f32| {
       let rect = Rect::new(x + PAD, mid - DOT / 2.0, DOT, DOT);
       f.rect(rect, fade(th.danger, k), DOT / 2.0);
@@ -610,6 +610,7 @@ mod tests {
     assert_eq!(said(&failed, Some(&failed), true), None);
     let errors = [
       ("could not start recording: no microphone found", "no microphone"),
+      ("could not start recording: no microphone: the lid is closed", "no microphone: lid closed"),
       (
         "could not start recording: the microphone \"USB Mic\" is not connected, and there is no \
          default microphone",
@@ -637,7 +638,7 @@ mod tests {
     let count = hidden.clone();
     let config = config(HudPosition::Bottom);
     let mut h = Harness::new(Hud::new(move || count.set(count.get() + 1)), config.size, 2.0);
-    h.cpu.transparent = true;
+    h.set_transparent(true);
     h.event(Event::Appearance(Appearance::DARK));
     (h, hidden)
   }
@@ -663,7 +664,7 @@ mod tests {
     h.app_mut().show(Show::Collapse);
     h.wait(COLLAPSE + ms(100));
     assert_eq!((h.app().mode(), hidden.get()), (Mode::Hidden, 1));
-    assert!(!h.rt.needs_frame(), "no frames once hidden");
+    assert!(!h.needs_frame(), "no frames once hidden");
   }
 
   /// With the setting, a dictation's time to text shows instead of the plain collapse; an error
@@ -725,6 +726,22 @@ mod tests {
     assert_eq!(h.app().mode(), Mode::Error);
     h.wait(COLLAPSE + ms(200));
     assert_eq!((h.app().mode(), hidden.get()), (Mode::Hidden, 1));
+  }
+
+  /// A model still downloading and a silent microphone: the model's warning stays, as it blocks
+  /// the dictation.
+  #[test]
+  fn a_blocking_warning_stays_over_no_sound() {
+    let (mut h, _) = hud();
+    let meter = Meter::default();
+    let warning = Some("download a model".to_owned());
+    let device = "Default Audio Device".to_owned();
+    h.app_mut().show(Show::Recording { meter: Some(meter.clone()), device, seconds: 1.0, warning });
+    h.wait(ms(300));
+    assert_eq!(h.app().text.as_deref(), Some("download a model"));
+    meter.set_silent(true);
+    h.wait(ms(300));
+    assert_eq!(h.app().text.as_deref(), Some("download a model"), "no switch to no sound");
   }
 
   /// A Windows microphone's name in full would run past the pill's rounded end.

@@ -1,19 +1,27 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! The menu bar icon and menu: a header with the app, the hotkey and the state; the warnings, most
-//! opening where they are fixed; Copy Last Dictation and Recent; the model in use with the others
-//! downloaded; Unload Model, History…, Settings…, Quit.
+//! opening where they are fixed; an update found or going on; Copy Last Dictation and Recent; the
+//! model in use with the others downloaded; Unload Model, History…, Settings…, Check for Updates…,
+//! Quit.
 
 use nimbo::Hotkey;
 use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
 
-use crate::audio::{Choice, Device};
+use crate::audio::{Auto, Device, Microphone};
 use crate::engine::Phase as EnginePhase;
 use crate::history::{local_time, shorten};
 use crate::session::{NoModel, Outcome, Phase, Status};
-use crate::window::{Found, Pick, microphones as mic_choices};
+use crate::updater::{self, State};
+use crate::window::{
+  Found, Pick, bluetooth_only, mic_name, microphones as mic_choices, not_connected,
+};
 
 pub const RECENT: usize = 10;
+/// The update's row under the warnings while it has news, and Check for Updates… above Quit: both
+/// open the update's window.
+pub const UPDATE: &str = "update";
+pub const CHECK_UPDATES: &str = "update-check";
 
 // MARK: Icon
 
@@ -162,16 +170,18 @@ pub fn recent_title(text: &str, created_at: i64, now: i64) -> String {
   format!("{when} · {preview}")
 }
 
-/// Item ids: `recent:<i>`, `mic:<i>`, `model:<name>`, `warn:…` and fixed ones, as `app::chosen`
-/// handles them. `mics`: the devices and the one saved.
+/// Item ids: `recent:<i>`, `mic:<i>`, `model:<name>`, `warn:…` and fixed ones, as
+/// `app::chosen` handles them. `mics`: the devices, the one saved and whether the lid is closed;
+/// `models`: those downloaded and the pick; `update`: the updater's state, `None` in a build that
+/// doesn't update.
 pub fn menu(
   hotkey: Option<&str>,
   status: &Status,
   warnings: &[Warning],
   recent: &[String],
-  mics: (&[Device], Option<&Choice>),
-  found: &[Found],
-  pick: &Pick,
+  mics: (&[Device], &Microphone, bool),
+  (found, pick): (&[Found], &Pick),
+  update: Option<&State>,
 ) -> Menu {
   let title = format!("Wavo {}", crate::VERSION);
   let header = [Some(title.as_str()), hotkey, state(status)].into_iter().flatten();
@@ -184,11 +194,13 @@ pub fn menu(
     items.push(Item::new(w.id, &format!("{mark}{}", w.text)).enabled(w.action));
   }
 
+  items.extend(update.and_then(update_item));
+
   let last = status.last.as_ref().is_some_and(|l| !l.text.is_empty());
   let loaded = status.engine.phase != EnginePhase::Stopped && status.state == Phase::Idle;
   let recent: Vec<Item> =
     recent.iter().enumerate().map(|(i, title)| Item::new(&format!("recent:{i}"), title)).collect();
-  let (mic, mics) = microphones(mics);
+  let (mic, mics, note) = microphones(mics);
   let (model, models) = models(found, pick);
   items.extend([
     Item::separator(),
@@ -196,6 +208,12 @@ pub fn menu(
     Item::new("recent", "Recent").enabled(!recent.is_empty()).submenu(Menu::new(recent)),
     Item::separator(),
     Item::new("mic", &mic).submenu(mics),
+  ]);
+  if let Some(note) = note {
+    items.push(Item::new("mic-note", &note).enabled(false));
+  }
+
+  items.extend([
     Item::new("model", &model).submenu(models),
     Item::new("unload", "Unload Model").enabled(loaded),
     Item::separator(),
@@ -203,28 +221,60 @@ pub fn menu(
     // A tray menu's keys work only in macOS's; Windows' and Linux's would show keys that do
     // nothing.
     with_key(Item::new("settings", "Settings…"), "cmd+comma"),
-    Item::separator(),
-    with_key(Item::new("quit", "Quit Wavo"), "cmd+q"),
   ]);
+  items.extend(update.map(check_item));
+  items.extend([Item::separator(), with_key(Item::new("quit", "Quit Wavo"), "cmd+q")]);
   Menu::new(items)
+}
+
+/// The update's row while it has news: a release on offer, its download, the restart, a failure.
+fn update_item(state: &State) -> Option<Item> {
+  let label = match state {
+    State::Available(r) => format!("Update Available: {}…", updater::shown(&r.version)),
+    State::Downloading(_, done) => format!("Downloading Update: {done}%"),
+    State::Restarting(_) => "Restarting to Update…".to_owned(),
+    State::Failed(..) | State::Relaunched(_) => "Update Failed…".to_owned(),
+    State::Idle | State::Checking | State::UpToDate => return None,
+  };
+
+  Some(Item::new(UPDATE, &label))
+}
+
+/// Check for Updates…, which opens the window ([updater::Updater::open]): Checking while the
+/// person's check runs.
+fn check_item(state: &State) -> Item {
+  let label =
+    if *state == State::Checking { "Checking for Updates…" } else { "Check for Updates…" };
+  Item::new(CHECK_UPDATES, label)
 }
 
 fn with_key(item: Item, key: &str) -> Item {
   if cfg!(target_os = "macos") { item.key(key) } else { item }
 }
 
-/// The microphone in use, and the submenu: the system default, then the devices, the one in use
-/// checked.
-fn microphones((devices, saved): (&[Device], Option<&Choice>)) -> (String, Menu) {
-  let (mics, at) = mic_choices(devices, saved);
+/// The microphone in use, the submenu (Automatic and the system default, then the devices, the one
+/// chosen checked) and a note under it: the one chosen isn't connected (the one in use is the
+/// system's input), or Automatic has only a Bluetooth one.
+fn microphones(
+  (devices, saved, lid_closed): (&[Device], &Microphone, bool),
+) -> (String, Menu, Option<String>) {
+  let (mics, at) = mic_choices(devices, saved, lid_closed);
   let mut items: Vec<Item> = (mics.iter().enumerate())
     .map(|(i, (label, _))| Item::new(&format!("mic:{i}"), label).checked(i == at))
     .collect();
-  if items.len() > 1 {
-    items.insert(1, Item::separator());
-  }
+  items.insert(2, Item::separator());
+  let menu = Menu::new(items);
+  let Some((name, instead)) = not_connected(devices, saved, lid_closed) else {
+    let note = bluetooth_only(devices, saved, lid_closed).map(str::to_owned);
+    return (mics[at].0.clone(), menu, note);
+  };
 
-  (mics[at].0.clone(), Menu::new(items))
+  let title = match instead {
+    Auto::Device(i) => mic_name(&devices[i], lid_closed),
+    Auto::System => "System Default".to_owned(),
+    Auto::Nothing => "No Microphone".to_owned(),
+  };
+  (title, menu, Some(format!("{name} isn’t connected")))
 }
 
 /// The model in use, and the submenu: the models downloaded with the one that transcribes checked,
@@ -272,7 +322,10 @@ fn state(status: &Status) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+  use shipo::Release;
+
   use super::*;
+  use crate::audio::{Choice, Transport};
 
   #[test]
   fn every_icon_is_an_18_point_even_odd_path() {
@@ -318,12 +371,19 @@ mod tests {
     s.state = Phase::Recording;
     assert_eq!(icon(&s, &list), Icon::Recording, "the phase first");
 
-    let device = |name: &str, default| Device { id: Some(name.into()), name: name.into(), default };
-    let devices =
-      [device("MacBook Pro Microphone", true), device("Elgato Wave:3 Microphone Array", false)];
+    let device = |name: &str, default, transport| {
+      let (id, name) = (Some(name.into()), name.into());
+      Device { id, name, default, transport }
+    };
+    let devices = [
+      device("MacBook Pro Microphone", true, Transport::BuiltIn),
+      device("Elgato Wave:3 Microphone Array", false, Transport::Usb),
+    ];
     let wave = Choice { id: devices[1].id.clone(), name: devices[1].name.clone() };
-    let mics = (&devices[..], Some(&wave));
-    let items = menu(Some("⌥Space"), &s, &list, &[], mics, &[], &Pick::default()).items;
+    let wave = Microphone::Device(wave);
+    let mics = (&devices[..], &wave, false);
+    let pick = Pick::default();
+    let items = menu(Some("⌥Space"), &s, &list, &[], mics, (&[], &pick), None).items;
     // The header as long as the build's version lets it be (a dirty build's runs longer).
     let header = format!("Wavo {} · ⌥Space · Recording…", crate::VERSION);
     let label = &items[0].label;
@@ -343,12 +403,133 @@ mod tests {
     assert_eq!(mic.label, "Elgato Wave:3 Microphone Array");
     let sub = &mic.submenu.as_ref().unwrap().items;
     let got: Vec<_> = sub.iter().map(|i| (i.label.as_str(), i.checked)).collect();
-    assert_eq!(got[0], ("System Default (MacBook Pro Microphone)", false));
-    let devices_got = &got[2..];
+    assert_eq!(got[0], ("Automatic (Elgato Wave:3 Microphone Array)", false));
+    assert_eq!(got[1], ("System Default (MacBook Pro Microphone)", false));
+    let devices_got = &got[3..];
     assert_eq!(devices_got, [("MacBook Pro Microphone", false), (devices[1].name.as_str(), true)]);
 
-    let items = menu(None, &s, &list, &[], (&devices[..], None), &[], &Pick::default()).items;
-    let mic = items.iter().find(|i| i.id == "mic").unwrap();
-    assert_eq!(mic.label, "System Default (MacBook Pro Microphone)");
+    let mic_label = |devices: &[Device], saved: &Microphone, lid_closed| {
+      let items = menu(None, &s, &list, &[], (devices, saved, lid_closed), (&[], &pick), None);
+      let label = |id| items.items.iter().find(|i| i.id == id).map(|i| i.label.clone());
+      (label("mic").unwrap(), label("mic-note"))
+    };
+    let system = mic_label(&devices, &Microphone::System, false);
+    assert_eq!(system, ("System Default (MacBook Pro Microphone)".into(), None));
+    // Automatic: the USB one over the built-in default; the built-in one over a Bluetooth one, but
+    // not under a closed lid, and a Bluetooth one left alone has a note; a virtual one only when
+    // no other is there, as the system's, also under a closed lid.
+    let mac = [device("MacBook Pro Microphone", true, Transport::BuiltIn)];
+    let both = [mac[0].clone(), device("AirPods Pro", false, Transport::Bluetooth)];
+    let airpods = [device("AirPods Pro", true, Transport::Bluetooth)];
+    let loopback = [device("BlackHole 2ch", true, Transport::Virtual)];
+    let krisp = [
+      device("MacBook Pro Microphone", false, Transport::BuiltIn),
+      device("Krisp Microphone", true, Transport::Virtual),
+    ];
+    let note = Some("Only a Bluetooth mic: the sound is worse");
+    let cases = [
+      (&devices[..], false, "Automatic (Elgato Wave:3 Microphone Array)", None),
+      (&both, false, "Automatic (MacBook Pro Microphone)", None),
+      (&both, true, "Automatic (AirPods Pro)", note),
+      (&airpods, false, "Automatic (AirPods Pro)", note),
+      (&mac, true, "Automatic (none: the lid is closed)", None),
+      (&loopback, false, "Automatic (BlackHole 2ch)", None),
+      (&krisp, true, "Automatic (Krisp Microphone)", None),
+    ];
+    for (devices, lid_closed, label, note) in cases {
+      let got = mic_label(devices, &Microphone::Automatic, lid_closed);
+      assert_eq!(got, (label.to_owned(), note.map(str::to_owned)), "lid closed: {lid_closed}");
+    }
+
+    assert!(!items.iter().any(|i| i.id.starts_with("update")), "a build that doesn't update");
+  }
+
+  /// A chosen microphone that isn't connected stays checked in the submenu; the menu names the one
+  /// that records in its place, the system's input (not Automatic's pick), a note under it.
+  #[test]
+  fn a_mic_not_connected_names_the_one_that_records() {
+    use Transport::*;
+
+    let device = |name: &str, default, transport| {
+      let (id, name) = (Some(name.into()), name.into());
+      Device { id, name, default, transport }
+    };
+    let wh = device("WH-1000XM5", false, Bluetooth);
+    let headphones = Microphone::Device(Choice { id: wh.id.clone(), name: wh.name.clone() });
+    let (s, pick) = (Status::default(), Pick::default());
+    // The menu's title and note, the submenu's checked item.
+    let mics = |devices: &[Device], lid_closed| {
+      let mics = (devices, &headphones, lid_closed);
+      let items = menu(None, &s, &[], &[], mics, (&[], &pick), None).items;
+      let label = |id| items.iter().find(|i| i.id == id).map(|i| i.label.clone());
+      let sub = &items.iter().find(|i| i.id == "mic").unwrap().submenu.as_ref().unwrap().items;
+      let checked = sub.iter().find(|i| i.checked).map(|i| i.label.clone());
+      (label("mic").unwrap(), label("mic-note"), checked)
+    };
+
+    let rode =
+      [device("MacBook Pro Microphone", false, BuiltIn), device("RØDE PodMic USB", true, Usb)];
+    let mac =
+      [device("MacBook Pro Microphone", true, BuiltIn), device("Elgato Wave:3", false, Usb)];
+    let alsa = [device("HDA Intel PCH", false, Unknown)];
+    let none = if cfg!(target_os = "linux") { "System Default" } else { "No Microphone" };
+    let cases = [
+      (&rode[..], false, "RØDE PodMic USB"),
+      // The system's input, not Automatic's USB one; under a closed lid that one hears nothing:
+      // the menu says so.
+      (&mac, false, "MacBook Pro Microphone"),
+      (&mac, true, "MacBook Pro Microphone (the lid is closed)"),
+      // The system's input named by no listed device (ALSA's), or none listed: Linux has ALSA's
+      // `default` all the same, elsewhere there is no input at all.
+      (&alsa, false, "System Default"),
+      (&[], false, none),
+    ];
+    let note = Some("WH-1000XM5 isn’t connected".to_owned());
+    let checked = Some("WH-1000XM5 (not connected)".to_owned());
+    for (devices, lid_closed, title) in cases {
+      let want = (title.to_owned(), note.clone(), checked.clone());
+      assert_eq!(mics(devices, lid_closed), want);
+    }
+
+    // Back again: in use, no note.
+    let back = [wh, device("RØDE PodMic USB", true, Usb)];
+    let want = ("WH-1000XM5".into(), None, Some("WH-1000XM5".into()));
+    assert_eq!(mics(&back, false), want);
+  }
+
+  /// An update shows under the header and the warnings; Check for Updates… sits above Quit.
+  #[test]
+  fn an_update_shows_under_the_header() {
+    let s = Status::default();
+    let pick = Pick::default();
+    let items = |state: State| {
+      let mics = (&[][..], &Microphone::System, false);
+      let items = menu(None, &s, &[], &[], mics, (&[], &pick), Some(&state)).items;
+      items.into_iter().map(|i| (i.id, i.label)).collect::<Vec<_>>()
+    };
+    let idle = items(State::Idle);
+    let ids: Vec<_> = idle[idle.len() - 4..].iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["settings", CHECK_UPDATES, "", "quit"]);
+    assert_eq!(idle[idle.len() - 3].1, "Check for Updates…");
+    assert!(!idle.iter().any(|(id, _)| id == UPDATE), "no news");
+    let available = items(State::Available(Release::test("1.2.0")));
+    assert_eq!(available[1], (UPDATE.into(), "Update Available: v1.2.0…".into()));
+  }
+
+  #[test]
+  fn the_update_items_say_what_goes_on() {
+    let r = || Release::test("1.2.0");
+    let label = |s: State| update_item(&s).map(|i| i.label);
+    assert_eq!([State::Idle, State::Checking, State::UpToDate].map(label), [None, None, None]);
+    assert_eq!(label(State::Available(r())).unwrap(), "Update Available: v1.2.0…");
+    assert_eq!(label(State::Downloading(r(), 42)).unwrap(), "Downloading Update: 42%");
+    assert_eq!(label(State::Restarting(r())).unwrap(), "Restarting to Update…");
+    assert_eq!(label(State::Failed(None, "offline".into())).unwrap(), "Update Failed…");
+    assert_eq!(label(State::Relaunched("the swap failed".into())).unwrap(), "Update Failed…");
+
+    let check = |s: State| check_item(&s).label;
+    assert_eq!(check(State::Idle), "Check for Updates…");
+    assert_eq!(check(State::Checking), "Checking for Updates…");
+    assert_eq!(check(State::Available(r())), "Check for Updates…");
   }
 }
