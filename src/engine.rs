@@ -36,8 +36,9 @@ pub trait Loader: Send + Sync {
     false
   }
 
-  /// Prepares the file for the Neural Engine in the background; `done` once it is.
-  fn prepare(&self, _path: &Path, _done: Box<dyn FnOnce() + Send>) {}
+  /// Prepares the file for the Neural Engine in the background, after those asked for before;
+  /// `done` once it is.
+  fn prepare(&self, _path: &Path, _done: Done) {}
 }
 
 /// Lives on the engine thread; the Neural Engine's is loaded on a thread of its own.
@@ -68,9 +69,9 @@ impl Loader for Wavo {
     has_neural_engine() && wavo::Model::prepared(path) == Some(true)
   }
 
-  fn prepare(&self, path: &Path, done: Box<dyn FnOnce() + Send>) {
-    if has_neural_engine() {
-      prepare(path, done);
+  fn prepare(&self, path: &Path, done: Done) {
+    if has_neural_engine() && wavo::Model::prepared(path) == Some(false) {
+      PREPARING.add(path, done);
     }
   }
 }
@@ -87,38 +88,75 @@ pub fn has_neural_engine() -> bool {
   })
 }
 
-/// Models being prepared for the Neural Engine.
-static PREPARING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+/// Called once a file is prepared for the Neural Engine.
+pub type Done = Box<dyn FnOnce() + Send>;
 
-/// Prepares a Parakeet or GigaAM file for the Neural Engine on a thread of its own and calls `done`
-/// once it is. The system compiles it once per app binary and macOS version (10–30 s; the Core ML
-/// model itself is in wavo's cache, shared with the wavo CLI); until then the model runs on the
-/// GPU.
-fn prepare(path: &Path, done: Box<dyn FnOnce() + Send>) {
-  if wavo::Model::prepared(path) != Some(false) {
-    return;
-  }
+/// Parakeet and GigaAM files to prepare for the Neural Engine, in order, on a thread of their own,
+/// one at a time: the system compiles each once per app binary and macOS version (10–30 s), and
+/// two compiles at once take as long together and twice the memory. The Core ML model itself is
+/// in wavo's cache, shared with the wavo CLI; until it is prepared a model runs on the GPU.
+struct Preparing {
+  /// The first one is being prepared.
+  queue: Mutex<VecDeque<(PathBuf, Done)>>,
+  /// Prepares a file: whether it was prepared now.
+  run: fn(&Path) -> Result<bool>,
+}
 
-  let mut preparing = PREPARING.lock().unwrap();
-  if preparing.iter().any(|p| p == path) {
-    return;
-  }
+static PREPARING: Preparing = Preparing { queue: Mutex::new(VecDeque::new()), run: prepare_file };
 
-  preparing.push(path.to_owned());
-  let path = path.to_owned();
-  thread::spawn(move || {
-    let started = Instant::now();
-    let prepared = wavo::Model::prepare(&path, |_| ControlFlow::Continue(()));
-    PREPARING.lock().unwrap().retain(|p| *p != path);
-    match prepared {
-      Ok(true) => {
-        info!("{}: prepared for the Neural Engine in {:.1?}", path.display(), started.elapsed());
-        done();
-      }
-      Ok(false) => {}
-      Err(e) => warn!("{}: not prepared for the Neural Engine: {e}", path.display()),
+fn prepare_file(path: &Path) -> Result<bool> {
+  Ok(wavo::Model::prepare(path, |_| ControlFlow::Continue(()))?)
+}
+
+impl Preparing {
+  /// Queues `path` unless it is queued already; `done` once it is prepared.
+  fn add(&'static self, path: &Path, done: Done) {
+    let mut queue = self.queue.lock().unwrap();
+    if queue.iter().any(|(p, _)| p == path) {
+      return;
     }
-  });
+
+    queue.push_back((path.to_owned(), done));
+    // The thread at work takes it after the ones before.
+    if queue.len() > 1 {
+      return;
+    }
+
+    drop(queue);
+    let spawn = thread::Builder::new().name("ane-prepare".into()).spawn(move || self.work());
+    if let Err(e) = spawn {
+      warn!("the Neural Engine's preparation did not start: {e}");
+      self.queue.lock().unwrap().clear();
+    }
+  }
+
+  /// Prepares the queued files one after another, until none is left.
+  fn work(&self) {
+    loop {
+      let Some(path) = self.queue.lock().unwrap().front().map(|(p, _)| p.clone()) else { return };
+      let started = Instant::now();
+      let prepared = (self.run)(&path);
+      // Taken off and looked at under one lock: a file queued meanwhile is this thread's.
+      let (done, more) = {
+        let mut queue = self.queue.lock().unwrap();
+        let (_, done) = queue.pop_front().unwrap();
+        (done, !queue.is_empty())
+      };
+
+      match prepared {
+        Ok(true) => {
+          info!("{}: prepared for the Neural Engine in {:.1?}", path.display(), started.elapsed());
+          done();
+        }
+        Ok(false) => {}
+        Err(e) => warn!("{}: not prepared for the Neural Engine: {e:#}", path.display()),
+      }
+
+      if !more {
+        return;
+      }
+    }
+  }
 }
 
 /// Parakeet's pieces on the GPU, short of the 60–70 s where it loses speech.
@@ -622,6 +660,7 @@ fn panic_message(panic: &(dyn Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
   use std::fs;
+  use std::sync::atomic::{AtomicUsize, Ordering};
 
   use super::*;
   use crate::audio::SAMPLE_RATE;
@@ -835,6 +874,31 @@ mod tests {
       (models.loads() == 2 && models.live() == 0).then_some(())
     });
     assert_eq!(f.engine.status().device, None);
+  }
+
+  /// Files are prepared for the Neural Engine one at a time, in the order asked, each once.
+  #[test]
+  fn files_are_prepared_one_at_a_time_in_order() {
+    static RUNNING: AtomicUsize = AtomicUsize::new(0);
+    static MOST: AtomicUsize = AtomicUsize::new(0);
+    fn slow(_: &Path) -> Result<bool> {
+      MOST.fetch_max(RUNNING.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+      thread::sleep(Duration::from_millis(50));
+      RUNNING.fetch_sub(1, Ordering::SeqCst);
+      Ok(true)
+    }
+
+    static QUEUE: Preparing = Preparing { queue: Mutex::new(VecDeque::new()), run: slow };
+    let (tx, done) = unbounded();
+    for name in ["a", "b", "a", "c"] {
+      let tx = tx.clone();
+      QUEUE.add(Path::new(name), Box::new(move || _ = tx.send(name)));
+    }
+
+    let order: Vec<&str> =
+      (0..3).map(|_| done.recv_timeout(Duration::from_secs(10)).unwrap()).collect();
+    assert_eq!(order, ["a", "b", "c"], "the second a goes with the first");
+    assert_eq!(MOST.load(Ordering::SeqCst), 1);
   }
 
   // MARK: Real models
