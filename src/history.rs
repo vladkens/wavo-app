@@ -303,16 +303,22 @@ impl Db {
     Ok(self.db.prepare_cached(qs)?.query_row([], total)?)
   }
 
-  /// The newest entry without text that `model` has not tried and nothing transcribes now.
-  pub fn get_untried(&self, model: &str) -> Result<Option<Entry>> {
+  /// The newest entry without text that `model` has not tried and nothing transcribes now, in one
+  /// of the model's `langs` (any for `None`: a file of the person's own). One without a language
+  /// (detected) goes to a model of more than one only.
+  pub fn get_untried(&self, model: &str, langs: Option<&[&str]>) -> Result<Option<Entry>> {
     let qs = "
     SELECT * FROM entries
     WHERE text = '' AND busy = 0 AND audio_path IS NOT NULL
       AND (tried_model IS NULL OR tried_model != ?1)
+      AND (?2 IS NULL
+        OR lower(language) IN (SELECT value FROM json_each(?2))
+        OR (language IS NULL AND json_array_length(?2) > 1))
     ORDER BY created_at DESC, id DESC LIMIT 1;
     ";
 
-    Ok(self.db.prepare_cached(qs)?.query_row([model], Entry::from_row).optional()?)
+    let langs = langs.map(serde_json::to_string).transpose()?;
+    Ok(self.db.prepare_cached(qs)?.query_row(params![model, langs], Entry::from_row).optional()?)
   }
 
   /// The entries after the newest `keep`; those being transcribed, and those without text when
@@ -692,6 +698,43 @@ mod tests {
     let e = h.db.get_entry(id).unwrap().unwrap();
     let got = (e.text.as_str(), e.model.as_deref(), e.tried_model.as_deref(), e.busy);
     assert_eq!(got, ("Привет", Some("gigaam"), Some("whisper"), false));
+  }
+
+  /// An entry without text goes to a model of its language; one without a language to a model of
+  /// more than one; a file of the person's own takes any.
+  #[test]
+  fn entries_without_text_go_to_a_model_of_their_language() {
+    let dir = TempDir::new("history-untried");
+    let h = History::open(dir.path()).unwrap();
+    let ids: Vec<i64> = (1..)
+      .zip([Some("ru"), Some("EN"), None])
+      .map(|(age, language)| {
+        let (name, path) = h.recordings.new_file(NOW - age);
+        write_wav(&path, &[0.1; 1_600]);
+        let language = language.map(str::to_owned);
+        let entry =
+          Entry { created_at: NOW - age, audio_path: Some(name), language, ..Entry::default() };
+        h.db.insert(&[entry]).unwrap()[0]
+      })
+      .collect();
+
+    let untried =
+      |model: &str, langs: Option<&[&str]>| h.db.get_untried(model, langs).unwrap().map(|e| e.id);
+
+    let (ru, en, multi) = (&["ru"][..], &["en"][..], &["en", "ru"][..]);
+    assert_eq!(untried("gigaam", Some(ru)), Some(ids[0]));
+    assert_eq!(untried("parakeet-v2", Some(en)), Some(ids[1]), "in any case");
+    assert_eq!(untried("parakeet-he", Some(&["he"][..])), None, "nor one detected");
+    assert_eq!(untried("parakeet-v3", Some(multi)), Some(ids[0]), "the newest");
+    assert_eq!(untried("own", None), Some(ids[0]));
+
+    for id in &ids[..2] {
+      h.db.mark_busy(*id, "parakeet-v3").unwrap();
+      h.db.mark_idle(*id).unwrap();
+    }
+
+    assert_eq!(untried("parakeet-v3", Some(multi)), Some(ids[2]), "detected: a model of more");
+    assert_eq!(untried("gigaam", Some(ru)), Some(ids[0]), "tried by another one");
   }
 
   #[test]

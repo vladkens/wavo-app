@@ -8,7 +8,9 @@
 //!   leaves an entry to transcribe again, which the next start recovers before any recording.
 //! - Text is optional: no model, an engine error or nothing recognized leave the entry without
 //!   text. Such entries are transcribed by themselves once another model can transcribe: one at a
-//!   time, behind dictations, each by a model that has not tried it yet (`tried_model`).
+//!   time, behind dictations, each by a model that has not tried it yet (`tried_model`) and knows
+//!   its language. An entry's language is the one it was recorded in: a model of one language's
+//!   own, else the setting's; one without (detected) goes to a model of more than one only.
 //! - A chosen model not on disk gives way to the first one found, with a warning; the choice stays.
 
 use std::collections::BTreeMap;
@@ -460,6 +462,7 @@ impl Session {
       untried: false,
       closed: false,
       model_path: None,
+      model_info: None,
       model_error: None,
       model_fallback: None,
       error: None,
@@ -593,8 +596,9 @@ struct Controller<O: TextOutput> {
   untried: bool,
   /// The app quits for an update ([Request::Close]): no dictation starts.
   closed: bool,
-  /// The model [`Controller::check_model`] last found.
+  /// The model [`Controller::check_model`] last found, and wavo's info on it.
   model_path: Option<PathBuf>,
+  model_info: Option<&'static ModelInfo>,
   model_error: Option<NoModel>,
   /// The warning of a chosen model not on disk while another one transcribes.
   model_fallback: Option<String>,
@@ -809,7 +813,7 @@ impl<O: TextOutput> Controller<O> {
       && let Ok(path) = self.config.hub.resolve(chosen)
     {
       (self.model_error, self.model_fallback) = (None, None);
-      return Ok((self.found_model(path), hub::lookup(chosen).ok()));
+      return Ok(self.found_model(path, hub::lookup(chosen).ok()));
     }
 
     let error = match (self.config.hub.downloaded().into_iter().next(), chosen) {
@@ -817,25 +821,30 @@ impl<O: TextOutput> Controller<O> {
         let note = chosen
           .map(|c| format!("{} is not on disk: {} transcribes instead", label(&c), info.full_name));
         (self.model_error, self.model_fallback) = (None, note);
-        return Ok((self.found_model(path), Some(info)));
+        return Ok(self.found_model(path, Some(info)));
       }
       (None, Some(chosen)) => NoModel::Gone { model: label(&chosen) },
       (None, None) => NoModel::NoneDownloaded,
     };
 
-    (self.model_path, self.model_fallback) = (None, None);
+    (self.model_path, self.model_info, self.model_fallback) = (None, None, None);
     self.model_error = Some(error.clone());
     Err(error)
   }
 
   /// Another model than before may transcribe the entries without text.
-  fn found_model(&mut self, path: PathBuf) -> PathBuf {
+  fn found_model(
+    &mut self,
+    path: PathBuf,
+    info: Option<&'static ModelInfo>,
+  ) -> (PathBuf, Option<&'static ModelInfo>) {
+    self.model_info = info;
     if self.model_path.as_ref() != Some(&path) {
       self.untried = true;
       self.model_path = Some(path.clone());
     }
 
-    path
+    (path, info)
   }
 
   /// The model found, prepared for the Neural Engine ahead of its first dictation, as the app
@@ -1025,12 +1034,19 @@ impl<O: TextOutput> Controller<O> {
       self.discard();
     }
 
-    let language = self.settings.engine_language();
-    let model = self.engine().map(|l| l.name.clone());
-    let entry = if rec.saved { self.add_entry(model.as_deref().ok()) } else { None };
+    let model = self.engine().map(|l| (l.name.clone(), l.info));
+    // A model not on disk still has a language: that of wavo's model of the name.
+    let info = match &model {
+      Ok((_, info)) => *info,
+      Err(_) => self.settings.model.as_deref().and_then(|c| hub::lookup(c).ok()),
+    };
+
+    let language = language_for(info, &self.settings);
+    let name = model.as_ref().ok().map(|(name, _)| name.as_str());
+    let entry = if rec.saved { self.add_entry(name, language.as_deref()) } else { None };
     self.dictation.as_mut().unwrap().last.entry = entry;
     let model = match model {
-      Ok(model) => model,
+      Ok((model, _)) => model,
       Err(e) => return self.end(Outcome::NoModel, Some(e.to_string())),
     };
 
@@ -1039,13 +1055,14 @@ impl<O: TextOutput> Controller<O> {
     self.dictation.as_mut().unwrap().job = Some(job);
   }
 
-  /// The entry of the dictation: without text, busy if a model transcribes it.
-  fn add_entry(&self, model: Option<&str>) -> Option<i64> {
+  /// The entry of the dictation, in its language: without text, busy if a model transcribes it.
+  fn add_entry(&self, model: Option<&str>, language: Option<&str>) -> Option<i64> {
     let d = self.dictation.as_ref().unwrap();
     let entry = Entry {
       created_at: d.created_at,
       duration_ms: d.duration_ms,
       audio_path: Some(d.audio.clone()),
+      language: language.map(str::to_owned),
       tried_model: model.map(str::to_owned),
       busy: model.is_some(),
       ..Entry::default()
@@ -1182,8 +1199,9 @@ impl<O: TextOutput> Controller<O> {
     current || self.retranscribing.iter().any(|r| r.entry == id)
   }
 
-  /// `entry`'s recording through the engine again, behind dictations. One without text whose
-  /// recording has no speech (or is gone) is deleted: there is nothing to keep.
+  /// `entry`'s recording through the engine again, behind dictations: in its own language when it
+  /// goes by itself, else as a dictation now would be. One without text whose recording has no
+  /// speech (or is gone) is deleted: there is nothing to keep.
   fn retranscribe(&mut self, entry: Entry, auto: bool) -> Result<()> {
     let id = entry.id;
     if entry.busy || self.is_busy(id) {
@@ -1205,8 +1223,9 @@ impl<O: TextOutput> Controller<O> {
       return self.delete(id);
     };
 
-    let language = self.settings.engine_language();
-    let model = self.engine()?.name.clone();
+    let loaded = self.engine()?;
+    let (model, info) = (loaded.name.clone(), loaded.info);
+    let language = if auto { entry.language } else { language_for(info, &self.settings) };
     // Marked tried before it runs: a crash or a failure is not tried again by the same model.
     self.history.db.mark_busy(id, &model)?;
     info!("entry {id}: transcribing {:.1} s again with {model}", input.seconds());
@@ -1216,8 +1235,9 @@ impl<O: TextOutput> Controller<O> {
     Ok(())
   }
 
-  /// One entry without text at a time, when no dictation runs, by a model that has not tried it;
-  /// while the model does not load they wait, for the next dictation that loads it.
+  /// One entry without text at a time, when no dictation runs, by a model that has not tried it
+  /// and knows its language; while the model does not load they wait, for the next dictation that
+  /// loads it.
   fn transcribe_untried(&mut self) {
     while self.untried
       && self.dictation.is_none()
@@ -1225,7 +1245,9 @@ impl<O: TextOutput> Controller<O> {
       && self.no_model().is_none()
     {
       let Some(model) = self.model_path.as_deref().map(file_stem) else { return };
-      let entry = self.history.db.get_untried(&model).inspect_err(|e| warn!("history: {e:#}"));
+      let langs = self.model_info.map(|m| m.langs);
+      let entry = self.history.db.get_untried(&model, langs);
+      let entry = entry.inspect_err(|e| warn!("history: {e:#}"));
       let Some(entry) = entry.ok().flatten() else {
         self.untried = false;
         return;
@@ -1297,8 +1319,10 @@ impl<O: TextOutput> Controller<O> {
   /// are being transcribed by themselves.
   fn cleanup(&mut self) {
     // Also those waiting for the model found (a start, an unload in the middle of them).
-    let model = self.model_path.as_deref().map(file_stem);
-    let waiting = model.is_some_and(|m| self.history.db.get_untried(&m).ok().flatten().is_some());
+    let (model, langs) =
+      (self.model_path.as_deref().map(file_stem), self.model_info.map(|m| m.langs));
+    let waiting =
+      model.is_some_and(|m| self.history.db.get_untried(&m, langs).ok().flatten().is_some());
     let spare = self.no_model().is_some() || self.untried || waiting;
     match self.history.cleanup(self.settings.history_retention, now_ms(), spare) {
       Ok(0) => {}
@@ -1360,6 +1384,15 @@ pub fn label(choice: &str) -> String {
 
   let file = Path::new(choice).file_name().and_then(|f| f.to_str()).unwrap_or(choice);
   file.strip_suffix(".gguf").unwrap_or(file).to_owned()
+}
+
+/// The language a model is asked in: its own for a model of one language, else the setting's
+/// (`None`: the model detects it).
+fn language_for(info: Option<&ModelInfo>, settings: &Settings) -> Option<String> {
+  match info.map(|m| m.langs) {
+    Some([code]) => Some((*code).to_owned()),
+    _ => settings.engine_language(),
+  }
 }
 
 fn loaded_label(info: Option<&ModelInfo>, name: &str) -> String {
@@ -1676,14 +1709,23 @@ mod tests {
 
     /// An entry with `text` and a recording of `pcm` (16 kHz), `age_ms` old.
     fn add_entry(&self, age_ms: i64, text: &str, pcm: &[f32]) -> i64 {
+      let entry = Entry { text: text.to_owned(), ..Entry::default() };
+      self.insert(age_ms, entry, pcm)
+    }
+
+    /// An entry without text in `language`, `age_ms` old, of a second of the tone.
+    fn add_untried(&self, age_ms: i64, language: Option<&str>) -> i64 {
+      let entry = Entry { language: language.map(str::to_owned), ..Entry::default() };
+      self.insert(age_ms, entry, &loud(1.0))
+    }
+
+    fn insert(&self, age_ms: i64, entry: Entry, pcm: &[f32]) -> i64 {
       let history = self.history();
       let created_at = now_ms() - age_ms;
       let (name, path) = history.recordings.new_file(created_at);
       write_wav(&path, pcm);
       let duration_ms = pcm.len() as i64 * 1000 / i64::from(SAMPLE_RATE);
-      let text = text.to_owned();
-      let entry =
-        Entry { created_at, duration_ms, audio_path: Some(name), text, ..Entry::default() };
+      let entry = Entry { created_at, duration_ms, audio_path: Some(name), ..entry };
       history.db.insert(&[entry]).unwrap()[0]
     }
   }
@@ -2010,6 +2052,29 @@ mod tests {
     restore().unwrap();
     assert_eq!(s.entry(id).unwrap().text, "текст");
     assert!(restore().is_err(), "once");
+  }
+
+  const GIGAAM: &str = "gigaam-v3-e2e-rnnt-Q8_0";
+
+  /// A model of one language takes the entries without text in it only: one in another language,
+  /// or of none (detected), waits for a model that knows it.
+  #[test]
+  fn a_model_of_one_language_takes_only_its_entries_without_text() {
+    let s = InProcess::start("session-untried-language", &Settings::default(), None, "hi", &[]);
+    let ru = s.add_untried(1_000, Some("ru"));
+    let others = [s.add_untried(2_000, Some("en")), s.add_untried(3_000, None)];
+    download(&s.hub, "gigaam-v3");
+    s.handle.check_model();
+    let done = poll("transcribed", Duration::from_secs(10), || {
+      s.entry(ru).filter(|e| !e.text.is_empty() && !e.busy)
+    });
+    assert_eq!((done.model.as_deref(), done.language.as_deref()), (Some(GIGAAM), Some("ru")));
+
+    thread::sleep(Duration::from_millis(100));
+    for id in others {
+      let entry = s.entry(id).unwrap();
+      assert_eq!((entry.text.as_str(), entry.tried_model), ("", None), "{id}");
+    }
   }
 
   #[test]
