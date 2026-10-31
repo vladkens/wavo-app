@@ -26,17 +26,17 @@
 Wavo is inspired by [Handy](https://github.com/cjpais/Handy) and runs the same GGUF models, the ones [handy-computer](https://huggingface.co/handy-computer) publishes. I built it for the technology: with agents around, there's no reason to put up with apps that aren't native and waste memory and compute.
 
 - Handy is a webview app (Tauri) on its own engine, transcribe.cpp. Wavo draws a native UI on each OS with [nimbo](https://github.com/vladkens/nimbo), light on memory, and runs its own engine, [`wavo-cli`](https://github.com/vladkens/wavo), in pure Rust on the GPU.
-- On a Mac with macOS 15 or later, Parakeet and GigaAM run on the Neural Engine at about a sixth of the GPU's energy. On an M2, Parakeet turns 11 s of speech into text in 61 ms there, 151 ms on the GPU and 269 ms with transcribe.cpp ([measured](https://github.com/vladkens/wavo#-speed)).
+- On a Mac with macOS 15 or later, Wavo runs on the Neural Engine: 11 s of speech becomes text in 61 ms on an M2, 2.5× faster than on the GPU and 4.4× faster than transcribe.cpp, for about 6× less energy than the GPU ([measured](https://github.com/vladkens/wavo#-speed)).
 - It adds what I missed in Handy: an automatic microphone choice, and a history that can be exported with its recordings.
-- Most alternatives are paid at the time of writing, and many are built on Whisper, whose last model came out in 2024. Wavo is free, works offline on macOS, Windows and Linux, and uses newer models: Parakeet Ultra, and GigaAM for Russian.
+- Most alternatives are paid at the time of writing, and many are built on Whisper, whose last model came out in 2024. Wavo is free, works offline on macOS, Windows and Linux, and uses newer models, such as Parakeet Ultra.
 
 ## 🌟 Features
 
 - 🎙️ **Hold to talk**: hold the hotkey and speak, or tap it to start and stop; Esc cancels
 - ⌨️ **Pastes where you type**: into any app, and the clipboard keeps what it held
 - 🔒 **Fully local**: no account, no cloud; only the model is downloaded, once
-- ⚡ **Fast**: with Parakeet on macOS 15 or later, 11 s of speech becomes text in about 60 ms on an M2's Neural Engine
-- 🌍 **100 languages**: Parakeet Ultra for 25 European ones, Russian and Ukrainian among them, GigaAM for Russian, Whisper for the rest
+- ⚡ **Fast**: 11 s of speech becomes text in 61 ms on an M2's Neural Engine (macOS 15 or later)
+- 🌍 **100 languages**: Parakeet Ultra for 25 European ones, Whisper for the rest
 - 💊 **A quiet indicator**: a small pill shows the level while you speak and never takes the focus
 - 🎧 **Picks the microphone**: a USB one first, then the built-in one, a Bluetooth headset only when there is nothing else
 - 📜 **History**: every dictation with its recording, searchable; play it back, transcribe it again, export it
@@ -104,27 +104,29 @@ On macOS drag Wavo from Applications to the Trash; on Windows remove it in Setti
 
 ## ❓ Questions
 
-**Is it free?** Yes, and open source under the MIT License.
+**Is it free?**\
+Yes, and open source under the MIT License.
 
-**Does anything leave my computer?** No: your voice and its text stay there. Wavo only downloads the model from Hugging Face and looks for its own updates on GitHub.
+**Does anything leave my computer?**\
+No: your voice and its text stay there. Wavo only downloads the model from Hugging Face and looks for its own updates on GitHub.
 
-**How big is the model?** Parakeet Ultra is about 0.7 GB and GigaAM about 0.3 GB, downloaded once.
+**How big is the model?**\
+Parakeet Ultra is about 0.7 GB, downloaded once.
 
-**Which permissions does it need on a Mac?** Microphone, and Accessibility for the paste and the hotkey. On macOS 15.4 and later, Paste from Other Apps lets it put back what the clipboard held.
+**Which permissions does it need on a Mac?**\
+Microphone, and Accessibility for the paste and the hotkey. On macOS 15.4 and later, Paste from Other Apps lets it put back what the clipboard held.
 
-**Does it run on an Intel Mac?** No, only on Apple Silicon.
+**Does it run on an Intel Mac?**\
+No, only on Apple Silicon.
 
-**What does Linux need?** A Vulkan driver for the GPU (`mesa-vulkan-drivers` on Debian and Ubuntu) and your user in the `render` group; without a driver for your GPU it runs on the CPU, 10–50 times slower.
+**What does Linux need?**\
+A Vulkan driver for the GPU (`mesa-vulkan-drivers` on Debian and Ubuntu) and your user in the `render` group; without a driver for your GPU it runs on the CPU, 10–50 times slower.
 
-**Sway or Hyprland?** The paste needs the desktop's RemoteDesktop portal, which their portals don't have yet, so copy the text from the history. The hotkey works through Hyprland's global shortcuts; on Sway bind a key to `wavo-app toggle`.
+**Sway or Hyprland?**\
+The paste needs the desktop's RemoteDesktop portal, which their portals don't have yet, so copy the text from the history. The hotkey works through Hyprland's global shortcuts; on Sway bind a key to `wavo-app toggle`.
 
-**Option-Space clashes with Alfred or ChatGPT?** Pick another shortcut in Settings › General.
-
-## 🙏 Credits
-
-- [Handy](https://github.com/cjpais/Handy): the app that inspired Wavo.
-- [`wavo-cli`](https://github.com/vladkens/wavo): the speech recognition, built on [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)'s reference and the GGUF conversions [handy-computer](https://huggingface.co/handy-computer) publishes. Wavo ships no weights: each model is downloaded under its own license, listed in [its credits](https://github.com/vladkens/wavo#-credits).
-- [nimbo](https://github.com/vladkens/nimbo): the UI toolkit Wavo is drawn with.
+**Option-Space clashes with Alfred or ChatGPT?**\
+Pick another shortcut in Settings › General.
 
 ## 🤖 How it's made
 
