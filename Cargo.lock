@@ -1533,8 +1533,9 @@ dependencies = [
 
 [[package]]
 name = "shipo"
-version = "0.1.0"
-source = "git+https://github.com/vladkens/shipo?rev=940fcb0#940fcb071ad17a3caa57814f3c148ce0091a77a5"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e6d812d218ce745f0aac9b0a4904a4890605bb20ec8fce49e436ac55479a6fe"
 dependencies = [
  "block2",
  "ed25519-compact",
@@ -2183,7 +2184,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
