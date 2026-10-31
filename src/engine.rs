@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use crossbeam_channel::{
   Receiver, RecvTimeoutError, Sender, after, bounded, never, select, unbounded,
 };
@@ -135,7 +135,9 @@ impl Preparing {
     loop {
       let Some(path) = self.queue.lock().unwrap().front().map(|(p, _)| p.clone()) else { return };
       let started = Instant::now();
-      let prepared = (self.run)(&path);
+      // A panic in wavo fails this file alone: the queue goes on.
+      let prepared = panic::catch_unwind(AssertUnwindSafe(|| (self.run)(&path)));
+      let prepared = prepared.unwrap_or_else(|p| Err(anyhow!("panicked: {}", panic_message(&*p))));
       // Taken off and looked at under one lock: a file queued meanwhile is this thread's.
       let (done, more) = {
         let mut queue = self.queue.lock().unwrap();
@@ -899,6 +901,24 @@ mod tests {
       (0..3).map(|_| done.recv_timeout(Duration::from_secs(10)).unwrap()).collect();
     assert_eq!(order, ["a", "b", "c"], "the second a goes with the first");
     assert_eq!(MOST.load(Ordering::SeqCst), 1);
+  }
+
+  /// A panic preparing one file leaves the files after it to be prepared.
+  #[test]
+  fn a_panic_preparing_a_file_stops_no_other() {
+    fn flaky(path: &Path) -> Result<bool> {
+      assert_ne!(path, Path::new("bad"), "injected panic in a preparation");
+      Ok(true)
+    }
+
+    static QUEUE: Preparing = Preparing { queue: Mutex::new(VecDeque::new()), run: flaky };
+    let (tx, done) = unbounded();
+    for name in ["bad", "good"] {
+      let tx = tx.clone();
+      QUEUE.add(Path::new(name), Box::new(move || _ = tx.send(name)));
+    }
+
+    assert_eq!(done.recv_timeout(Duration::from_secs(10)), Ok("good"));
   }
 
   // MARK: Real models
