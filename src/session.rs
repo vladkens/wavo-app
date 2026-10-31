@@ -761,7 +761,8 @@ impl<O: TextOutput> Controller<O> {
       Request::Retranscribe(id) => {
         let entry =
           self.history.db.get_entry(id)?.ok_or_else(|| anyhow!("no history entry {id}"))?;
-        self.retranscribe(entry, None, false)
+        let model = self.own_model(&entry);
+        self.retranscribe(entry, model, false)
       }
       Request::Restore(id) => {
         if self.is_busy(id) {
@@ -1397,6 +1398,19 @@ impl<O: TextOutput> Controller<O> {
     job.engine.transcribe(job.id, input.pcm, job.language.clone(), true);
     self.retranscribing.push(Retranscription { job, entry: id, auto });
     Ok(())
+  }
+
+  /// The choice of the model `entry`'s text came from, when it is on disk: the one found, a key's
+  /// or another of wavo's; else `None`, the one found.
+  fn own_model(&self, entry: &Entry) -> Option<String> {
+    let name = entry.model.as_deref()?;
+    if let Some(m) = self.models().into_iter().find(|m| file_stem(&m.path) == name) {
+      return m.choice;
+    }
+
+    let mut downloaded = self.config.hub.downloaded().into_iter();
+    let (info, _) = downloaded.find(|(_, path)| file_stem(path) == name)?;
+    Some(info.name.to_owned())
   }
 
   /// One entry without text at a time, when no dictation runs, by a model that has not tried it
@@ -2464,6 +2478,22 @@ mod tests {
 
     s.handle.edit_settings(|s| s.model = Some("parakeet-v3".into()));
     assert_eq!(transcribed(detected).model.as_deref(), Some(PARAKEET_V3));
+  }
+
+  /// Transcribe Again goes to the model the text came from while it is on disk, else to the
+  /// default one.
+  #[test]
+  fn transcribe_again_goes_to_the_entrys_own_model() {
+    let settings = Settings { model: Some("parakeet-v3".into()), ..Settings::default() };
+    let models = ["parakeet-v3", "gigaam-v3"];
+    let s = InProcess::start("session-again-own", &settings, None, "hi", &models);
+    let id = s.add_entry(1_000, "текст", &loud(1.0));
+    s.history().db.update_text(id, "текст", Some(GIGAAM), Some("ru")).unwrap();
+    let entry = s.retranscribed(id);
+    assert_eq!((entry.model.as_deref(), entry.language.as_deref()), (Some(GIGAAM), Some("ru")));
+
+    s.history().db.update_text(id, "текст", Some("gone-Q8_0"), None).unwrap();
+    assert_eq!(s.retranscribed(id).model.as_deref(), Some(PARAKEET_V3));
   }
 
   #[test]
