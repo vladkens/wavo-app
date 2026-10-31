@@ -2396,10 +2396,10 @@ mod tests {
     let models = ["parakeet-v3", "gigaam-v3", "parakeet-v2"];
     let s = InProcess::start("session-keys", &settings, Some(&loud(10.0)), "hi", &models);
     // Dictation, hotkey, keys pressed, its model and language.
-    let cases: [(Take, usize, &[usize], &str, Option<&str>); 3] = [
-      (1, 0, &[1, 0], GIGAAM, Some("ru")),
-      (2, 1, &[], PARAKEET_V2, Some("en")),
-      (3, 0, &[], PARAKEET_V3, None),
+    let cases = [
+      (1, 0, &[1, 0][..], GIGAAM, Some("ru")),
+      (2, 1, &[][..], PARAKEET_V2, Some("en")),
+      (3, 0, &[][..], PARAKEET_V3, None),
     ];
     for (take, which, keys, model, language) in cases {
       let last = s.dictate_held(take, which, keys);
