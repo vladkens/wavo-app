@@ -12,6 +12,8 @@
 //!   its language. An entry's language is the one it was recorded in: a model of one language's
 //!   own, else the setting's; one without (detected) goes to a model of more than one only.
 //! - A chosen model not on disk gives way to the first one found, with a warning; the choice stays.
+//! - Each model has an engine of its own, with its own idle unload: the one found, and those of the
+//!   model keys ([settings::ModelKey]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -450,7 +452,7 @@ impl Session {
       history,
       output,
       config,
-      engine: None,
+      engines: Vec::new(),
       events_tx,
       events,
       next_job: 0,
@@ -461,6 +463,7 @@ impl Session {
       originals: BTreeMap::new(),
       untried: false,
       closed: false,
+      on_disk: Vec::new(),
       model_path: None,
       model_info: None,
       model_error: None,
@@ -517,7 +520,7 @@ impl Handle {
 
 // MARK: Controller
 
-/// The engine for the model that transcribes now.
+/// The engine of a model.
 struct Loaded {
   /// The model file's name without extension.
   name: String,
@@ -527,9 +530,20 @@ struct Loaded {
   engine: Engine,
 }
 
+/// A model on disk to transcribe with: the default one, or a key's.
+struct OnDisk {
+  /// The key's model choice; `None`: the default one.
+  choice: Option<String>,
+  path: PathBuf,
+  info: Option<&'static ModelInfo>,
+}
+
 struct Job {
   id: u64,
+  /// The model's file name without extension, and wavo's info on it.
   model: String,
+  info: Option<&'static ModelInfo>,
+  path: PathBuf,
   language: Option<String>,
   /// The one it runs on, which a model change may have replaced since.
   engine: Engine,
@@ -568,8 +582,8 @@ struct Dictation<T> {
   /// The tail ([tail_end]) runs from then until the recorder closes.
   stopped: Option<Instant>,
   recorder: Option<Recorder>,
-  /// The engine loads the model for it.
-  prewarmed: bool,
+  /// The engine loading its model for it, by the model's path.
+  prewarmed: Option<PathBuf>,
   job: Option<Job>,
   duration_ms: i64,
   warnings: Vec<String>,
@@ -583,7 +597,8 @@ struct Controller<O: TextOutput> {
   settings: Settings,
   history: History,
   output: O,
-  engine: Option<Loaded>,
+  /// An engine per model, by its file: the default one's, the keys', one an entry's own.
+  engines: Vec<Loaded>,
   events_tx: Sender<engine::Event>,
   events: Receiver<engine::Event>,
   next_job: u64,
@@ -596,6 +611,8 @@ struct Controller<O: TextOutput> {
   untried: bool,
   /// The app quits for an update ([Request::Close]): no dictation starts.
   closed: bool,
+  /// The models on disk [`Controller::note_models`] last noted.
+  on_disk: Vec<PathBuf>,
   /// The model [`Controller::check_model`] last found, and wavo's info on it.
   model_path: Option<PathBuf>,
   model_info: Option<&'static ModelInfo>,
@@ -611,8 +628,10 @@ struct Controller<O: TextOutput> {
 
 impl<O: TextOutput> Controller<O> {
   fn run(mut self, rx: Receiver<Msg>) {
-    // What a crash left, before any recording makes new files; the model found now is no new one.
+    // What a crash left, before any recording makes new files; the models found now are no new
+    // ones.
     let _ = self.check_model();
+    self.note_models();
     self.untried = false;
     self.prepare();
     if let Err(e) = self.history.recover(now_ms()) {
@@ -689,11 +708,9 @@ impl<O: TextOutput> Controller<O> {
         self.apply_settings(settings);
       }
       Msg::CheckModel => {
-        let path = self.check_model().ok().map(|(path, _)| path);
-        if self.engine.as_ref().is_some_and(|l| Some(&l.path) != path.as_ref()) {
-          self.engine = None;
-        }
-
+        let _ = self.check_model();
+        self.note_models();
+        self.prune();
         self.prepare();
       }
       Msg::Prepared(path) => {
@@ -703,8 +720,8 @@ impl<O: TextOutput> Controller<O> {
           l.path == path && !device.contains("Neural Engine")
         };
 
-        if self.settings.neural_engine && self.engine.as_ref().is_some_and(on_gpu) {
-          self.engine = None;
+        if self.settings.neural_engine {
+          self.engines.retain(|l| !on_gpu(l));
         }
       }
       Msg::Quit => unreachable!("handled by the loop"),
@@ -716,7 +733,7 @@ impl<O: TextOutput> Controller<O> {
       Request::Retranscribe(id) => {
         let entry =
           self.history.db.get_entry(id)?.ok_or_else(|| anyhow!("no history entry {id}"))?;
-        self.retranscribe(entry, false)
+        self.retranscribe(entry, None, false)
       }
       Request::Restore(id) => {
         if self.is_busy(id) {
@@ -732,9 +749,9 @@ impl<O: TextOutput> Controller<O> {
       }
       Request::Delete(id) => self.delete(id),
       Request::Unload => {
-        info!("the model is unloaded on request");
+        info!("the models are unloaded on request");
         self.untried = false;
-        if let Some(l) = &self.engine {
+        for l in &self.engines {
           l.engine.unload();
         }
 
@@ -782,19 +799,24 @@ impl<O: TextOutput> Controller<O> {
 
     let old = mem::replace(&mut self.settings, new);
     self.machine.activation = self.settings.activation;
-    if old.model != self.settings.model
-      || old.unload_after_minutes != self.settings.unload_after_minutes
-      || old.neural_engine != self.settings.neural_engine
-    {
-      // Its thread finishes its jobs, then drops the model.
-      self.engine = None;
+    let new = &self.settings;
+    let (model, keys) = (old.model != new.model, old.keys != new.keys);
+    let ane = old.neural_engine != new.neural_engine;
+    if ane || old.unload_after_minutes != new.unload_after_minutes {
+      // Their threads finish their jobs, then drop the models.
+      self.engines.clear();
     }
 
-    if old.model != self.settings.model {
+    if model {
       let _ = self.check_model();
     }
 
-    if old.model != self.settings.model || old.neural_engine != self.settings.neural_engine {
+    if model || keys {
+      self.note_models();
+      self.prune();
+    }
+
+    if model || keys || ane {
       self.prepare();
     }
 
@@ -832,7 +854,8 @@ impl<O: TextOutput> Controller<O> {
     Err(error)
   }
 
-  /// Another model than before may transcribe the entries without text.
+  /// Another model than before may transcribe the entries without text; the engine of the one
+  /// before goes, unless a key has it.
   fn found_model(
     &mut self,
     path: PathBuf,
@@ -842,55 +865,123 @@ impl<O: TextOutput> Controller<O> {
     if self.model_path.as_ref() != Some(&path) {
       self.untried = true;
       self.model_path = Some(path.clone());
+      self.prune();
     }
 
     (path, info)
   }
 
-  /// The model found, prepared for the Neural Engine ahead of its first dictation, as the app
-  /// starts or another model is found: a new app binary compiles it again once.
+  /// The models on disk to transcribe with: the one found, then those of the keys, each file
+  /// once.
+  fn models(&self) -> Vec<OnDisk> {
+    let mut models = Vec::new();
+    if let Some(path) = &self.model_path {
+      models.push(OnDisk { choice: None, path: path.clone(), info: self.model_info });
+    }
+
+    for k in self.settings.model_keys() {
+      let Ok(path) = self.config.hub.resolve(&k.model) else { continue };
+      if !models.iter().any(|m: &OnDisk| m.path == path) {
+        let info = hub::lookup(&k.model).ok();
+        models.push(OnDisk { choice: Some(k.model.clone()), path, info });
+      }
+    }
+
+    models
+  }
+
+  /// Notes the models on disk: one new to the session may transcribe the entries without text.
+  fn note_models(&mut self) {
+    let paths: Vec<PathBuf> = self.models().into_iter().map(|m| m.path).collect();
+    if paths.iter().any(|p| !self.on_disk.contains(p)) {
+      self.untried = true;
+    }
+
+    self.on_disk = paths;
+  }
+
+  /// The engines of models no longer found nor a key's go: their threads finish their jobs first.
+  fn prune(&mut self) {
+    let paths: Vec<PathBuf> = self.models().into_iter().map(|m| m.path).collect();
+    self.engines.retain(|l| paths.contains(&l.path));
+  }
+
+  /// The models found, the default one first, then the keys', prepared for the Neural Engine one
+  /// at a time ahead of their first dictation, as the app starts or another model is found: a new
+  /// app binary compiles them again once.
   fn prepare(&self) {
-    let Some(path) = &self.model_path else { return };
     if !self.settings.neural_engine {
       return;
     }
 
-    let (tx, prepared) = (self.tx.clone(), path.clone());
-    self.config.loader.prepare(path, Box::new(move || _ = tx.send(Msg::Prepared(prepared))));
+    for m in self.models() {
+      let (tx, prepared) = (self.tx.clone(), m.path.clone());
+      self.config.loader.prepare(&m.path, Box::new(move || _ = tx.send(Msg::Prepared(prepared))));
+    }
   }
 
-  /// None on disk, or one that does not load.
+  /// None on disk, or the one found does not load.
   fn no_model(&self) -> Option<NoModel> {
     self.model_error.clone().or_else(|| {
-      let loaded = self.engine.as_ref()?;
+      let loaded = self.loaded(self.model_path.as_deref()?)?;
       let error = loaded.engine.status().load_error?;
       Some(NoModel::LoadFailed { model: loaded_label(loaded.info, &loaded.name), error })
     })
   }
 
-  /// The engine of the model to transcribe with: one of another model goes.
-  fn engine(&mut self) -> Result<&Loaded, NoModel> {
-    let (path, info) = self.check_model()?;
-    if self.engine.as_ref().is_some_and(|l| l.path != path) {
-      self.engine = None;
-    }
-
-    let loaded = self.engine.get_or_insert_with(|| {
-      let name = file_stem(&path);
-      info!("model {name} ({})", path.display());
-      let (loader, ane) = (self.config.loader.clone(), self.settings.neural_engine);
-      let (unload_after, events) = (self.settings.unload_after(), self.events_tx.clone());
-      let engine = Engine::start(loader, path.clone(), ane, unload_after, events);
-      Loaded { name, info, path, engine }
-    });
-
-    Ok(loaded)
+  fn loaded(&self, path: &Path) -> Option<&Loaded> {
+    self.engines.iter().find(|l| l.path == path)
   }
 
-  fn next_job(&mut self, model: String, language: Option<String>) -> Job {
+  /// The model of `choice` (a key's, as [Settings::model]; `None`: the one found): a key's gets no
+  /// stand-in.
+  fn model_for(
+    &mut self,
+    choice: Option<&str>,
+  ) -> Result<(PathBuf, Option<&'static ModelInfo>), NoModel> {
+    let Some(choice) = choice else { return self.check_model() };
+    match self.config.hub.resolve(choice) {
+      Ok(path) => Ok((path, hub::lookup(choice).ok())),
+      Err(_) => Err(NoModel::Gone { model: label(choice) }),
+    }
+  }
+
+  /// The engine of `choice`'s model ([model_for](Self::model_for)), started if it has none. With
+  /// an unload right after each dictation, the other engines unload: one model in memory.
+  fn engine_for(&mut self, choice: Option<&str>) -> Result<&Loaded, NoModel> {
+    let (path, info) = self.model_for(choice)?;
+    let at = match self.engines.iter().position(|l| l.path == path) {
+      Some(at) => at,
+      None => {
+        let name = file_stem(&path);
+        info!("model {name} ({})", path.display());
+        let (loader, ane) = (self.config.loader.clone(), self.settings.neural_engine);
+        let (unload_after, events) = (self.settings.unload_after(), self.events_tx.clone());
+        let engine = Engine::start(loader, path.clone(), ane, unload_after, events);
+        self.engines.push(Loaded { name, info, path, engine });
+        self.engines.len() - 1
+      }
+    };
+
+    if self.settings.unload_after() == Some(Duration::ZERO) {
+      for (i, l) in self.engines.iter().enumerate() {
+        if i != at {
+          l.engine.unload();
+        }
+      }
+    }
+
+    Ok(&self.engines[at])
+  }
+
+  /// A job on the engine of `choice`'s model ([engine_for](Self::engine_for)), without its
+  /// language yet.
+  fn new_job(&mut self, choice: Option<&str>) -> Result<Job, NoModel> {
+    let loaded = self.engine_for(choice)?;
+    let (model, info, path) = (loaded.name.clone(), loaded.info, loaded.path.clone());
+    let engine = loaded.engine.clone();
     self.next_job += 1;
-    let engine = self.engine.as_ref().unwrap().engine.clone();
-    Job { id: self.next_job, model, language, engine }
+    Ok(Job { id: self.next_job, model, info, path, language: None, engine })
   }
 
   fn on_engine(&mut self, event: engine::Event) {
@@ -905,17 +996,19 @@ impl<O: TextOutput> Controller<O> {
     }
   }
 
-  /// The outcome, text and error of an engine's result.
-  fn outcome(&self, result: Result<String, EngineError>) -> (Outcome, String, Option<String>) {
+  /// The outcome, text and error of `job`'s result.
+  fn outcome(
+    &self,
+    result: Result<String, EngineError>,
+    job: &Job,
+  ) -> (Outcome, String, Option<String>) {
     match result {
       Ok(text) if text.trim().is_empty() => {
-        let note = self.engine.as_ref().and_then(|l| l.info).and_then(understands_only);
-        (Outcome::NoText, String::new(), note)
+        (Outcome::NoText, String::new(), job.info.and_then(understands_only))
       }
       Ok(text) => (Outcome::Done, text.trim().to_owned(), None),
       Err(EngineError::Load(error)) => {
-        let model =
-          self.engine.as_ref().map_or("the model".into(), |l| loaded_label(l.info, &l.name));
+        let model = loaded_label(job.info, &job.model);
         (Outcome::NoModel, String::new(), Some(NoModel::LoadFailed { model, error }.to_string()))
       }
       Err(e) => (Outcome::Failed, String::new(), Some(e.to_string())),
@@ -953,7 +1046,7 @@ impl<O: TextOutput> Controller<O> {
       stopped: None,
       warnings: recorder.warning().map(str::to_owned).into_iter().collect(),
       recorder: Some(recorder),
-      prewarmed: false,
+      prewarmed: None,
       job: None,
       duration_ms: 0,
     });
@@ -962,12 +1055,15 @@ impl<O: TextOutput> Controller<O> {
     let target = self.output.target();
     debug!("dictation {take}: focus noted after {:.0?}", started.elapsed());
     self.dictation.as_mut().unwrap().target = Some(target);
-    match self.engine() {
-      Ok(loaded) => loaded.engine.prewarm(),
+    let path = match self.engine_for(None) {
+      Ok(loaded) => {
+        loaded.engine.prewarm();
+        loaded.path.clone()
+      }
       Err(e) => return info!("dictation {take}: recording without a model: {e}"),
-    }
+    };
 
-    self.dictation.as_mut().unwrap().prewarmed = true;
+    self.dictation.as_mut().unwrap().prewarmed = Some(path);
   }
 
   fn stop_recording(&mut self) {
@@ -1034,23 +1130,23 @@ impl<O: TextOutput> Controller<O> {
       self.discard();
     }
 
-    let model = self.engine().map(|l| (l.name.clone(), l.info));
+    let job = self.new_job(None);
     // A model not on disk still has a language: that of wavo's model of the name.
-    let info = match &model {
-      Ok((_, info)) => *info,
+    let info = match &job {
+      Ok(job) => job.info,
       Err(_) => self.settings.model.as_deref().and_then(|c| hub::lookup(c).ok()),
     };
 
     let language = language_for(info, &self.settings);
-    let name = model.as_ref().ok().map(|(name, _)| name.as_str());
-    let entry = if rec.saved { self.add_entry(name, language.as_deref()) } else { None };
+    let model = job.as_ref().ok().map(|j| j.model.as_str());
+    let entry = if rec.saved { self.add_entry(model, language.as_deref()) } else { None };
     self.dictation.as_mut().unwrap().last.entry = entry;
-    let model = match model {
-      Ok((model, _)) => model,
+    let mut job = match job {
+      Ok(job) => job,
       Err(e) => return self.end(Outcome::NoModel, Some(e.to_string())),
     };
 
-    let job = self.next_job(model, language.clone());
+    job.language = language.clone();
     job.engine.transcribe(job.id, input.pcm, language, false);
     self.dictation.as_mut().unwrap().job = Some(job);
   }
@@ -1074,9 +1170,9 @@ impl<O: TextOutput> Controller<O> {
   }
 
   fn on_transcribed(&mut self, result: Result<String, EngineError>) {
-    let (outcome, text, error) = self.outcome(result);
+    let job = self.dictation.as_mut().unwrap().job.take().unwrap();
+    let (outcome, text, error) = self.outcome(result, &job);
     let d = self.dictation.as_mut().unwrap();
-    let job = d.job.take().unwrap();
     match (outcome, d.last.entry) {
       (Outcome::Done, Some(id)) => {
         let language = job.language.as_deref();
@@ -1178,8 +1274,8 @@ impl<O: TextOutput> Controller<O> {
   fn complete(&mut self) {
     let mut d = self.dictation.take().unwrap();
     d.last.took_ms = d.stopped.map(|s| s.elapsed().as_millis() as u64);
-    if d.prewarmed
-      && let Some(loaded) = &self.engine
+    if let Some(path) = &d.prewarmed
+      && let Some(loaded) = self.loaded(path)
     {
       loaded.engine.release();
     }
@@ -1199,10 +1295,11 @@ impl<O: TextOutput> Controller<O> {
     current || self.retranscribing.iter().any(|r| r.entry == id)
   }
 
-  /// `entry`'s recording through the engine again, behind dictations: in its own language when it
-  /// goes by itself, else as a dictation now would be. One without text whose recording has no
-  /// speech (or is gone) is deleted: there is nothing to keep.
-  fn retranscribe(&mut self, entry: Entry, auto: bool) -> Result<()> {
+  /// `entry`'s recording through the engine of `model` again (a choice, as [Settings::model];
+  /// `None`: the one found), behind dictations: in its own language when it goes by itself, else as
+  /// a dictation now would be. One without text whose recording has no speech (or is gone) is
+  /// deleted: there is nothing to keep.
+  fn retranscribe(&mut self, entry: Entry, model: Option<String>, auto: bool) -> Result<()> {
     let id = entry.id;
     if entry.busy || self.is_busy(id) {
       bail!("entry {id} is being transcribed");
@@ -1223,46 +1320,57 @@ impl<O: TextOutput> Controller<O> {
       return self.delete(id);
     };
 
-    let loaded = self.engine()?;
-    let (model, info) = (loaded.name.clone(), loaded.info);
-    let language = if auto { entry.language } else { language_for(info, &self.settings) };
+    let mut job = self.new_job(model.as_deref())?;
+    job.language = if auto { entry.language } else { language_for(job.info, &self.settings) };
     // Marked tried before it runs: a crash or a failure is not tried again by the same model.
-    self.history.db.mark_busy(id, &model)?;
-    info!("entry {id}: transcribing {:.1} s again with {model}", input.seconds());
-    let job = self.next_job(model, language.clone());
-    job.engine.transcribe(job.id, input.pcm, language, true);
+    self.history.db.mark_busy(id, &job.model)?;
+    info!("entry {id}: transcribing {:.1} s again with {}", input.seconds(), job.model);
+    job.engine.transcribe(job.id, input.pcm, job.language.clone(), true);
     self.retranscribing.push(Retranscription { job, entry: id, auto });
     Ok(())
   }
 
   /// One entry without text at a time, when no dictation runs, by a model that has not tried it
-  /// and knows its language; while the model does not load they wait, for the next dictation that
-  /// loads it.
+  /// and knows its language; while a model does not load its entries wait, for the next dictation
+  /// that loads it.
   fn transcribe_untried(&mut self) {
-    while self.untried
-      && self.dictation.is_none()
-      && self.retranscribing.is_empty()
-      && self.no_model().is_none()
-    {
-      let Some(model) = self.model_path.as_deref().map(file_stem) else { return };
-      let langs = self.model_info.map(|m| m.langs);
-      let entry = self.history.db.get_untried(&model, langs);
-      let entry = entry.inspect_err(|e| warn!("history: {e:#}"));
-      let Some(entry) = entry.ok().flatten() else {
-        self.untried = false;
+    while self.untried && self.dictation.is_none() && self.retranscribing.is_empty() {
+      let (found, waiting) = self.untried_entry();
+      let Some((entry, model)) = found else {
+        self.untried = waiting;
         return;
       };
 
       let id = entry.id;
-      if let Err(e) = self.retranscribe(entry, true) {
+      if let Err(e) = self.retranscribe(entry, model, true) {
         warn!("entry {id}: {e:#}");
         self.untried = false;
       }
     }
   }
 
+  /// The newest entry without text a model on disk can take ([History::db]'s `get_untried`), the
+  /// one found's first, and the model's choice; and whether a model that does not load was passed
+  /// over.
+  fn untried_entry(&self) -> (Option<(Entry, Option<String>)>, bool) {
+    let mut passed = false;
+    for m in self.models() {
+      if self.loaded(&m.path).is_some_and(|l| l.engine.status().load_error.is_some()) {
+        passed = true;
+        continue;
+      }
+
+      let entry = self.history.db.get_untried(&file_stem(&m.path), m.info.map(|i| i.langs));
+      if let Some(entry) = entry.inspect_err(|e| warn!("history: {e:#}")).ok().flatten() {
+        return (Some((entry, m.choice)), passed);
+      }
+    }
+
+    (None, passed)
+  }
+
   fn on_retranscribed(&mut self, r: Retranscription, result: Result<String, EngineError>) {
-    let (outcome, text, error) = self.outcome(result);
+    let (outcome, text, error) = self.outcome(result, &r.job);
     info!("entry {}: transcribed again: {outcome:?}", r.entry);
     match outcome {
       Outcome::Done => {
@@ -1318,12 +1426,10 @@ impl<O: TextOutput> Controller<O> {
   /// The retention spares entries without text while no model can transcribe them, or while they
   /// are being transcribed by themselves.
   fn cleanup(&mut self) {
-    // Also those waiting for the model found (a start, an unload in the middle of them).
-    let (model, langs) =
-      (self.model_path.as_deref().map(file_stem), self.model_info.map(|m| m.langs));
-    let waiting =
-      model.is_some_and(|m| self.history.db.get_untried(&m, langs).ok().flatten().is_some());
-    let spare = self.no_model().is_some() || self.untried || waiting;
+    // Also those waiting for a model on disk (a start, an unload in the middle of them), or for one
+    // that does not load.
+    let (waiting, passed) = self.untried_entry();
+    let spare = self.no_model().is_some() || self.untried || waiting.is_some() || passed;
     match self.history.cleanup(self.settings.history_retention, now_ms(), spare) {
       Ok(0) => {}
       Ok(n) => info!("history: {n} old entries removed"),
@@ -1336,7 +1442,7 @@ impl<O: TextOutput> Controller<O> {
     let mut warnings: Vec<String> =
       self.settings_warning.iter().chain(&self.model_fallback).cloned().collect();
     warnings.extend(d.map_or(&self.last_warnings, |d| &d.warnings).iter().cloned());
-    let engine = self.engine.as_ref().map_or_else(EngineStatus::default, |l| {
+    let engine = self.shown_engine().map_or_else(EngineStatus::default, |l| {
       let s = l.engine.status();
       let model = Some(l.name.clone());
       EngineStatus { model, phase: s.phase, device: s.device, progress: s.progress }
@@ -1361,6 +1467,25 @@ impl<O: TextOutput> Controller<O> {
       warnings,
       no_model: self.no_model(),
     }
+  }
+
+  /// The engine the status shows: the dictation's, else one at work, else one with its model in
+  /// memory, else the one found's.
+  fn shown_engine(&self) -> Option<&Loaded> {
+    let d = self.dictation.as_ref();
+    let current = d.and_then(|d| d.job.as_ref().map(|j| &j.path).or(d.prewarmed.as_ref()));
+    if let Some(l) = current.and_then(|path| self.loaded(path)) {
+      return Some(l);
+    }
+
+    let working = |l: &&Loaded| {
+      matches!(l.engine.status().phase, engine::Phase::Running | engine::Phase::Loading)
+    };
+
+    let in_memory = |l: &&Loaded| l.engine.status().phase != engine::Phase::Stopped;
+    (self.engines.iter().find(working))
+      .or_else(|| self.engines.iter().find(in_memory))
+      .or_else(|| self.loaded(self.model_path.as_deref()?))
   }
 }
 
@@ -1412,6 +1537,7 @@ mod tests {
   use super::*;
   use crate::audio::SAMPLE_RATE;
   use crate::history::{RECORDINGS_DIR, Retention};
+  use crate::settings::ModelKey;
   use crate::testing::{FakeModels, TempDir, download, poll, tone, wav_count, write_wav};
 
   // MARK: Machine
@@ -2054,6 +2180,8 @@ mod tests {
     assert!(restore().is_err(), "once");
   }
 
+  const PARAKEET_V3: &str = "parakeet-tdt-0.6b-v3-Q8_0";
+  const PARAKEET_V2: &str = "parakeet-tdt-0.6b-v2-Q8_0";
   const GIGAAM: &str = "gigaam-v3-e2e-rnnt-Q8_0";
 
   /// A model of one language takes the entries without text in it only: one in another language,
@@ -2075,6 +2203,43 @@ mod tests {
       let entry = s.entry(id).unwrap();
       assert_eq!((entry.text.as_str(), entry.tried_model), ("", None), "{id}");
     }
+  }
+
+  fn model_key(key: &str, model: &str) -> ModelKey {
+    ModelKey { key: key.into(), model: model.into() }
+  }
+
+  /// Entries without text go to a model of their language, the default one's or a key's; one
+  /// without a language (detected) only to a model of more than one.
+  #[test]
+  fn entries_without_text_go_to_a_model_of_their_language() {
+    let settings = Settings { model: Some("parakeet-v2".into()), ..Settings::default() };
+    let models = ["parakeet-v2", "gigaam-v3", "parakeet-v3"];
+    let s = InProcess::start("session-untried-languages", &settings, None, "hi", &models);
+    let ru = s.add_untried(1_000, Some("ru"));
+    let en = s.add_untried(2_000, Some("en"));
+    let detected = s.add_untried(3_000, None);
+    s.handle.edit_settings(|s| s.keys = vec![model_key("z", "gigaam-v3")]);
+    let transcribed = |id| {
+      poll("transcribed", Duration::from_secs(10), || {
+        s.entry(id).filter(|e| !e.text.is_empty() && !e.busy)
+      })
+    };
+
+    for (id, model, language) in [(ru, GIGAAM, "ru"), (en, PARAKEET_V2, "en")] {
+      let entry = transcribed(id);
+      assert_eq!(
+        (entry.model.as_deref(), entry.language.as_deref()),
+        (Some(model), Some(language))
+      );
+    }
+
+    thread::sleep(Duration::from_millis(100));
+    let entry = s.entry(detected).unwrap();
+    assert_eq!((entry.text.as_str(), entry.tried_model), ("", None), "no model of more than one");
+
+    s.handle.edit_settings(|s| s.model = Some("parakeet-v3".into()));
+    assert_eq!(transcribed(detected).model.as_deref(), Some(PARAKEET_V3));
   }
 
   #[test]

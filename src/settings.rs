@@ -33,6 +33,8 @@ pub struct Settings {
   pub language: String,
   /// A model name or a GGUF file path; `None` is the first model found.
   pub model: Option<String>,
+  /// Models a dictation can go to instead, each by its key.
+  pub keys: Vec<ModelKey>,
   pub auto_paste: bool,
   /// Leave the text on the clipboard instead of restoring it after the paste.
   pub keep_in_clipboard: bool,
@@ -53,6 +55,17 @@ pub struct Settings {
   pub auto_update: bool,
   /// The version Skip This Version passed over: automatic checks don't offer it.
   pub skipped_update: Option<String>,
+}
+
+/// A model's key: one letter or digit pressed while a hotkey is held (`z`), or a hotkey of the
+/// model's own in nimbo's grammar (`f1`, `fn+1`, `ctrl+option+r`), held or tapped as the main one.
+/// Either way the dictation goes to the model.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelKey {
+  pub key: String,
+  /// A model name or a GGUF file path, as [Settings::model].
+  pub model: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -82,6 +95,7 @@ impl Default for Settings {
       microphone: Microphone::Automatic,
       language: "auto".into(),
       model: None,
+      keys: Vec::new(),
       auto_paste: true,
       keep_in_clipboard: false,
       unload_after_minutes: Some(15),
@@ -154,6 +168,22 @@ impl Settings {
   pub fn unload_after(&self) -> Option<Duration> {
     self.unload_after_minutes.map(|m| Duration::from_secs(u64::from(m) * 60))
   }
+
+  /// The model keys in use, in order: those with a key and a model, each key (in any case) and
+  /// each model once, the first one.
+  pub fn model_keys(&self) -> Vec<&ModelKey> {
+    let mut keys: Vec<&ModelKey> = Vec::new();
+    for k in &self.keys {
+      let (key, model) = (k.key.trim(), k.model.trim());
+      let taken =
+        keys.iter().any(|u| u.key.trim().eq_ignore_ascii_case(key) || u.model.trim() == model);
+      if !key.is_empty() && !model.is_empty() && !taken {
+        keys.push(k);
+      }
+    }
+
+    keys
+  }
 }
 
 // MARK: Languages
@@ -187,6 +217,7 @@ mod tests {
         name: "RØDE PodMic USB".into(),
       }),
       language: "ru".into(),
+      keys: vec![ModelKey { key: "z".into(), model: "gigaam-v3".into() }],
       unload_after_minutes: None,
       history_retention: Retention::Count(500),
       hud_position: HudPosition::Top,
@@ -200,6 +231,7 @@ mod tests {
     fs::write(&path, r#"{"hotkey": "fn", "start_in_tray": true}"#).unwrap();
     let older = Settings { hotkey: "fn".into(), ..Settings::default() };
     assert_eq!(Settings::load(&path), (older, None));
+    assert!(Settings::load(&path).0.keys.is_empty(), "no model keys");
 
     // The microphone as stored: `null` is the system default, as before Automatic.
     for (stored, mic) in [("null", Microphone::System), (r#""automatic""#, Microphone::Automatic)] {
@@ -208,6 +240,29 @@ mod tests {
       Settings { microphone: mic, ..Settings::default() }.save(&path).unwrap();
       assert!(fs::read_to_string(&path).unwrap().contains(&format!(r#""microphone": {stored}"#)));
     }
+  }
+
+  /// Settings with these model keys: (key, model).
+  fn with_keys(keys: &[(&str, &str)]) -> Settings {
+    let keys = keys.iter().map(|&(key, model)| ModelKey { key: key.into(), model: model.into() });
+    Settings { keys: keys.collect(), ..Settings::default() }
+  }
+
+  /// The keys in use, in the order they come: a key taken (in any case), a model with one, an
+  /// empty key or model are passed over.
+  #[test]
+  fn model_keys_take_each_key_and_model_once() {
+    let s = with_keys(&[
+      ("Z", "gigaam-v3"),
+      ("f1", "parakeet-v2"),
+      ("z", "whisper-turbo"),
+      ("x", "gigaam-v3"),
+      (" ", "moonshine-tiny"),
+      ("ctrl+option+r", "whisper-turbo"),
+      ("7", ""),
+    ]);
+    let keys: Vec<&str> = s.model_keys().into_iter().map(|k| k.key.as_str()).collect();
+    assert_eq!(keys, ["Z", "f1", "ctrl+option+r"]);
   }
 
   #[test]
