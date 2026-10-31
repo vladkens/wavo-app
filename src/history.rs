@@ -29,8 +29,8 @@ use crate::audio::{Clip, read_wav};
 
 pub const DB_FILE: &str = "history.db";
 pub const RECORDINGS_DIR: &str = "recordings";
-/// Entries without text no model has tried outlast the retention this long: a model of their
-/// language may come.
+/// Entries without text no model has tried are kept at least this long after they were recorded,
+/// whatever the retention: a model of their language may come.
 pub const UNTRIED_DAYS: i64 = 30;
 
 // MARK: Time and text
@@ -307,16 +307,32 @@ impl Db {
     Ok(self.db.prepare_cached(qs)?.query_row([], total)?)
   }
 
-  /// The entries without text that nothing transcribes now and that have their recording, newest
-  /// first: those a model may take by itself.
-  pub fn get_untried(&self) -> Result<Vec<Entry>> {
+  /// The newest entry without text that nothing transcribes now and that has its recording, of
+  /// those `wanted` takes by their language and the model that tried them last. They are looked at
+  /// newest first, and only the one returned is read whole.
+  pub fn get_untried(
+    &self,
+    mut wanted: impl FnMut(Option<&str>, Option<&str>) -> bool,
+  ) -> Result<Option<Entry>> {
     let qs = "
-    SELECT * FROM entries
+    SELECT id, language, tried_model FROM entries
     WHERE text = '' AND busy = 0 AND audio_path IS NOT NULL
     ORDER BY created_at DESC, id DESC;
     ";
 
-    self.get_all(qs, [])
+    let mut stmt = self.db.prepare_cached(qs)?;
+    let rows = stmt.query_map([], |r| {
+      Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+    })?;
+
+    for row in rows {
+      let (id, language, tried) = row?;
+      if wanted(language.as_deref(), tried.as_deref()) {
+        return self.get_entry(id);
+      }
+    }
+
+    Ok(None)
   }
 
   /// The entries after the newest `keep`; those being transcribed, those without text no model
@@ -704,7 +720,7 @@ mod tests {
   }
 
   /// The entries a model may take by itself: without text, not busy, with a recording; newest
-  /// first.
+  /// first, the first one wanted.
   #[test]
   fn untried_entries_are_those_without_text() {
     let dir = TempDir::new("history-untried");
@@ -714,8 +730,19 @@ mod tests {
     add(&h, 500, "text", false);
     add(&h, 500, "", true);
     h.db.insert(&[Entry { created_at: NOW, ..Entry::default() }]).unwrap();
-    let ids: Vec<i64> = h.db.get_untried().unwrap().iter().map(|e| e.id).collect();
-    assert_eq!(ids, [newer, older]);
+    h.db.mark_busy(older, "gigaam").unwrap();
+    h.db.mark_idle(older).unwrap();
+
+    let mut seen = Vec::new();
+    let first = h.db.get_untried(|_, tried| {
+      seen.push(tried.map(str::to_owned));
+      false
+    });
+    assert_eq!(first.unwrap(), None);
+    assert_eq!(seen, [None, Some("gigaam".to_owned())], "newest first");
+
+    let tried = h.db.get_untried(|_, tried| tried.is_some()).unwrap().unwrap();
+    assert_eq!((tried.id, tried.tried_model.as_deref()), (older, Some("gigaam")));
   }
 
   #[test]
@@ -759,6 +786,11 @@ mod tests {
     // A busy one and a young one no model tried are neither removed nor counted; zero keeps one.
     assert_eq!(h.cleanup(Retention::Count(1), NOW, false).unwrap(), 1);
     assert_eq!(h.cleanup(Retention::Count(0), NOW, false).unwrap(), 0);
+    assert_eq!(entry_ids(dir.path()), [entries[0].0, busy, untried]);
+
+    // Past the month one no model tried counts too.
+    add(&h, (UNTRIED_DAYS + 1) * DAY, "", false);
+    assert_eq!(h.cleanup(Retention::Count(1), NOW, false).unwrap(), 1);
     assert_eq!(entry_ids(dir.path()), [entries[0].0, busy, untried]);
   }
 

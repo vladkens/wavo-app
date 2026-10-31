@@ -85,9 +85,10 @@ pub enum Input {
   KeyDown { at: Instant, repeat: bool, which: usize },
   /// Hotkey `which` released.
   KeyUp { at: Instant, which: usize },
-  /// Model key `index` ([Settings::held_keys], a letter or digit) pressed while a hotkey is held:
-  /// the dictation goes to its model, the last one pressed, and the release stops it. Not once the
-  /// recording is latched.
+  /// Model key `index` ([Settings::held_keys], a letter or digit) pressed while the dictation's
+  /// hotkey is down: the dictation goes to its model, the last one pressed. A held press then stops
+  /// at its release, however short; in toggle mode the recording stays latched. Not after a tap
+  /// latched it.
   #[cfg_attr(not(test), allow(dead_code, reason = "the hotkeys send it once nimbo reports keys"))]
   ModelKey { index: usize },
   /// Another key went down while hotkey `which`, a modifier alone, was held: the press was a chord
@@ -620,18 +621,13 @@ struct Dictation<T> {
   /// The model its hotkey or a key picked (a choice, as [Settings::model]); `None`: the default
   /// one.
   model: Option<String>,
-  /// The engine loading its model for it.
-  prewarmed: Option<Prewarm>,
+  /// The engine loading its model for it, by the model's path.
+  prewarmed: Option<PathBuf>,
+  /// The engines whose model its prewarms loaded: a key that picks another model drops them.
+  cold: Vec<PathBuf>,
   job: Option<Job>,
   duration_ms: i64,
   warnings: Vec<String>,
-}
-
-/// A dictation's engine loading its model for it.
-struct Prewarm {
-  path: PathBuf,
-  /// The engine had no model: the load is the dictation's own.
-  cold: bool,
 }
 
 struct Controller<O: TextOutput> {
@@ -825,11 +821,6 @@ impl<O: TextOutput> Controller<O> {
       Effect::StopRecording(_) => self.stop_recording(),
       Effect::CancelRecording(_) => self.cancel(),
       Effect::AbortRecording(_) => {
-        // The press was a chord: a model it loaded goes with it.
-        if let Some(prewarm) = self.dictation.as_ref().and_then(|d| d.prewarmed.as_ref()) {
-          self.let_go(prewarm, true);
-        }
-
         // The last dictation and its warnings stay the ones before.
         let (last, warnings) = (self.last.take(), mem::take(&mut self.last_warnings));
         self.cancel();
@@ -1103,6 +1094,7 @@ impl<O: TextOutput> Controller<O> {
       recorder: Some(recorder),
       model,
       prewarmed: None,
+      cold: Vec::new(),
       job: None,
       duration_ms: 0,
     });
@@ -1125,9 +1117,10 @@ impl<O: TextOutput> Controller<O> {
 
     let prewarm = match self.engine_for(choice.as_deref()) {
       Ok(loaded) => {
+        // Its engine has no model: the load is the dictation's own.
         let cold = loaded.engine.status().phase == engine::Phase::Stopped;
         loaded.engine.prewarm();
-        Some(Prewarm { path: loaded.path.clone(), cold })
+        Some((loaded.path.clone(), cold))
       }
       Err(e) => {
         info!("dictation {take}: recording without a model: {e}");
@@ -1135,19 +1128,26 @@ impl<O: TextOutput> Controller<O> {
       }
     };
 
-    let path = prewarm.as_ref().map(|p| p.path.clone());
-    let before = mem::replace(&mut self.dictation.as_mut().unwrap().prewarmed, prewarm);
-    if let Some(before) = before.filter(|b| path.as_ref() != Some(&b.path)) {
-      self.let_go(&before, true);
+    let d = self.dictation.as_mut().unwrap();
+    if let Some((path, true)) = &prewarm
+      && !d.cold.contains(path)
+    {
+      d.cold.push(path.clone());
     }
+
+    let path = prewarm.map(|(path, _)| path);
+    let before = mem::replace(&mut d.prewarmed, path.clone());
+    let Some(before) = before.filter(|b| path.as_ref() != Some(b)) else { return };
+    let undo = d.cold.contains(&before);
+    self.let_go(&before, undo);
   }
 
-  /// A dictation's engine may unload its model when idle again; with `undo` a model the
-  /// dictation's prewarm loaded goes at once.
-  fn let_go(&self, prewarm: &Prewarm, undo: bool) {
-    let Some(l) = self.loaded(&prewarm.path) else { return };
+  /// A dictation's engine at `path` may unload its model when idle again; with `undo` the model
+  /// goes at once.
+  fn let_go(&self, path: &Path, undo: bool) {
+    let Some(l) = self.loaded(path) else { return };
     l.engine.release();
-    if undo && prewarm.cold {
+    if undo {
       l.engine.unload();
     }
   }
@@ -1377,8 +1377,8 @@ impl<O: TextOutput> Controller<O> {
   fn complete(&mut self) {
     let mut d = self.dictation.take().unwrap();
     d.last.took_ms = d.stopped.map(|s| s.elapsed().as_millis() as u64);
-    if let Some(prewarm) = &d.prewarmed {
-      self.let_go(prewarm, false);
+    if let Some(path) = &d.prewarmed {
+      self.let_go(path, false);
     }
 
     let after_stop = d.stopped.map(|s| format!(", {} ms after the stop", s.elapsed().as_millis()));
@@ -1422,10 +1422,10 @@ impl<O: TextOutput> Controller<O> {
     };
 
     let mut job = self.new_job(model)?;
-    job.language = match entry.language {
-      Some(code) if entry.text.is_empty() => Some(code),
-      _ if auto => None,
-      _ => language_for(job.info, &self.settings),
+    job.language = if auto || entry.text.is_empty() {
+      entry.language
+    } else {
+      language_for(job.info, &self.settings)
     };
 
     // Marked tried before it runs: a crash or a failure is not tried again by the same model.
@@ -1447,9 +1447,9 @@ impl<O: TextOutput> Controller<O> {
     own.or_else(routed).and_then(|m| m.choice.clone())
   }
 
-  /// One entry without text at a time, when no dictation runs, by a model that has not tried it
-  /// and knows its language; while a model does not load its entries wait, for the next dictation
-  /// that loads it.
+  /// One entry without text at a time, when no dictation runs, by the model its language goes to
+  /// ([route]; a detected one no model of more than one takes, to the one found) unless that one
+  /// tried it; while a model does not load its entries wait, for the next dictation that loads it.
   fn transcribe_untried(&mut self) {
     while self.untried && self.dictation.is_none() && self.retranscribing.is_empty() {
       let (found, waiting) = self.untried_entry();
@@ -1470,23 +1470,25 @@ impl<O: TextOutput> Controller<O> {
   /// choice; and whether one waits for a model that does not load. One model per entry: two don't
   /// take turns at an entry that gives no text.
   fn untried_entry(&self) -> (Option<(Entry, Option<String>)>, bool) {
-    let (models, mut passed) = (self.models(), false);
-    let entries = self.history.db.get_untried().inspect_err(|e| warn!("history: {e:#}"));
-    for entry in entries.unwrap_or_default() {
-      let Some(m) = route(&models, entry.language.as_deref()) else { continue };
-      if entry.tried_model.as_deref() == Some(file_stem(&m.path).as_str()) {
-        continue;
+    let models = self.models();
+    let (mut passed, mut to) = (false, None);
+    let found = self.history.db.get_untried(|language, tried| {
+      let Some(m) = route(&models, language) else { return false };
+      if tried == Some(file_stem(&m.path).as_str()) {
+        return false;
       }
 
       if self.loaded(&m.path).is_some_and(|l| l.engine.status().load_error.is_some()) {
         passed = true;
-        continue;
+        return false;
       }
 
-      return (Some((entry, m.choice.clone())), passed);
-    }
+      to = Some(m);
+      true
+    });
 
-    (None, passed)
+    let entry = found.inspect_err(|e| warn!("history: {e:#}")).ok().flatten();
+    (entry.zip(to).map(|(entry, m)| (entry, m.choice.clone())), passed)
   }
 
   fn on_retranscribed(&mut self, r: Retranscription, result: Result<String, EngineError>) {
@@ -1593,7 +1595,7 @@ impl<O: TextOutput> Controller<O> {
   fn dictation_path(&self) -> Option<&Path> {
     let d = self.dictation.as_ref()?;
     let job = d.job.as_ref().map(|j| j.path.as_path());
-    job.or(d.prewarmed.as_ref().map(|p| p.path.as_path()))
+    job.or(d.prewarmed.as_deref())
   }
 
   /// The engine the status shows: the dictation's, else one at work, else one with its model in
@@ -1640,16 +1642,16 @@ pub fn label(choice: &str) -> String {
 /// models before files of the person's own, which take any; one without a language (detected) to
 /// the first of more than one or a file of the person's own, else to the one found.
 fn route<'a>(models: &'a [OnDisk], language: Option<&str>) -> Option<&'a OnDisk> {
-  let mut order: Vec<&OnDisk> = models.iter().collect();
-  order.sort_by_key(|m| m.info.is_none());
   let takes = |m: &&OnDisk| match (m.info, language) {
     (None, _) => true,
     (Some(info), Some(code)) => info.langs.iter().any(|l| l.eq_ignore_ascii_case(code)),
     (Some(info), None) => info.langs.len() > 1,
   };
 
+  let wavo = models.iter().filter(|m| m.info.is_some());
+  let own = models.iter().filter(|m| m.info.is_none());
   let found = || models.iter().find(|m| m.choice.is_none()).filter(|_| language.is_none());
-  order.into_iter().find(takes).or_else(found)
+  wavo.chain(own).find(takes).or_else(found)
 }
 
 /// The language a model is asked in: its own for a model of one language, else the setting's
@@ -1844,7 +1846,7 @@ mod tests {
   }
 
   /// Another hotkey's press and release leave the press in progress as it is: its chord still
-  /// drops it, and a press of it after its release is no autorepeat.
+  /// drops it; and a press of another hotkey while it is down is no autorepeat of it.
   #[test]
   fn another_hotkeys_release_leaves_the_press_in_progress() {
     let mut d = Drive::new(Activation::HoldOrToggle);
@@ -1855,7 +1857,6 @@ mod tests {
 
     let mut d = Drive::new(Activation::Toggle);
     d.down(0);
-    d.up(100);
     assert_eq!(d.press(500, 1), Some(StopRecording(1)), "any press stops a latched one");
     d.release(600, 1);
     d.finish(1);
@@ -2547,6 +2548,45 @@ mod tests {
     assert_eq!((s.models.loads(), s.models.live()), (3, 2), "the default one stays");
     s.handle.input(Input::Escape);
     s.finished(3);
+  }
+
+  /// A key of the model the press already loads keeps that load the dictation's own: a key of
+  /// another model then drops it.
+  #[test]
+  fn a_key_of_the_same_model_keeps_the_presss_load_its_own() {
+    let settings = Settings {
+      keys: vec![model_key("z", "parakeet-v3"), model_key("x", "gigaam-v3")],
+      ..Settings::default()
+    };
+    let models = ["parakeet-v3", "gigaam-v3"];
+    let s = InProcess::start("session-key-same", &settings, Some(&loud(10.0)), "hi", &models);
+    s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+    poll("the default model", Duration::from_secs(10), || (s.models.live() == 1).then_some(()));
+    for index in [0, 1] {
+      s.handle.input(Input::ModelKey { index });
+    }
+
+    poll("the key's model alone", Duration::from_secs(10), || {
+      (s.models.loads() == 2 && s.models.live() == 1).then_some(())
+    });
+    s.handle.input(Input::Escape);
+    s.finished(1);
+  }
+
+  /// A press that was a chord (fn+←) keeps the model it loaded, as without model keys: the next
+  /// press needs it.
+  #[test]
+  fn a_chord_keeps_the_model_its_press_loaded() {
+    let mic = loud(10.0);
+    let s =
+      InProcess::start("session-chord", &Settings::default(), Some(&mic), "", &["parakeet-v3"]);
+    s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+    s.update_where("recording", |u| u.status.state == Phase::Recording);
+    poll("the model", Duration::from_secs(10), || (s.models.live() == 1).then_some(()));
+    s.handle.input(Input::KeyAborted { which: 0 });
+    s.update_where("the press dropped", |u| u.status.state == Phase::Idle);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!((s.models.loads(), s.models.live()), (1, 1));
   }
 
   /// With an unload right after each dictation, a Transcribe Again while recording leaves the
