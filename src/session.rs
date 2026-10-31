@@ -1039,13 +1039,15 @@ impl<O: TextOutput> Controller<O> {
     self.dictation.as_mut().unwrap().job = Some(job);
   }
 
-  /// The entry of the dictation: without text, busy if a model transcribes it.
+  /// The entry of the dictation, with its finished recording's size: without text, busy if a
+  /// model transcribes it.
   fn add_entry(&self, model: Option<&str>) -> Option<i64> {
     let d = self.dictation.as_ref().unwrap();
     let entry = Entry {
       created_at: d.created_at,
       duration_ms: d.duration_ms,
       audio_path: Some(d.audio.clone()),
+      audio_bytes: self.history.recordings.size(&d.audio),
       tried_model: model.map(str::to_owned),
       busy: model.is_some(),
       ..Entry::default()
@@ -1662,10 +1664,11 @@ mod tests {
       wav_count(&self.home.path().join(RECORDINGS_DIR))
     }
 
-    /// The history entry of `last`, which keeps its recording.
+    /// The history entry of `last`, which keeps its recording, and its size.
     fn kept(&self, last: &Last) -> Entry {
       let entry = self.entry(last.entry.expect("an entry")).unwrap();
-      assert!(self.history().audio_file(&entry).is_some(), "the recording is kept");
+      let file = self.history().audio_file(&entry).expect("the recording is kept");
+      assert_eq!(entry.audio_bytes, Some(fs::metadata(file).unwrap().len()), "its size");
       entry
     }
 

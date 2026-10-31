@@ -213,7 +213,8 @@ impl Prefs {
       history: HistoryPage { db: history, ..HistoryPage::default() },
     };
     prefs.refresh();
-    prefs.measure();
+    // Recordings from before sizes were kept, and those an import cut short couldn't copy.
+    prefs.shell.measure_history();
     prefs
   }
 
@@ -224,10 +225,7 @@ impl Prefs {
     }
 
     self.status = status.clone();
-    if history != self.history.revision {
-      self.history.revision = history;
-      self.measure();
-    }
+    self.history.revision = history;
   }
 
   /// Looks again at what the session does not push: when the window opens or comes to the front.
@@ -1514,9 +1512,6 @@ struct HistoryPage {
   /// The whole history's ([Db::get_total]), read again when it changes and once its recordings
   /// are measured.
   total: Option<Total>,
-  /// A pass of [Shell::measure_history] runs: `true` once the history changed since it started,
-  /// for one more after it.
-  measuring: Option<bool>,
   /// What the entries were loaded for: the search and the revision.
   loaded: Option<(String, u64)>,
   /// The search as typed last, and when ([Ui::now]).
@@ -1890,28 +1885,11 @@ impl Prefs {
     }
   }
 
-  /// Measures the recordings the history has not, for the size under the panel: as the window
-  /// opens and when the history changes, a pass at a time.
-  fn measure(&mut self) {
-    match self.history.measuring {
-      Some(_) => self.history.measuring = Some(true),
-      None => {
-        self.history.measuring = Some(false);
-        self.shell.measure_history();
-      }
-    }
-  }
-
-  /// A pass of [Shell::measure_history] ended: the totals are read again, and another pass runs
-  /// when the history changed meanwhile.
+  /// The pass of [Shell::measure_history] ended: the totals are read again.
   pub fn history_measured(&mut self) {
     let h = &mut self.history;
     if let Some(history) = &h.db {
       h.total = history.db.get_total().inspect_err(|e| warn!("history: {e:#}")).ok();
-    }
-
-    if h.measuring.take() == Some(true) {
-      self.measure();
     }
   }
 }
@@ -3017,16 +2995,20 @@ mod tests {
     assert_eq!(total(0, 0, 24_576), None);
   }
 
-  /// Under the panel: how many, how long, how big on disk and since when. The recordings are
-  /// measured as the window opens and as the history changes, a pass at a time.
+  /// Under the panel: how many, how long, how big on disk and since when. Recordings not measured
+  /// yet are measured once, as the window opens, not as the history changes.
   #[test]
   fn the_footer_sums_up_the_history() {
     let home = Home::new("window-total", &[]);
     home.dictations(&[("Let's move the design review.", 3), ("Send the invoice to Anna.", 2)]);
     let fake = Fake::default();
     let mut h = home.harness(&fake, Settings::default());
+    // As open_window does, at once: the revision moves from 0.
+    let settings = h.app().settings.clone();
+    h.app_mut().update(&settings, &Status::default(), 7);
     tab(&mut h, Page::History);
-    assert_eq!(fake.log().measures, 1, "as it opened");
+    h.app_mut().update(&settings, &Status::default(), 8);
+    assert_eq!(fake.log().measures, 1, "as it opened, only");
 
     // The database alone until the pass ends, then its two recordings of 1,600 samples too.
     let history = History::open(home.dir.path()).unwrap();
@@ -3040,16 +3022,6 @@ mod tests {
     h.frame();
     let text = h.text(Id::of("history-total")).unwrap();
     assert!(text.starts_with(&want(after)), "{text}");
-
-    // Changed twice while a pass runs: one more after it, then none.
-    let settings = h.app().settings.clone();
-    h.app_mut().update(&settings, &Status::default(), 7);
-    h.app_mut().update(&settings, &Status::default(), 8);
-    assert_eq!(fake.log().measures, 2);
-    h.app_mut().history_measured();
-    assert_eq!(fake.log().measures, 3);
-    h.app_mut().history_measured();
-    assert_eq!(fake.log().measures, 3);
   }
 
   /// The whole history loads at once; the list builds only the rows it shows.

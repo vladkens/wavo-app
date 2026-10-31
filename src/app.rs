@@ -1074,14 +1074,11 @@ impl window::Shell for AppShell {
     });
   }
 
-  /// On its own connection: the first pass after an update measures the whole history.
+  /// The first pass after an update measures the whole history.
   fn measure_history(&self) {
     let home = self.home.clone();
     spawn("history-size", move || {
-      if let Err(e) = History::open(&home).and_then(|h| h.measure()) {
-        warn!("history size: {e:#}");
-      }
-
+      measure(&home);
       with_window(Prefs::history_measured);
     });
   }
@@ -1190,6 +1187,8 @@ impl window::Shell for AppShell {
         }
       };
       *state.lock().unwrap() = Some(end);
+      // The recordings it copied, before the session tells the window.
+      measure(&home);
       if let Err(e) = handle.request(Request::Imported) {
         warn!("import: {e}");
       }
@@ -1208,6 +1207,14 @@ impl window::Shell for AppShell {
 
   fn check_updates(&self) {
     proxy().post(open_update);
+  }
+}
+
+/// The recordings of the history in `home` not measured yet, on a connection of its own
+/// ([History::measure]).
+fn measure(home: &Path) {
+  if let Err(e) = History::open(home).and_then(|h| h.measure()) {
+    warn!("history size: {e:#}");
   }
 }
 
