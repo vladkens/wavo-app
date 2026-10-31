@@ -49,6 +49,14 @@ Wavo is inspired by [Handy](https://github.com/cjpais/Handy) and runs the same G
 2. Pick a model in Settings › Models: **Parakeet Ultra**, about 0.7 GB, downloaded once.
 3. Hold **Option-Space** (Ctrl+Alt+Space on Windows and Linux), speak and let go. A short tap starts a longer dictation that the next press ends; Esc cancels.
 
+**Coming from Handy?** Quit Handy and run this, then bring in `~/Downloads/handy-export.zip` with Advanced › Data › Import…: your history comes over with its recordings, and Handy itself is only read.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/vladkens/wavo-app/main/scripts/handy.py | python3 -
+```
+
+The same Export… and Import… in Advanced › Data move your history to another computer.
+
 <details>
 <summary>Which file, and the first launch</summary>
 
@@ -70,19 +78,6 @@ On Wayland the desktop asks once to let Wavo paste (at the first paste, or earli
 Wavo's icon goes in the tray, which GNOME needs the AppIndicator extension for (Ubuntu ships it); KDE, Xfce, Cinnamon and MATE have a tray of their own.
 
 The GPU needs a Vulkan driver (`mesa-vulkan-drivers` on Debian and Ubuntu); without one Wavo runs on the CPU, much slower.
-
-</details>
-
-<details>
-<summary>Bringing your history over</summary>
-
-From another computer: Advanced › Data › Export… there, then Advanced › Data › Import… here; dictations Wavo already has are skipped.
-
-From Handy: quit Handy and run the line below, then import `~/Downloads/handy-export.zip` the same way. Handy itself is only read.
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/vladkens/wavo-app/main/scripts/handy.py | python3 -
-```
 
 </details>
 
