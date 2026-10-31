@@ -25,7 +25,7 @@ use nimbo::paste::{self, PORTAL_WAIT, Paste};
 use nimbo::permissions::{self, Access, Pane};
 use nimbo::system::Change;
 use nimbo::tray::{Menu, Tray};
-use nimbo::{Clipboard, Main, Proxy, SystemClipboard, Window, autostart};
+use nimbo::{Clipboard, Hotkey, Main, Proxy, SystemClipboard, Window, autostart};
 use shipo::{Release, Staged};
 use tracing::{error, info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -33,11 +33,11 @@ use wavo::hub::{self, Hub, ModelInfo};
 use crate::history::{self, Entry, History};
 use crate::hud::{self, Hud, Mode, Show};
 use crate::menu::{self, Icon, Warning};
-use crate::session::{self, Handle, NotPasted, Phase, Request, Session, TextOutput, Update};
-use crate::settings::{self, HudPosition, Settings};
+use crate::session::{self, Edges, Handle, NotPasted, Phase, Request, Session, TextOutput, Update};
+use crate::settings::{self, Binding, HudPosition, Settings};
 use crate::updater::{Act, State, UpdateWindow, Updater};
 use crate::window::{
-  self, Download, Downloads, Export, Found, Import, Page, Pick, Prefs, Transfer, no_text,
+  self, Download, Downloads, Export, Found, Import, KeyNotes, Page, Pick, Prefs, Transfer, no_text,
 };
 use crate::{INFO, audio, transfer, updater};
 
@@ -52,6 +52,10 @@ const WATCHED: &[Change] = match cfg!(target_os = "macos") {
   true => &[Change::AudioInputs, Change::DefaultInput, Change::Lid],
   false => &[Change::AudioInputs, Change::DefaultInput],
 };
+
+/// Model keys work here: nimbo arms several hotkeys and takes keys while one is held only on macOS
+/// for now.
+const MODEL_KEYS: bool = cfg!(target_os = "macos");
 
 thread_local! {
   static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -81,6 +85,10 @@ struct App {
   icon: Icon,
   menu: Menu,
   hotkeys: Hotkeys,
+  /// The main hotkey does not parse: no hotkey is set.
+  hotkey_error: Option<String>,
+  /// What the hotkeys last said of the model keys, as the settings window shows it.
+  notes: KeyNotes,
   hud: (Window<Hud>, HudPosition),
   handle: Handle,
   home: PathBuf,
@@ -188,8 +196,12 @@ fn start(
   // After the session's: it creates and migrates the history.
   let history = History::open(&home).inspect_err(|e| warn!("the history: {e:#}")).ok().map(Rc::new);
   let hotkeys = {
-    let handle = handle.clone();
-    Hotkeys::new(move |edge| handle.input(edge.into()))
+    let (handle, edges) = (handle.clone(), RefCell::new(Edges::default()));
+    Hotkeys::new(move |edge| {
+      if let Some(input) = edges.borrow_mut().input(edge) {
+        handle.input(input);
+      }
+    })
   };
 
   // `open` shows the settings (the reopen hook below) and `quit` quits: nimbo's.
@@ -222,6 +234,8 @@ fn start(
     icon: Icon::Idle,
     menu: Menu::default(),
     hotkeys,
+    hotkey_error: None,
+    notes: KeyNotes::default(),
     hud: (open_hud(main, position), position),
     handle,
     home,
@@ -279,6 +293,32 @@ fn start(
   }
 
   Ok(())
+}
+
+/// What the hotkeys listen to, in the session's order ([session::Input]): the main hotkey, then the
+/// models' own ([Settings::own_hotkeys]); the keys held with them ([Settings::held_keys]). Without
+/// [MODEL_KEYS] the main one alone. The error when the main one does not parse.
+fn listened(s: &Settings) -> Result<(Vec<Hotkey>, Vec<Hotkey>), String> {
+  let main = Hotkey::parse(&s.hotkey).map_err(|e| e.to_string())?;
+  if !MODEL_KEYS {
+    return Ok((vec![main], Vec::new()));
+  }
+
+  let hotkey = |k: &settings::ModelKey| k.binding().map(Binding::hotkey);
+  let own = s.own_hotkeys().into_iter().filter_map(hotkey);
+  let keys = s.held_keys().into_iter().filter_map(hotkey).collect();
+  Ok((std::iter::once(main).chain(own).collect(), keys))
+}
+
+/// What `status` says of the model keys of `s`: a model's own hotkey that does not work, why the
+/// held keys don't.
+fn key_notes(status: &nimbo::hotkey::Status, s: &Settings) -> KeyNotes {
+  let error = |which: usize| status.slots.get(which).and_then(|slot| slot.error.clone());
+  let own = (s.own_hotkeys().into_iter().enumerate())
+    .filter_map(|(i, k)| Some((hub::lookup(k.model.trim()).ok()?.name, error(i + 1)?)))
+    .collect();
+  let held = status.keys_error.clone().filter(|_| !s.held_keys().is_empty());
+  KeyNotes { own, held }
 }
 
 /// nimbo does not tell a launch at login from the person's: a login item may be one.
@@ -366,7 +406,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
     return;
   }
 
-  let Some((shell, update, hub, home, history)) = with_app(|app| {
+  let Some((shell, update, hub, home, history, notes)) = with_app(|app| {
     let shell = AppShell {
       home: app.home.clone(),
       handle: app.handle.clone(),
@@ -376,7 +416,8 @@ fn open_window(main: &mut Main, page: Option<Page>) {
       import: app.import.clone(),
       updater: app.updater.clone(),
     };
-    (shell, app.update.clone(), app.hub.clone(), app.home.clone(), app.history.clone())
+    let notes = app.notes.clone();
+    (shell, app.update.clone(), app.hub.clone(), app.home.clone(), app.history.clone(), notes)
   }) else {
     return;
   };
@@ -391,6 +432,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
     prefs.update(&u.settings, &u.status, u.history);
   }
 
+  prefs.key_notes(notes);
   prefs.page = page.unwrap_or(Page::General);
   let w = main.open(&window::config(prefs.page), prefs);
   // The shortcut recorder may have paused the hotkey.
@@ -486,7 +528,17 @@ impl App {
     }
 
     let status = &update.status;
-    let _ = self.hotkeys.set(&update.settings.hotkey); // its error shows in the menu
+    // Their errors show in the menu and in Settings.
+    self.hotkey_error = match listened(&update.settings) {
+      Ok((hotkeys, keys)) => {
+        let _ = self.hotkeys.set(&hotkeys, &keys);
+        None
+      }
+      Err(e) => {
+        let _ = self.hotkeys.set(&[], &[]);
+        Some(e)
+      }
+    };
     self.hotkeys.escape(status.state != Phase::Idle);
     let position = update.settings.hud_position;
     let shown = self.hud.0.with(|h| h.mode()).unwrap_or(Mode::Hidden);
@@ -513,9 +565,12 @@ impl App {
           device: r.map_or_else(String::new, |r| r.device.clone()),
           seconds: r.map_or(0.0, |r| r.seconds),
           warning: hint,
+          tag: hud::tag(status),
         }
       }
-      Phase::Transcribing => Show::Transcribing(status.engine.progress),
+      Phase::Transcribing => {
+        Show::Transcribing { progress: status.engine.progress, tag: hud::tag(status) }
+      }
       Phase::Idle => {
         let before = self.update.as_ref().map(|u| &u.status);
         let (paste, took) = (update.settings.auto_paste, update.settings.show_transcription_time);
@@ -728,7 +783,9 @@ impl App {
     let dead = hotkeys.listener == Listener::Failed && !hotkeys.fallback;
     let system = menu::System {
       accessibility: self.accessibility,
-      hotkey_error: hotkeys.error.or(hotkeys.listener_error.filter(|_| dead)),
+      hotkey_error: (self.hotkey_error.clone())
+        .or_else(|| hotkeys.slots.first().and_then(|s| s.error.clone()))
+        .or(hotkeys.listener_error.filter(|_| dead)),
       hotkey_portal: nimbo::hotkey::start_asks() && !listening,
       paste_portal: focus::hidden() && !nimbo::keys::ready(),
       no_microphone: self.mic() != Access::Granted,
@@ -757,7 +814,14 @@ impl App {
       self.tray.set_tooltip(icon.description());
     }
 
-    let hotkey = self.hotkeys.status().hotkey.map(|h| h.label());
+    let hotkeys = self.hotkeys.status();
+    let notes = key_notes(&hotkeys, &update.settings);
+    if notes != self.notes {
+      self.notes = notes.clone();
+      with_window(move |prefs| prefs.key_notes(notes));
+    }
+
+    let hotkey = hotkeys.slots.first().map(|s| s.hotkey.label());
     let now = history::now_ms();
     let recent: Vec<String> = (self.recent.iter())
       .map(|e| {
@@ -768,7 +832,8 @@ impl App {
     let mics = (&self.devices[..], &update.settings.microphone, self.lid_closed);
     let (status, found, pick) = (&update.status, &self.found, &self.pick);
     let updating = self.updater.lock().unwrap().showing().cloned();
-    let models = (&found[..], pick);
+    let keys = if MODEL_KEYS { update.settings.key_labels() } else { Vec::new() };
+    let models = (&found[..], pick, &keys[..]);
     let menu =
       menu::menu(hotkey.as_deref(), status, &warnings, &recent, mics, models, updating.as_ref());
     if menu != self.menu {
@@ -1016,6 +1081,10 @@ impl window::Shell for AppShell {
     proxy().post(move |_| _ = with_app(|app| app.hotkeys.pause(paused)));
   }
 
+  fn model_keys(&self) -> bool {
+    MODEL_KEYS
+  }
+
   fn devices(&self) -> Vec<audio::Device> {
     audio::devices()
   }
@@ -1054,7 +1123,11 @@ impl window::Shell for AppShell {
         Ok(freed) => {
           info!("deleted {} ({freed:?} bytes)", model.name);
           let chosen = |q: &str| hub::lookup(q).is_ok_and(|m| m.name == model.name);
-          handle.edit_settings(move |s| s.model = s.model.take().filter(|q| !chosen(q)));
+          // Its key goes with it: only a model on disk shows one.
+          handle.edit_settings(move |s| {
+            s.model = s.model.take().filter(|q| !chosen(q));
+            s.keys.retain(|k| !chosen(&k.model));
+          });
           handle.check_model();
         }
         Err(e) => warn!("delete {}: {e}", model.name),
