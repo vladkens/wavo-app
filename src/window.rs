@@ -26,7 +26,9 @@ use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
 use crate::audio::{self, Auto, Choice, Microphone, Playback, Transport};
-use crate::history::{Entry, History, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms};
+use crate::history::{
+  Entry, History, Local, RECORDINGS_DIR, Retention, Total, fold, local_time, now_ms,
+};
 use crate::session::{NoModel, Request, Status, label};
 use crate::settings::{Activation, HudPosition, Settings, language_name};
 use crate::transfer::Imported;
@@ -104,6 +106,9 @@ pub trait Shell {
   /// Then [Prefs::models_changed].
   fn delete_model(&self, _model: &'static ModelInfo) {}
   fn history(&self, _req: Request) {}
+  /// Measures the recordings the history has not ([History::measure]) off the main thread: then
+  /// [Prefs::history_measured], whatever came of it.
+  fn measure_history(&self) {}
   fn autostart(&self) -> Result<Autostart, String>;
   /// Then [Prefs::autostart_set].
   fn set_autostart(&self, _on: bool) {}
@@ -208,6 +213,7 @@ impl Prefs {
       history: HistoryPage { db: history, ..HistoryPage::default() },
     };
     prefs.refresh();
+    prefs.measure();
     prefs
   }
 
@@ -218,7 +224,10 @@ impl Prefs {
     }
 
     self.status = status.clone();
-    self.history.revision = history;
+    if history != self.history.revision {
+      self.history.revision = history;
+      self.measure();
+    }
   }
 
   /// Looks again at what the session does not push: when the window opens or comes to the front.
@@ -1502,8 +1511,12 @@ struct HistoryPage {
   entries: Vec<Entry>,
   /// Their days: each one's entries and duration.
   days: Vec<(Day, Range<usize>, i64)>,
-  /// The whole history's ([Db::get_total]), read again when it changes.
-  total: Option<(usize, i64, Option<i64>)>,
+  /// The whole history's ([Db::get_total]), read again when it changes and once its recordings
+  /// are measured.
+  total: Option<Total>,
+  /// A pass of [Shell::measure_history] runs: `true` once the history changed since it started,
+  /// for one more after it.
+  measuring: Option<bool>,
   /// What the entries were loaded for: the search and the revision.
   loaded: Option<(String, u64)>,
   /// The search as typed last, and when ([Ui::now]).
@@ -1671,6 +1684,25 @@ fn day_note((n, ms): (usize, i64)) -> String {
   format!("{n} {what} · {}:{:02}", s / 60, s % 60)
 }
 
+/// The whole history: `86,286 dictations · 312 h · 16.6 GB · since March 14, 2026`, with what it
+/// takes on disk; nothing for an empty one.
+fn total_text(t: Total) -> Option<String> {
+  let first = t.first.filter(|_| t.count > 0)?;
+  let what = if t.count == 1 { "dictation" } else { "dictations" };
+  let spoken = match t.duration_ms / 1000 {
+    s if s < 60 => format!("{s} s"),
+    s if s < 3600 => format!("{} min", s / 60),
+    s => format!("{} h", s / 3600),
+  };
+  let since = local_time(first).map(|d| format!("{} {}, {}", d.month_name(), d.day, d.year));
+  let mut text = format!("{} {what} · {spoken} · {}", thousands(t.count), size_text(t.bytes));
+  if let Some(since) = since {
+    text += &format!(" · since {since}");
+  }
+
+  Some(text)
+}
+
 enum Act {
   Select(i64),
   Copy(String),
@@ -1790,8 +1822,7 @@ impl Prefs {
     self.history_act(ui, act);
   }
 
-  /// Under the panel, the whole history: `86,286 dictations · 312 h · since March 14, 2026`; for
-  /// [NOTE_TIME] after a note, the note.
+  /// Under the panel, the whole history ([total_text]); for [NOTE_TIME] after a note, the note.
   fn history_total(&self, ui: &mut Ui, fs: &FormStyle) {
     let now = ui.now();
     let note = self.history.note.as_ref().filter(|(_, at)| now < *at + NOTE_TIME);
@@ -1800,7 +1831,7 @@ impl Prefs {
         ui.request_frame_in(*at + NOTE_TIME - now);
         note.clone()
       }
-      None => match self.total_text() {
+      None => match self.history.total.and_then(total_text) {
         Some(text) => text,
         None => return,
       },
@@ -1810,23 +1841,6 @@ impl Prefs {
     ui.row(Style::new().w(grow()).h(px(TOTAL_H)).align(Align::Center, Align::Center), |ui| {
       ui.id("history-total").text(&text, fs.note.nowrap());
     });
-  }
-
-  fn total_text(&self) -> Option<String> {
-    let (n, ms, Some(first)) = self.history.total.filter(|t| t.0 > 0)? else { return None };
-    let what = if n == 1 { "dictation" } else { "dictations" };
-    let spoken = match ms / 1000 {
-      s if s < 60 => format!("{s} s"),
-      s if s < 3600 => format!("{} min", s / 60),
-      s => format!("{} h", s / 3600),
-    };
-    let since = local_time(first).map(|t| format!("{} {}, {}", t.month_name(), t.day, t.year));
-    let mut text = format!("{} {what} · {spoken}", thousands(n));
-    if let Some(since) = since {
-      text += &format!(" · since {since}");
-    }
-
-    Some(text)
   }
 
   fn history_act(&mut self, ui: &mut Ui, act: Option<Act>) {
@@ -1873,6 +1887,31 @@ impl Prefs {
       && let Some(e) = p.error()
     {
       h.said = Some(format!("Could not play the recording: {e}"));
+    }
+  }
+
+  /// Measures the recordings the history has not, for the size under the panel: as the window
+  /// opens and when the history changes, a pass at a time.
+  fn measure(&mut self) {
+    match self.history.measuring {
+      Some(_) => self.history.measuring = Some(true),
+      None => {
+        self.history.measuring = Some(false);
+        self.shell.measure_history();
+      }
+    }
+  }
+
+  /// A pass of [Shell::measure_history] ended: the totals are read again, and another pass runs
+  /// when the history changed meanwhile.
+  pub fn history_measured(&mut self) {
+    let h = &mut self.history;
+    if let Some(history) = &h.db {
+      h.total = history.db.get_total().inspect_err(|e| warn!("history: {e:#}")).ok();
+    }
+
+    if h.measuring.take() == Some(true) {
+      self.measure();
     }
   }
 }
@@ -2100,6 +2139,8 @@ mod tests {
     cancelled: Vec<String>,
     deleted: Vec<&'static str>,
     requests: Vec<Request>,
+    /// Passes of [Shell::measure_history] asked for.
+    measures: usize,
     autostarts: Vec<bool>,
     export: Option<Export>,
     exports: Vec<PathBuf>,
@@ -2193,6 +2234,11 @@ mod tests {
 
     fn history(&self, req: Request) {
       self.log().requests.push(req);
+    }
+
+    /// The test measures, and calls [Prefs::history_measured].
+    fn measure_history(&self) {
+      self.log().measures += 1;
     }
 
     fn autostart(&self) -> Result<Autostart, String> {
@@ -2950,6 +2996,60 @@ mod tests {
   fn numbers_read_in_thousands() {
     let got: Vec<_> = [0, 7, 999, 1_000, 86_286, 1_234_567].map(thousands).into();
     assert_eq!(got, ["0", "7", "999", "1,000", "86,286", "1,234,567"]);
+  }
+
+  /// The size as everywhere in the window ([size_text]): a decimal in GB, whole MB and KB.
+  #[test]
+  fn the_total_says_how_big_the_history_is() {
+    // Noon UTC: March 14 from UTC-12 to UTC+11.
+    let first = Some(1_773_489_600_000);
+    let total = |count, duration_ms, bytes| total_text(Total { count, duration_ms, first, bytes });
+    let (min, since) = (60_000, " · since March 14, 2026");
+    let cases = [
+      ((88_296, 144 * 60 * min + 59 * min, 12_345_678_901), "88,296 dictations · 144 h · 12.3 GB"),
+      ((40, 25 * min, 740_400_000), "40 dictations · 25 min · 740 MB"),
+      ((1, 4_200, 48_000), "1 dictation · 4 s · 48 KB"),
+    ];
+    for ((count, ms, bytes), want) in cases {
+      assert_eq!(total(count, ms, bytes), Some(format!("{want}{since}")));
+    }
+
+    assert_eq!(total(0, 0, 24_576), None);
+  }
+
+  /// Under the panel: how many, how long, how big on disk and since when. The recordings are
+  /// measured as the window opens and as the history changes, a pass at a time.
+  #[test]
+  fn the_footer_sums_up_the_history() {
+    let home = Home::new("window-total", &[]);
+    home.dictations(&[("Let's move the design review.", 3), ("Send the invoice to Anna.", 2)]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::History);
+    assert_eq!(fake.log().measures, 1, "as it opened");
+
+    // The database alone until the pass ends, then its two recordings of 1,600 samples too.
+    let history = History::open(home.dir.path()).unwrap();
+    let before = history.db.get_total().unwrap().bytes;
+    assert_eq!(history.measure().unwrap(), 2);
+    let after = history.db.get_total().unwrap().bytes;
+    assert_eq!(after - before, 2 * 3_244);
+    let want = |bytes| format!("2 dictations · 6 s · {} · since ", size_text(bytes));
+    assert!(h.text(Id::of("history-total")).unwrap().starts_with(&want(before)));
+    h.app_mut().history_measured();
+    h.frame();
+    let text = h.text(Id::of("history-total")).unwrap();
+    assert!(text.starts_with(&want(after)), "{text}");
+
+    // Changed twice while a pass runs: one more after it, then none.
+    let settings = h.app().settings.clone();
+    h.app_mut().update(&settings, &Status::default(), 7);
+    h.app_mut().update(&settings, &Status::default(), 8);
+    assert_eq!(fake.log().measures, 2);
+    h.app_mut().history_measured();
+    assert_eq!(fake.log().measures, 3);
+    h.app_mut().history_measured();
+    assert_eq!(fake.log().measures, 3);
   }
 
   /// The whole history loads at once; the list builds only the rows it shows.

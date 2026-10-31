@@ -1074,6 +1074,18 @@ impl window::Shell for AppShell {
     });
   }
 
+  /// On its own connection: the first pass after an update measures the whole history.
+  fn measure_history(&self) {
+    let home = self.home.clone();
+    spawn("history-size", move || {
+      if let Err(e) = History::open(&home).and_then(|h| h.measure()) {
+        warn!("history size: {e:#}");
+      }
+
+      with_window(Prefs::history_measured);
+    });
+  }
+
   fn autostart(&self) -> Result<autostart::State, String> {
     autostart::state(&INFO)
   }
