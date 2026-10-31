@@ -2,17 +2,17 @@
 
 ### Features
 
-- Added dictation on macOS 14.2 and later, Windows 10 and 11, and Linux on X11 and Wayland: hold the hotkey (Option-Space on macOS, Ctrl+Alt+Space elsewhere) and speak, or tap it to start and stop, Esc to cancel; the microphone stays open a moment after the release while you finish a word, and the text is pasted where you were typing with the clipboard put back (#2, #6, #8, #14, #24, #31, #43)
-- Added speech recognition on your computer by wavo, on the GPU or, with macOS 15 and later, a Mac's Neural Engine, in about 100 languages: nothing leaves the machine; long recordings are transcribed in pieces, and a dictation never waits for the Neural Engine to get ready (#5, #10, #20, #34)
-- Added the menu bar and tray app: an icon for each state, Copy Last Dictation, recent dictations, the model and the microphone to use, and short warnings that open where a missing permission or model is fixed (#8, #12, #22, #24, #32)
-- Added the HUD: a small pill at the bottom or the top of the screen with the level while you speak and a wave while the text is made, which never takes the focus; Advanced › Show the transcription time adds how long the text took (#8, #29, #34)
-- Added Automatic, the default microphone: a USB one first, then the built-in one (on a Mac only with the lid open), then a wired one, and a Bluetooth headset only when there is no other, as it records at call quality and loses the first words; the menu and Settings name the one that records, such as `Automatic (MacBook Pro Microphone)`, and a microphone you chose that isn't connected stays chosen while the system's input records; Linux doesn't tell how a microphone is attached, so there Automatic takes the system's input (#30, #35, #45)
-- Added the settings window: General (permissions, microphone, model, language, shortcut, launch at login), Models (download with progress, resume and delete wavo's models, by language, Parakeet Ultra recommended), History, Advanced and About; the microphones and a Mac's lid update live while it is open, and it opens by itself only at a launch with a permission or a model missing (#12, #18, #19, #22, #45)
-- Added the history: every recording with speech, kept forever or for a while, the whole of it in one fast list; search, play back, copy, delete, or transcribe again with another model and restore the previous text, also from a row's right-click menu; a recording left without text is transcribed again once a model can (#4, #9, #21, #23, #30, #44)
-- Added export and import of the history with its recordings between computers, and the history of Handy brought in through `scripts/handy.py` (#11, #22)
-- Added Linux's desktop support: on Wayland the paste through the RemoteDesktop portal and the hotkey through the GlobalShortcuts portal, each asked from the menu (Allow Paste…, Allow the Hotkey…), the HUD on GNOME under Wayland through XWayland, and a launcher entry with Wavo's icon for the dock and Alt+Tab (#24, #29)
-- Added the command line: `wavo-app toggle` for a desktop's own shortcut where Wavo's hotkey can't be (GNOME before 48 on Wayland), and `wavo-app uninstall`, which removes all Wavo left: the history, settings and caches, the models it downloaded, and on macOS its permissions and the app itself (#17, #22, #24, #30, #33)
-- Added updates in place: a release looks for a new version at launch and once a day, and the menu says when there is one; that item and Check for Updates… open the update's window, as Sparkle has it, with the release notes, Skip This Version, Remind Me Later and Install Update, which puts it in place and restarts Wavo; nothing opens by itself, and Advanced › Check for updates turns the daily look off; the updates are signed and come through [shipo](https://github.com/vladkens/shipo), for the DMG, the Windows setups and the AppImages, while a .deb is updated by installing the next one (#42, #46)
-- Added the downloads: a signed and notarized DMG for Apple Silicon Macs, which needs no Gatekeeper steps; Windows setups for x64 and ARM64, which install Wavo for you alone with a Start menu entry, removed in Settings › Apps; an AppImage and a .deb for Linux on x86_64 and aarch64 (#25, #40, #41, #46)
+- Added dictation on macOS, Windows and Linux: hold the hotkey, speak and release, or tap it to start and stop, and the text lands where you were typing (#6, #8, #24, #43)
+- Added speech recognition on your computer in about 100 languages: no account, and your voice never leaves the machine (#5, #10)
+- Added fast transcription on the GPU, and on a Mac's Neural Engine with macOS 15 or later (#20, #34)
+- Added a small on-screen pill that shows your voice while you speak and never takes the focus (#8, #29)
+- Added automatic microphone choice: a USB microphone first, a Bluetooth headset only when there is no other (#35, #45)
+- Added the menu bar and tray menu with your recent dictations, the model and the microphone (#8, #12, #32)
+- Added settings for the hotkey, language, microphone and models, with model downloads by language (#12, #18, #19)
+- Added the history of your dictations: search, play back, copy, delete, or transcribe again with another model (#9, #21, #44)
+- Added export and import of the history, including from Handy (#11, #22)
+- Added updates from the menu: Wavo checks once a day and installs a new version when you choose (#42, #46)
+- Added `wavo-app toggle` for your desktop's own shortcut, and `wavo-app uninstall` to remove Wavo with its data and models (#17, #24, #30)
+- Added downloads for Apple Silicon Macs, Windows on x64 and ARM64, and Linux on x86_64 and aarch64 (#25, #40, #46)
 
 **Full Changelog**: https://github.com/vladkens/wavo-app/commits/v0.1.0
