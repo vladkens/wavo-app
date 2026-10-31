@@ -30,57 +30,39 @@ jobs:
       - run: make check CROSS="aarch64-apple-darwin x86_64-pc-windows-gnu"
       - run: make test
 
-  # A job per OS; aarch64 cross-compiled. Linux on the oldest LTS for its glibc. Also on release PRs,
-  # which rust-build checks.
+  # A job per target, each on its runner's own OS and CPU (arm64 on GitHub's ARM runners): none
+  # cross-compiles, and each keeps its own cache. Linux on the oldest LTS for its glibc. Also on
+  # release PRs, which rust-build checks.
   build:
-    name: build ${{ matrix.os }}
+    name: build ${{ matrix.target }}
     if: "github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || startsWith(github.event.pull_request.title, 'release: v')"
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macOS
-            runner: macos-latest
-            dist: make dist
-          - os: Windows
-            runner: windows-latest
-            dist: make dist T=x86_64-pc-windows-msvc && make dist T=aarch64-pc-windows-msvc
-          - os: Linux
-            runner: ubuntu-22.04
-            dist: make dist T=x86_64-unknown-linux-gnu && make dist T=aarch64-unknown-linux-gnu
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
-    env:
-      # Linux aarch64 cross-build.
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-      PKG_CONFIG_ALLOW_CROSS: 1
-      PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
     steps:
       - uses: actions/checkout@v7
-      # arm64 ALSA from Ubuntu's ports mirror.
+      # ALSA for cpal.
       - if: runner.os == 'Linux'
-        run: |
-          sudo dpkg --add-architecture arm64
-          sudo rm -f /etc/apt/sources.list.d/*
-          sudo sed -i -E 's/^deb ([^[])/deb [arch=amd64] \1/' /etc/apt/sources.list
-          for suite in jammy jammy-updates; do
-            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $suite main universe"
-          done | sudo tee -a /etc/apt/sources.list
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libasound2-dev libasound2-dev:arm64 gcc-aarch64-linux-gnu
-          rustup target add aarch64-unknown-linux-gnu
-      # The runner image has no make.
-      - if: runner.os == 'Windows'
-        run: |
-          rustup target add aarch64-pc-windows-msvc
-          choco install make --no-progress -y
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
       - uses: vladkens/actions/rust-build@v1
         with:
           name: Wavo
-          dist: ${{ matrix.dist }}
+          dist: make dist T=${{ matrix.target }}
           dev: true
           crates: false
-          artifact: release-${{ matrix.os }}
+          artifact: release-${{ matrix.target }}
 
   publish:
     if: github.ref == 'refs/heads/main'
@@ -97,7 +79,13 @@ jobs:
         with:
           name: release
           pattern: release-*
-      - run: sudo apt-get update && sudo apt-get install -y nsis && cargo install --locked shipo
+      # shipo, the packer: its latest release's prebuilt binary.
+      - run: |
+          mkdir -p "$RUNNER_TEMP/shipo"
+          gh release download -R vladkens/shipo --pattern '*x86_64-unknown-linux-musl.tar.gz' -O - | tar -xz -C "$RUNNER_TEMP/shipo" shipo
+          echo "$RUNNER_TEMP/shipo" >> "$GITHUB_PATH"
+        env:
+          GH_TOKEN: ${{ github.token }}
       - uses: vladkens/actions/rust-publish@v1
         with:
           name: Wavo
