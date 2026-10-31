@@ -98,7 +98,7 @@ The app's `uninstall` command removes all Wavo left: the history, settings and c
 
 ## 🤖 How it's made
 
-Wavo is written by AI agents (Claude Code, Codex) following [agents.md](agents.md); I choose what to build and review every pull request. The HUD, the settings and the update windows are tested headless in nimbo's harness, and `make test-models` transcribes Russian and English speech fixtures with real models, failing above a 15% word error rate. I've written software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)); agents are how I build now. Releases are rare, and an update doesn't break what you rely on: the CLI, the config and your data stay compatible; a breaking change waits for a major version.
+Wavo is built with AI agents following [agents.md](agents.md); I decide what to build and review every change. I've written software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)). Releases are rare and keep your config and data working.
 
 ## 🤝 Contributing
 
