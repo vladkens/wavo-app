@@ -7,10 +7,11 @@
 //! - A recording with speech gets its entry (busy, without text) before the engine has it: a crash
 //!   leaves an entry to transcribe again, which the next start recovers before any recording.
 //! - Text is optional: no model, an engine error or nothing recognized leave the entry without
-//!   text. Such entries are transcribed by themselves once another model can transcribe: one at a
-//!   time, behind dictations, each by a model that has not tried it yet (`tried_model`) and knows
-//!   its language. An entry's language is the one it was recorded in: a model of one language's
-//!   own, else the setting's; one without (detected) goes to a model of more than one only.
+//!   text. Such entries are transcribed by themselves once a model can: one at a time, started
+//!   while no dictation runs, each by the model its language goes to ([route]) unless that one
+//!   tried it already (`tried_model`). A dictation that starts meanwhile goes first on the same
+//!   model's engine, and runs beside it on another one's. An entry's language is the one it was
+//!   recorded in: a model of one language's own, else the setting's (none: detected).
 //! - A chosen model not on disk gives way to the first one found, with a warning; the choice stays.
 //! - A model key ([settings::ModelKey]) sends a dictation to its model: a letter or digit pressed
 //!   while the hotkey is held, or a hotkey of the model's own. Its model not on disk gets no
@@ -619,11 +620,18 @@ struct Dictation<T> {
   /// The model its hotkey or a key picked (a choice, as [Settings::model]); `None`: the default
   /// one.
   model: Option<String>,
-  /// The engine loading its model for it, by the model's path.
-  prewarmed: Option<PathBuf>,
+  /// The engine loading its model for it.
+  prewarmed: Option<Prewarm>,
   job: Option<Job>,
   duration_ms: i64,
   warnings: Vec<String>,
+}
+
+/// A dictation's engine loading its model for it.
+struct Prewarm {
+  path: PathBuf,
+  /// The engine had no model: the load is the dictation's own.
+  cold: bool,
 }
 
 struct Controller<O: TextOutput> {
@@ -770,7 +778,7 @@ impl<O: TextOutput> Controller<O> {
       Request::Retranscribe(id) => {
         let entry =
           self.history.db.get_entry(id)?.ok_or_else(|| anyhow!("no history entry {id}"))?;
-        let model = self.own_model(&entry);
+        let model = self.model_again(&entry);
         self.retranscribe(entry, model.as_deref(), false)
       }
       Request::Restore(id) => {
@@ -817,6 +825,11 @@ impl<O: TextOutput> Controller<O> {
       Effect::StopRecording(_) => self.stop_recording(),
       Effect::CancelRecording(_) => self.cancel(),
       Effect::AbortRecording(_) => {
+        // The press was a chord: a model it loaded goes with it.
+        if let Some(prewarm) = self.dictation.as_ref().and_then(|d| d.prewarmed.as_ref()) {
+          self.let_go(prewarm, true);
+        }
+
         // The last dictation and its warnings stay the ones before.
         let (last, warnings) = (self.last.take(), mem::take(&mut self.last_warnings));
         self.cancel();
@@ -986,7 +999,8 @@ impl<O: TextOutput> Controller<O> {
   }
 
   /// The engine of `choice`'s model ([model_for](Self::model_for)), started if it has none. With
-  /// an unload right after each dictation, the other engines unload: one model in memory.
+  /// an unload right after each dictation, the other engines but the dictation's unload: one model
+  /// in memory, two while a Transcribe Again runs beside a dictation.
   fn engine_for(&mut self, choice: Option<&str>) -> Result<&Loaded, NoModel> {
     let (path, info) = self.model_for(choice)?;
     let at = match self.engines.iter().position(|l| l.path == path) {
@@ -1003,8 +1017,9 @@ impl<O: TextOutput> Controller<O> {
     };
 
     if self.settings.unload_after() == Some(Duration::ZERO) {
+      let current = self.dictation_path();
       for (i, l) in self.engines.iter().enumerate() {
-        if i != at {
+        if i != at && Some(l.path.as_path()) != current {
           l.engine.unload();
         }
       }
@@ -1099,8 +1114,8 @@ impl<O: TextOutput> Controller<O> {
     self.prewarm();
   }
 
-  /// The engine of the dictation's model loads it while the person speaks; one that loaded another
-  /// model for it before a key picked this one is released.
+  /// The engine of the dictation's model loads it while the person speaks. One that loaded another
+  /// model for it before a key picked this one lets go, and drops a model the dictation loaded.
   fn prewarm(&mut self) {
     let d = self.dictation.as_ref().unwrap();
     let (take, choice) = (d.last.take, d.model.clone());
@@ -1108,10 +1123,11 @@ impl<O: TextOutput> Controller<O> {
       info!("dictation {take}: with {}", label(choice));
     }
 
-    let path = match self.engine_for(choice.as_deref()) {
+    let prewarm = match self.engine_for(choice.as_deref()) {
       Ok(loaded) => {
+        let cold = loaded.engine.status().phase == engine::Phase::Stopped;
         loaded.engine.prewarm();
-        Some(loaded.path.clone())
+        Some(Prewarm { path: loaded.path.clone(), cold })
       }
       Err(e) => {
         info!("dictation {take}: recording without a model: {e}");
@@ -1119,12 +1135,20 @@ impl<O: TextOutput> Controller<O> {
       }
     };
 
-    let d = self.dictation.as_mut().unwrap();
-    let before = mem::replace(&mut d.prewarmed, path.clone());
-    if let Some(before) = before.filter(|b| path.as_ref() != Some(b))
-      && let Some(l) = self.loaded(&before)
-    {
-      l.engine.release();
+    let path = prewarm.as_ref().map(|p| p.path.clone());
+    let before = mem::replace(&mut self.dictation.as_mut().unwrap().prewarmed, prewarm);
+    if let Some(before) = before.filter(|b| path.as_ref() != Some(&b.path)) {
+      self.let_go(&before, true);
+    }
+  }
+
+  /// A dictation's engine may unload its model when idle again; with `undo` a model the
+  /// dictation's prewarm loaded goes at once.
+  fn let_go(&self, prewarm: &Prewarm, undo: bool) {
+    let Some(l) = self.loaded(&prewarm.path) else { return };
+    l.engine.release();
+    if undo && prewarm.cold {
+      l.engine.unload();
     }
   }
 
@@ -1353,10 +1377,8 @@ impl<O: TextOutput> Controller<O> {
   fn complete(&mut self) {
     let mut d = self.dictation.take().unwrap();
     d.last.took_ms = d.stopped.map(|s| s.elapsed().as_millis() as u64);
-    if let Some(path) = &d.prewarmed
-      && let Some(loaded) = self.loaded(path)
-    {
-      loaded.engine.release();
+    if let Some(prewarm) = &d.prewarmed {
+      self.let_go(prewarm, false);
     }
 
     let after_stop = d.stopped.map(|s| format!(", {} ms after the stop", s.elapsed().as_millis()));
@@ -1375,9 +1397,9 @@ impl<O: TextOutput> Controller<O> {
   }
 
   /// `entry`'s recording through the engine of `model` again (a choice, as [Settings::model];
-  /// `None`: the one found), behind dictations: in its own language when it goes by itself, else as
-  /// a dictation now would be. One without text whose recording has no speech (or is gone) is
-  /// deleted: there is nothing to keep.
+  /// `None`: the one found), behind the dictations on that engine: in its own language when it
+  /// goes by itself or has no text, else as a dictation now would be. One without text whose
+  /// recording has no speech (or is gone) is deleted: there is nothing to keep.
   fn retranscribe(&mut self, entry: Entry, model: Option<&str>, auto: bool) -> Result<()> {
     let id = entry.id;
     if entry.busy || self.is_busy(id) {
@@ -1400,7 +1422,12 @@ impl<O: TextOutput> Controller<O> {
     };
 
     let mut job = self.new_job(model)?;
-    job.language = if auto { entry.language } else { language_for(job.info, &self.settings) };
+    job.language = match entry.language {
+      Some(code) if entry.text.is_empty() => Some(code),
+      _ if auto => None,
+      _ => language_for(job.info, &self.settings),
+    };
+
     // Marked tried before it runs: a crash or a failure is not tried again by the same model.
     self.history.db.mark_busy(id, &job.model)?;
     info!("entry {id}: transcribing {:.1} s again with {}", input.seconds(), job.model);
@@ -1409,17 +1436,15 @@ impl<O: TextOutput> Controller<O> {
     Ok(())
   }
 
-  /// The choice of the model `entry`'s text came from, when it is on disk: the one found, a key's
-  /// or another of wavo's; else `None`, the one found.
-  fn own_model(&self, entry: &Entry) -> Option<String> {
-    let name = entry.model.as_deref()?;
-    if let Some(m) = self.models().into_iter().find(|m| file_stem(&m.path) == name) {
-      return m.choice;
-    }
-
-    let mut downloaded = self.config.hub.downloaded().into_iter();
-    let (info, _) = downloaded.find(|(_, path)| file_stem(path) == name)?;
-    Some(info.name.to_owned())
+  /// The model Transcribe Again takes (a choice; `None`: the one found): the one `entry`'s text
+  /// came from if that is the one found or a key's; for an entry without text the one of its
+  /// language ([route]); else the one found.
+  fn model_again(&self, entry: &Entry) -> Option<String> {
+    let models = self.models();
+    let name = entry.model.as_deref();
+    let own = name.and_then(|name| models.iter().find(|m| file_stem(&m.path) == name));
+    let routed = || route(&models, entry.language.as_deref()).filter(|_| entry.text.is_empty());
+    own.or_else(routed).and_then(|m| m.choice.clone())
   }
 
   /// One entry without text at a time, when no dictation runs, by a model that has not tried it
@@ -1441,18 +1466,17 @@ impl<O: TextOutput> Controller<O> {
     }
   }
 
-  /// The newest entry without text for a model on disk ([History::db]'s `get_untried`), the one
-  /// found's first, and the model's choice; and whether one waits for a model that does not load.
-  /// An entry goes to the first model that takes its language: two models don't take turns at an
-  /// entry that gives no text.
+  /// The newest entry without text whose model ([route]) has not tried it, and that model's
+  /// choice; and whether one waits for a model that does not load. One model per entry: two don't
+  /// take turns at an entry that gives no text.
   fn untried_entry(&self) -> (Option<(Entry, Option<String>)>, bool) {
     let (models, mut passed) = (self.models(), false);
-    let langs: Vec<Option<&[&str]>> = models.iter().map(|m| m.info.map(|i| i.langs)).collect();
-    for (i, m) in models.iter().enumerate() {
-      let entry = self.history.db.get_untried(&file_stem(&m.path), langs[i], &langs[..i]);
-      let Some(entry) = entry.inspect_err(|e| warn!("history: {e:#}")).ok().flatten() else {
+    let entries = self.history.db.get_untried().inspect_err(|e| warn!("history: {e:#}"));
+    for entry in entries.unwrap_or_default() {
+      let Some(m) = route(&models, entry.language.as_deref()) else { continue };
+      if entry.tried_model.as_deref() == Some(file_stem(&m.path).as_str()) {
         continue;
-      };
+      }
 
       if self.loaded(&m.path).is_some_and(|l| l.engine.status().load_error.is_some()) {
         passed = true;
@@ -1565,12 +1589,17 @@ impl<O: TextOutput> Controller<O> {
     }
   }
 
+  /// The engine of the dictation in progress: its job's, else its prewarm's.
+  fn dictation_path(&self) -> Option<&Path> {
+    let d = self.dictation.as_ref()?;
+    let job = d.job.as_ref().map(|j| j.path.as_path());
+    job.or(d.prewarmed.as_ref().map(|p| p.path.as_path()))
+  }
+
   /// The engine the status shows: the dictation's, else one at work, else one with its model in
   /// memory, else the one found's.
   fn shown_engine(&self) -> Option<&Loaded> {
-    let d = self.dictation.as_ref();
-    let current = d.and_then(|d| d.job.as_ref().map(|j| &j.path).or(d.prewarmed.as_ref()));
-    if let Some(l) = current.and_then(|path| self.loaded(path)) {
+    if let Some(l) = self.dictation_path().and_then(|path| self.loaded(path)) {
       return Some(l);
     }
 
@@ -1605,6 +1634,22 @@ pub fn label(choice: &str) -> String {
 
   let file = Path::new(choice).file_name().and_then(|f| f.to_str()).unwrap_or(choice);
   file.strip_suffix(".gguf").unwrap_or(file).to_owned()
+}
+
+/// The model on disk an entry without text goes to: the first that takes its `language`, wavo's
+/// models before files of the person's own, which take any; one without a language (detected) to
+/// the first of more than one or a file of the person's own, else to the one found.
+fn route<'a>(models: &'a [OnDisk], language: Option<&str>) -> Option<&'a OnDisk> {
+  let mut order: Vec<&OnDisk> = models.iter().collect();
+  order.sort_by_key(|m| m.info.is_none());
+  let takes = |m: &&OnDisk| match (m.info, language) {
+    (None, _) => true,
+    (Some(info), Some(code)) => info.langs.iter().any(|l| l.eq_ignore_ascii_case(code)),
+    (Some(info), None) => info.langs.len() > 1,
+  };
+
+  let found = || models.iter().find(|m| m.choice.is_none()).filter(|_| language.is_none());
+  order.into_iter().find(takes).or_else(found)
 }
 
 /// The language a model is asked in: its own for a model of one language, else the setting's
@@ -2386,26 +2431,29 @@ mod tests {
   const PARAKEET_V3: &str = "parakeet-tdt-0.6b-v3-Q8_0";
   const PARAKEET_V2: &str = "parakeet-tdt-0.6b-v2-Q8_0";
   const GIGAAM: &str = "gigaam-v3-e2e-rnnt-Q8_0";
+  const PARAKEET_HE: &str = "parakeet-tdt-0.6b-v3-he-Q8_0";
+  const WHISPER: &str = "whisper-large-v3-turbo-Q8_0";
 
-  /// A model of one language takes the entries without text in it only: one in another language,
-  /// or of none (detected), waits for a model that knows it.
+  /// A model of one language alone takes the entries without text in it and the detected ones; one
+  /// in another language waits for a model that knows it.
   #[test]
-  fn a_model_of_one_language_takes_only_its_entries_without_text() {
+  fn a_model_of_one_language_alone_takes_its_entries_and_the_detected_ones() {
     let s = InProcess::start("session-untried-language", &Settings::default(), None, "hi", &[]);
     let ru = s.add_untried(1_000, Some("ru"));
-    let others = [s.add_untried(2_000, Some("en")), s.add_untried(3_000, None)];
+    let en = s.add_untried(2_000, Some("en"));
+    let detected = s.add_untried(3_000, None);
     download(&s.hub, "gigaam-v3");
     s.handle.check_model();
-    let done = poll("transcribed", Duration::from_secs(10), || {
-      s.entry(ru).filter(|e| !e.text.is_empty() && !e.busy)
-    });
-    assert_eq!((done.model.as_deref(), done.language.as_deref()), (Some(GIGAAM), Some("ru")));
+    for (id, language) in [(ru, Some("ru")), (detected, None)] {
+      let done = poll("transcribed", Duration::from_secs(10), || {
+        s.entry(id).filter(|e| !e.text.is_empty() && !e.busy)
+      });
+      assert_eq!((done.model.as_deref(), done.language.as_deref()), (Some(GIGAAM), language));
+    }
 
     thread::sleep(Duration::from_millis(100));
-    for id in others {
-      let entry = s.entry(id).unwrap();
-      assert_eq!((entry.text.as_str(), entry.tried_model), ("", None), "{id}");
-    }
+    let entry = s.entry(en).unwrap();
+    assert_eq!((entry.text.as_str(), entry.tried_model), ("", None));
   }
 
   fn model_key(key: &str, model: &str) -> ModelKey {
@@ -2468,6 +2516,62 @@ mod tests {
     s.finished(1);
   }
 
+  /// A key lets go of the model its press loaded for the default one, and leaves one loaded before.
+  #[test]
+  fn a_model_key_unloads_only_what_its_press_loaded() {
+    let settings = Settings { keys: vec![model_key("z", "gigaam-v3")], ..Settings::default() };
+    let models = ["parakeet-v3", "gigaam-v3"];
+    let s = InProcess::start("session-key-cold", &settings, Some(&loud(10.0)), "hi", &models);
+    let down = || s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+    let loaded = |what: &str, loads: usize, live: usize| {
+      poll(what, Duration::from_secs(10), || {
+        (s.models.loads() == loads && s.models.live() == live).then_some(())
+      })
+    };
+
+    down();
+    loaded("the default model", 1, 1);
+    s.handle.input(Input::ModelKey { index: 0 });
+    loaded("the key's model alone", 2, 1);
+    s.handle.input(Input::Escape);
+    s.finished(1);
+
+    s.dictate(2);
+    loaded("both models", 3, 2);
+    down();
+    s.handle.input(Input::ModelKey { index: 0 });
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!((s.models.loads(), s.models.live()), (3, 2), "the default one stays");
+    s.handle.input(Input::Escape);
+    s.finished(3);
+  }
+
+  /// With an unload right after each dictation, a Transcribe Again while recording leaves the
+  /// dictation's model in memory.
+  #[test]
+  fn transcribe_again_while_recording_keeps_the_dictations_model() {
+    let settings = Settings {
+      keys: vec![model_key("z", "gigaam-v3")],
+      unload_after_minutes: Some(0),
+      ..Settings::default()
+    };
+    let models = ["parakeet-v3", "gigaam-v3"];
+    let mic = loud(10.0);
+    let s = InProcess::start("session-again-recording", &settings, Some(&mic), "hi", &models);
+    let id = s.add_entry(1_000, "текст", &loud(1.0));
+    s.history().db.update_text(id, "текст", Some(GIGAAM), Some("ru")).unwrap();
+    s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+    poll("the dictation's model", Duration::from_secs(10), || (s.models.live() == 1).then_some(()));
+
+    assert_eq!(s.retranscribed(id).model.as_deref(), Some(GIGAAM));
+    poll("the other model gone", Duration::from_secs(10), || (s.models.live() == 1).then_some(()));
+
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!((s.models.loads(), s.models.live()), (2, 1), "the dictation's stays");
+    s.handle.input(Input::Escape);
+    s.finished(1);
+  }
+
   /// Unload frees every model in memory: the default one's and a key's.
   #[test]
   fn unload_frees_every_model() {
@@ -2481,8 +2585,8 @@ mod tests {
     poll("no model", Duration::from_secs(10), || (s.models.live() == 0).then_some(()));
   }
 
-  /// Entries without text go to a model of their language, the default one's or a key's; one
-  /// without a language (detected) only to a model of more than one.
+  /// Entries without text go to the first model on disk of their language, the default one or a
+  /// key's; those without a language (detected) to the first of more than one.
   #[test]
   fn entries_without_text_go_to_a_model_of_their_language() {
     let settings = Settings { model: Some("parakeet-v2".into()), ..Settings::default() };
@@ -2491,27 +2595,16 @@ mod tests {
     let ru = s.add_untried(1_000, Some("ru"));
     let en = s.add_untried(2_000, Some("en"));
     let detected = s.add_untried(3_000, None);
-    s.handle.edit_settings(|s| s.keys = vec![model_key("z", "gigaam-v3")]);
-    let transcribed = |id| {
-      poll("transcribed", Duration::from_secs(10), || {
+    s.handle.edit_settings(|s| {
+      s.keys = vec![model_key("z", "gigaam-v3"), model_key("x", "parakeet-v3")];
+    });
+
+    for (id, model) in [(ru, GIGAAM), (en, PARAKEET_V2), (detected, PARAKEET_V3)] {
+      let entry = poll("transcribed", Duration::from_secs(10), || {
         s.entry(id).filter(|e| !e.text.is_empty() && !e.busy)
-      })
-    };
-
-    for (id, model, language) in [(ru, GIGAAM, "ru"), (en, PARAKEET_V2, "en")] {
-      let entry = transcribed(id);
-      assert_eq!(
-        (entry.model.as_deref(), entry.language.as_deref()),
-        (Some(model), Some(language))
-      );
+      });
+      assert_eq!(entry.model.as_deref(), Some(model), "{id}");
     }
-
-    thread::sleep(Duration::from_millis(100));
-    let entry = s.entry(detected).unwrap();
-    assert_eq!((entry.text.as_str(), entry.tried_model), ("", None), "no model of more than one");
-
-    s.handle.edit_settings(|s| s.model = Some("parakeet-v3".into()));
-    assert_eq!(transcribed(detected).model.as_deref(), Some(PARAKEET_V3));
   }
 
   /// An entry that gives no text is not passed back and forth between two models: it goes to the
@@ -2533,20 +2626,34 @@ mod tests {
     assert_eq!(s.models.runs().len(), 1, "tried once");
   }
 
-  /// Transcribe Again goes to the model the text came from while it is on disk, else to the
-  /// default one.
+  /// Transcribe Again goes to the model the text came from when that is the one found or a key's,
+  /// else to the one found; an entry without text to the model of its language.
   #[test]
   fn transcribe_again_goes_to_the_entrys_own_model() {
-    let settings = Settings { model: Some("parakeet-v3".into()), ..Settings::default() };
-    let models = ["parakeet-v3", "gigaam-v3"];
+    let settings = Settings {
+      model: Some("parakeet-v3".into()),
+      keys: vec![model_key("z", "gigaam-v3"), model_key("x", "parakeet-he")],
+      ..Settings::default()
+    };
+    let models = ["parakeet-v3", "gigaam-v3", "parakeet-he", "whisper-turbo"];
     let s = InProcess::start("session-again-own", &settings, None, "hi", &models);
     let id = s.add_entry(1_000, "текст", &loud(1.0));
-    s.history().db.update_text(id, "текст", Some(GIGAAM), Some("ru")).unwrap();
-    let entry = s.retranscribed(id);
-    assert_eq!((entry.model.as_deref(), entry.language.as_deref()), (Some(GIGAAM), Some("ru")));
+    let again = |model: &str, language: Option<&str>| {
+      s.history().db.update_text(id, "текст", Some(model), language).unwrap();
+      s.retranscribed(id)
+    };
 
-    s.history().db.update_text(id, "текст", Some("gone-Q8_0"), None).unwrap();
-    assert_eq!(s.retranscribed(id).model.as_deref(), Some(PARAKEET_V3));
+    let entry = again(GIGAAM, Some("ru"));
+    assert_eq!((entry.model.as_deref(), entry.language.as_deref()), (Some(GIGAAM), Some("ru")));
+    assert_eq!(again(WHISPER, None).model.as_deref(), Some(PARAKEET_V3), "a model of no key");
+    assert_eq!(again("gone-Q8_0", None).model.as_deref(), Some(PARAKEET_V3));
+
+    let untried = s.add_untried(2_000, Some("he"));
+    let entry = s.retranscribed(untried);
+    assert_eq!(
+      (entry.model.as_deref(), entry.language.as_deref()),
+      (Some(PARAKEET_HE), Some("he"))
+    );
   }
 
   #[test]
@@ -2559,6 +2666,32 @@ mod tests {
     assert_eq!((failed.state, failed.last), (Phase::Idle, None));
     let dir = s.home.path().join(RECORDINGS_DIR);
     assert_eq!(fs::read_dir(dir).unwrap().count(), 0, "no file, nor its day folder");
+  }
+
+  /// An entry without text goes to the first model on disk of its language, wavo's before a file of
+  /// the person's own; a detected one to the first of more than one or such a file, else to the one
+  /// found.
+  #[test]
+  fn an_entry_without_text_goes_to_the_model_of_its_language() {
+    let on = |name: &str, key: bool| OnDisk {
+      choice: key.then(|| name.to_owned()),
+      path: PathBuf::from(name),
+      info: hub::lookup(name).ok(),
+    };
+    let to = |models: &[OnDisk], language: Option<&str>| {
+      route(models, language).map(|m| m.path.display().to_string())
+    };
+
+    let two = [on("gigaam-v3", false), on("parakeet-v2", true)];
+    assert_eq!(to(&two, Some("ru")).as_deref(), Some("gigaam-v3"));
+    assert_eq!(to(&two, Some("EN")).as_deref(), Some("parakeet-v2"));
+    assert_eq!(to(&two, Some("de")), None);
+    assert_eq!(to(&two, None).as_deref(), Some("gigaam-v3"), "detected: the one found");
+
+    let own = [on("/models/own.gguf", false), on("gigaam-v3", true), on("parakeet-v3", true)];
+    assert_eq!(to(&own, Some("ru")).as_deref(), Some("gigaam-v3"), "the person's file last");
+    assert_eq!(to(&own, None).as_deref(), Some("parakeet-v3"), "detected: the first of more");
+    assert_eq!(to(&own, Some("he")).as_deref(), Some("/models/own.gguf"));
   }
 
   #[test]

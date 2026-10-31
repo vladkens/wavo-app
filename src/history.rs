@@ -7,7 +7,8 @@
 //!   text can always be made again from the audio.
 //! - Entries and their recordings go together, the file first: a crash in between leaves a row
 //!   whose file is gone, never a file nothing points to. Entries being transcribed (`busy`) are
-//!   never removed; the retention leaves those without text no model has tried.
+//!   never removed; the retention leaves those without text no model has tried for [UNTRIED_DAYS]
+//!   days.
 //! - [`History::recover`] runs on start: entries a crash left busy are not any more, entries
 //!   without text whose recording is gone go, and recordings without an entry (the app died while
 //!   recording) become entries without text if they have speech, else they go.
@@ -28,6 +29,9 @@ use crate::audio::{Clip, read_wav};
 
 pub const DB_FILE: &str = "history.db";
 pub const RECORDINGS_DIR: &str = "recordings";
+/// Entries without text no model has tried outlast the retention this long: a model of their
+/// language may come.
+pub const UNTRIED_DAYS: i64 = 30;
 
 // MARK: Time and text
 
@@ -303,59 +307,42 @@ impl Db {
     Ok(self.db.prepare_cached(qs)?.query_row([], total)?)
   }
 
-  /// The newest entry without text that `model` has not tried and nothing transcribes now, of
-  /// those it takes and none of the models `before` it does: an entry goes to the first model that
-  /// takes it. A model takes the entries in its `langs` (any for `None`: a file of the person's
-  /// own), and those without a language (detected) when it has more than one.
-  pub fn get_untried(
-    &self,
-    model: &str,
-    langs: Option<&[&str]>,
-    before: &[Option<&[&str]>],
-  ) -> Result<Option<Entry>> {
+  /// The entries without text that nothing transcribes now and that have their recording, newest
+  /// first: those a model may take by itself.
+  pub fn get_untried(&self) -> Result<Vec<Entry>> {
     let qs = "
     SELECT * FROM entries
     WHERE text = '' AND busy = 0 AND audio_path IS NOT NULL
-      AND (tried_model IS NULL OR tried_model != ?1)
-      AND (?2 IS NULL
-        OR lower(language) IN (SELECT value FROM json_each(?2))
-        OR (language IS NULL AND json_array_length(?2) > 1))
-      AND NOT EXISTS (
-        SELECT 1 FROM json_each(?3) AS m
-        WHERE m.type = 'null'
-          OR lower(language) IN (SELECT value FROM json_each(m.value))
-          OR (language IS NULL AND json_array_length(m.value) > 1)
-      )
-    ORDER BY created_at DESC, id DESC LIMIT 1;
+    ORDER BY created_at DESC, id DESC;
     ";
 
-    let langs = langs.map(serde_json::to_string).transpose()?;
-    let before = serde_json::to_string(before)?;
-    let mut stmt = self.db.prepare_cached(qs)?;
-    Ok(stmt.query_row(params![model, langs, before], Entry::from_row).optional()?)
+    self.get_all(qs, [])
   }
 
   /// The entries after the newest `keep`; those being transcribed, those without text no model
-  /// has tried, and those without text when `spare`, are neither returned nor counted.
-  pub fn get_beyond_newest(&self, keep: u32, spare: bool) -> Result<Vec<Entry>> {
+  /// has tried recorded since `untried` (Unix ms), and those without text when `spare`, are
+  /// neither returned nor counted.
+  pub fn get_beyond_newest(&self, keep: u32, spare: bool, untried: i64) -> Result<Vec<Entry>> {
     let qs = "
     SELECT * FROM entries
-    WHERE busy = 0 AND (text != '' OR (?2 = 0 AND tried_model IS NOT NULL))
+    WHERE busy = 0
+      AND (text != '' OR (?2 = 0 AND (tried_model IS NOT NULL OR created_at < ?3)))
     ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?1;
     ";
 
-    self.get_all(qs, params![keep, spare])
+    self.get_all(qs, params![keep, spare, untried])
   }
 
   /// The entries recorded before `at` (Unix ms), but those being transcribed, those without text
-  /// no model has tried, and those without text when `spare`.
-  pub fn get_created_before(&self, at: i64, spare: bool) -> Result<Vec<Entry>> {
+  /// no model has tried recorded since `untried`, and those without text when `spare`.
+  pub fn get_created_before(&self, at: i64, spare: bool, untried: i64) -> Result<Vec<Entry>> {
     let qs = "
     SELECT * FROM entries
-    WHERE busy = 0 AND (text != '' OR (?2 = 0 AND tried_model IS NOT NULL)) AND created_at < ?1;
+    WHERE busy = 0 AND created_at < ?1
+      AND (text != '' OR (?2 = 0 AND (tried_model IS NOT NULL OR created_at < ?3)));
     ";
 
-    self.get_all(qs, params![at, spare])
+    self.get_all(qs, params![at, spare, untried])
   }
 
   // MARK: Inserters
@@ -612,16 +599,17 @@ impl History {
   }
 
   /// Applies `retention` at `now` (Unix ms); entries without text stay when `spare`, and those no
-  /// model has tried always, and do not count: their audio is all there is of them. Returns how
-  /// many entries were removed.
+  /// model has tried for [UNTRIED_DAYS] days, and do not count: their audio is all there is of
+  /// them. Returns how many entries were removed.
   pub fn cleanup(&self, retention: Retention, now: i64, spare: bool) -> Result<usize> {
     let days = |n: i64| now - n * 24 * 60 * 60 * 1000;
+    let untried = days(UNTRIED_DAYS);
     let doomed = match retention {
       Retention::Unlimited => return Ok(0),
-      Retention::Count(n) => self.db.get_beyond_newest(n.max(1), spare)?,
-      Retention::Days3 => self.db.get_created_before(days(3), spare)?,
-      Retention::Weeks2 => self.db.get_created_before(days(14), spare)?,
-      Retention::Months3 => self.db.get_created_before(days(90), spare)?,
+      Retention::Count(n) => self.db.get_beyond_newest(n.max(1), spare, untried)?,
+      Retention::Days3 => self.db.get_created_before(days(3), spare, untried)?,
+      Retention::Weeks2 => self.db.get_created_before(days(14), spare, untried)?,
+      Retention::Months3 => self.db.get_created_before(days(90), spare, untried)?,
     };
 
     let mut removed = Vec::new();
@@ -715,53 +703,19 @@ mod tests {
     assert_eq!(got, ("Привет", Some("gigaam"), Some("whisper"), false));
   }
 
-  /// An entry without text goes to a model of its language; one without a language to a model of
-  /// more than one; a file of the person's own takes any.
+  /// The entries a model may take by itself: without text, not busy, with a recording; newest
+  /// first.
   #[test]
-  fn entries_without_text_go_to_a_model_of_their_language() {
+  fn untried_entries_are_those_without_text() {
     let dir = TempDir::new("history-untried");
     let h = History::open(dir.path()).unwrap();
-    let ids: Vec<i64> = (1..)
-      .zip([Some("ru"), Some("EN"), None])
-      .map(|(age, language)| {
-        let (name, path) = h.recordings.new_file(NOW - age);
-        write_wav(&path, &[0.1; 1_600]);
-        let language = language.map(str::to_owned);
-        let entry =
-          Entry { created_at: NOW - age, audio_path: Some(name), language, ..Entry::default() };
-        h.db.insert(&[entry]).unwrap()[0]
-      })
-      .collect();
-
-    let untried = |model: &str, langs: Option<&[&str]>| {
-      h.db.get_untried(model, langs, &[]).unwrap().map(|e| e.id)
-    };
-
-    let (ru, en, multi) = (&["ru"][..], &["en"][..], &["en", "ru"][..]);
-    assert_eq!(untried("gigaam", Some(ru)), Some(ids[0]));
-    assert_eq!(untried("parakeet-v2", Some(en)), Some(ids[1]), "in any case");
-    assert_eq!(untried("parakeet-he", Some(&["he"][..])), None, "nor one detected");
-    assert_eq!(untried("parakeet-v3", Some(multi)), Some(ids[0]), "the newest");
-    assert_eq!(untried("own", None), Some(ids[0]));
-
-    // An entry goes to the first model that takes it.
-    let after = |model: &str, langs: &[&str], before: &[Option<&[&str]>]| {
-      h.db.get_untried(model, Some(langs), before).unwrap().map(|e| e.id)
-    };
-
-    assert_eq!(after("gigaam", ru, &[Some(multi)]), None, "parakeet-v3's");
-    assert_eq!(after("gigaam", ru, &[Some(en)]), Some(ids[0]), "parakeet-v2 takes no Russian");
-    assert_eq!(after("whisper", multi, &[Some(ru)]), Some(ids[1]));
-    assert_eq!(after("whisper", multi, &[Some(en), Some(multi)]), None, "detected: the first");
-    assert_eq!(after("whisper", multi, &[None]), None, "a file of the person's own takes any");
-
-    for id in &ids[..2] {
-      h.db.mark_busy(*id, "parakeet-v3").unwrap();
-      h.db.mark_idle(*id).unwrap();
-    }
-
-    assert_eq!(untried("parakeet-v3", Some(multi)), Some(ids[2]), "detected: a model of more");
-    assert_eq!(untried("gigaam", Some(ru)), Some(ids[0]), "tried by another one");
+    let (older, _) = add(&h, 2_000, "", false);
+    let (newer, _) = add(&h, 1_000, "", false);
+    add(&h, 500, "text", false);
+    add(&h, 500, "", true);
+    h.db.insert(&[Entry { created_at: NOW, ..Entry::default() }]).unwrap();
+    let ids: Vec<i64> = h.db.get_untried().unwrap().iter().map(|e| e.id).collect();
+    assert_eq!(ids, [newer, older]);
   }
 
   #[test]
@@ -792,15 +746,17 @@ mod tests {
     let (tried, _) = add(&h, 400 * DAY, "", false);
     h.db.mark_busy(tried, "gigaam").unwrap();
     h.db.mark_idle(tried).unwrap();
-    let (untried, _) = add(&h, 400 * DAY, "", false);
+    let (untried, _) = add(&h, 10 * DAY, "", false);
+    add(&h, (UNTRIED_DAYS + 1) * DAY, "", false);
 
     assert_eq!(h.cleanup(Retention::Months3, NOW, true).unwrap(), 1, "nor one without text");
     assert!(!entries[4].1.exists());
-    assert_eq!(h.cleanup(Retention::Days3, NOW, false).unwrap(), 3, "but one no model tried");
+    let removed = h.cleanup(Retention::Days3, NOW, false).unwrap();
+    assert_eq!(removed, 4, "but one no model tried for less than a month");
     assert_eq!(entry_ids(dir.path()), [entries[0].0, entries[1].0, busy, untried]);
     assert_eq!(wav_count(&dir.path().join(RECORDINGS_DIR)), 4);
 
-    // A busy one and one no model tried are neither removed nor counted; zero keeps one.
+    // A busy one and a young one no model tried are neither removed nor counted; zero keeps one.
     assert_eq!(h.cleanup(Retention::Count(1), NOW, false).unwrap(), 1);
     assert_eq!(h.cleanup(Retention::Count(0), NOW, false).unwrap(), 0);
     assert_eq!(entry_ids(dir.path()), [entries[0].0, busy, untried]);
