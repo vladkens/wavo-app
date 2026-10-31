@@ -1512,12 +1512,12 @@ impl<O: TextOutput> Controller<O> {
   /// The retention spares entries without text while no model can transcribe them, or while they
   /// are being transcribed by themselves.
   fn cleanup(&mut self) {
-    // Also those waiting for a model on disk (a start, an unload in the middle of them), and those
-    // no model has tried: in a language no model on disk knows, or for one that does not load.
-    let (waiting, _) = self.untried_entry();
+    // Also those waiting for a model on disk (a start, an unload in the middle of them) or for one
+    // that does not load, and those no model has tried: in a language no model on disk knows.
+    let (waiting, passed) = self.untried_entry();
     let fresh = self.history.db.has_untried().inspect_err(|e| warn!("history: {e:#}"));
     let fresh = fresh.unwrap_or(true);
-    let spare = self.no_model().is_some() || self.untried || waiting.is_some() || fresh;
+    let spare = self.no_model().is_some() || self.untried || waiting.is_some() || passed || fresh;
     match self.history.cleanup(self.settings.history_retention, now_ms(), spare) {
       Ok(0) => {}
       Ok(n) => info!("history: {n} old entries removed"),
