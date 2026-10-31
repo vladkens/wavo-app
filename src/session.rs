@@ -11,7 +11,8 @@
 //!   while no dictation runs, each by the model its language goes to ([route]) unless that one
 //!   tried it already (`tried_model`). A dictation that starts meanwhile goes first on the same
 //!   model's engine, and runs beside it on another one's. An entry's language is the one it was
-//!   recorded in: a model of one language's own, else the setting's (none: detected).
+//!   recorded in: a model of one language's own, else the setting's; one without (detected, or from
+//!   before) is asked in the language a dictation now would be.
 //! - A chosen model not on disk gives way to the first one found, with a warning; the choice stays.
 //! - A model key ([settings::ModelKey]) sends a dictation to its model: a letter or digit pressed
 //!   while the hotkey is held, or a hotkey of the model's own. Its model not on disk gets no
@@ -1397,9 +1398,9 @@ impl<O: TextOutput> Controller<O> {
   }
 
   /// `entry`'s recording through the engine of `model` again (a choice, as [Settings::model];
-  /// `None`: the one found), behind the dictations on that engine: in its own language when it
-  /// goes by itself or has no text, else as a dictation now would be. One without text whose
-  /// recording has no speech (or is gone) is deleted: there is nothing to keep.
+  /// `None`: the one found), behind the dictations on that engine: in its own language, if it has
+  /// one, when it goes by itself or has no text; else as a dictation now would be. One without text
+  /// whose recording has no speech (or is gone) is deleted: there is nothing to keep.
   fn retranscribe(&mut self, entry: Entry, model: Option<&str>, auto: bool) -> Result<()> {
     let id = entry.id;
     if entry.busy || self.is_busy(id) {
@@ -1423,7 +1424,7 @@ impl<O: TextOutput> Controller<O> {
 
     let mut job = self.new_job(model)?;
     job.language = if auto || entry.text.is_empty() {
-      entry.language
+      entry.language.or_else(|| language_for(job.info, &self.settings))
     } else {
       language_for(job.info, &self.settings)
     };
@@ -2445,16 +2446,31 @@ mod tests {
     let detected = s.add_untried(3_000, None);
     download(&s.hub, "gigaam-v3");
     s.handle.check_model();
-    for (id, language) in [(ru, Some("ru")), (detected, None)] {
+    for id in [ru, detected] {
       let done = poll("transcribed", Duration::from_secs(10), || {
         s.entry(id).filter(|e| !e.text.is_empty() && !e.busy)
       });
-      assert_eq!((done.model.as_deref(), done.language.as_deref()), (Some(GIGAAM), language));
+      assert_eq!((done.model.as_deref(), done.language.as_deref()), (Some(GIGAAM), Some("ru")));
     }
 
     thread::sleep(Duration::from_millis(100));
     let entry = s.entry(en).unwrap();
     assert_eq!((entry.text.as_str(), entry.tried_model), ("", None));
+  }
+
+  /// An entry without text nor a language (one from before, a recording a crash left) is asked in
+  /// the language a dictation now would be: the setting's.
+  #[test]
+  fn an_entry_without_a_language_goes_in_the_settings_one() {
+    let settings = Settings { language: "de".into(), ..Settings::default() };
+    let s = InProcess::start("session-untried-setting", &settings, None, "hi", &[]);
+    let id = s.add_untried(1_000, None);
+    download(&s.hub, "parakeet-v3");
+    s.handle.check_model();
+    let done = poll("transcribed", Duration::from_secs(10), || {
+      s.entry(id).filter(|e| !e.text.is_empty() && !e.busy)
+    });
+    assert_eq!((done.model.as_deref(), done.language.as_deref()), (Some(PARAKEET_V3), Some("de")));
   }
 
   fn model_key(key: &str, model: &str) -> ModelKey {
