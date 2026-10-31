@@ -68,6 +68,17 @@ pub struct ModelKey {
   pub model: String,
 }
 
+impl ModelKey {
+  /// The letter or digit held with a hotkey, lowercase; `None` for a hotkey of the model's own.
+  pub fn held(&self) -> Option<char> {
+    let mut chars = self.key.trim().chars();
+    match (chars.next(), chars.next()) {
+      (Some(c), None) if c.is_ascii_alphanumeric() => Some(c.to_ascii_lowercase()),
+      _ => None,
+    }
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Activation {
@@ -184,6 +195,31 @@ impl Settings {
 
     keys
   }
+
+  /// The model keys that are hotkeys of their own, in the order the hotkey listener gets them
+  /// after the main one: hotkey 1 is the first.
+  pub fn own_hotkeys(&self) -> Vec<&ModelKey> {
+    self.model_keys().into_iter().filter(|k| k.held().is_none()).collect()
+  }
+
+  /// The model of hotkey `which`: `None` for the main one (0), else one of
+  /// [own_hotkeys](Self::own_hotkeys).
+  pub fn hotkey_model(&self, which: usize) -> Option<&str> {
+    let own = self.own_hotkeys().into_iter().nth(which.checked_sub(1)?)?;
+    Some(own.model.as_str())
+  }
+
+  /// The model keys that are a letter or digit held with a hotkey, in the order the hotkey
+  /// listener gets them: key 0 is the first.
+  pub fn held_keys(&self) -> Vec<&ModelKey> {
+    self.model_keys().into_iter().filter(|k| k.held().is_some()).collect()
+  }
+
+  /// The model of key `index` of [held_keys](Self::held_keys).
+  pub fn held_key_model(&self, index: usize) -> Option<&str> {
+    let key = self.held_keys().into_iter().nth(index)?;
+    Some(key.model.as_str())
+  }
 }
 
 // MARK: Languages
@@ -263,6 +299,23 @@ mod tests {
     ]);
     let keys: Vec<&str> = s.model_keys().into_iter().map(|k| k.key.as_str()).collect();
     assert_eq!(keys, ["Z", "f1", "ctrl+option+r"]);
+  }
+
+  /// A letter or digit is held with a hotkey; anything else is a hotkey of its own, numbered after
+  /// the main one.
+  #[test]
+  fn model_keys_are_held_or_hotkeys_of_their_own() {
+    let s = with_keys(&[
+      ("Z", "gigaam-v3"),
+      ("f1", "parakeet-v2"),
+      ("7", "whisper-turbo"),
+      ("ctrl+option+r", "moonshine-tiny"),
+    ]);
+    let held: Vec<Option<char>> = s.held_keys().into_iter().map(ModelKey::held).collect();
+    assert_eq!(held, [Some('z'), Some('7')]);
+    assert_eq!((s.held_key_model(1), s.held_key_model(2)), (Some("whisper-turbo"), None));
+    let hotkeys: Vec<Option<&str>> = (0..4).map(|which| s.hotkey_model(which)).collect();
+    assert_eq!(hotkeys, [None, Some("parakeet-v2"), Some("moonshine-tiny"), None]);
   }
 
   #[test]

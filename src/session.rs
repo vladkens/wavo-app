@@ -12,8 +12,10 @@
 //!   its language. An entry's language is the one it was recorded in: a model of one language's
 //!   own, else the setting's; one without (detected) goes to a model of more than one only.
 //! - A chosen model not on disk gives way to the first one found, with a warning; the choice stays.
-//! - Each model has an engine of its own, with its own idle unload: the one found, and those of the
-//!   model keys ([settings::ModelKey]).
+//! - A model key ([settings::ModelKey]) sends a dictation to its model: a letter or digit pressed
+//!   while the hotkey is held, or a hotkey of the model's own. Its model not on disk gets no
+//!   stand-in: the recording is kept without text. Each model has an engine of its own, with its
+//!   own idle unload.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -69,55 +71,57 @@ enum State {
 enum Hold {
   /// The hotkey that started the recording is down since then: its release decides.
   Held(Instant),
+  /// Held, and a model key came: the release stops the recording, however short the press.
+  Keyed,
   /// Records until the next press: a tap or toggle mode started it.
   Latched,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Input {
-  KeyDown {
-    at: Instant,
-    repeat: bool,
-  },
-  KeyUp {
-    at: Instant,
-  },
-  /// Another key went down while the hotkey, a modifier alone, was held: the press was a chord
-  /// (⌥E). A recording it started is dropped without a trace.
-  KeyAborted,
+  /// Hotkey `which` pressed, or held (`repeat`): 0 is the main one, the others the models' own
+  /// ([Settings::own_hotkeys], in order), whose dictations go to their models.
+  KeyDown { at: Instant, repeat: bool, which: usize },
+  /// Hotkey `which` released.
+  KeyUp { at: Instant, which: usize },
+  /// Model key `index` ([Settings::held_keys], a letter or digit) pressed while a hotkey is held:
+  /// the dictation goes to its model, the last one pressed, and the release stops it. Not once the
+  /// recording is latched.
+  #[cfg_attr(not(test), allow(dead_code, reason = "the hotkeys send it once nimbo reports keys"))]
+  ModelKey { index: usize },
+  /// Another key went down while hotkey `which`, a modifier alone, was held: the press was a chord
+  /// (⌥E, or fn+1 when that is a hotkey too). A recording it started is dropped without a trace.
+  KeyAborted { which: usize },
   /// Cancels a recording or its transcription.
   Escape,
   /// Starts a recording that runs until the next one, or stops it: `wavo-app toggle`, for a
   /// desktop's own shortcut where Wavo's hotkey can't be (GNOME before 48 on Wayland).
   Toggle,
   /// The microphone did not open.
-  RecordingFailed {
-    take: Take,
-  },
+  RecordingFailed { take: Take },
   /// The microphone stopped by itself: what it recorded is transcribed.
-  MicStopped {
-    take: Take,
-  },
+  MicStopped { take: Take },
   /// The dictation ended, delivered or not.
-  Finished {
-    take: Take,
-  },
+  Finished { take: Take },
 }
 
 impl From<Edge> for Input {
   fn from(edge: Edge) -> Self {
     match edge {
-      Edge::Down { at, repeat } => Input::KeyDown { at, repeat },
-      Edge::Up { at } => Input::KeyUp { at },
+      Edge::Down { at, repeat } => Input::KeyDown { at, repeat, which: 0 },
+      Edge::Up { at } => Input::KeyUp { at, which: 0 },
       Edge::Escape => Input::Escape,
-      Edge::Aborted => Input::KeyAborted,
+      Edge::Aborted => Input::KeyAborted { which: 0 },
     }
   }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Effect {
-  StartRecording(Take),
+  /// By hotkey `which` ([Input::KeyDown]).
+  StartRecording(Take, usize),
+  /// Model key `index`: the dictation goes to its model.
+  PickModel(Take, usize),
   StopRecording(Take),
   CancelRecording(Take),
   /// Like a cancel, without a word: the press was no hotkey press.
@@ -131,36 +135,40 @@ struct Machine {
   activation: Activation,
   state: State,
   last_take: Take,
-  /// The last press or repeat of the hotkey, if no release came after it.
+  /// The last press or repeat of a hotkey, if no release came after it.
   key_down: Option<Instant>,
   /// The take the press in progress started, until its release.
   pressed: Option<Take>,
+  /// The hotkey that started the recording in progress: only its release counts.
+  which: usize,
 }
 
 impl Machine {
   fn new(activation: Activation) -> Self {
-    Self { activation, state: State::Idle, last_take: 0, key_down: None, pressed: None }
+    Self { activation, state: State::Idle, last_take: 0, key_down: None, pressed: None, which: 0 }
   }
 
   fn handle(&mut self, input: Input) -> Option<Effect> {
     use State::{Idle, Recording, Transcribing};
     match (self.state, self.track_key(input)) {
       (_, Input::KeyDown { repeat: true, .. }) => None,
-      (Idle, Input::KeyDown { at, .. }) => {
+      (Idle, Input::KeyDown { at, which, .. }) => {
         let hold = match self.activation {
           Activation::Toggle => Hold::Latched,
           Activation::HoldOrToggle | Activation::PushToTalk => Hold::Held(at),
         };
 
         self.last_take += 1;
-        self.pressed = Some(self.last_take);
+        (self.pressed, self.which) = (Some(self.last_take), which);
         self.state = Recording { take: self.last_take, hold };
-        Some(Effect::StartRecording(self.last_take))
+        Some(Effect::StartRecording(self.last_take, which))
       }
       // A second press before the release: the release to come decides.
-      (Recording { hold: Hold::Held(_), .. }, Input::KeyDown { .. }) => None,
+      (Recording { hold: Hold::Held(_) | Hold::Keyed, .. }, Input::KeyDown { .. }) => None,
       (Recording { take, hold: Hold::Latched }, Input::KeyDown { .. }) => self.stop(take),
-      (Recording { take, hold: Hold::Held(since) }, Input::KeyUp { at }) => {
+      (Recording { take, hold: Hold::Held(since) }, Input::KeyUp { at, which })
+        if which == self.which =>
+      {
         let tap = at.saturating_duration_since(since) < HOLD_THRESHOLD;
         if self.activation == Activation::HoldOrToggle && tap {
           self.state = Recording { take, hold: Hold::Latched };
@@ -169,22 +177,39 @@ impl Machine {
 
         self.stop(take)
       }
+      (Recording { take, hold: Hold::Keyed }, Input::KeyUp { which, .. })
+        if which == self.which =>
+      {
+        self.stop(take)
+      }
       (_, Input::KeyDown { .. } | Input::KeyUp { .. }) => None,
+
+      (Recording { take, hold: Hold::Held(_) | Hold::Keyed }, Input::ModelKey { index }) => {
+        self.state = Recording { take, hold: Hold::Keyed };
+        Some(Effect::PickModel(take, index))
+      }
+      (_, Input::ModelKey { .. }) => None,
 
       (Idle, Input::Toggle) => {
         self.last_take += 1;
+        self.which = 0;
         self.state = Recording { take: self.last_take, hold: Hold::Latched };
-        Some(Effect::StartRecording(self.last_take))
+        Some(Effect::StartRecording(self.last_take, 0))
       }
       (Recording { take, .. }, Input::Toggle) => self.stop(take),
       (Transcribing { .. }, Input::Toggle) => None,
 
-      (Recording { take, .. }, Input::KeyAborted) if self.pressed == Some(take) => {
+      (Recording { take, .. }, Input::KeyAborted { which })
+        if self.pressed == Some(take) && which == self.which =>
+      {
         (self.state, self.pressed) = (Idle, None);
         Some(Effect::AbortRecording(take))
       }
-      (_, Input::KeyAborted) => {
-        self.pressed = None;
+      (_, Input::KeyAborted { which }) => {
+        if which == self.which {
+          self.pressed = None;
+        }
+
         None
       }
 
@@ -216,16 +241,16 @@ impl Machine {
   /// Flags an unflagged autorepeat (see [`REPEAT_WINDOW`]).
   fn track_key(&mut self, input: Input) -> Input {
     match input {
-      Input::KeyDown { at, repeat } => {
+      Input::KeyDown { at, repeat, which } => {
         let held = self.key_down.is_some_and(|t| at.saturating_duration_since(t) < REPEAT_WINDOW);
         self.key_down = Some(at);
-        Input::KeyDown { at, repeat: repeat || held }
+        Input::KeyDown { at, repeat: repeat || held, which }
       }
       Input::KeyUp { .. } => {
         (self.key_down, self.pressed) = (None, None);
         input
       }
-      Input::KeyAborted => {
+      Input::KeyAborted { .. } => {
         self.key_down = None;
         input
       }
@@ -582,6 +607,9 @@ struct Dictation<T> {
   /// The tail ([tail_end]) runs from then until the recorder closes.
   stopped: Option<Instant>,
   recorder: Option<Recorder>,
+  /// The model its hotkey or a key picked (a choice, as [Settings::model]); `None`: the default
+  /// one.
+  model: Option<String>,
   /// The engine loading its model for it, by the model's path.
   prewarmed: Option<PathBuf>,
   job: Option<Job>,
@@ -774,7 +802,8 @@ impl<O: TextOutput> Controller<O> {
     let Some(effect) = self.machine.handle(input) else { return };
     debug!(?input, ?effect, "session");
     match effect {
-      Effect::StartRecording(take) => self.start_recording(take),
+      Effect::StartRecording(take, which) => self.start_recording(take, which),
+      Effect::PickModel(_, index) => self.pick(index),
       Effect::StopRecording(_) => self.stop_recording(),
       Effect::CancelRecording(_) => self.cancel(),
       Effect::AbortRecording(_) => {
@@ -1018,8 +1047,9 @@ impl<O: TextOutput> Controller<O> {
   // MARK: Dictation
 
   /// The microphone first, and the shell shows the recording at once; then the focus check (up to
-  /// a second) and the engine loads the model while the person speaks.
-  fn start_recording(&mut self, take: Take) {
+  /// a second) and the engine loads the model while the person speaks: that of hotkey `which`.
+  fn start_recording(&mut self, take: Take, which: usize) {
+    let model = self.settings.hotkey_model(which).map(str::to_owned);
     let started = Instant::now();
     let created_at = now_ms();
     let (audio, wav) = self.history.recordings.new_file(created_at);
@@ -1046,6 +1076,7 @@ impl<O: TextOutput> Controller<O> {
       stopped: None,
       warnings: recorder.warning().map(str::to_owned).into_iter().collect(),
       recorder: Some(recorder),
+      model,
       prewarmed: None,
       job: None,
       duration_ms: 0,
@@ -1055,15 +1086,50 @@ impl<O: TextOutput> Controller<O> {
     let target = self.output.target();
     debug!("dictation {take}: focus noted after {:.0?}", started.elapsed());
     self.dictation.as_mut().unwrap().target = Some(target);
-    let path = match self.engine_for(None) {
+    self.prewarm();
+  }
+
+  /// The engine of the dictation's model loads it while the person speaks; one that loaded another
+  /// model for it before a key picked this one is released.
+  fn prewarm(&mut self) {
+    let d = self.dictation.as_ref().unwrap();
+    let (take, choice) = (d.last.take, d.model.clone());
+    if let Some(choice) = &choice {
+      info!("dictation {take}: with {}", label(choice));
+    }
+
+    let path = match self.engine_for(choice.as_deref()) {
       Ok(loaded) => {
         loaded.engine.prewarm();
-        loaded.path.clone()
+        Some(loaded.path.clone())
       }
-      Err(e) => return info!("dictation {take}: recording without a model: {e}"),
+      Err(e) => {
+        info!("dictation {take}: recording without a model: {e}");
+        None
+      }
     };
 
-    self.dictation.as_mut().unwrap().prewarmed = Some(path);
+    let d = self.dictation.as_mut().unwrap();
+    let before = mem::replace(&mut d.prewarmed, path.clone());
+    if let Some(before) = before.filter(|b| path.as_ref() != Some(b))
+      && let Some(l) = self.loaded(&before)
+    {
+      l.engine.release();
+    }
+  }
+
+  /// Model key `index` while the hotkey is held: the dictation goes to the key's model, which its
+  /// engine loads meanwhile.
+  fn pick(&mut self, index: usize) {
+    let Some(choice) = self.settings.held_key_model(index).map(str::to_owned) else {
+      return debug!("no model key {index}");
+    };
+
+    let Some(d) = self.dictation.as_mut() else { return };
+    if d.model.as_ref() != Some(&choice) {
+      d.model = Some(choice);
+      self.prewarm();
+    }
   }
 
   fn stop_recording(&mut self) {
@@ -1119,6 +1185,7 @@ impl<O: TextOutput> Controller<O> {
     }
 
     d.duration_ms = rec.clip.duration_ms();
+    let choice = d.model.clone();
     let Some(input) = rec.clip.engine_input() else {
       self.discard();
       return self.end(Outcome::NoSpeech, None);
@@ -1130,11 +1197,13 @@ impl<O: TextOutput> Controller<O> {
       self.discard();
     }
 
-    let job = self.new_job(None);
+    let job = self.new_job(choice.as_deref());
     // A model not on disk still has a language: that of wavo's model of the name.
     let info = match &job {
       Ok(job) => job.info,
-      Err(_) => self.settings.model.as_deref().and_then(|c| hub::lookup(c).ok()),
+      Err(_) => {
+        choice.as_deref().or(self.settings.model.as_deref()).and_then(|c| hub::lookup(c).ok())
+      }
     };
 
     let language = language_for(info, &self.settings);
@@ -1552,18 +1621,32 @@ mod tests {
       Self { m: Machine::new(activation), t0: Instant::now() }
     }
 
+    /// The main hotkey's press.
     fn down(&mut self, ms: u64) -> Option<Effect> {
+      self.press(ms, 0)
+    }
+
+    fn press(&mut self, ms: u64, which: usize) -> Option<Effect> {
       let at = self.t0 + Duration::from_millis(ms);
-      self.m.handle(Input::KeyDown { at, repeat: false })
+      self.m.handle(Input::KeyDown { at, repeat: false, which })
     }
 
     fn repeat(&mut self, ms: u64) -> Option<Effect> {
       let at = self.t0 + Duration::from_millis(ms);
-      self.m.handle(Input::KeyDown { at, repeat: true })
+      self.m.handle(Input::KeyDown { at, repeat: true, which: 0 })
     }
 
+    /// The main hotkey's release.
     fn up(&mut self, ms: u64) -> Option<Effect> {
-      self.m.handle(Input::KeyUp { at: self.t0 + Duration::from_millis(ms) })
+      self.release(ms, 0)
+    }
+
+    fn release(&mut self, ms: u64, which: usize) -> Option<Effect> {
+      self.m.handle(Input::KeyUp { at: self.t0 + Duration::from_millis(ms), which })
+    }
+
+    fn key(&mut self, index: usize) -> Option<Effect> {
+      self.m.handle(Input::ModelKey { index })
     }
 
     fn latched(&self) -> bool {
@@ -1577,16 +1660,16 @@ mod tests {
   }
 
   use Effect::{
-    AbortRecording, CancelRecording, CancelTranscription, StartRecording, StopRecording,
+    AbortRecording, CancelRecording, CancelTranscription, PickModel, StartRecording, StopRecording,
   };
 
   #[test]
   fn hold_or_toggle_holds_or_latches_on_a_tap() {
     let mut d = Drive::new(Activation::HoldOrToggle);
-    assert_eq!(d.down(0), Some(StartRecording(1)));
+    assert_eq!(d.down(0), Some(StartRecording(1, 0)));
     assert_eq!(d.up(300), Some(StopRecording(1)), "a hold of the threshold");
     d.finish(1);
-    assert_eq!(d.down(1_000), Some(StartRecording(2)));
+    assert_eq!(d.down(1_000), Some(StartRecording(2, 0)));
     assert_eq!(d.up(1_299), None, "a tap latches");
     assert!(d.latched());
     assert_eq!(d.down(4_000), Some(StopRecording(2)), "the next press stops");
@@ -1596,11 +1679,11 @@ mod tests {
   #[test]
   fn push_to_talk_and_toggle() {
     let mut d = Drive::new(Activation::PushToTalk);
-    assert_eq!(d.down(0), Some(StartRecording(1)));
+    assert_eq!(d.down(0), Some(StartRecording(1, 0)));
     assert_eq!(d.up(40), Some(StopRecording(1)), "however short");
 
     let mut d = Drive::new(Activation::Toggle);
-    assert_eq!(d.down(0), Some(StartRecording(1)));
+    assert_eq!(d.down(0), Some(StartRecording(1, 0)));
     assert_eq!(d.up(2_000), None, "a long hold changes nothing");
     assert_eq!(d.down(5_000), Some(StopRecording(1)));
     assert_eq!(d.down(5_100), None, "transcribing ignores the hotkey");
@@ -1611,7 +1694,7 @@ mod tests {
   fn a_toggle_latches_in_every_activation() {
     for activation in [Activation::HoldOrToggle, Activation::PushToTalk, Activation::Toggle] {
       let mut d = Drive::new(activation);
-      assert_eq!(d.m.handle(Input::Toggle), Some(StartRecording(1)), "{activation:?}");
+      assert_eq!(d.m.handle(Input::Toggle), Some(StartRecording(1, 0)), "{activation:?}");
       assert!(d.latched());
       assert_eq!(d.m.handle(Input::Toggle), Some(StopRecording(1)));
       assert_eq!(d.m.handle(Input::Toggle), None, "transcribing ignores it");
@@ -1661,20 +1744,76 @@ mod tests {
     assert_eq!(d.m.handle(Input::MicStopped { take: 3 }), Some(StopRecording(3)));
   }
 
+  /// A model key counts while the hotkey is held: as it goes down, and later, the last one; the
+  /// release then stops the recording, however short the press. Not while transcribing, nor once a
+  /// tap or toggle mode latched it.
+  #[test]
+  fn a_model_key_counts_while_the_hotkey_is_held() {
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    d.down(0);
+    assert_eq!(d.key(0), Some(PickModel(1, 0)), "at the press");
+    assert_eq!(d.key(1), Some(PickModel(1, 1)), "while held");
+    assert_eq!(d.up(100), Some(StopRecording(1)), "a short press with a key is a hold");
+    assert_eq!(d.key(0), None, "while transcribing");
+    d.finish(1);
+    assert_eq!(d.key(0), None, "idle");
+
+    d.down(1_000);
+    d.up(1_100);
+    assert!(d.latched());
+    assert_eq!(d.key(0), None, "latched by a tap");
+    assert_eq!(d.down(3_000), Some(StopRecording(2)));
+
+    let mut d = Drive::new(Activation::Toggle);
+    d.down(0);
+    assert_eq!(d.key(0), None, "toggle mode");
+  }
+
+  /// A model's own hotkey starts a dictation as the main one does: held, or latched by a tap; only
+  /// its own release counts, any press stops it once latched.
+  #[test]
+  fn a_models_own_hotkey_starts_its_dictation() {
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    assert_eq!(d.press(0, 1), Some(StartRecording(1, 1)));
+    assert_eq!(d.up(400), None, "another hotkey's release");
+    assert_eq!(d.release(500, 1), Some(StopRecording(1)));
+    d.finish(1);
+
+    assert_eq!(d.press(1_000, 2), Some(StartRecording(2, 2)));
+    assert_eq!(d.release(1_100, 2), None, "a tap latches");
+    assert!(d.latched());
+    assert_eq!(d.down(4_000), Some(StopRecording(2)));
+  }
+
+  /// fn alone and fn+1 as hotkeys: the chord drops what fn's press started, then starts its own.
+  #[test]
+  fn a_chord_on_a_lone_hotkeys_modifier_starts_its_own_dictation() {
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    assert_eq!(d.down(0), Some(StartRecording(1, 0)));
+    assert_eq!(d.m.handle(Input::KeyAborted { which: 1 }), None, "not the press's hotkey");
+    assert_eq!(d.m.handle(Input::KeyAborted { which: 0 }), Some(AbortRecording(1)));
+    assert_eq!(d.press(50, 1), Some(StartRecording(2, 1)));
+    assert_eq!(d.release(500, 1), Some(StopRecording(2)));
+  }
+
   #[test]
   fn a_press_that_was_a_chord_drops_the_recording_it_started() {
     let mut d = Drive::new(Activation::HoldOrToggle);
     d.down(0);
-    assert_eq!(d.m.handle(Input::KeyAborted), Some(AbortRecording(1)));
+    assert_eq!(d.m.handle(Input::KeyAborted { which: 0 }), Some(AbortRecording(1)));
     assert_eq!(d.up(80), None);
 
     // A press that stopped a latched recording: what it stopped stays stopped.
     let mut d = Drive::new(Activation::Toggle);
     d.down(0);
     d.up(100);
-    assert_eq!(d.m.handle(Input::KeyAborted), None, "after the release the press is over");
+    assert_eq!(
+      d.m.handle(Input::KeyAborted { which: 0 }),
+      None,
+      "after the release the press is over"
+    );
     assert_eq!(d.down(3_000), Some(StopRecording(1)));
-    assert_eq!(d.m.handle(Input::KeyAborted), None);
+    assert_eq!(d.m.handle(Input::KeyAborted { which: 0 }), None);
   }
 
   // MARK: Session
@@ -1782,8 +1921,8 @@ mod tests {
     }
 
     fn press(&self) {
-      self.handle.input(Input::KeyDown { at: Instant::now(), repeat: false });
-      self.handle.input(Input::KeyUp { at: Instant::now() });
+      self.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+      self.handle.input(Input::KeyUp { at: Instant::now(), which: 0 });
     }
 
     /// Starts a recording and waits until its audio arrives.
@@ -1806,6 +1945,22 @@ mod tests {
       self.record(0.3);
       thread::sleep(Duration::from_millis(300));
       self.press();
+      self.finished(take).last.unwrap()
+    }
+
+    /// The same with hotkey `which` held, and model keys `keys` ([Settings::held_keys]) pressed
+    /// meanwhile.
+    fn dictate_held(&self, take: Take, which: usize, keys: &[usize]) -> Last {
+      self.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which });
+      let recording = self.update_where("recording", |u| u.status.state == Phase::Recording);
+      for &index in keys {
+        self.handle.input(Input::ModelKey { index });
+      }
+
+      let meter = recording.meter.unwrap();
+      poll("the level", Duration::from_secs(10), || (meter.level() > 0.3).then_some(()));
+      thread::sleep(Duration::from_millis(300));
+      self.handle.input(Input::KeyUp { at: Instant::now(), which });
       self.finished(take).last.unwrap()
     }
 
@@ -2207,6 +2362,75 @@ mod tests {
 
   fn model_key(key: &str, model: &str) -> ModelKey {
     ModelKey { key: key.into(), model: model.into() }
+  }
+
+  /// A model key sends the dictation to its model, in the model's language when it has one: the
+  /// last key pressed, or the model's own hotkey; a key's model not on disk gets no stand-in, its
+  /// recording waits in its language.
+  #[test]
+  fn a_model_key_sends_the_dictation_to_its_model() {
+    let keys = vec![
+      model_key("z", "gigaam-v3"),
+      model_key("f1", "parakeet-v2"),
+      model_key("x", "moonshine-tiny"),
+    ];
+    let settings = Settings { model: Some("parakeet-v3".into()), keys, ..Settings::default() };
+    let models = ["parakeet-v3", "gigaam-v3", "parakeet-v2"];
+    let s = InProcess::start("session-keys", &settings, Some(&loud(10.0)), "hi", &models);
+    // Dictation, hotkey, keys pressed, its model and language.
+    let cases: [(Take, usize, &[usize], &str, Option<&str>); 3] = [
+      (1, 0, &[1, 0], GIGAAM, Some("ru")),
+      (2, 1, &[], PARAKEET_V2, Some("en")),
+      (3, 0, &[], PARAKEET_V3, None),
+    ];
+    for (take, which, keys, model, language) in cases {
+      let last = s.dictate_held(take, which, keys);
+      assert_eq!((last.outcome, last.text.as_str()), (Outcome::Done, "hi"), "{take}");
+      let entry = s.kept(&last);
+      assert_eq!((entry.model.as_deref(), entry.language.as_deref()), (Some(model), language));
+    }
+
+    let last = s.dictate_held(4, 0, &[1]);
+    assert_eq!(last.outcome, Outcome::NoModel);
+    assert_eq!(last.error.as_deref(), Some("moonshine-tiny is not on disk"));
+    let entry = s.kept(&last);
+    let got = (entry.text.as_str(), entry.tried_model.as_deref(), entry.language.as_deref());
+    assert_eq!(got, ("", None, Some("en")));
+    assert_eq!(s.models.loads(), 3, "an engine per model");
+  }
+
+  /// A key while recording loads its model and lets go of the one loaded for the default: with an
+  /// unload right after each dictation, one model stays in memory.
+  #[test]
+  fn a_model_key_moves_the_prewarm_to_its_model() {
+    let settings = Settings {
+      keys: vec![model_key("z", "gigaam-v3")],
+      unload_after_minutes: Some(0),
+      ..Settings::default()
+    };
+    let models = ["parakeet-v3", "gigaam-v3"];
+    let s = InProcess::start("session-key-prewarm", &settings, Some(&loud(10.0)), "hi", &models);
+    s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+    poll("the default model", Duration::from_secs(10), || (s.models.live() == 1).then_some(()));
+    s.handle.input(Input::ModelKey { index: 0 });
+    poll("the key's model alone", Duration::from_secs(10), || {
+      (s.models.loads() == 2 && s.models.live() == 1).then_some(())
+    });
+    s.handle.input(Input::Escape);
+    s.finished(1);
+  }
+
+  /// Unload frees every model in memory: the default one's and a key's.
+  #[test]
+  fn unload_frees_every_model() {
+    let settings = Settings { keys: vec![model_key("z", "gigaam-v3")], ..Settings::default() };
+    let models = ["parakeet-v3", "gigaam-v3"];
+    let s = InProcess::start("session-unload", &settings, Some(&loud(10.0)), "hi", &models);
+    s.dictate(1);
+    s.dictate_held(2, 0, &[0]);
+    assert_eq!((s.models.loads(), s.models.live()), (2, 2));
+    s.handle.request(Request::Unload).unwrap();
+    poll("no model", Duration::from_secs(10), || (s.models.live() == 0).then_some(()));
   }
 
   /// Entries without text go to a model of their language, the default one's or a key's; one
