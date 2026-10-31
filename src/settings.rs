@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use isolang::Language;
+use nimbo::Hotkey;
 use serde::{Deserialize, Serialize};
 
 use crate::audio::Microphone;
@@ -68,13 +69,24 @@ pub struct ModelKey {
   pub model: String,
 }
 
+/// What a model key is ([ModelKey::binding]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+  /// A letter or digit pressed while a hotkey is held, lowercase.
+  Held(char),
+  /// A hotkey of the model's own.
+  Own(Hotkey),
+}
+
 impl ModelKey {
-  /// The letter or digit held with a hotkey, lowercase; `None` for a hotkey of the model's own.
-  pub fn held(&self) -> Option<char> {
-    let mut chars = self.key.trim().chars();
+  /// A letter or digit is held with a hotkey, any other key a hotkey of the model's own; `None`
+  /// for one that is neither (empty, not in nimbo's hotkey grammar).
+  pub fn binding(&self) -> Option<Binding> {
+    let key = self.key.trim();
+    let mut chars = key.chars();
     match (chars.next(), chars.next()) {
-      (Some(c), None) if c.is_ascii_alphanumeric() => Some(c.to_ascii_lowercase()),
-      _ => None,
+      (Some(c), None) if c.is_ascii_alphanumeric() => Some(Binding::Held(c.to_ascii_lowercase())),
+      _ => Hotkey::parse(key).ok().map(Binding::Own),
     }
   }
 }
@@ -180,26 +192,27 @@ impl Settings {
     self.unload_after_minutes.map(|m| Duration::from_secs(u64::from(m) * 60))
   }
 
-  /// The model keys in use, in order: those with a key and a model, each key (in any case) and
-  /// each model once, the first one.
+  /// The model keys in use, in order: those of a model with a [binding](ModelKey::binding), each
+  /// binding and each model once, the first one.
   pub fn model_keys(&self) -> Vec<&ModelKey> {
-    let mut keys: Vec<&ModelKey> = Vec::new();
+    let mut keys: Vec<(&ModelKey, Binding)> = Vec::new();
     for k in &self.keys {
-      let (key, model) = (k.key.trim(), k.model.trim());
-      let taken =
-        keys.iter().any(|u| u.key.trim().eq_ignore_ascii_case(key) || u.model.trim() == model);
-      if !key.is_empty() && !model.is_empty() && !taken {
-        keys.push(k);
+      let Some(binding) = k.binding() else { continue };
+      let model = k.model.trim();
+      let taken = keys.iter().any(|(u, b)| *b == binding || u.model.trim() == model);
+      if !model.is_empty() && !taken {
+        keys.push((k, binding));
       }
     }
 
-    keys
+    keys.into_iter().map(|(k, _)| k).collect()
   }
 
   /// The model keys that are hotkeys of their own, in the order the hotkey listener gets them
   /// after the main one: hotkey 1 is the first.
   pub fn own_hotkeys(&self) -> Vec<&ModelKey> {
-    self.model_keys().into_iter().filter(|k| k.held().is_none()).collect()
+    let own = |k: &&ModelKey| matches!(k.binding(), Some(Binding::Own(_)));
+    self.model_keys().into_iter().filter(own).collect()
   }
 
   /// The model of hotkey `which`: `None` for the main one (0), else one of
@@ -212,7 +225,8 @@ impl Settings {
   /// The model keys that are a letter or digit held with a hotkey, in the order the hotkey
   /// listener gets them: key 0 is the first.
   pub fn held_keys(&self) -> Vec<&ModelKey> {
-    self.model_keys().into_iter().filter(|k| k.held().is_some()).collect()
+    let held = |k: &&ModelKey| matches!(k.binding(), Some(Binding::Held(_)));
+    self.model_keys().into_iter().filter(held).collect()
   }
 
   /// The model of key `index` of [held_keys](Self::held_keys).
@@ -284,8 +298,8 @@ mod tests {
     Settings { keys: keys.collect(), ..Settings::default() }
   }
 
-  /// The keys in use, in the order they come: a key taken (in any case), a model with one, an
-  /// empty key or model are passed over.
+  /// The keys in use, in the order they come: a key taken (in any case, in any spelling), a model
+  /// with one, an empty key or model are passed over.
   #[test]
   fn model_keys_take_each_key_and_model_once() {
     let s = with_keys(&[
@@ -295,24 +309,26 @@ mod tests {
       ("x", "gigaam-v3"),
       (" ", "moonshine-tiny"),
       ("ctrl+option+r", "whisper-turbo"),
+      ("Control+Alt+R", "parakeet-v3"),
       ("7", ""),
     ]);
     let keys: Vec<&str> = s.model_keys().into_iter().map(|k| k.key.as_str()).collect();
     assert_eq!(keys, ["Z", "f1", "ctrl+option+r"]);
   }
 
-  /// A letter or digit is held with a hotkey; anything else is a hotkey of its own, numbered after
-  /// the main one.
+  /// A letter or digit is held with a hotkey, another key of nimbo's grammar is a hotkey of its
+  /// own, numbered after the main one; one that is neither shifts no number.
   #[test]
   fn model_keys_are_held_or_hotkeys_of_their_own() {
     let s = with_keys(&[
       ("Z", "gigaam-v3"),
       ("f1", "parakeet-v2"),
+      ("no such key", "parakeet-v3"),
       ("7", "whisper-turbo"),
       ("ctrl+option+r", "moonshine-tiny"),
     ]);
-    let held: Vec<Option<char>> = s.held_keys().into_iter().map(ModelKey::held).collect();
-    assert_eq!(held, [Some('z'), Some('7')]);
+    let held: Vec<Option<Binding>> = s.held_keys().into_iter().map(ModelKey::binding).collect();
+    assert_eq!(held, [Some(Binding::Held('z')), Some(Binding::Held('7'))]);
     assert_eq!((s.held_key_model(1), s.held_key_model(2)), (Some("whisper-turbo"), None));
     let hotkeys: Vec<Option<&str>> = (0..4).map(|which| s.hotkey_model(which)).collect();
     assert_eq!(hotkeys, [None, Some("parakeet-v2"), Some("moonshine-tiny"), None]);
