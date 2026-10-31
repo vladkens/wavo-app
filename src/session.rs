@@ -2492,7 +2492,8 @@ mod tests {
     let entry = s.kept(&last);
     let got = (entry.text.as_str(), entry.tried_model.as_deref(), entry.language.as_deref());
     assert_eq!(got, ("", None, Some("en")));
-    assert_eq!(s.models.loads(), 3, "an engine per model");
+    // The first press loaded the default model for nothing: it went with the key, and came back.
+    assert_eq!(s.models.loads(), 4, "an engine per model");
   }
 
   /// A key while recording loads its model and lets go of the one loaded for the default: with an
@@ -2523,6 +2524,7 @@ mod tests {
     let models = ["parakeet-v3", "gigaam-v3"];
     let s = InProcess::start("session-key-cold", &settings, Some(&loud(10.0)), "hi", &models);
     let down = || s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+    let up = || s.handle.input(Input::KeyUp { at: Instant::now(), which: 0 });
     let loaded = |what: &str, loads: usize, live: usize| {
       poll(what, Duration::from_secs(10), || {
         (s.models.loads() == loads && s.models.live() == live).then_some(())
@@ -2535,6 +2537,7 @@ mod tests {
     loaded("the key's model alone", 2, 1);
     s.handle.input(Input::Escape);
     s.finished(1);
+    up();
 
     s.dictate(2);
     loaded("both models", 3, 2);
