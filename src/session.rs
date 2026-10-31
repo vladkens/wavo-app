@@ -762,7 +762,7 @@ impl<O: TextOutput> Controller<O> {
         let entry =
           self.history.db.get_entry(id)?.ok_or_else(|| anyhow!("no history entry {id}"))?;
         let model = self.own_model(&entry);
-        self.retranscribe(entry, model, false)
+        self.retranscribe(entry, model.as_deref(), false)
       }
       Request::Restore(id) => {
         if self.is_busy(id) {
@@ -1369,7 +1369,7 @@ impl<O: TextOutput> Controller<O> {
   /// `None`: the one found), behind dictations: in its own language when it goes by itself, else as
   /// a dictation now would be. One without text whose recording has no speech (or is gone) is
   /// deleted: there is nothing to keep.
-  fn retranscribe(&mut self, entry: Entry, model: Option<String>, auto: bool) -> Result<()> {
+  fn retranscribe(&mut self, entry: Entry, model: Option<&str>, auto: bool) -> Result<()> {
     let id = entry.id;
     if entry.busy || self.is_busy(id) {
       bail!("entry {id} is being transcribed");
@@ -1390,7 +1390,7 @@ impl<O: TextOutput> Controller<O> {
       return self.delete(id);
     };
 
-    let mut job = self.new_job(model.as_deref())?;
+    let mut job = self.new_job(model)?;
     job.language = if auto { entry.language } else { language_for(job.info, &self.settings) };
     // Marked tried before it runs: a crash or a failure is not tried again by the same model.
     self.history.db.mark_busy(id, &job.model)?;
@@ -1425,7 +1425,7 @@ impl<O: TextOutput> Controller<O> {
       };
 
       let id = entry.id;
-      if let Err(e) = self.retranscribe(entry, model, true) {
+      if let Err(e) = self.retranscribe(entry, model.as_deref(), true) {
         warn!("entry {id}: {e:#}");
         self.untried = false;
       }
