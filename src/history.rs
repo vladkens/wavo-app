@@ -305,12 +305,18 @@ impl Db {
 
   /// The newest entry without text that `model` has not tried and nothing transcribes now, in one
   /// of the model's `langs` (any for `None`: a file of the person's own). One without a language
-  /// (detected) goes to a model of more than one only.
-  pub fn get_untried(&self, model: &str, langs: Option<&[&str]>) -> Result<Option<Entry>> {
+  /// (detected) goes to a model of more than one only. No model has tried it, or with `retry`
+  /// another one has.
+  pub fn get_untried(
+    &self,
+    model: &str,
+    langs: Option<&[&str]>,
+    retry: bool,
+  ) -> Result<Option<Entry>> {
     let qs = "
     SELECT * FROM entries
     WHERE text = '' AND busy = 0 AND audio_path IS NOT NULL
-      AND (tried_model IS NULL OR tried_model != ?1)
+      AND (tried_model IS NULL OR (?3 AND tried_model != ?1))
       AND (?2 IS NULL
         OR lower(language) IN (SELECT value FROM json_each(?2))
         OR (language IS NULL AND json_array_length(?2) > 1))
@@ -318,7 +324,8 @@ impl Db {
     ";
 
     let langs = langs.map(serde_json::to_string).transpose()?;
-    Ok(self.db.prepare_cached(qs)?.query_row(params![model, langs], Entry::from_row).optional()?)
+    let mut stmt = self.db.prepare_cached(qs)?;
+    Ok(stmt.query_row(params![model, langs, retry], Entry::from_row).optional()?)
   }
 
   /// Whether an entry without text waits for its first transcription: no model has tried it.
@@ -729,8 +736,9 @@ mod tests {
       })
       .collect();
 
-    let untried =
-      |model: &str, langs: Option<&[&str]>| h.db.get_untried(model, langs).unwrap().map(|e| e.id);
+    let untried = |model: &str, langs: Option<&[&str]>| {
+      h.db.get_untried(model, langs, true).unwrap().map(|e| e.id)
+    };
 
     let (ru, en, multi) = (&["ru"][..], &["en"][..], &["en", "ru"][..]);
     assert!(h.db.has_untried().unwrap());
@@ -747,6 +755,8 @@ mod tests {
 
     assert_eq!(untried("parakeet-v3", Some(multi)), Some(ids[2]), "detected: a model of more");
     assert_eq!(untried("gigaam", Some(ru)), Some(ids[0]), "tried by another one");
+    let fresh = h.db.get_untried("gigaam", Some(ru), false).unwrap();
+    assert_eq!(fresh, None, "only one no model tried");
     assert!(h.db.has_untried().unwrap(), "the detected one, no model tried");
     h.db.mark_busy(ids[2], "parakeet-v3").unwrap();
     h.db.mark_idle(ids[2]).unwrap();

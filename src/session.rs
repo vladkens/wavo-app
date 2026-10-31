@@ -1443,7 +1443,10 @@ impl<O: TextOutput> Controller<O> {
         continue;
       }
 
-      let entry = self.history.db.get_untried(&file_stem(&m.path), m.info.map(|i| i.langs));
+      // The one found tries again one another model tried, a key's model only one no model tried:
+      // two models don't take turns at an entry that gives no text.
+      let (langs, retry) = (m.info.map(|i| i.langs), m.choice.is_none());
+      let entry = self.history.db.get_untried(&file_stem(&m.path), langs, retry);
       if let Some(entry) = entry.inspect_err(|e| warn!("history: {e:#}")).ok().flatten() {
         return (Some((entry, m.choice)), passed);
       }
@@ -2480,6 +2483,25 @@ mod tests {
 
     s.handle.edit_settings(|s| s.model = Some("parakeet-v3".into()));
     assert_eq!(transcribed(detected).model.as_deref(), Some(PARAKEET_V3));
+  }
+
+  /// An entry that gives no text is not passed back and forth between two models: a key's model
+  /// takes only one no model has tried.
+  #[test]
+  fn two_models_do_not_take_turns_at_an_entry_without_text() {
+    let settings = Settings { model: Some("parakeet-v3".into()), ..Settings::default() };
+    let models = ["parakeet-v3", "whisper-turbo"];
+    let s = InProcess::start("session-untried-turns", &settings, None, "", &models);
+    let id = s.add_untried(1_000, None);
+    s.handle.edit_settings(|s| s.keys = vec![model_key("z", "whisper-turbo")]);
+    poll("tried", Duration::from_secs(10), || {
+      s.entry(id).filter(|e| e.tried_model.is_some() && !e.busy)
+    });
+
+    thread::sleep(Duration::from_millis(200));
+    let entry = s.entry(id).unwrap();
+    assert_eq!((entry.text.as_str(), entry.tried_model.as_deref()), ("", Some(PARAKEET_V3)));
+    assert_eq!(s.models.runs().len(), 1, "tried once");
   }
 
   /// Transcribe Again goes to the model the text came from while it is on disk, else to the
