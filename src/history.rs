@@ -11,6 +11,9 @@
 //! - [`History::recover`] runs on start: entries a crash left busy are not any more, entries
 //!   without text whose recording is gone go, and recordings without an entry (the app died while
 //!   recording) become entries without text if they have speech, else they go.
+//! - A recording's size, for the History page's totals, is measured once: as its entry goes in,
+//!   else (an older entry, an import's) by [`History::measure`] off the main thread. One whose file
+//!   is not there is not counted until it is; one deleted outside Wavo later still counts.
 
 use std::collections::HashSet;
 use std::io::ErrorKind;
@@ -167,10 +170,26 @@ fn migrate_v1(db: &Connection) -> Result<()> {
   Ok(())
 }
 
+fn migrate_v2(db: &Connection) -> Result<()> {
+  let queries = vec![
+    // The recording's size on disk, measured once: NULL until then, and while its file is not
+    // there ([History::measure]).
+    "ALTER TABLE entries ADD COLUMN audio_bytes INTEGER;",
+    "CREATE INDEX entries_unmeasured ON entries (id)
+      WHERE audio_bytes IS NULL AND audio_path IS NOT NULL;",
+  ];
+
+  for qs in queries {
+    db.execute(qs, [])?;
+  }
+
+  Ok(())
+}
+
 /// Runs the migrations the database has not had; one from a newer Wavo is refused rather than
 /// written in a layout this one does not know.
 fn migrate(db: &Connection) -> Result<()> {
-  let migrations: Vec<fn(&Connection) -> Result<()>> = vec![migrate_v1];
+  let migrations: Vec<fn(&Connection) -> Result<()>> = vec![migrate_v1, migrate_v2];
   let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
   if version > migrations.len() as i64 {
     bail!("the database has schema {version}, newer than this Wavo knows ({})", migrations.len());
@@ -196,6 +215,8 @@ pub struct Entry {
   pub duration_ms: i64,
   /// The recording, as [Recordings] names it.
   pub audio_path: Option<String>,
+  /// The recording's size on disk, once measured ([Recordings::size]).
+  pub audio_bytes: Option<u64>,
   /// Empty until a transcription makes some.
   pub text: String,
   /// The model the text came from: its file name without extension.
@@ -219,6 +240,7 @@ impl Entry {
       created_at: row.get("created_at")?,
       duration_ms: row.get("duration_ms")?,
       audio_path: row.get("audio_path")?,
+      audio_bytes: row.get::<_, Option<i64>>("audio_bytes")?.map(|b| b as u64),
       text: row.get("text")?,
       model: row.get("model")?,
       language: row.get("language")?,
@@ -226,6 +248,28 @@ impl Entry {
       busy: row.get("busy")?,
       pasted: row.get("pasted")?,
       not_pasted: row.get("not_pasted")?,
+    })
+  }
+}
+
+/// The whole history, as [Db::get_total] sums it up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Total {
+  pub count: usize,
+  pub duration_ms: i64,
+  /// The first entry's start, Unix ms.
+  pub first: Option<i64>,
+  /// What the history takes on disk: the database and the recordings measured.
+  pub bytes: u64,
+}
+
+impl Total {
+  fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+    Ok(Self {
+      count: row.get::<_, i64>("n")? as usize,
+      duration_ms: row.get("duration_ms")?,
+      first: row.get("first_at")?,
+      bytes: row.get::<_, i64>("bytes")? as u64,
     })
   }
 }
@@ -296,11 +340,30 @@ impl Db {
     self.get_all(qs, params![fold(search), limit as i64])
   }
 
-  /// Every entry: their count, their duration in ms and the first one's start (Unix ms).
-  pub fn get_total(&self) -> Result<(usize, i64, Option<i64>)> {
-    let qs = "SELECT COUNT(*), COALESCE(SUM(duration_ms), 0), MIN(created_at) FROM entries;";
-    let total = |r: &Row| Ok((r.get::<_, i64>(0)? as usize, r.get(1)?, r.get(2)?));
-    Ok(self.db.prepare_cached(qs)?.query_row([], total)?)
+  /// Every entry: their count, duration and the first one's start; and what the history takes on
+  /// disk: the database's pages (not its WAL journal, which comes and goes) and the recordings
+  /// measured ([History::measure]). No file is read.
+  pub fn get_total(&self) -> Result<Total> {
+    let qs = "
+    SELECT COUNT(*) AS n, COALESCE(SUM(duration_ms), 0) AS duration_ms,
+      MIN(created_at) AS first_at,
+      COALESCE(SUM(audio_bytes), 0)
+        + (SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()) AS bytes
+    FROM entries;
+    ";
+
+    Ok(self.db.prepare_cached(qs)?.query_row([], Total::from_row)?)
+  }
+
+  /// The entries whose recording is not measured: `(id, name)`.
+  pub fn get_unmeasured(&self) -> Result<Vec<(i64, String)>> {
+    let qs = "
+    SELECT id, audio_path FROM entries WHERE audio_bytes IS NULL AND audio_path IS NOT NULL;
+    ";
+
+    let mut stmt = self.db.prepare_cached(qs)?;
+    let items = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    Ok(items.collect::<rusqlite::Result<_>>()?)
   }
 
   /// The newest entry without text that `model` has not tried and nothing transcribes now.
@@ -344,9 +407,9 @@ impl Db {
   pub fn insert(&self, entries: &[Entry]) -> Result<Vec<i64>> {
     let qs = "
     INSERT INTO entries (
-      created_at, duration_ms, audio_path, text, model, language, tried_model, busy, pasted,
-      not_pasted
-    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);
+      created_at, duration_ms, audio_path, audio_bytes, text, model, language, tried_model, busy,
+      pasted, not_pasted
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);
     ";
 
     let tx = self.db.unchecked_transaction()?;
@@ -356,6 +419,7 @@ impl Db {
         e.created_at,
         e.duration_ms,
         e.audio_path,
+        e.audio_bytes.map(|b| b as i64),
         e.text,
         e.model,
         e.language,
@@ -389,7 +453,21 @@ impl Db {
 
   /// The entries naming one of `names` name no recording.
   pub fn update_without_audio(&self, names: &[String]) -> Result<()> {
-    self.update_all("UPDATE entries SET audio_path = NULL WHERE audio_path = ?1;", names)
+    let qs = "UPDATE entries SET audio_path = NULL, audio_bytes = NULL WHERE audio_path = ?1;";
+    self.update_all(qs, names)
+  }
+
+  /// The recordings of entries `sizes` take so many bytes: `(id, name, bytes)`; an entry that no
+  /// longer names that recording keeps its size.
+  pub fn update_sizes(&self, sizes: &[(i64, &str, u64)]) -> Result<()> {
+    let qs = "UPDATE entries SET audio_bytes = ?3 WHERE id = ?1 AND audio_path = ?2;";
+    let tx = self.db.unchecked_transaction()?;
+    for (id, name, bytes) in sizes {
+      tx.prepare_cached(qs)?.execute(params![id, name, *bytes as i64])?;
+    }
+
+    tx.commit()?;
+    Ok(())
   }
 
   /// Entry `id` is being transcribed by `model`.
@@ -426,6 +504,11 @@ impl Db {
   /// Entries an import added, once their recordings are in.
   pub fn mark_idle_entries(&self, ids: &[i64]) -> Result<()> {
     self.update_all("UPDATE entries SET busy = 0 WHERE id = ?1;", ids)
+  }
+
+  /// Entries `ids` count no recording until it is measured again.
+  pub fn mark_unmeasured(&self, ids: &[i64]) -> Result<()> {
+    self.update_all("UPDATE entries SET audio_bytes = NULL WHERE id = ?1;", ids)
   }
 
   pub fn delete_entries(&self, ids: &[i64]) -> Result<()> {
@@ -501,6 +584,11 @@ impl Recordings {
     }
 
     Ok(())
+  }
+
+  /// Recording `name`'s size on disk, if it is there.
+  pub fn size(&self, name: &str) -> Option<u64> {
+    Some(fs::metadata(self.path(name)?).ok()?.len())
   }
 
   /// Every recording, named as entries name them.
@@ -580,15 +668,33 @@ impl History {
   }
 
   /// Deletes entry `id` and its recording, the file first: if it cannot be deleted, the entry
-  /// stays. False if there is no such entry.
+  /// stays. Its size goes before both, so an entry left without its file counts none. False if
+  /// there is no such entry.
   pub fn delete(&self, id: i64) -> Result<bool> {
     let Some(entry) = self.db.get_entry(id)? else { return Ok(false) };
     if let Some(name) = &entry.audio_path {
+      self.db.mark_unmeasured(&[id])?;
       self.recordings.remove(name)?;
     }
 
     self.db.delete_entries(&[id])?;
     Ok(true)
+  }
+
+  /// Measures the recordings not measured yet (entries from before sizes were kept, an
+  /// import's), a thousand a transaction. One whose file is not there stays unmeasured for a later
+  /// pass: an import may copy it still. Returns how many were measured.
+  pub fn measure(&self) -> Result<usize> {
+    let mut measured = 0;
+    for chunk in self.db.get_unmeasured()?.chunks(1000) {
+      let sizes: Vec<(i64, &str, u64)> = (chunk.iter())
+        .filter_map(|(id, name)| Some((*id, name.as_str(), self.recordings.size(name)?)))
+        .collect();
+      self.db.update_sizes(&sizes)?;
+      measured += sizes.len();
+    }
+
+    Ok(measured)
   }
 
   /// Applies `retention` at `now` (Unix ms); entries without text stay when `spare`, and do not
@@ -602,6 +708,10 @@ impl History {
       Retention::Weeks2 => self.db.get_created_before(days(14), spare)?,
       Retention::Months3 => self.db.get_created_before(days(90), spare)?,
     };
+
+    // As in [History::delete], their sizes first.
+    let sized: Vec<i64> = doomed.iter().filter(|e| e.audio_bytes.is_some()).map(|e| e.id).collect();
+    self.db.mark_unmeasured(&sized)?;
 
     let mut removed = Vec::new();
     for e in doomed {
@@ -640,6 +750,7 @@ impl History {
           created_at: started_at(name).unwrap_or(now),
           duration_ms: clip.duration_ms(),
           audio_path: Some(name.clone()),
+          audio_bytes: self.recordings.size(name),
           ..Entry::default()
         }),
         _ => self.recordings.remove(name).unwrap_or_else(|e| warn!("{e:#}")),
@@ -712,6 +823,95 @@ mod tests {
     assert!(page("%", 100).is_empty());
   }
 
+  /// The total's size: the database's pages and the recordings measured, each once; one not on
+  /// disk counts once it is there, an entry without a recording only by its row.
+  #[test]
+  fn the_total_counts_the_recordings_measured() {
+    let dir = TempDir::new("history-total");
+    let h = History::open(dir.path()).unwrap();
+    let wavs: Vec<(String, PathBuf)> = (0..)
+      .zip([0.5, 3.0, 0.25])
+      .map(|(i, seconds)| {
+        let (name, path) = h.recordings.new_file(NOW + i);
+        write_wav(&path, &tone(seconds, 0.1));
+        let entry =
+          Entry { created_at: NOW + i, audio_path: Some(name.clone()), ..Entry::default() };
+        h.db.insert(&[entry]).unwrap();
+        (name, path)
+      })
+      .collect();
+    let text = Entry { created_at: NOW - DAY, text: "Hi.".into(), ..Entry::default() };
+    h.db.insert(&[text]).unwrap();
+
+    let pragma = |name: &str| {
+      h.db.db.query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0)).unwrap() as u64
+    };
+    let size = || h.db.get_total().unwrap().bytes - pragma("page_count") * pragma("page_size");
+    let len = |i: usize| fs::metadata(&wavs[i].1).unwrap().len();
+    assert_eq!(size(), 0, "nothing measured yet");
+
+    // One not copied in yet, as by an import.
+    let away = dir.path().join("away.wav");
+    fs::rename(&wavs[2].1, &away).unwrap();
+    assert_eq!(h.measure().unwrap(), 2);
+    assert_eq!(size(), len(0) + len(1));
+    fs::rename(&away, &wavs[2].1).unwrap();
+    assert_eq!(h.measure().unwrap(), 1);
+    assert_eq!(h.measure().unwrap(), 0, "each once");
+    assert_eq!(size(), len(0) + len(1) + len(2));
+
+    h.db.update_without_audio(&[wavs[0].0.clone()]).unwrap();
+    assert_eq!(size(), len(1) + len(2));
+    let t = h.db.get_total().unwrap();
+    assert_eq!((t.count, t.first), (4, Some(NOW - DAY)));
+  }
+
+  /// A pass's sizes go only to the entries that still name the file it measured: not to one
+  /// deleted meanwhile or left without its recording, nor to a new one under the same name.
+  #[test]
+  fn a_stale_size_goes_nowhere() {
+    let dir = TempDir::new("history-stale");
+    let h = History::open(dir.path()).unwrap();
+    let (gone, _) = add(&h, 0, "one", false);
+    let (bare, _) = add(&h, DAY, "two", false);
+    let stale = h.db.get_unmeasured().unwrap();
+    assert_eq!(stale.len(), 2);
+
+    let name = |id| stale.iter().find(|s| s.0 == id).unwrap().1.clone();
+    h.db.delete_entries(&[gone]).unwrap();
+    h.db.update_without_audio(&[name(bare)]).unwrap();
+    let again: Vec<Entry> = (stale.iter())
+      .map(|(_, n)| Entry { created_at: NOW + 1, audio_path: Some(n.clone()), ..Entry::default() })
+      .collect();
+    let new = h.db.insert(&again).unwrap();
+
+    let sizes: Vec<(i64, &str, u64)> =
+      stale.iter().map(|(id, n)| (*id, n.as_str(), 3_244)).collect();
+    h.db.update_sizes(&sizes).unwrap();
+    let size = |id| h.db.get_entry(id).unwrap().map(|e| e.audio_bytes);
+    assert_eq!(size(gone), None);
+    assert_eq!(size(bare), Some(None));
+    assert_eq!(new.iter().map(|&id| size(id)).collect::<Vec<_>>(), [Some(None), Some(None)]);
+  }
+
+  /// A history of schema 1 gets the recordings' sizes, none measured yet.
+  #[test]
+  fn migrates_schema_1() {
+    let dir = TempDir::new("history-v1");
+    let path = dir.path().join(DB_FILE);
+    let db = Connection::open(&path).unwrap();
+    migrate_v1(&db).unwrap();
+    db.pragma_update(None, "user_version", 1).unwrap();
+    let qs = "INSERT INTO entries (created_at, audio_path, text) VALUES (?1, ?2, 'Hi.');";
+    db.execute(qs, params![NOW, "2026-10-09/1.wav"]).unwrap();
+    drop(db);
+
+    let db = Db::open(&path).unwrap();
+    let version: i64 = db.db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(version, 2);
+    assert_eq!(db.get_unmeasured().unwrap(), [(1, "2026-10-09/1.wav".to_owned())]);
+  }
+
   #[test]
   fn retention_by_count_and_age() {
     let dir = TempDir::new("history-retention");
@@ -759,6 +959,7 @@ mod tests {
     let adopted = h.db.get_entries().unwrap().pop().unwrap();
     assert_eq!((adopted.audio_path.as_deref(), adopted.created_at), (Some(name.as_str()), NOW + 5));
     assert_eq!(adopted.duration_ms, 1_500);
+    assert_eq!(adopted.audio_bytes, Some(fs::metadata(&path).unwrap().len()));
     assert!(!silent.exists() && !broken.exists());
   }
 

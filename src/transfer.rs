@@ -231,7 +231,8 @@ impl Plan {
 
       plan.entries += 1;
       match (starts.get(&e.created_at), audio) {
-        (None, audio) => plan.new.push((Entry { busy: true, ..e }, audio)),
+        // Measured once its recording is copied in: theirs may not come.
+        (None, audio) => plan.new.push((Entry { busy: true, audio_bytes: None, ..e }, audio)),
         (Some(Some(name)), Some(audio)) if !on_disk.contains(name) => {
           plan.missing.push((audio, name.clone()))
         }
