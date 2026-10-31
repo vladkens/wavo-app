@@ -321,6 +321,17 @@ impl Db {
     Ok(self.db.prepare_cached(qs)?.query_row(params![model, langs], Entry::from_row).optional()?)
   }
 
+  /// Whether an entry without text waits for its first transcription: no model has tried it.
+  pub fn has_untried(&self) -> Result<bool> {
+    let qs = "
+    SELECT EXISTS (
+      SELECT 1 FROM entries WHERE text = '' AND audio_path IS NOT NULL AND tried_model IS NULL
+    );
+    ";
+
+    Ok(self.db.prepare_cached(qs)?.query_row([], |r| r.get(0))?)
+  }
+
   /// The entries after the newest `keep`; those being transcribed, and those without text when
   /// `spare`, are neither returned nor counted.
   pub fn get_beyond_newest(&self, keep: u32, spare: bool) -> Result<Vec<Entry>> {
@@ -722,6 +733,7 @@ mod tests {
       |model: &str, langs: Option<&[&str]>| h.db.get_untried(model, langs).unwrap().map(|e| e.id);
 
     let (ru, en, multi) = (&["ru"][..], &["en"][..], &["en", "ru"][..]);
+    assert!(h.db.has_untried().unwrap());
     assert_eq!(untried("gigaam", Some(ru)), Some(ids[0]));
     assert_eq!(untried("parakeet-v2", Some(en)), Some(ids[1]), "in any case");
     assert_eq!(untried("parakeet-he", Some(&["he"][..])), None, "nor one detected");
@@ -735,6 +747,10 @@ mod tests {
 
     assert_eq!(untried("parakeet-v3", Some(multi)), Some(ids[2]), "detected: a model of more");
     assert_eq!(untried("gigaam", Some(ru)), Some(ids[0]), "tried by another one");
+    assert!(h.db.has_untried().unwrap(), "the detected one, no model tried");
+    h.db.mark_busy(ids[2], "parakeet-v3").unwrap();
+    h.db.mark_idle(ids[2]).unwrap();
+    assert!(!h.db.has_untried().unwrap());
   }
 
   #[test]
