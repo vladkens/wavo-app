@@ -87,10 +87,9 @@ pub enum Input {
   /// Hotkey `which` released.
   KeyUp { at: Instant, which: usize },
   /// Model key `index` ([Settings::held_keys], a letter or digit) pressed while the dictation's
-  /// hotkey is down: the dictation goes to its model, the last one pressed. A held press then stops
-  /// at its release, however short; in toggle mode the recording stays latched. Not after a tap
-  /// latched it.
-  #[cfg_attr(not(test), allow(dead_code, reason = "the hotkeys send it once nimbo reports keys"))]
+  /// hotkey is down: the dictation goes to its model, the last one pressed (the hotkeys send only
+  /// the first of a press, [Edges]). A held press then stops at its release, however short; in
+  /// toggle mode the recording stays latched. Not after a tap latched it.
   ModelKey { index: usize },
   /// Another key went down while hotkey `which`, a modifier alone, was held: the press was a chord
   /// (⌥E, or fn+1 when that is a hotkey too). A recording it started is dropped without a trace.
@@ -108,13 +107,41 @@ pub enum Input {
   Finished { take: Take },
 }
 
-impl From<Edge> for Input {
-  fn from(edge: Edge) -> Self {
+/// nimbo's hotkey edges as inputs: of the keys pressed while hotkeys are held, the first only,
+/// until every one of them is up again, so a dictation goes to one model.
+#[derive(Debug, Default)]
+pub struct Edges {
+  /// The hotkeys down, a bit per `which`.
+  held: u32,
+  keyed: bool,
+}
+
+impl Edges {
+  pub fn input(&mut self, edge: Edge) -> Option<Input> {
+    let bit = |which: usize| 1u32.checked_shl(which as u32).unwrap_or(0);
     match edge {
-      Edge::Down { at, repeat } => Input::KeyDown { at, repeat, which: 0 },
-      Edge::Up { at } => Input::KeyUp { at, which: 0 },
-      Edge::Escape => Input::Escape,
-      Edge::Aborted => Input::KeyAborted { which: 0 },
+      Edge::Down { which, at, repeat } => {
+        if !repeat && self.held == 0 {
+          self.keyed = false;
+        }
+
+        self.held |= bit(which);
+        Some(Input::KeyDown { at, repeat, which })
+      }
+      Edge::Up { which, at } => {
+        self.held &= !bit(which);
+        Some(Input::KeyUp { at, which })
+      }
+      Edge::Aborted { which } => {
+        self.held &= !bit(which);
+        Some(Input::KeyAborted { which })
+      }
+      Edge::Key { index, .. } if self.held != 0 && !self.keyed => {
+        self.keyed = true;
+        Some(Input::ModelKey { index })
+      }
+      Edge::Key { .. } => None,
+      Edge::Escape => Some(Input::Escape),
     }
   }
 }
@@ -350,6 +377,9 @@ pub struct Status {
   pub warnings: Vec<String>,
   /// Why no model can transcribe now: recordings are kept for later.
   pub no_model: Option<NoModel>,
+  /// The dictation in progress goes to a key's model ([Settings::keys]): the language it is asked
+  /// in, `auto` when the model detects it.
+  pub key_language: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -1589,6 +1619,10 @@ impl<O: TextOutput> Controller<O> {
       error: self.error.clone(),
       warnings,
       no_model: self.no_model(),
+      key_language: d.and_then(|d| d.model.as_deref()).map(|choice| {
+        let info = hub::lookup(choice).ok();
+        language_for(info, &self.settings).unwrap_or_else(|| "auto".into())
+      }),
     }
   }
 
@@ -1889,6 +1923,49 @@ mod tests {
     assert_eq!(d.m.handle(Input::KeyAborted { which: 0 }), Some(AbortRecording(1)));
     assert_eq!(d.press(50, 1), Some(StartRecording(2, 1)));
     assert_eq!(d.release(500, 1), Some(StopRecording(2)));
+  }
+
+  /// nimbo's edges as inputs, by hotkey; of the keys while hotkeys are held only the first, until
+  /// they are all up or aborted.
+  #[test]
+  fn edges_keep_the_first_key_of_a_press() {
+    let at = Instant::now();
+    let mut e = Edges::default();
+    let mut feed =
+      |edges: &[Edge]| -> Vec<Input> { edges.iter().filter_map(|&x| e.input(x)).collect() };
+    let down = |which, repeat| Edge::Down { which, at, repeat };
+    let key = |index| Edge::Key { index, at };
+    assert_eq!(feed(&[key(0)]), [], "no hotkey held");
+    let press =
+      feed(&[down(0, false), key(1), key(0), down(0, true), key(2), Edge::Up { which: 0, at }]);
+    assert_eq!(
+      press,
+      [
+        Input::KeyDown { at, repeat: false, which: 0 },
+        Input::ModelKey { index: 1 },
+        Input::KeyDown { at, repeat: true, which: 0 },
+        Input::KeyUp { at, which: 0 },
+      ]
+    );
+    // The next press takes a key again; another hotkey down meanwhile joins it.
+    let press = feed(&[down(0, false), down(1, false), key(0), Edge::Up { which: 0, at }, key(1)]);
+    assert_eq!(press[2..], [Input::ModelKey { index: 0 }, Input::KeyUp { at, which: 0 }]);
+    assert_eq!(
+      feed(&[Edge::Up { which: 1, at }, down(1, false), key(1)])[2],
+      Input::ModelKey { index: 1 }
+    );
+    // fn alone with fn+1: fn aborted, the chord's own press takes a key.
+    feed(&[Edge::Up { which: 1, at }]);
+    let chord =
+      feed(&[down(0, false), Edge::Aborted { which: 0 }, down(1, false), key(0), Edge::Escape]);
+    let want = [
+      Input::KeyDown { at, repeat: false, which: 0 },
+      Input::KeyAborted { which: 0 },
+      Input::KeyDown { at, repeat: false, which: 1 },
+      Input::ModelKey { index: 0 },
+      Input::Escape,
+    ];
+    assert_eq!(chord, want);
   }
 
   #[test]
@@ -2511,6 +2588,27 @@ mod tests {
     assert_eq!(got, ("", None, Some("en")));
     // The first press loaded the default model for nothing: it went with the key, and came back.
     assert_eq!(s.models.loads(), 4, "an engine per model");
+  }
+
+  /// The status tells the language of a key's model while its dictation runs: the HUD's tag.
+  #[test]
+  fn the_status_tells_a_keys_language() {
+    let keys = vec![model_key("z", "gigaam-v3"), model_key("f1", "whisper-turbo")];
+    let settings = Settings { model: Some("parakeet-v3".into()), keys, ..Settings::default() };
+    let models = ["parakeet-v3", "gigaam-v3", "whisper-turbo"];
+    let s = InProcess::start("session-key-language", &settings, Some(&loud(10.0)), "hi", &models);
+    let language = |u: &Update| u.status.key_language.clone();
+    s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+    let recording = s.update_where("recording", |u| u.status.state == Phase::Recording);
+    assert_eq!(language(&recording), None, "the default model");
+    s.handle.input(Input::ModelKey { index: 0 });
+    s.update_where("gigaam's", |u| language(u).as_deref() == Some("ru"));
+    s.handle.input(Input::Escape);
+    s.update_where("cancelled", |u| u.status.state == Phase::Idle && language(u).is_none());
+    // A model of many languages, asked in none: detected.
+    s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 1 });
+    s.update_where("whisper's", |u| language(u).as_deref() == Some("auto"));
+    s.handle.input(Input::Escape);
   }
 
   /// A key while recording loads its model and lets go of the one loaded for the default: with an

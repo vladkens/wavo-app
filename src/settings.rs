@@ -10,8 +10,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use isolang::Language;
-use nimbo::Hotkey;
+use nimbo::keys::f_key;
+use nimbo::{Hotkey, Key, Modifiers, Shortcut};
 use serde::{Deserialize, Serialize};
+use wavo::hub;
 
 use crate::audio::Microphone;
 use crate::history::Retention;
@@ -79,15 +81,67 @@ pub enum Binding {
 }
 
 impl ModelKey {
-  /// A letter or digit is held with a hotkey, any other key a hotkey of the model's own; `None`
-  /// for one that is neither (empty, not in nimbo's hotkey grammar).
+  /// A letter or digit is held with a hotkey; a chord with ⌃, ⌥, ⌘ or fn, an F-key or a modifier
+  /// alone is a hotkey of the model's own; `None` for any other (empty, not in nimbo's hotkey
+  /// grammar, a key alone or with ⇧ that every app would lose).
   pub fn binding(&self) -> Option<Binding> {
     let key = self.key.trim();
     let mut chars = key.chars();
     match (chars.next(), chars.next()) {
       (Some(c), None) if c.is_ascii_alphanumeric() => Some(Binding::Held(c.to_ascii_lowercase())),
-      _ => Hotkey::parse(key).ok().map(Binding::Own),
+      _ => Hotkey::parse(key).ok().filter(|&h| own(h)).map(Binding::Own),
     }
+  }
+}
+
+/// A hotkey that takes its key from every app without taking typing: a modifier alone, a chord
+/// with ⌃, ⌥, ⌘ or fn, an F-key.
+fn own(hotkey: Hotkey) -> bool {
+  let Hotkey::Shortcut(s) = hotkey else { return true };
+  let chord = Modifiers::CONTROL | Modifiers::ALT | Modifiers::META | Modifiers::FN;
+  let f = |n| f_key(n).is_some_and(|(_, k)| s.key == Key::Named(k));
+  s.mods.intersects(chord) || (1..=20).any(f)
+}
+
+impl Binding {
+  /// As nimbo listens to it: a held key is the key alone.
+  pub fn hotkey(self) -> Hotkey {
+    match self {
+      Binding::Held(c) => {
+        Hotkey::Shortcut(Shortcut { key: Key::Char(c), mods: Modifiers::empty() })
+      }
+      Binding::Own(h) => h,
+    }
+  }
+
+  /// As the platform writes it: `Z`, `F1`, `fn 1`, `⌃⌥R`.
+  pub fn label(self) -> String {
+    self.hotkey().label()
+  }
+}
+
+/// The key a model's key field recorded ([nimbo::Ui::shortcut_key]) as [ModelKey::key] spells it,
+/// or why it can't be one: it is the main `hotkey` or that one's own key, or neither a letter or
+/// digit nor a hotkey of its own.
+pub fn model_key(recorded: Hotkey, hotkey: &str) -> Result<String, String> {
+  let main = Hotkey::parse(hotkey).ok();
+  let label = recorded.label();
+  if main == Some(recorded) {
+    return Err(format!("{label} is the shortcut"));
+  }
+
+  // ⌥Space's Space, ⌃Z's Z: the key alone.
+  if let (Some(Hotkey::Shortcut(m)), Hotkey::Shortcut(k)) = (main, recorded)
+    && k.mods.is_empty()
+    && m.code().is_some_and(|c| k.code() == Some(c))
+  {
+    return Err(format!("{label} is in the shortcut"));
+  }
+
+  let key = ModelKey { key: recorded.to_string(), model: String::new() };
+  match key.binding() {
+    Some(_) => Ok(key.key),
+    None => Err(format!("{label} can’t be a key")),
   }
 }
 
@@ -234,6 +288,30 @@ impl Settings {
     let key = self.held_keys().into_iter().nth(index)?;
     Some(key.model.as_str())
   }
+
+  /// The key in use of wavo's model `name` ([model_keys](Self::model_keys)).
+  pub fn model_key(&self, name: &str) -> Option<Binding> {
+    let of = |k: &&ModelKey| hub::lookup(k.model.trim()).is_ok_and(|m| m.name == name);
+    self.model_keys().into_iter().find(of)?.binding()
+  }
+
+  /// The keys in use as the platform writes them ([Binding::label]), by wavo's name of their model.
+  pub fn key_labels(&self) -> Vec<(&'static str, String)> {
+    let label = |k: &ModelKey| Some((hub::lookup(k.model.trim()).ok()?.name, k.binding()?.label()));
+    self.model_keys().into_iter().filter_map(label).collect()
+  }
+
+  /// Gives wavo's model `name` the `key` ([ModelKey::key]), taken from a model that had it, or
+  /// none.
+  pub fn set_model_key(&mut self, name: &str, key: Option<String>) {
+    let binding =
+      key.as_ref().and_then(|key| ModelKey { key: key.clone(), model: String::new() }.binding());
+    let of = |k: &ModelKey| hub::lookup(k.model.trim()).is_ok_and(|m| m.name == name);
+    self.keys.retain(|k| !of(k) && (binding.is_none() || k.binding() != binding));
+    if let Some(key) = key {
+      self.keys.push(ModelKey { key, model: name.to_owned() });
+    }
+  }
 }
 
 // MARK: Languages
@@ -332,6 +410,50 @@ mod tests {
     assert_eq!((s.held_key_model(1), s.held_key_model(2)), (Some("whisper-turbo"), None));
     let hotkeys: Vec<Option<&str>> = (0..4).map(|which| s.hotkey_model(which)).collect();
     assert_eq!(hotkeys, [None, Some("parakeet-v2"), Some("moonshine-tiny"), None]);
+  }
+
+  /// A hotkey of its own is one that types nothing: a key alone or with ⇧ is none.
+  #[test]
+  fn a_hotkey_of_its_own_takes_no_typing() {
+    let binding = |key: &str| ModelKey { key: key.into(), model: "m".into() }.binding();
+    for key in ["f1", "shift+f5", "fn+1", "option+z", "ctrl+cmd+r", "right_option"] {
+      assert!(matches!(binding(key), Some(Binding::Own(_))), "{key}");
+    }
+
+    for key in ["space", "shift+z", "return", "left", ""] {
+      assert_eq!(binding(key), None, "{key}");
+    }
+  }
+
+  /// A key field's key: a letter or digit, or a hotkey of its own; not the main shortcut nor its
+  /// key.
+  #[test]
+  fn a_recorded_key_is_held_or_its_own_but_not_the_shortcuts() {
+    let hk = |text: &str| Hotkey::parse(text).unwrap();
+    let key = |text: &str, main: &str| model_key(hk(text), main);
+    assert_eq!(key("z", "fn"), Ok("z".into()));
+    assert_eq!(key("7", "option+space"), Ok("7".into()));
+    assert_eq!(key("f1", "fn"), Ok("f1".into()));
+    assert_eq!(key("ctrl+option+r", "fn"), Ok("ctrl+option+r".into()));
+    let label = |text: &str| hk(text).label();
+    assert_eq!(key("f5", "f5"), Err(format!("{} is the shortcut", label("f5"))));
+    assert_eq!(key("space", "option+space"), Err(format!("{} is in the shortcut", label("space"))));
+    assert_eq!(key("z", "ctrl+z"), Err(format!("{} is in the shortcut", label("z"))));
+    assert_eq!(key("shift+z", "fn"), Err(format!("{} can’t be a key", label("shift+z"))));
+  }
+
+  /// A key set moves from the model that had it; one cleared goes; the labels follow.
+  #[test]
+  fn a_key_moves_to_the_model_it_is_set_for() {
+    let mut s = with_keys(&[("z", "gigaam-v3"), ("f1", "parakeet-v2")]);
+    s.set_model_key("whisper-turbo", Some("Z".into()));
+    assert_eq!(s.model_key("gigaam-v3"), None);
+    assert_eq!(s.model_key("whisper-turbo"), Some(Binding::Held('z')));
+    s.set_model_key("parakeet-v2", Some("x".into()));
+    let labels = s.key_labels();
+    assert_eq!(labels, [("whisper-turbo", "Z".into()), ("parakeet-v2", "X".into())]);
+    s.set_model_key("whisper-turbo", None);
+    assert_eq!(s.keys, [ModelKey { key: "x".into(), model: "parakeet-v2".into() }]);
   }
 
   #[test]

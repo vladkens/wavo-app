@@ -19,8 +19,8 @@ use nimbo::permissions::{Access as Grant, Pane};
 use nimbo::system::Change;
 use nimbo::{
   Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
-  FormStyle, Hotkey, Icon, Id, Item, Key, Menu, NamedKey, PopUp, Select, Style, TextStyle, Tile,
-  Ui, Weight, grow, open, paths, px,
+  FormStyle, Hotkey, Icon, Id, Item, Key, Menu, NamedKey, PopUp, Select, Style, TextStyle, Theme,
+  Tile, Ui, Weight, grow, open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -28,7 +28,7 @@ use wavo::hub::{self, Hub, ModelInfo};
 use crate::audio::{self, Auto, Choice, Microphone, Playback, Transport};
 use crate::history::{Entry, History, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms};
 use crate::session::{NoModel, Request, Status, label};
-use crate::settings::{Activation, HudPosition, Settings, language_name};
+use crate::settings::{self, Activation, Binding, HudPosition, Settings, language_name};
 use crate::transfer::Imported;
 
 // MARK: Window
@@ -82,12 +82,25 @@ pub struct Access {
   pub clipboard_unread: bool,
 }
 
+/// What the hotkeys say of the model keys ([Settings::keys]): why a model's own shortcut does not
+/// work, by wavo's name of the model, and why the keys held with the shortcut don't.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct KeyNotes {
+  pub own: Vec<(&'static str, String)>,
+  pub held: Option<String>,
+}
+
 /// What the window asks of the app. What takes a while runs off the main thread and comes back
 /// through the `Prefs` method named.
 pub trait Shell {
   fn edit(&self, _edit: Box<dyn FnOnce(&mut Settings) + Send>) {}
   /// The shortcut recorder records: the current hotkey is not matched meanwhile.
   fn pause_hotkey(&self, _paused: bool) {}
+  /// The models' keys work here: Models has a key field per model.
+  fn model_keys(&self) -> bool {
+    false
+  }
+
   fn devices(&self) -> Vec<audio::Device>;
   /// [audio::lid_closed], for Automatic's microphone.
   fn lid_closed(&self) -> bool {
@@ -166,8 +179,13 @@ pub struct Prefs {
   pick: Pick,
   access: Access,
   login: Login,
-  /// The shortcut recorder records: the hotkey is paused.
+  /// The shortcut recorder or a key field records: the hotkey is paused.
   recording: bool,
+  /// A key field records, in the frame being built.
+  key_recording: bool,
+  key_notes: KeyNotes,
+  /// The key a model's field refused, and why: in place of its caption until the next key.
+  key_refused: Option<(&'static str, String)>,
   ask: Option<Ask>,
   /// The file panel open: its answer goes to it.
   panel: Option<Panel>,
@@ -201,6 +219,9 @@ impl Prefs {
       access,
       login: Login { state: Err(String::new()), busy: None, error: None },
       recording: false,
+      key_recording: false,
+      key_notes: KeyNotes::default(),
+      key_refused: None,
       ask: None,
       panel: None,
       model_search: String::new(),
@@ -228,6 +249,10 @@ impl Prefs {
     self.access = self.shell.access();
     self.login.state = self.shell.autostart();
     self.models_changed();
+  }
+
+  pub fn key_notes(&mut self, notes: KeyNotes) {
+    self.key_notes = notes;
   }
 
   pub fn access_changed(&mut self) {
@@ -308,6 +333,7 @@ impl App for Prefs {
     }
 
     let fs = FormStyle::plates(&ui.theme());
+    self.key_recording = false;
     ui.col(Style::new().grow().bg(fs.bg), |ui| {
       ui.id(TABS).toolbar_tabs(&fs, &mut self.page, &PAGES);
       let head = Style::new().w(grow()).pads([12.0, 20.0, 2.0, 20.0]).gap(10.0);
@@ -336,7 +362,7 @@ impl App for Prefs {
     self.confirm(ui);
 
     // Also when the recorder lost its focus with the page, or the window lost the keys.
-    let recording = ui.focused(Id::of("hotkey")) && ui.window_focused();
+    let recording = (ui.focused(Id::of("hotkey")) || self.key_recording) && ui.window_focused();
     if recording != self.recording {
       self.recording = recording;
       self.shell.pause_hotkey(recording);
@@ -400,6 +426,11 @@ const FN_NOTE: &str =
   "Set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”, or macOS acts on it too.";
 const SECURE_INPUT_NOTE: &str = "Secure Input is on (a password field, or a terminal’s Secure \
   Keyboard Entry): the shortcut works through a backup path, and Esc may not cancel.";
+const KEYS_HELP: &str = "A model’s key is a letter or digit you press while holding the \
+  shortcut, or a shortcut of its own such as F1 or ⌃⌥1, held or tapped like the main one. Either \
+  way, that dictation goes to the model.";
+const KEYS_NOTE: &str = "Held with a model’s key, it dictates with that model: the keys are in \
+  Models.";
 const ACTIVATION_HELP: &str = "How the hotkey records: while you hold it, from one press to the \
   next, or both (a short tap latches the recording on).";
 // What Automatic does here ([audio::automatic]): macOS tells the built-in microphone from a
@@ -477,12 +508,17 @@ impl Prefs {
         (false, true) => Some(FN_NOTE),
         (false, false) => None,
       };
+      let keys = self.shell.model_keys() && !self.settings.model_keys().is_empty();
+      let note = match (note, keys) {
+        (Some(note), true) => Some(format!("{note}\n\n{KEYS_NOTE}")),
+        (note, keys) => note.map(str::to_owned).or(keys.then(|| KEYS_NOTE.to_owned())),
+      };
       let mut row = FormRow::new("Shortcut");
-      if let Some(note) = note {
+      if let Some(note) = &note {
         row = row.info(note);
       }
 
-      ui.form_row(fs, row, |ui| self.shortcut(ui));
+      ui.id("shortcut-row").form_row(fs, row, |ui| self.shortcut(ui));
       ui.form_row(fs, FormRow::new("Activation").info(ACTIVATION_HELP), |ui| {
         let mut cur = self.settings.activation;
         if ui.id("activation").select(&mut cur, &ACTIVATIONS).changed {
@@ -1120,10 +1156,19 @@ impl Prefs {
     } else if !downloaded.is_empty() {
       let size: u64 = downloaded.iter().map(|m| m.size).sum();
       let note = format!("{} · {}", count(downloaded.len()), size_text(size));
+      let keys = self.shell.model_keys();
       ui.form_section_with(
         fs,
         "Downloaded",
-        |ui| ui.text(&note, fs.note),
+        |ui| {
+          ui.row(Style::new().gap(6.0).align(Align::Start, Align::Center), |ui| {
+            ui.text(&note, fs.note);
+            if keys {
+              let r = ui.id("keys-info").info_button();
+              ui.tooltip(r.id, KEYS_HELP);
+            }
+          });
+        },
         |ui| {
           for &m in &downloaded {
             act = self.downloaded_row(ui, fs, m, active == Some(m.name)).or(act);
@@ -1164,7 +1209,9 @@ impl Prefs {
     self.edit(move |s| s.model = Some(name.to_owned()));
   }
 
-  /// Use (or "✓ In use"), the bin and ↗: the model to ask about deleting.
+  /// The key field of a model not in use ([Prefs::key_field]), Use (or "✓ In use"), the bin and
+  /// ↗: the model to ask about deleting. A key refused says why in the caption's place, one that
+  /// does not work in the warning mark.
   fn downloaded_row(
     &mut self,
     ui: &mut Ui,
@@ -1173,9 +1220,34 @@ impl Prefs {
     in_use: bool,
   ) -> Option<&'static ModelInfo> {
     let t = ui.theme();
-    let caption = format!("{} · {}", m.languages, size_text(m.size));
+    let refused = self.key_refused.as_ref().filter(|(name, _)| *name == m.name);
+    let caption = match refused {
+      Some((_, why)) => why.clone(),
+      None => format!("{} · {}", m.languages, size_text(m.size)),
+    };
+
+    let fs = &match refused {
+      Some(_) => FormStyle { caption: fs.caption.color(t.warning), ..*fs },
+      None => *fs,
+    };
+    let notes = &self.key_notes;
+    let warning = match self.settings.model_key(m.name).filter(|_| self.shell.model_keys()) {
+      Some(Binding::Own(_)) => notes.own.iter().find(|n| n.0 == m.name).map(|n| n.1.clone()),
+      Some(Binding::Held(_)) => notes.held.clone(),
+      None => None,
+    };
+    let mut row = model_row(m, Some(&caption));
+    if let Some(warning) = &warning {
+      row = row.warning(warning);
+    }
+
     let (mut used, mut act) = (false, None);
-    ui.form_row(fs, model_row(m, Some(&caption)), |ui| {
+    let keys = self.shell.model_keys() && !in_use;
+    ui.id(("model", m.name)).form_row(fs, row, |ui| {
+      if keys {
+        self.key_field(ui, m);
+      }
+
       if in_use {
         ui.row(Style::new().gap(4.0).align(Align::Start, Align::Center), |ui| {
           ui.icon_stroke(Icon::CHECK, 14.0, t.accent, 2.2);
@@ -1200,6 +1272,34 @@ impl Prefs {
     }
 
     act
+  }
+
+  /// A model's key ([settings::model_key]) in a recorder of a key, with the ⊗ that clears it: the
+  /// plates themes leave it out for a recorder beside a reset button, and this one has none. A key
+  /// another model had moves here.
+  fn key_field(&mut self, ui: &mut Ui, m: &'static ModelInfo) {
+    let mut value = self.settings.model_key(m.name).map(Binding::hotkey);
+    let theme = ui.theme();
+    ui.set_theme(Theme { shortcut_clear: true, ..theme });
+    let r = ui.id(("key", m.name)).shortcut_key(&mut value);
+    ui.follow_system();
+    self.key_recording |= r.recording;
+    if !r.changed {
+      return;
+    }
+
+    let key = match value.map(|h| settings::model_key(h, &self.settings.hotkey)).transpose() {
+      Ok(key) => key,
+      Err(why) => {
+        self.key_refused = Some((m.name, why));
+        return;
+      }
+    };
+
+    self.key_refused = None;
+    info!("settings: model {} key {key:?}", m.name);
+    let name = m.name;
+    self.edit(move |s| s.set_model_key(name, key.clone()));
   }
 
   /// Download (Retry after a failure), or its progress in place of the caption with ✕.
@@ -2081,6 +2181,7 @@ mod tests {
   use nimbo::{Appearance, Event, Harness, Modifiers, MouseButton, Os, Phase, Point, Size};
 
   use super::*;
+  use crate::settings::ModelKey;
   use crate::testing::TempDir;
 
   #[derive(Default)]
@@ -2131,6 +2232,10 @@ mod tests {
 
     fn pause_hotkey(&self, paused: bool) {
       self.log().paused.push(paused);
+    }
+
+    fn model_keys(&self) -> bool {
+      true
     }
 
     fn devices(&self) -> Vec<audio::Device> {
@@ -2334,12 +2439,16 @@ mod tests {
   /// Rests the pointer on the mark of the row `row` (its ⓘ, or the warning in its place) until
   /// its tooltip shows; the tooltip's text.
   fn tip(h: &mut Harness<Prefs>, row: &str) -> String {
-    let mark = Id::of(row).key("info");
-    let r = h.rect(mark).unwrap_or_else(|| panic!("no mark in {row}"));
+    tip_of(h, Id::of(row))
+  }
+
+  fn tip_of(h: &mut Harness<Prefs>, row: Id) -> String {
+    let mark = row.key("info");
+    let r = h.rect(mark).unwrap_or_else(|| panic!("no mark in {row:?}"));
     h.move_to(r.x + r.w / 2.0, r.y + r.h / 2.0);
     h.wait(Duration::from_millis(400));
     let tip = mark.key("tip");
-    assert!(h.rect(tip).is_some(), "no tooltip on the mark of {row}");
+    assert!(h.rect(tip).is_some(), "no tooltip on the mark of {row:?}");
     let text = h.text(tip.nth(0)).unwrap_or_default().to_owned();
     h.leave();
     h.frame();
@@ -2418,7 +2527,10 @@ mod tests {
       let running = Download::Running { done: 114_000_000, total: 272_000_000, rate: Some(3.2e6) };
       fake.log().states.insert("gigaam-v3-e2e-ctc", running);
       fake.log().updates = true;
-      let mut h = home.harness(&fake, Settings::default());
+      // GigaAM held with the shortcut, Whisper on a shortcut of its own.
+      let keys = [("z", "gigaam-v3"), ("f1", "whisper-turbo")];
+      let keys = keys.map(|(key, model)| ModelKey { key: key.into(), model: model.into() });
+      let mut h = home.harness(&fake, Settings { keys: keys.to_vec(), ..Settings::default() });
       h.event(Event::Appearance(appearance));
       for (page, _, name) in PAGES {
         tab(&mut h, page);
@@ -2761,6 +2873,85 @@ mod tests {
     click(&mut h, Id::of(("delete", TWO[1])));
     confirm(&mut h);
     assert_eq!(fake.log().deleted, [TWO[1]]);
+  }
+
+  /// A downloaded model's key field, but the one in use's: a key recorded is the model's, and moves
+  /// from a model that had it; ⊗ clears it; the shortcut's own key is refused, why in the caption's
+  /// place. The hotkey pauses while a field records.
+  #[test]
+  fn a_models_key_field_records_moves_clears_and_refuses() {
+    let home = Home::new("window-keys", &["parakeet-v3", "parakeet-v2", "gigaam-v3"]);
+    let fake = Fake::default();
+    let settings = Settings {
+      model: Some("parakeet-v3".into()),
+      hotkey: "option+space".into(),
+      ..Settings::default()
+    };
+    let mut h = home.harness(&fake, settings);
+    tab(&mut h, Page::Models);
+    let field = |name: &str| Id::of(("key", name));
+    assert!(h.rect(field("parakeet-v3")).is_none(), "the model in use has none");
+    let key = |fake: &Fake, name: &str| fake.log().settings.model_key(name).map(Binding::label);
+    let record = |h: &mut Harness<Prefs>, name: &str, k: Key| {
+      click(h, field(name));
+      h.key(k, Modifiers::empty());
+      h.frame();
+      h.frame();
+    };
+
+    record(&mut h, "gigaam-v3", 'z'.into());
+    assert_eq!(fake.log().paused, [true, false], "paused while it recorded");
+    assert_eq!(key(&fake, "gigaam-v3").as_deref(), Some("Z"));
+    record(&mut h, "parakeet-v2", 'z'.into());
+    assert_eq!((key(&fake, "gigaam-v3"), key(&fake, "parakeet-v2").as_deref()), (None, Some("Z")));
+    record(&mut h, "gigaam-v3", NamedKey::F1.into());
+    assert_eq!(
+      fake.log().settings.model_key("gigaam-v3"),
+      Some(Binding::Own(Hotkey::parse("f1").unwrap()))
+    );
+
+    // Space is ⌥Space's own key: refused, the caption says why until the next key.
+    record(&mut h, "parakeet-v2", ' '.into());
+    assert_eq!(key(&fake, "parakeet-v2").as_deref(), Some("Z"), "kept");
+    let caption = Id::of(("model", "parakeet-v2")).key("caption");
+    let space = Hotkey::parse("space").unwrap().label();
+    assert_eq!(h.text(caption), Some(format!("{space} is in the shortcut").as_str()));
+    record(&mut h, "parakeet-v2", 'x'.into());
+    assert_ne!(h.text(caption), Some(format!("{space} is in the shortcut").as_str()));
+
+    click(&mut h, field("parakeet-v2").key("clear"));
+    assert_eq!(key(&fake, "parakeet-v2"), None);
+    assert_eq!(fake.log().settings.keys.len(), 1, "gigaam's F1 alone");
+  }
+
+  /// The keys' ⓘ explains both kinds; a key that does not work says why in its row's warning mark,
+  /// and General's shortcut tells of the keys once there are some.
+  #[test]
+  fn the_keys_say_how_they_work_and_what_is_wrong() {
+    let home = Home::new("window-key-notes", &["parakeet-v3", "parakeet-v2", "gigaam-v3"]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    assert!(h.rect(Id::of("shortcut-row").key("info")).is_none(), "no keys: no ⓘ");
+    let keys = vec![
+      ModelKey { key: "z".into(), model: "gigaam-v3".into() },
+      ModelKey { key: "f1".into(), model: "parakeet-v2".into() },
+    ];
+    let settings = Settings { keys, ..Settings::default() };
+    h.app_mut().update(&settings, &Status::default(), 0);
+    h.frame();
+    assert_eq!(tip(&mut h, "shortcut-row"), KEYS_NOTE);
+
+    tab(&mut h, Page::Models);
+    let info = format!(r#"button "Info" desc {KEYS_HELP:?}"#);
+    assert_eq!(a11y_line(&h, &info), Some(info));
+    let notes = KeyNotes {
+      own: vec![("parakeet-v2", "taken by another app".into())],
+      held: Some("keys while held need the event tap: Accessibility access".into()),
+    };
+    h.app_mut().key_notes(notes.clone());
+    h.frame();
+    assert_eq!(tip_of(&mut h, Id::of(("model", "parakeet-v2"))), notes.own[0].1);
+    assert_eq!(tip_of(&mut h, Id::of(("model", "gigaam-v3"))), notes.held.unwrap());
   }
 
   #[test]

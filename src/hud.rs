@@ -5,7 +5,8 @@
 //! become a travelling wave, the time freezes (`n/m` for a recording in pieces). Then the pill
 //! collapses to a circle and fades: no "done" state. An error shows a glyph and a short lowercase
 //! reason for a few seconds, the pill widening to fit; while recording, a warning (no sound, no
-//! model, a permission) takes the level's place.
+//! model, a permission) takes the level's place. A dictation that goes to a key's model has a tag
+//! of the model's language after the time.
 
 use std::time::Duration;
 
@@ -35,6 +36,10 @@ const BARS_X: f32 = PAD + DOT + 10.0;
 const TIME_X: f32 = BARS_X + BARS as f32 * BAR_STEP + 8.0;
 const GLYPH: f32 = 20.0;
 const REASON_X: f32 = PAD + GLYPH + 8.0;
+// The language tag after the time: a chip of the reference time's width away.
+const TAG_GAP: f32 = 8.0;
+const TAG_PAD: f32 = 5.0;
+const TAG_H: f32 = 18.0;
 const WAVE_LOW: f32 = 3.0;
 const WAVE_HIGH: f32 = 9.0;
 
@@ -49,9 +54,12 @@ const DONE_HOLD: Duration = ms(1000);
 const METER_TICK: Duration = ms(33);
 const WAVE_HALF: Duration = ms(600);
 const WAVE_STAGGER: Duration = ms(75);
+// One tag to the next.
+const TAG_FADE: Duration = ms(180);
 
 const FONT: Font = Font::ui(13.0);
 const TIME: Font = Font::mono(13.0).weight(Weight::Medium);
+const TAG: Font = Font::ui(11.0).weight(Weight::Semibold);
 // A triangle with an exclamation mark cut out of it.
 const TRIANGLE: Icon =
   Icon::filled("M10.3 3.9a2 2 0 0 1 3.4 0l8 13.6a2 2 0 0 1-1.7 3H4a2 2 0 0 1-1.7-3Z");
@@ -124,6 +132,11 @@ pub fn during(status: &Status) -> Option<String> {
   Some(no_model(matches!(why, NoModel::LoadFailed { .. })))
 }
 
+/// The tag of a dictation that goes to a key's model: its language, `RU`, `AUTO`.
+pub fn tag(status: &Status) -> Option<String> {
+  status.key_language.as_ref().map(|l| l.to_uppercase())
+}
+
 fn no_model(load: bool) -> String {
   let what = if load { "model failed to load" } else { "download a model" };
   what.to_owned()
@@ -168,14 +181,20 @@ fn short(error: &str) -> String {
 // MARK: Hud
 
 pub enum Show {
-  /// `seconds` in so far; `warning` takes the level's place, over no sound too.
+  /// `seconds` in so far; `warning` takes the level's place, over no sound too; `tag` ([tag])
+  /// after the time.
   Recording {
     meter: Option<Meter>,
     device: String,
     seconds: f64,
     warning: Option<String>,
+    tag: Option<String>,
   },
-  Transcribing(Option<(usize, usize)>),
+  /// The pieces done of how many, and the tag.
+  Transcribing {
+    progress: Option<(usize, usize)>,
+    tag: Option<String>,
+  },
   Error(String),
   /// The dictation's text came this long after the stop.
   Done(String),
@@ -209,6 +228,8 @@ pub struct Hud {
   text: Option<String>,
   // The pill's width on its way: from, to, since.
   width: (f32, f32, Duration),
+  // The tag on its way: from, to, since.
+  tag: (Option<String>, Option<String>, Duration),
   meter: Option<Meter>,
   device: String,
   warning: Option<String>,
@@ -233,6 +254,7 @@ impl Hud {
       progress: None,
       text: None,
       width: (WIDTH, WIDTH, Duration::ZERO),
+      tag: (None, None, Duration::ZERO),
       meter: None,
       device: String::new(),
       warning: None,
@@ -253,7 +275,7 @@ impl Hud {
       (Show::Recording { .. }, _) => Mode::Recording,
       (Show::Error(_), _) => Mode::Error,
       (Show::Done(_), _) => Mode::Done,
-      (Show::Transcribing(_), Mode::Recording) => Mode::Transcribing,
+      (Show::Transcribing { .. }, Mode::Recording) => Mode::Transcribing,
       (Show::Collapse, Mode::Recording | Mode::Transcribing | Mode::Error | Mode::Done) => {
         Mode::Closing
       }
@@ -281,6 +303,26 @@ impl Hud {
     self.width = (self.width_at(now), to, now);
   }
 
+  /// The pill's width with the level or the wave, the time and the tag.
+  fn plain_width(&self, f: &mut Frame) -> f32 {
+    let Some(tag) = &self.tag.1 else { return WIDTH };
+    let tag = f.measure(tag, TAG) + 2.0 * TAG_PAD;
+    (TIME_X + f.measure("0:00", TIME) + TAG_GAP + tag + PAD).max(WIDTH)
+  }
+
+  /// Another tag crossfades in, the pill fitting it unless a text shows.
+  fn retag(&mut self, tag: Option<String>, f: &mut Frame) {
+    if self.tag.1 == tag {
+      return;
+    }
+
+    self.tag = (self.tag.1.take(), tag, f.now);
+    if self.text.is_none() {
+      let to = self.plain_width(f);
+      self.resize(to, f.now);
+    }
+  }
+
   fn apply(&mut self, show: Show, f: &mut Frame) {
     let now = f.now;
     if !matches!(show, Show::Recording { .. }) {
@@ -288,24 +330,30 @@ impl Hud {
     }
 
     match show {
-      Show::Recording { meter, device, seconds, warning } => {
+      Show::Recording { meter, device, seconds, warning, tag } => {
+        // Its tag at once, the pill as wide as it needs.
         if self.mode != Mode::Recording {
           self.enter(Mode::Recording, now);
           self.started = now.saturating_sub(Duration::from_secs_f64(seconds));
           (self.levels, self.ticked, self.text) = ([0.0; BARS], now, None);
-          self.width = (WIDTH, WIDTH, now);
+          self.tag = (None, tag.clone(), Duration::ZERO);
+          let width = self.plain_width(f);
+          self.width = (width, width, now);
         }
 
         (self.meter, self.device, self.warning) = (meter, device, warning);
+        self.retag(tag, f);
       }
-      Show::Transcribing(progress) => {
+      Show::Transcribing { progress, tag } => {
         self.progress = progress;
         // Not of a recording it did not show (one started while hidden).
         if self.mode == Mode::Recording {
           self.ended = now;
           self.enter(Mode::Transcribing, now);
           self.text = None;
-          self.resize(WIDTH, now);
+          self.retag(tag, f);
+          let to = self.plain_width(f);
+          self.resize(to, now);
         }
       }
       Show::Error(reason) => {
@@ -350,7 +398,10 @@ impl Hud {
       return;
     }
 
-    let to = warning.as_ref().map_or(WIDTH, |w| reason_width(f.measure(w, FONT)));
+    let to = match &warning {
+      Some(w) => reason_width(f.measure(w, FONT)),
+      None => self.plain_width(f),
+    };
     self.resize(to, f.now);
     self.text = warning;
   }
@@ -410,6 +461,17 @@ impl Hud {
     let time = |f: &mut Frame, text: &str, k: f32| {
       let y = baseline(f, TIME);
       f.text(x + TIME_X, y, text, TIME, fade(th.text, k));
+      // The tag after it, the one before fading out as the next fades in.
+      let at = x + TIME_X + f.measure(text, TIME).max(f.measure("0:00", TIME)) + TAG_GAP;
+      let (from, to, since) = &self.tag;
+      let next = eased(now.saturating_sub(*since), TAG_FADE);
+      for (tag, kt) in [(from, 1.0 - next), (to, next)] {
+        let Some(tag) = tag.as_deref().filter(|_| kt > 0.0) else { continue };
+        let chip = Rect::new(at, mid - TAG_H / 2.0, f.measure(tag, TAG) + 2.0 * TAG_PAD, TAG_H);
+        f.rect(chip, fade(alpha(th.text, 0.1), k * kt), 4.0);
+        let y = baseline(f, TAG);
+        f.text(at + TAG_PAD, y, tag, TAG, fade(th.muted, k * kt));
+      }
     };
     let clock = |end: Duration| {
       let secs = end.saturating_sub(self.started).as_secs();
@@ -647,7 +709,7 @@ mod tests {
   fn a_dictation_records_transcribes_and_collapses() {
     let (mut h, hidden) = hud();
     let recording =
-      Show::Recording { meter: None, device: "Mic".into(), seconds: 3.0, warning: None };
+      Show::Recording { meter: None, device: "Mic".into(), seconds: 3.0, warning: None, tag: None };
     h.app_mut().show(recording);
     assert_eq!(h.app().mode(), Mode::Recording, "as soon as it is asked");
     h.wait(ms(500));
@@ -658,7 +720,7 @@ mod tests {
     let [r, g, _, a] = img.pixel(left + PAD + DOT / 2.0, mid);
     assert!(r > 200 && g < 100 && a == 255, "the red dot: {r} {g} {a}");
 
-    h.app_mut().show(Show::Transcribing(Some((0, 2))));
+    h.app_mut().show(Show::Transcribing { progress: Some((0, 2)), tag: None });
     h.wait(ms(300));
     assert_eq!(h.app().mode(), Mode::Transcribing);
     h.app_mut().show(Show::Collapse);
@@ -736,12 +798,57 @@ mod tests {
     let meter = Meter::default();
     let warning = Some("download a model".to_owned());
     let device = "Default Audio Device".to_owned();
-    h.app_mut().show(Show::Recording { meter: Some(meter.clone()), device, seconds: 1.0, warning });
+    let shown = Some(meter.clone());
+    h.app_mut().show(Show::Recording { meter: shown, device, seconds: 1.0, warning, tag: None });
     h.wait(ms(300));
     assert_eq!(h.app().text.as_deref(), Some("download a model"));
     meter.set_silent(true);
     h.wait(ms(300));
     assert_eq!(h.app().text.as_deref(), Some("download a model"), "no switch to no sound");
+  }
+
+  /// A dictation by a key's model: its tag after the time, the pill wider for it; another tag
+  /// crossfades in, and stays through the transcription. With `WAVO_SHOTS` set (`make shots`),
+  /// written there.
+  #[test]
+  fn the_tag_renders_in_both_looks() {
+    let dir = std::env::var_os("WAVO_SHOTS").map(std::path::PathBuf::from);
+    for (look, appearance) in [("light", Appearance::LIGHT), ("dark", Appearance::DARK)] {
+      let (mut h, _) = hud();
+      h.event(Event::Appearance(appearance));
+      let recording = |tag: &str| Show::Recording {
+        meter: None,
+        device: "Mic".into(),
+        seconds: 7.0,
+        warning: None,
+        tag: Some(tag.into()),
+      };
+      h.app_mut().show(recording("RU"));
+      h.wait(ms(300));
+      let left = |h: &mut Harness<Hud>| {
+        let (img, mid) = (h.render(), MARGIN + HEIGHT / 2.0);
+        (0..400).map(|x| x as f32).find(|&x| img.pixel(x, mid)[3] == 255).unwrap()
+      };
+      let plain = (config(HudPosition::Bottom).size.w - WIDTH) / 2.0;
+      assert!(left(&mut h) < plain - 5.0, "{look}: wider for the tag");
+      let shot = |h: &mut Harness<Hud>, name: &str| {
+        if let Some(dir) = &dir {
+          std::fs::create_dir_all(dir).unwrap();
+          h.shot(&dir.join(format!("hud-{name}-{look}.png"))).unwrap();
+        }
+      };
+      shot(&mut h, "tag");
+
+      h.app_mut().show(recording("EN"));
+      h.wait(TAG_FADE / 2);
+      let tag = &h.app().tag;
+      assert_eq!((tag.0.as_deref(), tag.1.as_deref()), (Some("RU"), Some("EN")), "crossfading");
+      h.app_mut().show(Show::Transcribing { progress: None, tag: Some("EN".into()) });
+      h.wait(ms(400));
+      assert_eq!(h.app().tag.1.as_deref(), Some("EN"));
+      assert!(left(&mut h) < plain - 5.0, "{look}: still wide");
+      shot(&mut h, "tag-transcribing");
+    }
   }
 
   /// A Windows microphone's name in full would run past the pill's rounded end.

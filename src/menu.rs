@@ -172,7 +172,8 @@ pub fn recent_title(text: &str, created_at: i64, now: i64) -> String {
 
 /// Item ids: `recent:<i>`, `mic:<i>`, `model:<name>`, `warn:…` and fixed ones, as
 /// `app::chosen` handles them. `mics`: the devices, the one saved and whether the lid is closed;
-/// `models`: those downloaded and the pick; `update`: the updater's state, `None` in a build that
+/// `models`: those downloaded, the pick and the models' keys
+/// ([crate::settings::Settings::key_labels]); `update`: the updater's state, `None` in a build that
 /// doesn't update.
 pub fn menu(
   hotkey: Option<&str>,
@@ -180,7 +181,7 @@ pub fn menu(
   warnings: &[Warning],
   recent: &[String],
   mics: (&[Device], &Microphone, bool),
-  (found, pick): (&[Found], &Pick),
+  (found, pick, keys): (&[Found], &Pick, &[(&str, String)]),
   update: Option<&State>,
 ) -> Menu {
   let title = format!("Wavo {}", crate::VERSION);
@@ -201,7 +202,7 @@ pub fn menu(
   let recent: Vec<Item> =
     recent.iter().enumerate().map(|(i, title)| Item::new(&format!("recent:{i}"), title)).collect();
   let (mic, mics, note) = microphones(mics);
-  let (model, models) = models(found, pick);
+  let (model, models) = models(found, pick, keys);
   items.extend([
     Item::separator(),
     Item::new("copy-last", "Copy Last Dictation").enabled(last),
@@ -278,12 +279,16 @@ fn microphones(
 }
 
 /// The model in use, and the submenu: the models downloaded with the one that transcribes checked,
-/// then the chosen one when it is none of them.
-fn models(found: &[Found], pick: &Pick) -> (String, Menu) {
+/// each with its key after its name (`gigaam-v3 · Z`), then the chosen one when it is none of them.
+fn models(found: &[Found], pick: &Pick, keys: &[(&str, String)]) -> (String, Menu) {
   let only = pick.other.is_none();
   let mut items: Vec<Item> = (found.iter().enumerate())
     .map(|(i, (m, _))| {
-      Item::new(&format!("model:{}", m.name), m.full_name).checked(only && pick.active == Some(i))
+      let label = match keys.iter().find(|(name, _)| *name == m.name) {
+        Some((_, key)) => format!("{} · {key}", m.full_name),
+        None => m.full_name.to_owned(),
+      };
+      Item::new(&format!("model:{}", m.name), &label).checked(only && pick.active == Some(i))
     })
     .collect();
   let other = pick.other.as_ref().map(|(name, there)| match there {
@@ -326,6 +331,7 @@ mod tests {
 
   use super::*;
   use crate::audio::{Choice, Transport};
+  use crate::settings::{ModelKey, Settings};
 
   #[test]
   fn every_icon_is_an_18_point_even_odd_path() {
@@ -383,7 +389,7 @@ mod tests {
     let wave = Microphone::Device(wave);
     let mics = (&devices[..], &wave, false);
     let pick = Pick::default();
-    let items = menu(Some("⌥Space"), &s, &list, &[], mics, (&[], &pick), None).items;
+    let items = menu(Some("⌥Space"), &s, &list, &[], mics, (&[], &pick, &[]), None).items;
     // The header as long as the build's version lets it be (a dirty build's runs longer).
     let header = format!("Wavo {} · ⌥Space · Recording…", crate::VERSION);
     let label = &items[0].label;
@@ -409,7 +415,7 @@ mod tests {
     assert_eq!(devices_got, [("MacBook Pro Microphone", false), (devices[1].name.as_str(), true)]);
 
     let mic_label = |devices: &[Device], saved: &Microphone, lid_closed| {
-      let items = menu(None, &s, &list, &[], (devices, saved, lid_closed), (&[], &pick), None);
+      let items = menu(None, &s, &list, &[], (devices, saved, lid_closed), (&[], &pick, &[]), None);
       let label = |id| items.items.iter().find(|i| i.id == id).map(|i| i.label.clone());
       (label("mic").unwrap(), label("mic-note"))
     };
@@ -460,7 +466,7 @@ mod tests {
     // The menu's title and note, the submenu's checked item.
     let mics = |devices: &[Device], lid_closed| {
       let mics = (devices, &headphones, lid_closed);
-      let items = menu(None, &s, &[], &[], mics, (&[], &pick), None).items;
+      let items = menu(None, &s, &[], &[], mics, (&[], &pick, &[]), None).items;
       let label = |id| items.iter().find(|i| i.id == id).map(|i| i.label.clone());
       let sub = &items.iter().find(|i| i.id == "mic").unwrap().submenu.as_ref().unwrap().items;
       let checked = sub.iter().find(|i| i.checked).map(|i| i.label.clone());
@@ -497,6 +503,30 @@ mod tests {
     assert_eq!(mics(&back, false), want);
   }
 
+  /// The models downloaded show their keys after their names, as the platform writes them.
+  #[test]
+  fn the_models_show_their_keys() {
+    let names = ["parakeet-v3", "gigaam-v3", "parakeet-v2"];
+    let found: Vec<Found> =
+      names.iter().map(|n| (wavo::hub::lookup(n).unwrap(), std::path::PathBuf::new())).collect();
+    let keys = [("z", "gigaam-v3"), ("ctrl+option+r", "parakeet-v2")];
+    let keys = keys.map(|(key, model)| ModelKey { key: key.into(), model: model.into() });
+    let labels = Settings { keys: keys.to_vec(), ..Settings::default() }.key_labels();
+    let pick = Pick { active: Some(0), other: None };
+    let mics = (&[][..], &Microphone::System, false);
+    let items =
+      menu(None, &Status::default(), &[], &[], mics, (&found, &pick, &labels), None).items;
+    let sub = &items.iter().find(|i| i.id == "model").unwrap().submenu.as_ref().unwrap().items;
+    let got: Vec<(&str, bool)> = sub[..3].iter().map(|i| (i.label.as_str(), i.checked)).collect();
+    let chord = Hotkey::parse("ctrl+option+r").unwrap().label();
+    let want = [
+      (found[0].0.full_name.to_owned(), true),
+      (format!("{} · Z", found[1].0.full_name), false),
+      (format!("{} · {chord}", found[2].0.full_name), false),
+    ];
+    assert_eq!(got, want.iter().map(|(l, c)| (l.as_str(), *c)).collect::<Vec<_>>());
+  }
+
   /// An update shows under the header and the warnings; Check for Updates… sits above Quit.
   #[test]
   fn an_update_shows_under_the_header() {
@@ -504,7 +534,7 @@ mod tests {
     let pick = Pick::default();
     let items = |state: State| {
       let mics = (&[][..], &Microphone::System, false);
-      let items = menu(None, &s, &[], &[], mics, (&[], &pick), Some(&state)).items;
+      let items = menu(None, &s, &[], &[], mics, (&[], &pick, &[]), Some(&state)).items;
       items.into_iter().map(|i| (i.id, i.label)).collect::<Vec<_>>()
     };
     let idle = items(State::Idle);
