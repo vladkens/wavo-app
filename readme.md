@@ -7,7 +7,7 @@
 **Local dictation for macOS, Windows and Linux**
 
 [<img src="https://badges.ws/badge/-/macOS%2014.2%2B/000000?logo=apple&label" alt="macOS 14.2+" />](#-usage)
-[<img src="https://badges.ws/badge/-/Windows%2010%2B/0078D6?logo=windows&label" alt="Windows 10+" />](#-usage)
+[<img src="https://badges.ws/badge/-/Windows%2010%2B/0078D6?logo=windows11&label" alt="Windows 10+" />](#-usage)
 [<img src="https://badges.ws/badge/-/Linux%20%C2%B7%20X11%20%C2%B7%20Wayland/333333?logo=linux&logoColor=FCC624&label" alt="Linux, X11 and Wayland" />](#-usage)
 [<img src="https://badges.ws/github/license/vladkens/wavo-app" alt="license" />](https://github.com/vladkens/wavo-app/blob/main/LICENSE)
 [<img src="https://badges.ws/badge/follow-@uid127-black" alt="follow @uid127" />](https://x.com/uid127)
