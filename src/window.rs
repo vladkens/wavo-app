@@ -841,7 +841,6 @@ impl Prefs {
     });
   }
 
-  /// [Shell::set_autostart] to `on` ended: the system's state after it, or why not.
   /// A history request the session refused: said under the panel.
   pub fn history_failed(&mut self, req: Request, error: &str) {
     let what = match req {
@@ -853,6 +852,7 @@ impl Prefs {
     self.history.said = Some(format!("{what}: {error}"));
   }
 
+  /// [Shell::set_autostart] to `on` ended: the system's state after it, or why not.
   pub fn autostart_set(&mut self, on: bool, result: Result<Autostart, String>) {
     self.login.busy = None;
     match result {
@@ -1515,7 +1515,7 @@ struct HistoryPage {
   /// "Copied".
   note: Option<(String, Duration)>,
   /// A note from outside a frame (a request that failed on its thread, a recording that could not
-  /// play), stamped at the next one.
+  /// play), stamped when History shows next.
   said: Option<String>,
 }
 
