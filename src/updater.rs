@@ -19,14 +19,16 @@ use shipo::{Error, Feed, Release};
 
 /// `update.txt` beside the latest release's files, which CI's publish job writes and signs
 /// (`make pack`'s `shipo release --tag`); `latest` is never the dev pre-release. The public keys
-/// `shipo keygen` printed: the working one, then the spare.
+/// `shipo keygen` printed: the working one, then the spare. Fakeable: `SHIPO_FAKE_UPDATE=1.2.0`
+/// (shipo's readme's Fake update) shows the updater in any build, with no release or network.
 pub const FEED: Feed = Feed::new(
   "https://github.com/vladkens/wavo-app/releases/latest/download/update.txt",
   &[
     "9ef558b726bcca12c391391bf02432ac13da1e5f9c986fb6077c9600d843b242",
     "14eb5d25ae6eaea5871a01e705cd5b74ef0791fe99ecb2a16556ec20e7aa14b0",
   ],
-);
+)
+.fakeable();
 
 /// An automatic check once a day; one that got no answer is tried again at the next [TICK].
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -112,7 +114,7 @@ pub struct Updater {
 
 impl Updater {
   /// `on`: the app updates itself, as decided at launch: shipo's [supported](shipo::supported)
-  /// and not a [dev] build.
+  /// and not a [dev] build, or shipo [faking](shipo::faking).
   pub fn new(on: bool) -> Self {
     Self { state: State::Idle, checking: None, answered: None, off: !on }
   }
@@ -404,41 +406,6 @@ fn sentence(s: &str) -> String {
   chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
-// MARK: Fake
-
-const RELEASES: &str = "https://github.com/vladkens/wavo-app/releases";
-
-/// `WAVO_FAKE_UPDATE=<version>` (`none`: nothing newer), to see the updater on this computer: it
-/// shows in any build, its check offers that version with no network, its download only counts
-/// and its install fails, nothing replaced.
-pub fn fake() -> Option<String> {
-  std::env::var("WAVO_FAKE_UPDATE").ok().filter(|v| !v.is_empty())
-}
-
-/// What the fake check finds: the version with its notes' page and a size, as a feed gives them.
-pub fn fake_check(version: &str) -> shipo::Result<Option<Release>> {
-  if version == "none" {
-    return Ok(None);
-  }
-
-  // shipo makes a release only from a feed, or with no file for an app's own tests.
-  let mut r = Release::test(version);
-  r.notes = Some(format!("{RELEASES}/tag/{}", shown(version)));
-  r.size = 30_000_000;
-  Ok(Some(r))
-}
-
-/// The fake download: `progress` counts to 100 in about 5 s.
-pub fn fake_download(mut progress: impl FnMut(u64, u64)) {
-  for done in (0..=100).step_by(4) {
-    std::thread::sleep(Duration::from_millis(200));
-    progress(done, 100);
-  }
-}
-
-/// The fake install's failure, after Restarting… shows a while.
-pub const FAKE_INSTALL: &str = "WAVO_FAKE_UPDATE: nothing is installed";
-
 #[cfg(test)]
 mod tests {
   use std::cell::RefCell;
@@ -455,6 +422,14 @@ mod tests {
 
   fn r(v: &str) -> Release {
     Release::test(v)
+  }
+
+  /// A release as the feed gives it: its notes' page and its size.
+  fn release(v: &str) -> Release {
+    let mut r = r(v);
+    r.notes = Some(format!("https://github.com/vladkens/wavo-app/releases/tag/{}", shown(v)));
+    r.size = 50_000_000;
+    r
   }
 
   fn newer(v: &str) -> Result<Option<Release>, String> {
@@ -700,15 +675,6 @@ mod tests {
     assert_eq!(u.state, State::Available(r("1.2.0")));
   }
 
-  #[test]
-  fn the_fake_offers_its_version_or_none() {
-    let r = fake_check("1.2.0").unwrap().unwrap();
-    assert_eq!(r.version, "1.2.0");
-    assert_eq!(r.notes.as_deref(), Some(format!("{RELEASES}/tag/v1.2.0").as_str()));
-    assert_eq!(fake_check("v1.2.0").unwrap().unwrap().notes, r.notes);
-    assert_eq!(fake_check("none").unwrap(), None);
-  }
-
   // MARK: Window
 
   /// The window over `state` in the light look, and what the person chose in it.
@@ -724,9 +690,9 @@ mod tests {
     (h, acts)
   }
 
-  /// The fake's release on offer.
+  /// A release on offer.
   fn available() -> State {
-    State::Available(fake_check("1.2.0").unwrap().unwrap())
+    State::Available(release("1.2.0"))
   }
 
   #[test]
@@ -757,7 +723,7 @@ mod tests {
   /// A failed download, check or relaunch offers Retry and Close, under its own title.
   #[test]
   fn a_failure_offers_retry_and_close() {
-    let r = fake_check("1.2.0").unwrap();
+    let r = Some(release("1.2.0"));
     let failures = [
       (State::Failed(r, "the download stopped".into()), "The update failed"),
       (State::Failed(None, "offline".into()), "Couldn't check for updates"),
@@ -777,7 +743,7 @@ mod tests {
   /// `WAVO_SHOTS` set (`make shots`), written there.
   #[test]
   fn every_state_renders_in_both_looks() {
-    let r = fake_check("1.2.0").unwrap().unwrap();
+    let r = release("1.2.0");
     let states = [
       ("available", State::Available(r.clone())),
       ("checking", State::Checking),

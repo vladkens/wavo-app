@@ -124,7 +124,7 @@ pub trait Shell {
     false
   }
   /// The app can update itself: not where [shipo::supported] says no, a dev build, a run with its
-  /// own `WAVO_HOME`.
+  /// own `WAVO_HOME`, unless shipo is [faking](shipo::faking).
   fn updates(&self) -> bool {
     false
   }

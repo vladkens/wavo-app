@@ -25,6 +25,9 @@ ID = "me.vladkens.wavo"
 RUNNING = "Wavo.app/Contents/MacOS/wavo-app"
 # In the data home, which `wavo-app uninstall` deletes along with the permissions.
 GRANTED = Path.home() / "Library/Application Support" / ID / "permissions-requirement"
+# The fakes passed to the app, which `open` starts without this shell's environment: the
+# microphone's, and shipo's update and failed relaunch (its readme's Fake update).
+FAKES = ("WAVO_FAKE_MIC", "SHIPO_FAKE_UPDATE", "SHIPO_UPDATE_ERROR")
 
 
 def running() -> bool:
@@ -72,10 +75,8 @@ def main() -> int:
         subprocess.run(["ditto", app, dest], check=True)
         app = dest
 
-    # The fakes (WAVO_FAKE_MIC, WAVO_FAKE_UPDATE) pass through: `open` starts the app without
-    # this shell's environment.
     env = ["WAVO_LOG=warn,wavo_app=debug"]
-    env += [f"{k}={v}" for k, v in os.environ.items() if k.startswith("WAVO_FAKE_")]
+    env += [f"{k}={v}" for k in FAKES if (v := os.environ.get(k))]
     flags = [a for e in env for a in ("--env", e)]
     subprocess.run(["open", "--stderr", log, *flags, app], check=True)
     print(f"started {app}, log in {log}")

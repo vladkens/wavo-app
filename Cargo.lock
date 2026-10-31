@@ -1534,8 +1534,7 @@ dependencies = [
 [[package]]
 name = "shipo"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12114147f164de31f3ffaf505c32e3ab53d835bb304a1a5d7816513b8624c0d0"
+source = "git+https://github.com/vladkens/shipo?rev=940fcb0#940fcb071ad17a3caa57814f3c148ce0091a77a5"
 dependencies = [
  "block2",
  "ed25519-compact",

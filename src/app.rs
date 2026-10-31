@@ -174,7 +174,7 @@ fn start(
   }
 
   // Asked once: shipo tries a staging folder beside the app.
-  let supported = updater::fake().is_some()
+  let supported = shipo::faking()
     || installed()
       && !updater::dev(crate::VERSION)
       && shipo::supported().inspect_err(|e| info!("updates: {e}")).is_ok();
@@ -830,13 +830,7 @@ impl App {
   /// The check, on a thread, its answer to [App::update_checked].
   fn spawn_check() {
     spawn("update-check", || {
-      let checked = match updater::fake() {
-        Some(version) => {
-          std::thread::sleep(Duration::from_secs(1));
-          updater::fake_check(&version)
-        }
-        None => shipo::check(&updater::FEED, crate::VERSION),
-      };
+      let checked = shipo::check(&updater::FEED, crate::VERSION);
       proxy().post(|_| _ = with_app(|app| app.update_checked(checked)));
     });
   }
@@ -873,11 +867,6 @@ impl App {
                 proxy().post(move |_| _ = with_app(|app| app.update_progress(done)));
               }
             };
-            if updater::fake().is_some() {
-              updater::fake_download(progress);
-              return proxy().post(|_| _ = with_app(App::update_fake_downloaded));
-            }
-
             let staged = shipo::download(&release, progress);
             proxy().post(|_| _ = with_app(|app| app.update_downloaded(staged)));
           });
@@ -940,18 +929,6 @@ impl App {
     }
 
     self.update_changed();
-  }
-
-  /// [updater::fake]'s download done: Restarting… for 3 s, then its install fails.
-  fn update_fake_downloaded(&mut self) {
-    self.updater.lock().unwrap().downloaded();
-    self.update_changed();
-    proxy().after(Duration::from_secs(3), |_| {
-      _ = with_app(|app| {
-        app.updater.lock().unwrap().failed(updater::FAKE_INSTALL.into());
-        app.update_changed();
-      })
-    });
   }
 
   /// The update downloaded goes in place once no dictation runs, and none starts meanwhile.
