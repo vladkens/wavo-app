@@ -7,9 +7,17 @@
 //! - A recording with speech gets its entry (busy, without text) before the engine has it: a crash
 //!   leaves an entry to transcribe again, which the next start recovers before any recording.
 //! - Text is optional: no model, an engine error or nothing recognized leave the entry without
-//!   text. Such entries are transcribed by themselves once another model can transcribe: one at a
-//!   time, behind dictations, each by a model that has not tried it yet (`tried_model`).
+//!   text. Such entries are transcribed by themselves once a model can: one at a time, started
+//!   while no dictation runs, each by the model its language goes to ([route]) unless that one
+//!   tried it already (`tried_model`). A dictation that starts meanwhile goes first on the same
+//!   model's engine, and runs beside it on another one's. An entry's language is the one it was
+//!   recorded in: a model of one language's own, else the setting's; one without (detected, or from
+//!   before) is asked in the language a dictation now would be.
 //! - A chosen model not on disk gives way to the first one found, with a warning; the choice stays.
+//! - A model key ([settings::ModelKey]) sends a dictation to its model: a letter or digit pressed
+//!   while the hotkey is held, or a hotkey of the model's own. Its model not on disk gets no
+//!   stand-in: the recording is kept without text. Each model has an engine of its own, with its
+//!   own idle unload.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -65,55 +73,58 @@ enum State {
 enum Hold {
   /// The hotkey that started the recording is down since then: its release decides.
   Held(Instant),
+  /// Held, and a model key came: the release stops the recording, however short the press.
+  Keyed,
   /// Records until the next press: a tap or toggle mode started it.
   Latched,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Input {
-  KeyDown {
-    at: Instant,
-    repeat: bool,
-  },
-  KeyUp {
-    at: Instant,
-  },
-  /// Another key went down while the hotkey, a modifier alone, was held: the press was a chord
-  /// (⌥E). A recording it started is dropped without a trace.
-  KeyAborted,
+  /// Hotkey `which` pressed, or held (`repeat`): 0 is the main one, the others the models' own
+  /// ([Settings::own_hotkeys], in order), whose dictations go to their models.
+  KeyDown { at: Instant, repeat: bool, which: usize },
+  /// Hotkey `which` released.
+  KeyUp { at: Instant, which: usize },
+  /// Model key `index` ([Settings::held_keys], a letter or digit) pressed while the dictation's
+  /// hotkey is down: the dictation goes to its model, the last one pressed. A held press then stops
+  /// at its release, however short; in toggle mode the recording stays latched. Not after a tap
+  /// latched it.
+  #[cfg_attr(not(test), allow(dead_code, reason = "the hotkeys send it once nimbo reports keys"))]
+  ModelKey { index: usize },
+  /// Another key went down while hotkey `which`, a modifier alone, was held: the press was a chord
+  /// (⌥E, or fn+1 when that is a hotkey too). A recording it started is dropped without a trace.
+  KeyAborted { which: usize },
   /// Cancels a recording or its transcription.
   Escape,
   /// Starts a recording that runs until the next one, or stops it: `wavo-app toggle`, for a
   /// desktop's own shortcut where Wavo's hotkey can't be (GNOME before 48 on Wayland).
   Toggle,
   /// The microphone did not open.
-  RecordingFailed {
-    take: Take,
-  },
+  RecordingFailed { take: Take },
   /// The microphone stopped by itself: what it recorded is transcribed.
-  MicStopped {
-    take: Take,
-  },
+  MicStopped { take: Take },
   /// The dictation ended, delivered or not.
-  Finished {
-    take: Take,
-  },
+  Finished { take: Take },
 }
 
 impl From<Edge> for Input {
   fn from(edge: Edge) -> Self {
     match edge {
-      Edge::Down { at, repeat } => Input::KeyDown { at, repeat },
-      Edge::Up { at } => Input::KeyUp { at },
+      Edge::Down { at, repeat } => Input::KeyDown { at, repeat, which: 0 },
+      Edge::Up { at } => Input::KeyUp { at, which: 0 },
       Edge::Escape => Input::Escape,
-      Edge::Aborted => Input::KeyAborted,
+      Edge::Aborted => Input::KeyAborted { which: 0 },
     }
   }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Effect {
-  StartRecording(Take),
+  /// By hotkey `which` ([Input::KeyDown]).
+  StartRecording(Take, usize),
+  /// Model key `index`: the dictation goes to its model.
+  PickModel(Take, usize),
   StopRecording(Take),
   CancelRecording(Take),
   /// Like a cancel, without a word: the press was no hotkey press.
@@ -127,36 +138,40 @@ struct Machine {
   activation: Activation,
   state: State,
   last_take: Take,
-  /// The last press or repeat of the hotkey, if no release came after it.
-  key_down: Option<Instant>,
+  /// The last press or repeat of a hotkey (which, when), if no release of it came after it.
+  key_down: Option<(usize, Instant)>,
   /// The take the press in progress started, until its release.
   pressed: Option<Take>,
+  /// The hotkey that started the recording in progress: only its release counts.
+  which: usize,
 }
 
 impl Machine {
   fn new(activation: Activation) -> Self {
-    Self { activation, state: State::Idle, last_take: 0, key_down: None, pressed: None }
+    Self { activation, state: State::Idle, last_take: 0, key_down: None, pressed: None, which: 0 }
   }
 
   fn handle(&mut self, input: Input) -> Option<Effect> {
     use State::{Idle, Recording, Transcribing};
     match (self.state, self.track_key(input)) {
       (_, Input::KeyDown { repeat: true, .. }) => None,
-      (Idle, Input::KeyDown { at, .. }) => {
+      (Idle, Input::KeyDown { at, which, .. }) => {
         let hold = match self.activation {
           Activation::Toggle => Hold::Latched,
           Activation::HoldOrToggle | Activation::PushToTalk => Hold::Held(at),
         };
 
         self.last_take += 1;
-        self.pressed = Some(self.last_take);
+        (self.pressed, self.which) = (Some(self.last_take), which);
         self.state = Recording { take: self.last_take, hold };
-        Some(Effect::StartRecording(self.last_take))
+        Some(Effect::StartRecording(self.last_take, which))
       }
       // A second press before the release: the release to come decides.
-      (Recording { hold: Hold::Held(_), .. }, Input::KeyDown { .. }) => None,
+      (Recording { hold: Hold::Held(_) | Hold::Keyed, .. }, Input::KeyDown { .. }) => None,
       (Recording { take, hold: Hold::Latched }, Input::KeyDown { .. }) => self.stop(take),
-      (Recording { take, hold: Hold::Held(since) }, Input::KeyUp { at }) => {
+      (Recording { take, hold: Hold::Held(since) }, Input::KeyUp { at, which })
+        if which == self.which =>
+      {
         let tap = at.saturating_duration_since(since) < HOLD_THRESHOLD;
         if self.activation == Activation::HoldOrToggle && tap {
           self.state = Recording { take, hold: Hold::Latched };
@@ -165,22 +180,45 @@ impl Machine {
 
         self.stop(take)
       }
+      (Recording { take, hold: Hold::Keyed }, Input::KeyUp { which, .. })
+        if which == self.which =>
+      {
+        self.stop(take)
+      }
       (_, Input::KeyDown { .. } | Input::KeyUp { .. }) => None,
+
+      (Recording { take, hold: Hold::Held(_) | Hold::Keyed }, Input::ModelKey { index }) => {
+        self.state = Recording { take, hold: Hold::Keyed };
+        Some(Effect::PickModel(take, index))
+      }
+      // Toggle mode latches at the press: a key counts while that hotkey is still down.
+      (Recording { take, hold: Hold::Latched }, Input::ModelKey { index })
+        if self.pressed == Some(take) =>
+      {
+        Some(Effect::PickModel(take, index))
+      }
+      (_, Input::ModelKey { .. }) => None,
 
       (Idle, Input::Toggle) => {
         self.last_take += 1;
+        (self.pressed, self.which) = (None, 0);
         self.state = Recording { take: self.last_take, hold: Hold::Latched };
-        Some(Effect::StartRecording(self.last_take))
+        Some(Effect::StartRecording(self.last_take, 0))
       }
       (Recording { take, .. }, Input::Toggle) => self.stop(take),
       (Transcribing { .. }, Input::Toggle) => None,
 
-      (Recording { take, .. }, Input::KeyAborted) if self.pressed == Some(take) => {
+      (Recording { take, .. }, Input::KeyAborted { which })
+        if self.pressed == Some(take) && which == self.which =>
+      {
         (self.state, self.pressed) = (Idle, None);
         Some(Effect::AbortRecording(take))
       }
-      (_, Input::KeyAborted) => {
-        self.pressed = None;
+      (_, Input::KeyAborted { which }) => {
+        if which == self.which {
+          self.pressed = None;
+        }
+
         None
       }
 
@@ -212,17 +250,20 @@ impl Machine {
   /// Flags an unflagged autorepeat (see [`REPEAT_WINDOW`]).
   fn track_key(&mut self, input: Input) -> Input {
     match input {
-      Input::KeyDown { at, repeat } => {
-        let held = self.key_down.is_some_and(|t| at.saturating_duration_since(t) < REPEAT_WINDOW);
-        self.key_down = Some(at);
-        Input::KeyDown { at, repeat: repeat || held }
+      Input::KeyDown { at, repeat, which } => {
+        let held = self
+          .key_down
+          .is_some_and(|(w, t)| w == which && at.saturating_duration_since(t) < REPEAT_WINDOW);
+        self.key_down = Some((which, at));
+        Input::KeyDown { at, repeat: repeat || held, which }
       }
-      Input::KeyUp { .. } => {
-        (self.key_down, self.pressed) = (None, None);
-        input
-      }
-      Input::KeyAborted => {
-        self.key_down = None;
+      // Another hotkey's release leaves this one's press as it is.
+      Input::KeyUp { which, .. } | Input::KeyAborted { which } => {
+        self.key_down = self.key_down.filter(|&(w, _)| w != which);
+        if which == self.which && matches!(input, Input::KeyUp { .. }) {
+          self.pressed = None;
+        }
+
         input
       }
       _ => input,
@@ -448,7 +489,7 @@ impl Session {
       history,
       output,
       config,
-      engine: None,
+      engines: Vec::new(),
       events_tx,
       events,
       next_job: 0,
@@ -459,7 +500,9 @@ impl Session {
       originals: BTreeMap::new(),
       untried: false,
       closed: false,
+      on_disk: Vec::new(),
       model_path: None,
+      model_info: None,
       model_error: None,
       model_fallback: None,
       error: None,
@@ -514,7 +557,7 @@ impl Handle {
 
 // MARK: Controller
 
-/// The engine for the model that transcribes now.
+/// The engine of a model.
 struct Loaded {
   /// The model file's name without extension.
   name: String,
@@ -524,9 +567,20 @@ struct Loaded {
   engine: Engine,
 }
 
+/// A model on disk to transcribe with: the default one, or a key's.
+struct OnDisk {
+  /// The key's model choice; `None`: the default one.
+  choice: Option<String>,
+  path: PathBuf,
+  info: Option<&'static ModelInfo>,
+}
+
 struct Job {
   id: u64,
+  /// The model's file name without extension, and wavo's info on it.
   model: String,
+  info: Option<&'static ModelInfo>,
+  path: PathBuf,
   language: Option<String>,
   /// The one it runs on, which a model change may have replaced since.
   engine: Engine,
@@ -565,8 +619,13 @@ struct Dictation<T> {
   /// The tail ([tail_end]) runs from then until the recorder closes.
   stopped: Option<Instant>,
   recorder: Option<Recorder>,
-  /// The engine loads the model for it.
-  prewarmed: bool,
+  /// The model its hotkey or a key picked (a choice, as [Settings::model]); `None`: the default
+  /// one.
+  model: Option<String>,
+  /// The engine loading its model for it, by the model's path.
+  prewarmed: Option<PathBuf>,
+  /// The engines whose model its prewarms loaded: a key that picks another model drops them.
+  cold: Vec<PathBuf>,
   job: Option<Job>,
   duration_ms: i64,
   warnings: Vec<String>,
@@ -580,7 +639,8 @@ struct Controller<O: TextOutput> {
   settings: Settings,
   history: History,
   output: O,
-  engine: Option<Loaded>,
+  /// An engine per model, by its file: the default one's, the keys', one an entry's own.
+  engines: Vec<Loaded>,
   events_tx: Sender<engine::Event>,
   events: Receiver<engine::Event>,
   next_job: u64,
@@ -593,8 +653,11 @@ struct Controller<O: TextOutput> {
   untried: bool,
   /// The app quits for an update ([Request::Close]): no dictation starts.
   closed: bool,
-  /// The model [`Controller::check_model`] last found.
+  /// The models on disk [`Controller::note_models`] last noted.
+  on_disk: Vec<PathBuf>,
+  /// The model [`Controller::check_model`] last found, and wavo's info on it.
   model_path: Option<PathBuf>,
+  model_info: Option<&'static ModelInfo>,
   model_error: Option<NoModel>,
   /// The warning of a chosen model not on disk while another one transcribes.
   model_fallback: Option<String>,
@@ -607,8 +670,10 @@ struct Controller<O: TextOutput> {
 
 impl<O: TextOutput> Controller<O> {
   fn run(mut self, rx: Receiver<Msg>) {
-    // What a crash left, before any recording makes new files; the model found now is no new one.
+    // What a crash left, before any recording makes new files; the models found now are no new
+    // ones.
     let _ = self.check_model();
+    self.note_models();
     self.untried = false;
     self.prepare();
     if let Err(e) = self.history.recover(now_ms()) {
@@ -685,11 +750,9 @@ impl<O: TextOutput> Controller<O> {
         self.apply_settings(settings);
       }
       Msg::CheckModel => {
-        let path = self.check_model().ok().map(|(path, _)| path);
-        if self.engine.as_ref().is_some_and(|l| Some(&l.path) != path.as_ref()) {
-          self.engine = None;
-        }
-
+        let _ = self.check_model();
+        self.note_models();
+        self.prune();
         self.prepare();
       }
       Msg::Prepared(path) => {
@@ -699,8 +762,8 @@ impl<O: TextOutput> Controller<O> {
           l.path == path && !device.contains("Neural Engine")
         };
 
-        if self.settings.neural_engine && self.engine.as_ref().is_some_and(on_gpu) {
-          self.engine = None;
+        if self.settings.neural_engine {
+          self.engines.retain(|l| !on_gpu(l));
         }
       }
       Msg::Quit => unreachable!("handled by the loop"),
@@ -712,7 +775,8 @@ impl<O: TextOutput> Controller<O> {
       Request::Retranscribe(id) => {
         let entry =
           self.history.db.get_entry(id)?.ok_or_else(|| anyhow!("no history entry {id}"))?;
-        self.retranscribe(entry, false)
+        let model = self.model_again(&entry);
+        self.retranscribe(entry, model.as_deref(), false)
       }
       Request::Restore(id) => {
         if self.is_busy(id) {
@@ -728,9 +792,9 @@ impl<O: TextOutput> Controller<O> {
       }
       Request::Delete(id) => self.delete(id),
       Request::Unload => {
-        info!("the model is unloaded on request");
+        info!("the models are unloaded on request");
         self.untried = false;
-        if let Some(l) = &self.engine {
+        for l in &self.engines {
           l.engine.unload();
         }
 
@@ -753,7 +817,8 @@ impl<O: TextOutput> Controller<O> {
     let Some(effect) = self.machine.handle(input) else { return };
     debug!(?input, ?effect, "session");
     match effect {
-      Effect::StartRecording(take) => self.start_recording(take),
+      Effect::StartRecording(take, which) => self.start_recording(take, which),
+      Effect::PickModel(_, index) => self.pick(index),
       Effect::StopRecording(_) => self.stop_recording(),
       Effect::CancelRecording(_) => self.cancel(),
       Effect::AbortRecording(_) => {
@@ -778,19 +843,24 @@ impl<O: TextOutput> Controller<O> {
 
     let old = mem::replace(&mut self.settings, new);
     self.machine.activation = self.settings.activation;
-    if old.model != self.settings.model
-      || old.unload_after_minutes != self.settings.unload_after_minutes
-      || old.neural_engine != self.settings.neural_engine
-    {
-      // Its thread finishes its jobs, then drops the model.
-      self.engine = None;
+    let new = &self.settings;
+    let (model, keys) = (old.model != new.model, old.keys != new.keys);
+    let ane = old.neural_engine != new.neural_engine;
+    if ane || old.unload_after_minutes != new.unload_after_minutes {
+      // Their threads finish their jobs, then drop the models.
+      self.engines.clear();
     }
 
-    if old.model != self.settings.model {
+    if model {
       let _ = self.check_model();
     }
 
-    if old.model != self.settings.model || old.neural_engine != self.settings.neural_engine {
+    if model || keys {
+      self.note_models();
+      self.prune();
+    }
+
+    if model || keys || ane {
       self.prepare();
     }
 
@@ -809,7 +879,7 @@ impl<O: TextOutput> Controller<O> {
       && let Ok(path) = self.config.hub.resolve(chosen)
     {
       (self.model_error, self.model_fallback) = (None, None);
-      return Ok((self.found_model(path), hub::lookup(chosen).ok()));
+      return Ok(self.found_model(path, hub::lookup(chosen).ok()));
     }
 
     let error = match (self.config.hub.downloaded().into_iter().next(), chosen) {
@@ -817,71 +887,147 @@ impl<O: TextOutput> Controller<O> {
         let note = chosen
           .map(|c| format!("{} is not on disk: {} transcribes instead", label(&c), info.full_name));
         (self.model_error, self.model_fallback) = (None, note);
-        return Ok((self.found_model(path), Some(info)));
+        return Ok(self.found_model(path, Some(info)));
       }
       (None, Some(chosen)) => NoModel::Gone { model: label(&chosen) },
       (None, None) => NoModel::NoneDownloaded,
     };
 
-    (self.model_path, self.model_fallback) = (None, None);
+    (self.model_path, self.model_info, self.model_fallback) = (None, None, None);
     self.model_error = Some(error.clone());
     Err(error)
   }
 
-  /// Another model than before may transcribe the entries without text.
-  fn found_model(&mut self, path: PathBuf) -> PathBuf {
+  /// Another model than before may transcribe the entries without text; the engine of the one
+  /// before goes, unless a key has it.
+  fn found_model(
+    &mut self,
+    path: PathBuf,
+    info: Option<&'static ModelInfo>,
+  ) -> (PathBuf, Option<&'static ModelInfo>) {
+    self.model_info = info;
     if self.model_path.as_ref() != Some(&path) {
       self.untried = true;
       self.model_path = Some(path.clone());
+      self.prune();
     }
 
-    path
+    (path, info)
   }
 
-  /// The model found, prepared for the Neural Engine ahead of its first dictation, as the app
-  /// starts or another model is found: a new app binary compiles it again once.
+  /// The models on disk to transcribe with: the one found, then those of the keys, each file
+  /// once.
+  fn models(&self) -> Vec<OnDisk> {
+    let mut models = Vec::new();
+    if let Some(path) = &self.model_path {
+      models.push(OnDisk { choice: None, path: path.clone(), info: self.model_info });
+    }
+
+    for k in self.settings.model_keys() {
+      let Ok(path) = self.config.hub.resolve(&k.model) else { continue };
+      if !models.iter().any(|m: &OnDisk| m.path == path) {
+        let info = hub::lookup(&k.model).ok();
+        models.push(OnDisk { choice: Some(k.model.clone()), path, info });
+      }
+    }
+
+    models
+  }
+
+  /// Notes the models on disk: one new to the session may transcribe the entries without text.
+  fn note_models(&mut self) {
+    let paths: Vec<PathBuf> = self.models().into_iter().map(|m| m.path).collect();
+    if paths.iter().any(|p| !self.on_disk.contains(p)) {
+      self.untried = true;
+    }
+
+    self.on_disk = paths;
+  }
+
+  /// The engines of models no longer found nor a key's go: their threads finish their jobs first.
+  fn prune(&mut self) {
+    let paths: Vec<PathBuf> = self.models().into_iter().map(|m| m.path).collect();
+    self.engines.retain(|l| paths.contains(&l.path));
+  }
+
+  /// The models found, the default one first, then the keys', prepared for the Neural Engine one
+  /// at a time ahead of their first dictation, as the app starts or another model is found: a new
+  /// app binary compiles them again once.
   fn prepare(&self) {
-    let Some(path) = &self.model_path else { return };
     if !self.settings.neural_engine {
       return;
     }
 
-    let (tx, prepared) = (self.tx.clone(), path.clone());
-    self.config.loader.prepare(path, Box::new(move || _ = tx.send(Msg::Prepared(prepared))));
+    for m in self.models() {
+      let (tx, prepared) = (self.tx.clone(), m.path.clone());
+      self.config.loader.prepare(&m.path, Box::new(move || _ = tx.send(Msg::Prepared(prepared))));
+    }
   }
 
-  /// None on disk, or one that does not load.
+  /// None on disk, or the one found does not load.
   fn no_model(&self) -> Option<NoModel> {
     self.model_error.clone().or_else(|| {
-      let loaded = self.engine.as_ref()?;
+      let loaded = self.loaded(self.model_path.as_deref()?)?;
       let error = loaded.engine.status().load_error?;
       Some(NoModel::LoadFailed { model: loaded_label(loaded.info, &loaded.name), error })
     })
   }
 
-  /// The engine of the model to transcribe with: one of another model goes.
-  fn engine(&mut self) -> Result<&Loaded, NoModel> {
-    let (path, info) = self.check_model()?;
-    if self.engine.as_ref().is_some_and(|l| l.path != path) {
-      self.engine = None;
-    }
-
-    let loaded = self.engine.get_or_insert_with(|| {
-      let name = file_stem(&path);
-      info!("model {name} ({})", path.display());
-      let (loader, ane) = (self.config.loader.clone(), self.settings.neural_engine);
-      let (unload_after, events) = (self.settings.unload_after(), self.events_tx.clone());
-      let engine = Engine::start(loader, path.clone(), ane, unload_after, events);
-      Loaded { name, info, path, engine }
-    });
-
-    Ok(loaded)
+  fn loaded(&self, path: &Path) -> Option<&Loaded> {
+    self.engines.iter().find(|l| l.path == path)
   }
 
-  fn next_job(&mut self, model: String, language: Option<String>) -> Job {
+  /// The model of `choice` (a key's, as [Settings::model]; `None`: the one found): a key's gets no
+  /// stand-in.
+  fn model_for(
+    &mut self,
+    choice: Option<&str>,
+  ) -> Result<(PathBuf, Option<&'static ModelInfo>), NoModel> {
+    let Some(choice) = choice else { return self.check_model() };
+    match self.config.hub.resolve(choice) {
+      Ok(path) => Ok((path, hub::lookup(choice).ok())),
+      Err(_) => Err(NoModel::Gone { model: label(choice) }),
+    }
+  }
+
+  /// The engine of `choice`'s model ([model_for](Self::model_for)), started if it has none. With
+  /// an unload right after each dictation, the other engines but the dictation's unload: one model
+  /// in memory, two while a Transcribe Again runs beside a dictation.
+  fn engine_for(&mut self, choice: Option<&str>) -> Result<&Loaded, NoModel> {
+    let (path, info) = self.model_for(choice)?;
+    let at = match self.engines.iter().position(|l| l.path == path) {
+      Some(at) => at,
+      None => {
+        let name = file_stem(&path);
+        info!("model {name} ({})", path.display());
+        let (loader, ane) = (self.config.loader.clone(), self.settings.neural_engine);
+        let (unload_after, events) = (self.settings.unload_after(), self.events_tx.clone());
+        let engine = Engine::start(loader, path.clone(), ane, unload_after, events);
+        self.engines.push(Loaded { name, info, path, engine });
+        self.engines.len() - 1
+      }
+    };
+
+    if self.settings.unload_after() == Some(Duration::ZERO) {
+      let current = self.dictation_path();
+      for (i, l) in self.engines.iter().enumerate() {
+        if i != at && Some(l.path.as_path()) != current {
+          l.engine.unload();
+        }
+      }
+    }
+
+    Ok(&self.engines[at])
+  }
+
+  /// A job on the engine of `choice`'s model ([engine_for](Self::engine_for)), without its
+  /// language yet.
+  fn new_job(&mut self, choice: Option<&str>) -> Result<Job, NoModel> {
+    let loaded = self.engine_for(choice)?;
+    let (model, info, path) = (loaded.name.clone(), loaded.info, loaded.path.clone());
+    let engine = loaded.engine.clone();
     self.next_job += 1;
-    let engine = self.engine.as_ref().unwrap().engine.clone();
-    Job { id: self.next_job, model, language, engine }
+    Ok(Job { id: self.next_job, model, info, path, language: None, engine })
   }
 
   fn on_engine(&mut self, event: engine::Event) {
@@ -896,17 +1042,19 @@ impl<O: TextOutput> Controller<O> {
     }
   }
 
-  /// The outcome, text and error of an engine's result.
-  fn outcome(&self, result: Result<String, EngineError>) -> (Outcome, String, Option<String>) {
+  /// The outcome, text and error of `job`'s result.
+  fn outcome(
+    &self,
+    result: Result<String, EngineError>,
+    job: &Job,
+  ) -> (Outcome, String, Option<String>) {
     match result {
       Ok(text) if text.trim().is_empty() => {
-        let note = self.engine.as_ref().and_then(|l| l.info).and_then(understands_only);
-        (Outcome::NoText, String::new(), note)
+        (Outcome::NoText, String::new(), job.info.and_then(understands_only))
       }
       Ok(text) => (Outcome::Done, text.trim().to_owned(), None),
       Err(EngineError::Load(error)) => {
-        let model =
-          self.engine.as_ref().map_or("the model".into(), |l| loaded_label(l.info, &l.name));
+        let model = loaded_label(job.info, &job.model);
         (Outcome::NoModel, String::new(), Some(NoModel::LoadFailed { model, error }.to_string()))
       }
       Err(e) => (Outcome::Failed, String::new(), Some(e.to_string())),
@@ -916,8 +1064,9 @@ impl<O: TextOutput> Controller<O> {
   // MARK: Dictation
 
   /// The microphone first, and the shell shows the recording at once; then the focus check (up to
-  /// a second) and the engine loads the model while the person speaks.
-  fn start_recording(&mut self, take: Take) {
+  /// a second) and the engine loads the model while the person speaks: that of hotkey `which`.
+  fn start_recording(&mut self, take: Take, which: usize) {
+    let model = self.settings.hotkey_model(which).map(str::to_owned);
     let started = Instant::now();
     let created_at = now_ms();
     let (audio, wav) = self.history.recordings.new_file(created_at);
@@ -944,7 +1093,9 @@ impl<O: TextOutput> Controller<O> {
       stopped: None,
       warnings: recorder.warning().map(str::to_owned).into_iter().collect(),
       recorder: Some(recorder),
-      prewarmed: false,
+      model,
+      prewarmed: None,
+      cold: Vec::new(),
       job: None,
       duration_ms: 0,
     });
@@ -953,12 +1104,67 @@ impl<O: TextOutput> Controller<O> {
     let target = self.output.target();
     debug!("dictation {take}: focus noted after {:.0?}", started.elapsed());
     self.dictation.as_mut().unwrap().target = Some(target);
-    match self.engine() {
-      Ok(loaded) => loaded.engine.prewarm(),
-      Err(e) => return info!("dictation {take}: recording without a model: {e}"),
+    self.prewarm();
+  }
+
+  /// The engine of the dictation's model loads it while the person speaks. One that loaded another
+  /// model for it before a key picked this one lets go, and drops a model the dictation loaded.
+  fn prewarm(&mut self) {
+    let d = self.dictation.as_ref().unwrap();
+    let (take, choice) = (d.last.take, d.model.clone());
+    if let Some(choice) = &choice {
+      info!("dictation {take}: with {}", label(choice));
     }
 
-    self.dictation.as_mut().unwrap().prewarmed = true;
+    let prewarm = match self.engine_for(choice.as_deref()) {
+      Ok(loaded) => {
+        // Its engine has no model: the load is the dictation's own.
+        let cold = loaded.engine.status().phase == engine::Phase::Stopped;
+        loaded.engine.prewarm();
+        Some((loaded.path.clone(), cold))
+      }
+      Err(e) => {
+        info!("dictation {take}: recording without a model: {e}");
+        None
+      }
+    };
+
+    let d = self.dictation.as_mut().unwrap();
+    if let Some((path, true)) = &prewarm
+      && !d.cold.contains(path)
+    {
+      d.cold.push(path.clone());
+    }
+
+    let path = prewarm.map(|(path, _)| path);
+    let before = mem::replace(&mut d.prewarmed, path.clone());
+    let Some(before) = before.filter(|b| path.as_ref() != Some(b)) else { return };
+    let undo = d.cold.contains(&before);
+    self.let_go(&before, undo);
+  }
+
+  /// A dictation's engine at `path` may unload its model when idle again; with `undo` the model
+  /// goes at once.
+  fn let_go(&self, path: &Path, undo: bool) {
+    let Some(l) = self.loaded(path) else { return };
+    l.engine.release();
+    if undo {
+      l.engine.unload();
+    }
+  }
+
+  /// Model key `index` while the hotkey is held: the dictation goes to the key's model, which its
+  /// engine loads meanwhile.
+  fn pick(&mut self, index: usize) {
+    let Some(choice) = self.settings.held_key_model(index).map(str::to_owned) else {
+      return debug!("no model key {index}");
+    };
+
+    let Some(d) = self.dictation.as_mut() else { return };
+    if d.model.as_ref() != Some(&choice) {
+      d.model = Some(choice);
+      self.prewarm();
+    }
   }
 
   fn stop_recording(&mut self) {
@@ -1014,6 +1220,7 @@ impl<O: TextOutput> Controller<O> {
     }
 
     d.duration_ms = rec.clip.duration_ms();
+    let choice = d.model.clone();
     let Some(input) = rec.clip.engine_input() else {
       self.discard();
       return self.end(Outcome::NoSpeech, None);
@@ -1025,27 +1232,37 @@ impl<O: TextOutput> Controller<O> {
       self.discard();
     }
 
-    let language = self.settings.engine_language();
-    let model = self.engine().map(|l| l.name.clone());
-    let entry = if rec.saved { self.add_entry(model.as_deref().ok()) } else { None };
+    let job = self.new_job(choice.as_deref());
+    // A model not on disk still has a language: that of wavo's model of the name.
+    let info = match &job {
+      Ok(job) => job.info,
+      Err(_) => {
+        choice.as_deref().or(self.settings.model.as_deref()).and_then(|c| hub::lookup(c).ok())
+      }
+    };
+
+    let language = language_for(info, &self.settings);
+    let model = job.as_ref().ok().map(|j| j.model.as_str());
+    let entry = if rec.saved { self.add_entry(model, language.as_deref()) } else { None };
     self.dictation.as_mut().unwrap().last.entry = entry;
-    let model = match model {
-      Ok(model) => model,
+    let mut job = match job {
+      Ok(job) => job,
       Err(e) => return self.end(Outcome::NoModel, Some(e.to_string())),
     };
 
-    let job = self.next_job(model, language.clone());
+    job.language = language.clone();
     job.engine.transcribe(job.id, input.pcm, language, false);
     self.dictation.as_mut().unwrap().job = Some(job);
   }
 
-  /// The entry of the dictation: without text, busy if a model transcribes it.
-  fn add_entry(&self, model: Option<&str>) -> Option<i64> {
+  /// The entry of the dictation, in its language: without text, busy if a model transcribes it.
+  fn add_entry(&self, model: Option<&str>, language: Option<&str>) -> Option<i64> {
     let d = self.dictation.as_ref().unwrap();
     let entry = Entry {
       created_at: d.created_at,
       duration_ms: d.duration_ms,
       audio_path: Some(d.audio.clone()),
+      language: language.map(str::to_owned),
       tried_model: model.map(str::to_owned),
       busy: model.is_some(),
       ..Entry::default()
@@ -1057,9 +1274,9 @@ impl<O: TextOutput> Controller<O> {
   }
 
   fn on_transcribed(&mut self, result: Result<String, EngineError>) {
-    let (outcome, text, error) = self.outcome(result);
+    let job = self.dictation.as_mut().unwrap().job.take().unwrap();
+    let (outcome, text, error) = self.outcome(result, &job);
     let d = self.dictation.as_mut().unwrap();
-    let job = d.job.take().unwrap();
     match (outcome, d.last.entry) {
       (Outcome::Done, Some(id)) => {
         let language = job.language.as_deref();
@@ -1161,10 +1378,8 @@ impl<O: TextOutput> Controller<O> {
   fn complete(&mut self) {
     let mut d = self.dictation.take().unwrap();
     d.last.took_ms = d.stopped.map(|s| s.elapsed().as_millis() as u64);
-    if d.prewarmed
-      && let Some(loaded) = &self.engine
-    {
-      loaded.engine.release();
+    if let Some(path) = &d.prewarmed {
+      self.let_go(path, false);
     }
 
     let after_stop = d.stopped.map(|s| format!(", {} ms after the stop", s.elapsed().as_millis()));
@@ -1182,9 +1397,11 @@ impl<O: TextOutput> Controller<O> {
     current || self.retranscribing.iter().any(|r| r.entry == id)
   }
 
-  /// `entry`'s recording through the engine again, behind dictations. One without text whose
-  /// recording has no speech (or is gone) is deleted: there is nothing to keep.
-  fn retranscribe(&mut self, entry: Entry, auto: bool) -> Result<()> {
+  /// `entry`'s recording through the engine of `model` again (a choice, as [Settings::model];
+  /// `None`: the one found), behind the dictations on that engine: in its own language, if it has
+  /// one, when it goes by itself or has no text; else as a dictation now would be. One without text
+  /// whose recording has no speech (or is gone) is deleted: there is nothing to keep.
+  fn retranscribe(&mut self, entry: Entry, model: Option<&str>, auto: bool) -> Result<()> {
     let id = entry.id;
     if entry.busy || self.is_busy(id) {
       bail!("entry {id} is being transcribed");
@@ -1205,42 +1422,78 @@ impl<O: TextOutput> Controller<O> {
       return self.delete(id);
     };
 
-    let language = self.settings.engine_language();
-    let model = self.engine()?.name.clone();
+    let mut job = self.new_job(model)?;
+    job.language = if auto || entry.text.is_empty() {
+      entry.language.or_else(|| language_for(job.info, &self.settings))
+    } else {
+      language_for(job.info, &self.settings)
+    };
+
     // Marked tried before it runs: a crash or a failure is not tried again by the same model.
-    self.history.db.mark_busy(id, &model)?;
-    info!("entry {id}: transcribing {:.1} s again with {model}", input.seconds());
-    let job = self.next_job(model, language.clone());
-    job.engine.transcribe(job.id, input.pcm, language, true);
+    self.history.db.mark_busy(id, &job.model)?;
+    info!("entry {id}: transcribing {:.1} s again with {}", input.seconds(), job.model);
+    job.engine.transcribe(job.id, input.pcm, job.language.clone(), true);
     self.retranscribing.push(Retranscription { job, entry: id, auto });
     Ok(())
   }
 
-  /// One entry without text at a time, when no dictation runs, by a model that has not tried it;
-  /// while the model does not load they wait, for the next dictation that loads it.
+  /// The model Transcribe Again takes (a choice; `None`: the one found): the one `entry`'s text
+  /// came from if that is the one found or a key's; for an entry without text the one of its
+  /// language ([route]); else the one found.
+  fn model_again(&self, entry: &Entry) -> Option<String> {
+    let models = self.models();
+    let name = entry.model.as_deref();
+    let own = name.and_then(|name| models.iter().find(|m| file_stem(&m.path) == name));
+    let routed = || route(&models, entry.language.as_deref()).filter(|_| entry.text.is_empty());
+    own.or_else(routed).and_then(|m| m.choice.clone())
+  }
+
+  /// One entry without text at a time, when no dictation runs, by the model its language goes to
+  /// ([route]; a detected one no model of more than one takes, to the one found) unless that one
+  /// tried it; while a model does not load its entries wait, for the next dictation that loads it.
   fn transcribe_untried(&mut self) {
-    while self.untried
-      && self.dictation.is_none()
-      && self.retranscribing.is_empty()
-      && self.no_model().is_none()
-    {
-      let Some(model) = self.model_path.as_deref().map(file_stem) else { return };
-      let entry = self.history.db.get_untried(&model).inspect_err(|e| warn!("history: {e:#}"));
-      let Some(entry) = entry.ok().flatten() else {
-        self.untried = false;
+    while self.untried && self.dictation.is_none() && self.retranscribing.is_empty() {
+      let (found, waiting) = self.untried_entry();
+      let Some((entry, model)) = found else {
+        self.untried = waiting;
         return;
       };
 
       let id = entry.id;
-      if let Err(e) = self.retranscribe(entry, true) {
+      if let Err(e) = self.retranscribe(entry, model.as_deref(), true) {
         warn!("entry {id}: {e:#}");
         self.untried = false;
       }
     }
   }
 
+  /// The newest entry without text whose model ([route]) has not tried it, and that model's
+  /// choice; and whether one waits for a model that does not load. One model per entry: two don't
+  /// take turns at an entry that gives no text.
+  fn untried_entry(&self) -> (Option<(Entry, Option<String>)>, bool) {
+    let models = self.models();
+    let (mut passed, mut to) = (false, None);
+    let found = self.history.db.get_untried(|language, tried| {
+      let Some(m) = route(&models, language) else { return false };
+      if tried == Some(file_stem(&m.path).as_str()) {
+        return false;
+      }
+
+      if self.loaded(&m.path).is_some_and(|l| l.engine.status().load_error.is_some()) {
+        passed = true;
+        return false;
+      }
+
+      to = Some(m);
+      true
+    });
+
+    let entry = found.inspect_err(|e| warn!("history: {e:#}")).ok().flatten();
+    (entry.zip(to).map(|(entry, m)| (entry, m.choice.clone())), passed)
+  }
+
   fn on_retranscribed(&mut self, r: Retranscription, result: Result<String, EngineError>) {
-    let (outcome, text, error) = self.outcome(result);
+    let (outcome, text, error) = self.outcome(result, &r.job);
     info!("entry {}: transcribed again: {outcome:?}", r.entry);
     match outcome {
       Outcome::Done => {
@@ -1296,10 +1549,10 @@ impl<O: TextOutput> Controller<O> {
   /// The retention spares entries without text while no model can transcribe them, or while they
   /// are being transcribed by themselves.
   fn cleanup(&mut self) {
-    // Also those waiting for the model found (a start, an unload in the middle of them).
-    let model = self.model_path.as_deref().map(file_stem);
-    let waiting = model.is_some_and(|m| self.history.db.get_untried(&m).ok().flatten().is_some());
-    let spare = self.no_model().is_some() || self.untried || waiting;
+    // Also those waiting for a model on disk (a start, an unload in the middle of them) or for one
+    // that does not load; the history keeps those no model has tried anyway.
+    let (waiting, passed) = self.untried_entry();
+    let spare = self.no_model().is_some() || self.untried || waiting.is_some() || passed;
     match self.history.cleanup(self.settings.history_retention, now_ms(), spare) {
       Ok(0) => {}
       Ok(n) => info!("history: {n} old entries removed"),
@@ -1312,7 +1565,7 @@ impl<O: TextOutput> Controller<O> {
     let mut warnings: Vec<String> =
       self.settings_warning.iter().chain(&self.model_fallback).cloned().collect();
     warnings.extend(d.map_or(&self.last_warnings, |d| &d.warnings).iter().cloned());
-    let engine = self.engine.as_ref().map_or_else(EngineStatus::default, |l| {
+    let engine = self.shown_engine().map_or_else(EngineStatus::default, |l| {
       let s = l.engine.status();
       let model = Some(l.name.clone());
       EngineStatus { model, phase: s.phase, device: s.device, progress: s.progress }
@@ -1338,6 +1591,30 @@ impl<O: TextOutput> Controller<O> {
       no_model: self.no_model(),
     }
   }
+
+  /// The engine of the dictation in progress: its job's, else its prewarm's.
+  fn dictation_path(&self) -> Option<&Path> {
+    let d = self.dictation.as_ref()?;
+    let job = d.job.as_ref().map(|j| j.path.as_path());
+    job.or(d.prewarmed.as_deref())
+  }
+
+  /// The engine the status shows: the dictation's, else one at work, else one with its model in
+  /// memory, else the one found's.
+  fn shown_engine(&self) -> Option<&Loaded> {
+    if let Some(l) = self.dictation_path().and_then(|path| self.loaded(path)) {
+      return Some(l);
+    }
+
+    let working = |l: &&Loaded| {
+      matches!(l.engine.status().phase, engine::Phase::Running | engine::Phase::Loading)
+    };
+
+    let in_memory = |l: &&Loaded| l.engine.status().phase != engine::Phase::Stopped;
+    (self.engines.iter().find(working))
+      .or_else(|| self.engines.iter().find(in_memory))
+      .or_else(|| self.loaded(self.model_path.as_deref()?))
+  }
 }
 
 fn log_history(result: Result<()>) {
@@ -1362,6 +1639,31 @@ pub fn label(choice: &str) -> String {
   file.strip_suffix(".gguf").unwrap_or(file).to_owned()
 }
 
+/// The model on disk an entry without text goes to: the first that takes its `language`, wavo's
+/// models before files of the person's own, which take any; one without a language (detected) to
+/// the first of more than one or a file of the person's own, else to the one found.
+fn route<'a>(models: &'a [OnDisk], language: Option<&str>) -> Option<&'a OnDisk> {
+  let takes = |m: &&OnDisk| match (m.info, language) {
+    (None, _) => true,
+    (Some(info), Some(code)) => info.langs.iter().any(|l| l.eq_ignore_ascii_case(code)),
+    (Some(info), None) => info.langs.len() > 1,
+  };
+
+  let wavo = models.iter().filter(|m| m.info.is_some());
+  let own = models.iter().filter(|m| m.info.is_none());
+  let found = || models.iter().find(|m| m.choice.is_none()).filter(|_| language.is_none());
+  wavo.chain(own).find(takes).or_else(found)
+}
+
+/// The language a model is asked in: its own for a model of one language, else the setting's
+/// (`None`: the model detects it).
+fn language_for(info: Option<&ModelInfo>, settings: &Settings) -> Option<String> {
+  match info.map(|m| m.langs) {
+    Some([code]) => Some((*code).to_owned()),
+    _ => settings.engine_language(),
+  }
+}
+
 fn loaded_label(info: Option<&ModelInfo>, name: &str) -> String {
   info.map_or_else(|| name.to_owned(), |m| m.full_name.to_owned())
 }
@@ -1379,6 +1681,7 @@ mod tests {
   use super::*;
   use crate::audio::SAMPLE_RATE;
   use crate::history::{RECORDINGS_DIR, Retention};
+  use crate::settings::ModelKey;
   use crate::testing::{FakeModels, TempDir, download, poll, tone, wav_count, write_wav};
 
   // MARK: Machine
@@ -1393,18 +1696,32 @@ mod tests {
       Self { m: Machine::new(activation), t0: Instant::now() }
     }
 
+    /// The main hotkey's press.
     fn down(&mut self, ms: u64) -> Option<Effect> {
+      self.press(ms, 0)
+    }
+
+    fn press(&mut self, ms: u64, which: usize) -> Option<Effect> {
       let at = self.t0 + Duration::from_millis(ms);
-      self.m.handle(Input::KeyDown { at, repeat: false })
+      self.m.handle(Input::KeyDown { at, repeat: false, which })
     }
 
     fn repeat(&mut self, ms: u64) -> Option<Effect> {
       let at = self.t0 + Duration::from_millis(ms);
-      self.m.handle(Input::KeyDown { at, repeat: true })
+      self.m.handle(Input::KeyDown { at, repeat: true, which: 0 })
     }
 
+    /// The main hotkey's release.
     fn up(&mut self, ms: u64) -> Option<Effect> {
-      self.m.handle(Input::KeyUp { at: self.t0 + Duration::from_millis(ms) })
+      self.release(ms, 0)
+    }
+
+    fn release(&mut self, ms: u64, which: usize) -> Option<Effect> {
+      self.m.handle(Input::KeyUp { at: self.t0 + Duration::from_millis(ms), which })
+    }
+
+    fn key(&mut self, index: usize) -> Option<Effect> {
+      self.m.handle(Input::ModelKey { index })
     }
 
     fn latched(&self) -> bool {
@@ -1418,16 +1735,16 @@ mod tests {
   }
 
   use Effect::{
-    AbortRecording, CancelRecording, CancelTranscription, StartRecording, StopRecording,
+    AbortRecording, CancelRecording, CancelTranscription, PickModel, StartRecording, StopRecording,
   };
 
   #[test]
   fn hold_or_toggle_holds_or_latches_on_a_tap() {
     let mut d = Drive::new(Activation::HoldOrToggle);
-    assert_eq!(d.down(0), Some(StartRecording(1)));
+    assert_eq!(d.down(0), Some(StartRecording(1, 0)));
     assert_eq!(d.up(300), Some(StopRecording(1)), "a hold of the threshold");
     d.finish(1);
-    assert_eq!(d.down(1_000), Some(StartRecording(2)));
+    assert_eq!(d.down(1_000), Some(StartRecording(2, 0)));
     assert_eq!(d.up(1_299), None, "a tap latches");
     assert!(d.latched());
     assert_eq!(d.down(4_000), Some(StopRecording(2)), "the next press stops");
@@ -1437,11 +1754,11 @@ mod tests {
   #[test]
   fn push_to_talk_and_toggle() {
     let mut d = Drive::new(Activation::PushToTalk);
-    assert_eq!(d.down(0), Some(StartRecording(1)));
+    assert_eq!(d.down(0), Some(StartRecording(1, 0)));
     assert_eq!(d.up(40), Some(StopRecording(1)), "however short");
 
     let mut d = Drive::new(Activation::Toggle);
-    assert_eq!(d.down(0), Some(StartRecording(1)));
+    assert_eq!(d.down(0), Some(StartRecording(1, 0)));
     assert_eq!(d.up(2_000), None, "a long hold changes nothing");
     assert_eq!(d.down(5_000), Some(StopRecording(1)));
     assert_eq!(d.down(5_100), None, "transcribing ignores the hotkey");
@@ -1452,7 +1769,7 @@ mod tests {
   fn a_toggle_latches_in_every_activation() {
     for activation in [Activation::HoldOrToggle, Activation::PushToTalk, Activation::Toggle] {
       let mut d = Drive::new(activation);
-      assert_eq!(d.m.handle(Input::Toggle), Some(StartRecording(1)), "{activation:?}");
+      assert_eq!(d.m.handle(Input::Toggle), Some(StartRecording(1, 0)), "{activation:?}");
       assert!(d.latched());
       assert_eq!(d.m.handle(Input::Toggle), Some(StopRecording(1)));
       assert_eq!(d.m.handle(Input::Toggle), None, "transcribing ignores it");
@@ -1502,20 +1819,96 @@ mod tests {
     assert_eq!(d.m.handle(Input::MicStopped { take: 3 }), Some(StopRecording(3)));
   }
 
+  /// A model key counts while the hotkey is held: as it goes down, and later, the last one; the
+  /// release then stops the recording, however short the press. Not while transcribing, nor once a
+  /// tap latched it; in toggle mode while the hotkey is still down.
+  #[test]
+  fn a_model_key_counts_while_the_hotkey_is_held() {
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    d.down(0);
+    assert_eq!(d.key(0), Some(PickModel(1, 0)), "at the press");
+    assert_eq!(d.key(1), Some(PickModel(1, 1)), "while held");
+    assert_eq!(d.up(100), Some(StopRecording(1)), "a short press with a key is a hold");
+    assert_eq!(d.key(0), None, "while transcribing");
+    d.finish(1);
+    assert_eq!(d.key(0), None, "idle");
+
+    d.down(1_000);
+    d.up(1_100);
+    assert!(d.latched());
+    assert_eq!(d.key(0), None, "latched by a tap");
+    assert_eq!(d.down(3_000), Some(StopRecording(2)));
+
+    let mut d = Drive::new(Activation::Toggle);
+    d.down(0);
+    assert_eq!(d.key(0), Some(PickModel(1, 0)), "toggle mode, held");
+    assert_eq!(d.up(100), None);
+    assert_eq!(d.key(0), None, "toggle mode, released");
+  }
+
+  /// Another hotkey's press and release leave the press in progress as it is: its chord still
+  /// drops it; and a press of another hotkey while it is down is no autorepeat of it.
+  #[test]
+  fn another_hotkeys_release_leaves_the_press_in_progress() {
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    d.down(0);
+    assert_eq!(d.press(100, 1), None);
+    assert_eq!(d.release(150, 1), None);
+    assert_eq!(d.m.handle(Input::KeyAborted { which: 0 }), Some(AbortRecording(1)));
+
+    let mut d = Drive::new(Activation::Toggle);
+    d.down(0);
+    assert_eq!(d.press(500, 1), Some(StopRecording(1)), "any press stops a latched one");
+    d.release(600, 1);
+    d.finish(1);
+    assert_eq!(d.down(1_000), Some(StartRecording(2, 0)));
+  }
+
+  /// A model's own hotkey starts a dictation as the main one does: held, or latched by a tap; only
+  /// its own release counts, any press stops it once latched.
+  #[test]
+  fn a_models_own_hotkey_starts_its_dictation() {
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    assert_eq!(d.press(0, 1), Some(StartRecording(1, 1)));
+    assert_eq!(d.up(400), None, "another hotkey's release");
+    assert_eq!(d.release(500, 1), Some(StopRecording(1)));
+    d.finish(1);
+
+    assert_eq!(d.press(1_000, 2), Some(StartRecording(2, 2)));
+    assert_eq!(d.release(1_100, 2), None, "a tap latches");
+    assert!(d.latched());
+    assert_eq!(d.down(4_000), Some(StopRecording(2)));
+  }
+
+  /// fn alone and fn+1 as hotkeys: the chord drops what fn's press started, then starts its own.
+  #[test]
+  fn a_chord_on_a_lone_hotkeys_modifier_starts_its_own_dictation() {
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    assert_eq!(d.down(0), Some(StartRecording(1, 0)));
+    assert_eq!(d.m.handle(Input::KeyAborted { which: 1 }), None, "not the press's hotkey");
+    assert_eq!(d.m.handle(Input::KeyAborted { which: 0 }), Some(AbortRecording(1)));
+    assert_eq!(d.press(50, 1), Some(StartRecording(2, 1)));
+    assert_eq!(d.release(500, 1), Some(StopRecording(2)));
+  }
+
   #[test]
   fn a_press_that_was_a_chord_drops_the_recording_it_started() {
     let mut d = Drive::new(Activation::HoldOrToggle);
     d.down(0);
-    assert_eq!(d.m.handle(Input::KeyAborted), Some(AbortRecording(1)));
+    assert_eq!(d.m.handle(Input::KeyAborted { which: 0 }), Some(AbortRecording(1)));
     assert_eq!(d.up(80), None);
 
     // A press that stopped a latched recording: what it stopped stays stopped.
     let mut d = Drive::new(Activation::Toggle);
     d.down(0);
     d.up(100);
-    assert_eq!(d.m.handle(Input::KeyAborted), None, "after the release the press is over");
+    assert_eq!(
+      d.m.handle(Input::KeyAborted { which: 0 }),
+      None,
+      "after the release the press is over"
+    );
     assert_eq!(d.down(3_000), Some(StopRecording(1)));
-    assert_eq!(d.m.handle(Input::KeyAborted), None);
+    assert_eq!(d.m.handle(Input::KeyAborted { which: 0 }), None);
   }
 
   // MARK: Session
@@ -1623,8 +2016,8 @@ mod tests {
     }
 
     fn press(&self) {
-      self.handle.input(Input::KeyDown { at: Instant::now(), repeat: false });
-      self.handle.input(Input::KeyUp { at: Instant::now() });
+      self.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+      self.handle.input(Input::KeyUp { at: Instant::now(), which: 0 });
     }
 
     /// Starts a recording and waits until its audio arrives.
@@ -1647,6 +2040,22 @@ mod tests {
       self.record(0.3);
       thread::sleep(Duration::from_millis(300));
       self.press();
+      self.finished(take).last.unwrap()
+    }
+
+    /// The same with hotkey `which` held, and model keys `keys` ([Settings::held_keys]) pressed
+    /// meanwhile.
+    fn dictate_held(&self, take: Take, which: usize, keys: &[usize]) -> Last {
+      self.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which });
+      let recording = self.update_where("recording", |u| u.status.state == Phase::Recording);
+      for &index in keys {
+        self.handle.input(Input::ModelKey { index });
+      }
+
+      let meter = recording.meter.unwrap();
+      poll("the level", Duration::from_secs(10), || (meter.level() > 0.3).then_some(()));
+      thread::sleep(Duration::from_millis(300));
+      self.handle.input(Input::KeyUp { at: Instant::now(), which });
       self.finished(take).last.unwrap()
     }
 
@@ -1676,14 +2085,23 @@ mod tests {
 
     /// An entry with `text` and a recording of `pcm` (16 kHz), `age_ms` old.
     fn add_entry(&self, age_ms: i64, text: &str, pcm: &[f32]) -> i64 {
+      let entry = Entry { text: text.to_owned(), ..Entry::default() };
+      self.insert(age_ms, entry, pcm)
+    }
+
+    /// An entry without text in `language`, `age_ms` old, of a second of the tone.
+    fn add_untried(&self, age_ms: i64, language: Option<&str>) -> i64 {
+      let entry = Entry { language: language.map(str::to_owned), ..Entry::default() };
+      self.insert(age_ms, entry, &loud(1.0))
+    }
+
+    fn insert(&self, age_ms: i64, entry: Entry, pcm: &[f32]) -> i64 {
       let history = self.history();
       let created_at = now_ms() - age_ms;
       let (name, path) = history.recordings.new_file(created_at);
       write_wav(&path, pcm);
       let duration_ms = pcm.len() as i64 * 1000 / i64::from(SAMPLE_RATE);
-      let text = text.to_owned();
-      let entry =
-        Entry { created_at, duration_ms, audio_path: Some(name), text, ..Entry::default() };
+      let entry = Entry { created_at, duration_ms, audio_path: Some(name), ..entry };
       history.db.insert(&[entry]).unwrap()[0]
     }
   }
@@ -2012,6 +2430,291 @@ mod tests {
     assert!(restore().is_err(), "once");
   }
 
+  const PARAKEET_V3: &str = "parakeet-tdt-0.6b-v3-Q8_0";
+  const PARAKEET_V2: &str = "parakeet-tdt-0.6b-v2-Q8_0";
+  const GIGAAM: &str = "gigaam-v3-e2e-rnnt-Q8_0";
+  const PARAKEET_HE: &str = "parakeet-tdt-0.6b-v3-he-Q8_0";
+  const WHISPER: &str = "whisper-large-v3-turbo-Q8_0";
+
+  /// A model of one language alone takes the entries without text in it and the detected ones; one
+  /// in another language waits for a model that knows it.
+  #[test]
+  fn a_model_of_one_language_alone_takes_its_entries_and_the_detected_ones() {
+    let s = InProcess::start("session-untried-language", &Settings::default(), None, "hi", &[]);
+    let ru = s.add_untried(1_000, Some("ru"));
+    let en = s.add_untried(2_000, Some("en"));
+    let detected = s.add_untried(3_000, None);
+    download(&s.hub, "gigaam-v3");
+    s.handle.check_model();
+    for id in [ru, detected] {
+      let done = poll("transcribed", Duration::from_secs(10), || {
+        s.entry(id).filter(|e| !e.text.is_empty() && !e.busy)
+      });
+      assert_eq!((done.model.as_deref(), done.language.as_deref()), (Some(GIGAAM), Some("ru")));
+    }
+
+    thread::sleep(Duration::from_millis(100));
+    let entry = s.entry(en).unwrap();
+    assert_eq!((entry.text.as_str(), entry.tried_model), ("", None));
+  }
+
+  /// An entry without text nor a language (one from before, a recording a crash left) is asked in
+  /// the language a dictation now would be: the setting's.
+  #[test]
+  fn an_entry_without_a_language_goes_in_the_settings_one() {
+    let settings = Settings { language: "de".into(), ..Settings::default() };
+    let s = InProcess::start("session-untried-setting", &settings, None, "hi", &[]);
+    let id = s.add_untried(1_000, None);
+    download(&s.hub, "parakeet-v3");
+    s.handle.check_model();
+    let done = poll("transcribed", Duration::from_secs(10), || {
+      s.entry(id).filter(|e| !e.text.is_empty() && !e.busy)
+    });
+    assert_eq!((done.model.as_deref(), done.language.as_deref()), (Some(PARAKEET_V3), Some("de")));
+  }
+
+  fn model_key(key: &str, model: &str) -> ModelKey {
+    ModelKey { key: key.into(), model: model.into() }
+  }
+
+  /// A model key sends the dictation to its model, in the model's language when it has one: the
+  /// last key pressed, or the model's own hotkey; a key's model not on disk gets no stand-in, its
+  /// recording waits in its language.
+  #[test]
+  fn a_model_key_sends_the_dictation_to_its_model() {
+    let keys = vec![
+      model_key("z", "gigaam-v3"),
+      model_key("f1", "parakeet-v2"),
+      model_key("x", "moonshine-tiny"),
+    ];
+    let settings = Settings { model: Some("parakeet-v3".into()), keys, ..Settings::default() };
+    let models = ["parakeet-v3", "gigaam-v3", "parakeet-v2"];
+    let s = InProcess::start("session-keys", &settings, Some(&loud(10.0)), "hi", &models);
+    // Dictation, hotkey, keys pressed, its model and language.
+    let cases = [
+      (1, 0, &[1, 0][..], GIGAAM, Some("ru")),
+      (2, 1, &[][..], PARAKEET_V2, Some("en")),
+      (3, 0, &[][..], PARAKEET_V3, None),
+    ];
+    for (take, which, keys, model, language) in cases {
+      let last = s.dictate_held(take, which, keys);
+      assert_eq!((last.outcome, last.text.as_str()), (Outcome::Done, "hi"), "{take}");
+      let entry = s.kept(&last);
+      assert_eq!((entry.model.as_deref(), entry.language.as_deref()), (Some(model), language));
+    }
+
+    let last = s.dictate_held(4, 0, &[1]);
+    assert_eq!(last.outcome, Outcome::NoModel);
+    assert_eq!(last.error.as_deref(), Some("moonshine-tiny is not on disk"));
+    let entry = s.kept(&last);
+    let got = (entry.text.as_str(), entry.tried_model.as_deref(), entry.language.as_deref());
+    assert_eq!(got, ("", None, Some("en")));
+    // The first press loaded the default model for nothing: it went with the key, and came back.
+    assert_eq!(s.models.loads(), 4, "an engine per model");
+  }
+
+  /// A key while recording loads its model and lets go of the one loaded for the default: with an
+  /// unload right after each dictation, one model stays in memory.
+  #[test]
+  fn a_model_key_moves_the_prewarm_to_its_model() {
+    let settings = Settings {
+      keys: vec![model_key("z", "gigaam-v3")],
+      unload_after_minutes: Some(0),
+      ..Settings::default()
+    };
+    let models = ["parakeet-v3", "gigaam-v3"];
+    let s = InProcess::start("session-key-prewarm", &settings, Some(&loud(10.0)), "hi", &models);
+    s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+    poll("the default model", Duration::from_secs(10), || (s.models.live() == 1).then_some(()));
+    s.handle.input(Input::ModelKey { index: 0 });
+    poll("the key's model alone", Duration::from_secs(10), || {
+      (s.models.loads() == 2 && s.models.live() == 1).then_some(())
+    });
+    s.handle.input(Input::Escape);
+    s.finished(1);
+  }
+
+  /// A key lets go of the model its press loaded for the default one, and leaves one loaded before.
+  #[test]
+  fn a_model_key_unloads_only_what_its_press_loaded() {
+    let settings = Settings { keys: vec![model_key("z", "gigaam-v3")], ..Settings::default() };
+    let models = ["parakeet-v3", "gigaam-v3"];
+    let s = InProcess::start("session-key-cold", &settings, Some(&loud(10.0)), "hi", &models);
+    let down = || s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+    let up = || s.handle.input(Input::KeyUp { at: Instant::now(), which: 0 });
+    let loaded = |what: &str, loads: usize, live: usize| {
+      poll(what, Duration::from_secs(10), || {
+        (s.models.loads() == loads && s.models.live() == live).then_some(())
+      })
+    };
+
+    down();
+    loaded("the default model", 1, 1);
+    s.handle.input(Input::ModelKey { index: 0 });
+    loaded("the key's model alone", 2, 1);
+    s.handle.input(Input::Escape);
+    s.finished(1);
+    up();
+
+    s.dictate(2);
+    loaded("both models", 3, 2);
+    down();
+    s.handle.input(Input::ModelKey { index: 0 });
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!((s.models.loads(), s.models.live()), (3, 2), "the default one stays");
+    s.handle.input(Input::Escape);
+    s.finished(3);
+  }
+
+  /// A key of the model the press already loads keeps that load the dictation's own: a key of
+  /// another model then drops it.
+  #[test]
+  fn a_key_of_the_same_model_keeps_the_presss_load_its_own() {
+    let settings = Settings {
+      keys: vec![model_key("z", "parakeet-v3"), model_key("x", "gigaam-v3")],
+      ..Settings::default()
+    };
+    let models = ["parakeet-v3", "gigaam-v3"];
+    let s = InProcess::start("session-key-same", &settings, Some(&loud(10.0)), "hi", &models);
+    s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+    poll("the default model", Duration::from_secs(10), || (s.models.live() == 1).then_some(()));
+    for index in [0, 1] {
+      s.handle.input(Input::ModelKey { index });
+    }
+
+    poll("the key's model alone", Duration::from_secs(10), || {
+      (s.models.loads() == 2 && s.models.live() == 1).then_some(())
+    });
+    s.handle.input(Input::Escape);
+    s.finished(1);
+  }
+
+  /// A press that was a chord (fn+←) keeps the model it loaded, as without model keys: the next
+  /// press needs it.
+  #[test]
+  fn a_chord_keeps_the_model_its_press_loaded() {
+    let mic = loud(10.0);
+    let s =
+      InProcess::start("session-chord", &Settings::default(), Some(&mic), "", &["parakeet-v3"]);
+    s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+    s.update_where("recording", |u| u.status.state == Phase::Recording);
+    poll("the model", Duration::from_secs(10), || (s.models.live() == 1).then_some(()));
+    s.handle.input(Input::KeyAborted { which: 0 });
+    s.update_where("the press dropped", |u| u.status.state == Phase::Idle);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!((s.models.loads(), s.models.live()), (1, 1));
+  }
+
+  /// With an unload right after each dictation, a Transcribe Again while recording leaves the
+  /// dictation's model in memory.
+  #[test]
+  fn transcribe_again_while_recording_keeps_the_dictations_model() {
+    let settings = Settings {
+      keys: vec![model_key("z", "gigaam-v3")],
+      unload_after_minutes: Some(0),
+      ..Settings::default()
+    };
+    let models = ["parakeet-v3", "gigaam-v3"];
+    let mic = loud(10.0);
+    let s = InProcess::start("session-again-recording", &settings, Some(&mic), "hi", &models);
+    let id = s.add_entry(1_000, "текст", &loud(1.0));
+    s.history().db.update_text(id, "текст", Some(GIGAAM), Some("ru")).unwrap();
+    s.handle.input(Input::KeyDown { at: Instant::now(), repeat: false, which: 0 });
+    poll("the dictation's model", Duration::from_secs(10), || (s.models.live() == 1).then_some(()));
+
+    assert_eq!(s.retranscribed(id).model.as_deref(), Some(GIGAAM));
+    poll("the other model gone", Duration::from_secs(10), || (s.models.live() == 1).then_some(()));
+
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!((s.models.loads(), s.models.live()), (2, 1), "the dictation's stays");
+    s.handle.input(Input::Escape);
+    s.finished(1);
+  }
+
+  /// Unload frees every model in memory: the default one's and a key's.
+  #[test]
+  fn unload_frees_every_model() {
+    let settings = Settings { keys: vec![model_key("z", "gigaam-v3")], ..Settings::default() };
+    let models = ["parakeet-v3", "gigaam-v3"];
+    let s = InProcess::start("session-unload", &settings, Some(&loud(10.0)), "hi", &models);
+    s.dictate(1);
+    s.dictate_held(2, 0, &[0]);
+    assert_eq!((s.models.loads(), s.models.live()), (2, 2));
+    s.handle.request(Request::Unload).unwrap();
+    poll("no model", Duration::from_secs(10), || (s.models.live() == 0).then_some(()));
+  }
+
+  /// Entries without text go to the first model on disk of their language, the default one or a
+  /// key's; those without a language (detected) to the first of more than one.
+  #[test]
+  fn entries_without_text_go_to_a_model_of_their_language() {
+    let settings = Settings { model: Some("parakeet-v2".into()), ..Settings::default() };
+    let models = ["parakeet-v2", "gigaam-v3", "parakeet-v3"];
+    let s = InProcess::start("session-untried-languages", &settings, None, "hi", &models);
+    let ru = s.add_untried(1_000, Some("ru"));
+    let en = s.add_untried(2_000, Some("en"));
+    let detected = s.add_untried(3_000, None);
+    s.handle.edit_settings(|s| {
+      s.keys = vec![model_key("z", "gigaam-v3"), model_key("x", "parakeet-v3")];
+    });
+
+    for (id, model) in [(ru, GIGAAM), (en, PARAKEET_V2), (detected, PARAKEET_V3)] {
+      let entry = poll("transcribed", Duration::from_secs(10), || {
+        s.entry(id).filter(|e| !e.text.is_empty() && !e.busy)
+      });
+      assert_eq!(entry.model.as_deref(), Some(model), "{id}");
+    }
+  }
+
+  /// An entry that gives no text is not passed back and forth between two models: it goes to the
+  /// first one that takes it.
+  #[test]
+  fn two_models_do_not_take_turns_at_an_entry_without_text() {
+    let settings = Settings { model: Some("parakeet-v3".into()), ..Settings::default() };
+    let models = ["parakeet-v3", "whisper-turbo"];
+    let s = InProcess::start("session-untried-turns", &settings, None, "", &models);
+    let id = s.add_untried(1_000, None);
+    s.handle.edit_settings(|s| s.keys = vec![model_key("z", "whisper-turbo")]);
+    poll("tried", Duration::from_secs(10), || {
+      s.entry(id).filter(|e| e.tried_model.is_some() && !e.busy)
+    });
+
+    thread::sleep(Duration::from_millis(200));
+    let entry = s.entry(id).unwrap();
+    assert_eq!((entry.text.as_str(), entry.tried_model.as_deref()), ("", Some(PARAKEET_V3)));
+    assert_eq!(s.models.runs().len(), 1, "tried once");
+  }
+
+  /// Transcribe Again goes to the model the text came from when that is the one found or a key's,
+  /// else to the one found; an entry without text to the model of its language.
+  #[test]
+  fn transcribe_again_goes_to_the_entrys_own_model() {
+    let settings = Settings {
+      model: Some("parakeet-v3".into()),
+      keys: vec![model_key("z", "gigaam-v3"), model_key("x", "parakeet-he")],
+      ..Settings::default()
+    };
+    let models = ["parakeet-v3", "gigaam-v3", "parakeet-he", "whisper-turbo"];
+    let s = InProcess::start("session-again-own", &settings, None, "hi", &models);
+    let id = s.add_entry(1_000, "текст", &loud(1.0));
+    let again = |model: &str, language: Option<&str>| {
+      s.history().db.update_text(id, "текст", Some(model), language).unwrap();
+      s.retranscribed(id)
+    };
+
+    let entry = again(GIGAAM, Some("ru"));
+    assert_eq!((entry.model.as_deref(), entry.language.as_deref()), (Some(GIGAAM), Some("ru")));
+    assert_eq!(again(WHISPER, None).model.as_deref(), Some(PARAKEET_V3), "a model of no key");
+    assert_eq!(again("gone-Q8_0", None).model.as_deref(), Some(PARAKEET_V3));
+
+    let untried = s.add_untried(2_000, Some("he"));
+    let entry = s.retranscribed(untried);
+    assert_eq!(
+      (entry.model.as_deref(), entry.language.as_deref()),
+      (Some(PARAKEET_HE), Some("he"))
+    );
+  }
+
   #[test]
   fn a_microphone_that_will_not_open_leaves_nothing_behind() {
     let settings = Settings { history_retention: Retention::Count(1), ..Settings::default() };
@@ -2022,6 +2725,32 @@ mod tests {
     assert_eq!((failed.state, failed.last), (Phase::Idle, None));
     let dir = s.home.path().join(RECORDINGS_DIR);
     assert_eq!(fs::read_dir(dir).unwrap().count(), 0, "no file, nor its day folder");
+  }
+
+  /// An entry without text goes to the first model on disk of its language, wavo's before a file of
+  /// the person's own; a detected one to the first of more than one or such a file, else to the one
+  /// found.
+  #[test]
+  fn an_entry_without_text_goes_to_the_model_of_its_language() {
+    let on = |name: &str, key: bool| OnDisk {
+      choice: key.then(|| name.to_owned()),
+      path: PathBuf::from(name),
+      info: hub::lookup(name).ok(),
+    };
+    let to = |models: &[OnDisk], language: Option<&str>| {
+      route(models, language).map(|m| m.path.display().to_string())
+    };
+
+    let two = [on("gigaam-v3", false), on("parakeet-v2", true)];
+    assert_eq!(to(&two, Some("ru")).as_deref(), Some("gigaam-v3"));
+    assert_eq!(to(&two, Some("EN")).as_deref(), Some("parakeet-v2"));
+    assert_eq!(to(&two, Some("de")), None);
+    assert_eq!(to(&two, None).as_deref(), Some("gigaam-v3"), "detected: the one found");
+
+    let own = [on("/models/own.gguf", false), on("gigaam-v3", true), on("parakeet-v3", true)];
+    assert_eq!(to(&own, Some("ru")).as_deref(), Some("gigaam-v3"), "the person's file last");
+    assert_eq!(to(&own, None).as_deref(), Some("parakeet-v3"), "detected: the first of more");
+    assert_eq!(to(&own, Some("he")).as_deref(), Some("/models/own.gguf"));
   }
 
   #[test]
