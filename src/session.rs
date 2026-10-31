@@ -135,8 +135,8 @@ struct Machine {
   activation: Activation,
   state: State,
   last_take: Take,
-  /// The last press or repeat of a hotkey, if no release came after it.
-  key_down: Option<Instant>,
+  /// The last press or repeat of a hotkey (which, when), if no release of it came after it.
+  key_down: Option<(usize, Instant)>,
   /// The take the press in progress started, until its release.
   pressed: Option<Take>,
   /// The hotkey that started the recording in progress: only its release counts.
@@ -188,11 +188,17 @@ impl Machine {
         self.state = Recording { take, hold: Hold::Keyed };
         Some(Effect::PickModel(take, index))
       }
+      // Toggle mode latches at the press: a key counts while that hotkey is still down.
+      (Recording { take, hold: Hold::Latched }, Input::ModelKey { index })
+        if self.pressed == Some(take) =>
+      {
+        Some(Effect::PickModel(take, index))
+      }
       (_, Input::ModelKey { .. }) => None,
 
       (Idle, Input::Toggle) => {
         self.last_take += 1;
-        self.which = 0;
+        (self.pressed, self.which) = (None, 0);
         self.state = Recording { take: self.last_take, hold: Hold::Latched };
         Some(Effect::StartRecording(self.last_take, 0))
       }
@@ -242,16 +248,19 @@ impl Machine {
   fn track_key(&mut self, input: Input) -> Input {
     match input {
       Input::KeyDown { at, repeat, which } => {
-        let held = self.key_down.is_some_and(|t| at.saturating_duration_since(t) < REPEAT_WINDOW);
-        self.key_down = Some(at);
+        let held = self
+          .key_down
+          .is_some_and(|(w, t)| w == which && at.saturating_duration_since(t) < REPEAT_WINDOW);
+        self.key_down = Some((which, at));
         Input::KeyDown { at, repeat: repeat || held, which }
       }
-      Input::KeyUp { .. } => {
-        (self.key_down, self.pressed) = (None, None);
-        input
-      }
-      Input::KeyAborted { .. } => {
-        self.key_down = None;
+      // Another hotkey's release leaves this one's press as it is.
+      Input::KeyUp { which, .. } | Input::KeyAborted { which } => {
+        self.key_down = self.key_down.filter(|&(w, _)| w != which);
+        if which == self.which && matches!(input, Input::KeyUp { .. }) {
+          self.pressed = None;
+        }
+
         input
       }
       _ => input,
@@ -1764,7 +1773,7 @@ mod tests {
 
   /// A model key counts while the hotkey is held: as it goes down, and later, the last one; the
   /// release then stops the recording, however short the press. Not while transcribing, nor once a
-  /// tap or toggle mode latched it.
+  /// tap latched it; in toggle mode while the hotkey is still down.
   #[test]
   fn a_model_key_counts_while_the_hotkey_is_held() {
     let mut d = Drive::new(Activation::HoldOrToggle);
@@ -1784,7 +1793,28 @@ mod tests {
 
     let mut d = Drive::new(Activation::Toggle);
     d.down(0);
-    assert_eq!(d.key(0), None, "toggle mode");
+    assert_eq!(d.key(0), Some(PickModel(1, 0)), "toggle mode, held");
+    assert_eq!(d.up(100), None);
+    assert_eq!(d.key(0), None, "toggle mode, released");
+  }
+
+  /// Another hotkey's press and release leave the press in progress as it is: its chord still
+  /// drops it, and a press of it after its release is no autorepeat.
+  #[test]
+  fn another_hotkeys_release_leaves_the_press_in_progress() {
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    d.down(0);
+    assert_eq!(d.press(100, 1), None);
+    assert_eq!(d.release(150, 1), None);
+    assert_eq!(d.m.handle(Input::KeyAborted { which: 0 }), Some(AbortRecording(1)));
+
+    let mut d = Drive::new(Activation::Toggle);
+    d.down(0);
+    d.up(100);
+    assert_eq!(d.press(500, 1), Some(StopRecording(1)), "any press stops a latched one");
+    d.release(600, 1);
+    d.finish(1);
+    assert_eq!(d.down(1_000), Some(StartRecording(2, 0)));
   }
 
   /// A model's own hotkey starts a dictation as the main one does: held, or latched by a tap; only
