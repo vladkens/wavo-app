@@ -6,6 +6,10 @@
 
 **Local dictation for macOS, Windows and Linux**
 
+[<img src="https://badges.ws/badge/macOS-14.2%2B%20%C2%B7%20Apple%20Silicon-black?icon=apple" alt="macOS 14.2+, Apple Silicon" />](#-usage)
+[<img src="https://badges.ws/badge/Windows-10%2B%20%C2%B7%20x64%20%C2%B7%20ARM64-black" alt="Windows 10+, x64 and ARM64" />](#-usage)
+[<img src="https://badges.ws/badge/Linux-x64%20%C2%B7%20ARM64-black?icon=linux" alt="Linux, x64 and ARM64" />](#-usage)
+
 [<img src="https://badges.ws/github/license/vladkens/wavo-app" alt="license" />](https://github.com/vladkens/wavo-app/blob/main/LICENSE)
 [<img src="https://badges.ws/badge/follow-@uid127-black" alt="follow @uid127" />](https://x.com/uid127)
 [<img src="https://badges.ws/badge/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
