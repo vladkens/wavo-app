@@ -303,29 +303,36 @@ impl Db {
     Ok(self.db.prepare_cached(qs)?.query_row([], total)?)
   }
 
-  /// The newest entry without text that `model` has not tried and nothing transcribes now, in one
-  /// of the model's `langs` (any for `None`: a file of the person's own). One without a language
-  /// (detected) goes to a model of more than one only. No model has tried it, or with `retry`
-  /// another one has.
+  /// The newest entry without text that `model` has not tried and nothing transcribes now, of
+  /// those it takes and none of the models `before` it does: an entry goes to the first model that
+  /// takes it. A model takes the entries in its `langs` (any for `None`: a file of the person's
+  /// own), and those without a language (detected) when it has more than one.
   pub fn get_untried(
     &self,
     model: &str,
     langs: Option<&[&str]>,
-    retry: bool,
+    before: &[Option<&[&str]>],
   ) -> Result<Option<Entry>> {
     let qs = "
     SELECT * FROM entries
     WHERE text = '' AND busy = 0 AND audio_path IS NOT NULL
-      AND (tried_model IS NULL OR (?3 AND tried_model != ?1))
+      AND (tried_model IS NULL OR tried_model != ?1)
       AND (?2 IS NULL
         OR lower(language) IN (SELECT value FROM json_each(?2))
         OR (language IS NULL AND json_array_length(?2) > 1))
+      AND NOT EXISTS (
+        SELECT 1 FROM json_each(?3) AS m
+        WHERE m.type = 'null'
+          OR lower(language) IN (SELECT value FROM json_each(m.value))
+          OR (language IS NULL AND json_array_length(m.value) > 1)
+      )
     ORDER BY created_at DESC, id DESC LIMIT 1;
     ";
 
     let langs = langs.map(serde_json::to_string).transpose()?;
+    let before = serde_json::to_string(before)?;
     let mut stmt = self.db.prepare_cached(qs)?;
-    Ok(stmt.query_row(params![model, langs, retry], Entry::from_row).optional()?)
+    Ok(stmt.query_row(params![model, langs, before], Entry::from_row).optional()?)
   }
 
   /// The entries after the newest `keep`; those being transcribed, those without text no model
@@ -727,7 +734,7 @@ mod tests {
       .collect();
 
     let untried = |model: &str, langs: Option<&[&str]>| {
-      h.db.get_untried(model, langs, true).unwrap().map(|e| e.id)
+      h.db.get_untried(model, langs, &[]).unwrap().map(|e| e.id)
     };
 
     let (ru, en, multi) = (&["ru"][..], &["en"][..], &["en", "ru"][..]);
@@ -737,6 +744,17 @@ mod tests {
     assert_eq!(untried("parakeet-v3", Some(multi)), Some(ids[0]), "the newest");
     assert_eq!(untried("own", None), Some(ids[0]));
 
+    // An entry goes to the first model that takes it.
+    let after = |model: &str, langs: &[&str], before: &[Option<&[&str]>]| {
+      h.db.get_untried(model, Some(langs), before).unwrap().map(|e| e.id)
+    };
+
+    assert_eq!(after("gigaam", ru, &[Some(multi)]), None, "parakeet-v3's");
+    assert_eq!(after("gigaam", ru, &[Some(en)]), Some(ids[0]), "parakeet-v2 takes no Russian");
+    assert_eq!(after("whisper", multi, &[Some(ru)]), Some(ids[1]));
+    assert_eq!(after("whisper", multi, &[Some(en), Some(multi)]), None, "detected: the first");
+    assert_eq!(after("whisper", multi, &[None]), None, "a file of the person's own takes any");
+
     for id in &ids[..2] {
       h.db.mark_busy(*id, "parakeet-v3").unwrap();
       h.db.mark_idle(*id).unwrap();
@@ -744,8 +762,6 @@ mod tests {
 
     assert_eq!(untried("parakeet-v3", Some(multi)), Some(ids[2]), "detected: a model of more");
     assert_eq!(untried("gigaam", Some(ru)), Some(ids[0]), "tried by another one");
-    let fresh = h.db.get_untried("gigaam", Some(ru), false).unwrap();
-    assert_eq!(fresh, None, "only one no model tried");
   }
 
   #[test]

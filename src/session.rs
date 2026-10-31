@@ -1432,24 +1432,25 @@ impl<O: TextOutput> Controller<O> {
     }
   }
 
-  /// The newest entry without text a model on disk can take ([History::db]'s `get_untried`), the
-  /// one found's first, and the model's choice; and whether a model that does not load was passed
-  /// over.
+  /// The newest entry without text for a model on disk ([History::db]'s `get_untried`), the one
+  /// found's first, and the model's choice; and whether one waits for a model that does not load.
+  /// An entry goes to the first model that takes its language: two models don't take turns at an
+  /// entry that gives no text.
   fn untried_entry(&self) -> (Option<(Entry, Option<String>)>, bool) {
-    let mut passed = false;
-    for m in self.models() {
+    let (models, mut passed) = (self.models(), false);
+    let langs: Vec<Option<&[&str]>> = models.iter().map(|m| m.info.map(|i| i.langs)).collect();
+    for (i, m) in models.iter().enumerate() {
+      let entry = self.history.db.get_untried(&file_stem(&m.path), langs[i], &langs[..i]);
+      let Some(entry) = entry.inspect_err(|e| warn!("history: {e:#}")).ok().flatten() else {
+        continue;
+      };
+
       if self.loaded(&m.path).is_some_and(|l| l.engine.status().load_error.is_some()) {
         passed = true;
         continue;
       }
 
-      // The one found tries again one another model tried, a key's model only one no model tried:
-      // two models don't take turns at an entry that gives no text.
-      let (langs, retry) = (m.info.map(|i| i.langs), m.choice.is_none());
-      let entry = self.history.db.get_untried(&file_stem(&m.path), langs, retry);
-      if let Some(entry) = entry.inspect_err(|e| warn!("history: {e:#}")).ok().flatten() {
-        return (Some((entry, m.choice)), passed);
-      }
+      return (Some((entry, m.choice.clone())), passed);
     }
 
     (None, passed)
@@ -2483,8 +2484,8 @@ mod tests {
     assert_eq!(transcribed(detected).model.as_deref(), Some(PARAKEET_V3));
   }
 
-  /// An entry that gives no text is not passed back and forth between two models: a key's model
-  /// takes only one no model has tried.
+  /// An entry that gives no text is not passed back and forth between two models: it goes to the
+  /// first one that takes it.
   #[test]
   fn two_models_do_not_take_turns_at_an_entry_without_text() {
     let settings = Settings { model: Some("parakeet-v3".into()), ..Settings::default() };
