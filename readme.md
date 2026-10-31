@@ -45,7 +45,9 @@ Wavo is inspired by [Handy](https://github.com/cjpais/Handy) and runs the same G
 
 ## 🚀 Usage
 
-**Download** the file for your system from the [latest release](https://github.com/vladkens/wavo-app/releases/latest) and run it. Then pick a model in Settings › Models: **Parakeet Ultra** is the recommended one, about 0.7 GB, downloaded once.
+1. Download the file for your system from the [latest release](https://github.com/vladkens/wavo-app/releases/latest) and run it.
+2. Pick a model in Settings › Models: **Parakeet Ultra**, about 0.7 GB, downloaded once.
+3. Hold **Option-Space** (Ctrl+Alt+Space on Windows and Linux), speak and let go. A short tap starts a longer dictation that the next press ends; Esc cancels.
 
 <details>
 <summary>Which file, and the first launch</summary>
@@ -71,27 +73,16 @@ The GPU needs a Vulkan driver (`mesa-vulkan-drivers` on Debian and Ubuntu); with
 
 </details>
 
-**Hold the hotkey** (Option-Space on macOS, Ctrl+Alt+Space elsewhere), speak and let go: a small indicator shows the level while you speak, and the text is pasted where the cursor was. **A short tap** starts a dictation that the next press ends, for longer talks; **Esc** cancels.
-
-The menu-bar icon opens the recent dictations, the model and the microphone. **Settings** changes the shortcut, the language and the rest, and keeps the **History**: search it, play a recording back, transcribe it again with another model.
-
 <details>
-<summary>Moving to another computer</summary>
+<summary>Bringing your history over</summary>
 
-Export the history with its recordings on the old computer with Advanced › Data › Export…, and bring it in on the new one with Advanced › Data › Import…: the dictations it does not have yet are added.
+From another computer: Advanced › Data › Export… there, then Advanced › Data › Import… here; dictations Wavo already has are skipped.
 
-</details>
-
-<details>
-<summary>Moving from Handy</summary>
-
-Handy's history, with its recordings, comes over through an archive; Handy itself is only read. Quit Handy, then run:
+From Handy: quit Handy and run the line below, then import `~/Downloads/handy-export.zip` the same way. Handy itself is only read.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/vladkens/wavo-app/main/scripts/handy.py | python3 -
 ```
-
-It writes `~/Downloads/handy-export.zip`: bring it in with Advanced › Data › Import…. Dictations Wavo already has are left, so importing twice adds nothing. `HANDY_DIR=<folder>` before `python3` reads Handy's data from another folder.
 
 </details>
 
