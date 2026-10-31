@@ -741,6 +741,8 @@ mod tests {
     assert_eq!(first.unwrap(), None);
     assert_eq!(seen, [None, Some("gigaam".to_owned())], "newest first");
 
+    let newest = h.db.get_untried(|_, _| true).unwrap().map(|e| e.id);
+    assert_eq!(newest, Some(newer));
     let tried = h.db.get_untried(|_, tried| tried.is_some()).unwrap().unwrap();
     assert_eq!((tried.id, tried.tried_model.as_deref()), (older, Some("gigaam")));
   }
