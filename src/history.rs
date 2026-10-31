@@ -460,9 +460,9 @@ impl Db {
   /// The recordings of entries `sizes` take so many bytes: `(id, name, bytes)`; an entry that no
   /// longer names that recording keeps its size.
   pub fn update_sizes(&self, sizes: &[(i64, &str, u64)]) -> Result<()> {
+    let qs = "UPDATE entries SET audio_bytes = ?3 WHERE id = ?1 AND audio_path = ?2;";
     let tx = self.db.unchecked_transaction()?;
     for (id, name, bytes) in sizes {
-      let qs = "UPDATE entries SET audio_bytes = ?3 WHERE id = ?1 AND audio_path = ?2;";
       tx.prepare_cached(qs)?.execute(params![id, name, *bytes as i64])?;
     }
 
