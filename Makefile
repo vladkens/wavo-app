@@ -76,10 +76,12 @@ install: # quit the running Wavo, install target/Wavo.app into /Applications and
 	$(MAKE) bundle
 	python3 scripts/run.py $(APP) /Applications/Wavo.app
 
-# The installed app's binary, else the release build's; ARGS go to it (--dry-run, --yes).
+# The installed app's binary, else the release build's, built again: `make run` leaves Wavo Dev's
+# there. ARGS go to it (--dry-run, --yes).
 INSTALLED := /Applications/Wavo.app/Contents/MacOS/wavo-app
 
 uninstall: # remove Wavo and all it left (data, models, permissions, the app): then a clean install
+	$(if $(wildcard $(INSTALLED)),,cargo build $(CARGO_FLAGS))
 	$(or $(wildcard $(INSTALLED)),target/release/wavo-app) uninstall $(ARGS)
 
 shots: # the settings window's pages and the update window's states, headless, into target/shots/

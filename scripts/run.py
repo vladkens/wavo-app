@@ -47,20 +47,30 @@ def running(binary: str) -> bool:
 
 
 def copy_history(src: Path, dst: Path):
-    """The history of the home `src` into `dst`, in place of its own: the database by SQLite's
-    backup, safe while the app at `src` writes, then the recordings, cloned (APFS)."""
-    dst.mkdir(parents=True, exist_ok=True)
+    """The history of the home `src` into `dst`, in place of its own, which stays until the copy
+    is whole: the database by SQLite's backup, safe while the app at `src` writes, then the
+    recordings, cloned (APFS). One the app at `src` records or deletes in between is an entry
+    without text or a recording missing in the copy, which the app's recovery handles."""
+    db, recordings = src / "history.db", src / "recordings"
+    if not db.is_file():
+        sys.exit(f"{db}: no history to copy, {dst}'s left as it is")
+
+    new = dst / "history-copy"
+    shutil.rmtree(new, ignore_errors=True)
+    new.mkdir(parents=True)
+    subprocess.run(["sqlite3", db, f".backup '{new / db.name}'"], check=True)
+
+    if recordings.is_dir():
+        subprocess.run(["cp", "-Rc", recordings, new / recordings.name], check=True)
+
     for name in ("history.db", "history.db-wal", "history.db-shm"):
         (dst / name).unlink(missing_ok=True)
 
     shutil.rmtree(dst / "recordings", ignore_errors=True)
-    if (src / "history.db").is_file():
-        backup = f".backup '{dst / 'history.db'}'"
-        subprocess.run(["sqlite3", src / "history.db", backup], check=True)
+    for path in new.iterdir():
+        path.rename(dst / path.name)
 
-    if (src / "recordings").is_dir():
-        subprocess.run(["cp", "-Rc", src / "recordings", dst / "recordings"], check=True)
-
+    new.rmdir()
     print(f"the history of {src} copied into {dst}")
 
 
