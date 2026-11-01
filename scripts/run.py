@@ -63,10 +63,13 @@ def copy_history(src: Path, dst: Path):
     if recordings.is_dir():
         subprocess.run(["cp", "-Rc", recordings, new / recordings.name], check=True)
 
+    # The recordings first: one that can't go stops it before the database goes.
+    if (dst / "recordings").exists():
+        shutil.rmtree(dst / "recordings")
+
     for name in ("history.db", "history.db-wal", "history.db-shm"):
         (dst / name).unlink(missing_ok=True)
 
-    shutil.rmtree(dst / "recordings", ignore_errors=True)
     for path in new.iterdir():
         path.rename(dst / path.name)
 
