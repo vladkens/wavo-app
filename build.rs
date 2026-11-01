@@ -1,12 +1,28 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! The build script: the version the app shows, `WAVO_VERSION` ([version]).
+//! The build script: the version the app shows, `WAVO_VERSION` ([version]), and the flavor,
+//! `cfg(wavo_dev)` ([dev]).
 
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
   println!("cargo:rustc-env=WAVO_VERSION={}", version());
+  println!("cargo:rustc-check-cfg=cfg(wavo_dev)");
+  if dev() {
+    println!("cargo:rustc-cfg=wavo_dev");
+  }
+}
+
+/// `WAVO_FLAVOR=dev` (`make run`'s bundle): Wavo Dev, an app of its own beside the release
+/// (main.rs's `DEV`); unset, empty or `release`: Wavo.
+fn dev() -> bool {
+  println!("cargo:rerun-if-env-changed=WAVO_FLAVOR");
+  match std::env::var("WAVO_FLAVOR").unwrap_or_default().as_str() {
+    "" | "release" => false,
+    "dev" => true,
+    other => panic!("WAVO_FLAVOR={other}: release or dev"),
+  }
 }
 
 /// The version the build shows, as CI's dev builds have it (vladkens/actions dev-version): Cargo's

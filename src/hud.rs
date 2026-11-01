@@ -67,7 +67,7 @@ pub fn config(position: HudPosition) -> Config {
     HudPosition::Top => Anchor::Top(0.0),
   };
 
-  let cfg = Config::new("Wavo", MAX_WIDTH + 2.0 * MARGIN, HEIGHT + 2.0 * MARGIN);
+  let cfg = Config::new(crate::INFO.name, MAX_WIDTH + 2.0 * MARGIN, HEIGHT + 2.0 * MARGIN);
   crate::with_icon(cfg.overlay(anchor).hidden())
 }
 

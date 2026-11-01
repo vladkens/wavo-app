@@ -134,7 +134,8 @@ pub fn run(updated: Option<shipo::Error>) -> Result<()> {
     Claim::Primary(instance) => instance,
     Claim::Running => {
       let opened = instance::send_in(&home, instance::OPEN).is_ok();
-      eprintln!("Wavo is already running for {} (settings opened: {opened})", home.display());
+      let name = INFO.name;
+      eprintln!("{name} is already running for {} (settings opened: {opened})", home.display());
       return Ok(());
     }
   };
@@ -173,9 +174,11 @@ fn start(
     }
   }
 
-  // Asked once: shipo tries a staging folder beside the app.
+  // Asked once: shipo tries a staging folder beside the app. Never Wavo Dev, which a release would
+  // replace by Wavo, even when built on a release's commit.
   let supported = shipo::faking()
     || installed()
+      && !cfg!(wavo_dev)
       && !updater::dev(crate::VERSION)
       && shipo::supported().inspect_err(|e| info!("updates: {e}")).is_ok();
   let fake_mic = config.fake_mic.is_some();
@@ -213,7 +216,7 @@ fn start(
 
   // The session has not told its settings yet: they are read from the file.
   let saved = Settings::load(&home.join(settings::FILE)).0;
-  let tray = Tray::new(Icon::Idle.tray(), Icon::Idle.description());
+  let tray = Tray::new(Icon::Idle.tray(), &Icon::Idle.description());
   tray.on_open(|_, _| _ = with_app(App::menu_opening));
   tray.on_item(|main, _, id| chosen(main, id));
   let position = HudPosition::default();
@@ -754,7 +757,7 @@ impl App {
     if icon != self.icon {
       self.icon = icon;
       self.tray.set_icon(icon.tray());
-      self.tray.set_tooltip(icon.description());
+      self.tray.set_tooltip(&icon.description());
     }
 
     let hotkey = self.hotkeys.status().hotkey.map(|h| h.label());

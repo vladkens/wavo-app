@@ -14,7 +14,7 @@ The dictation app (`wavo-app`, `publish = false`) for macOS, Windows and Linux: 
 ## Rules
 
 - Never open a window on the person's Mac without their permission: no GUI runs, no GUI tests; headless commands except `uninstall`, and tests, are free to run, and the HUD and the settings window are tested in nimbo's harness.
-- `make bundle` builds `target/Wavo.app` and is free to run, but never open the app; `make run`, `make install` and `make uninstall` are the person's commands.
+- `make bundle` builds `target/Wavo.app` (`FLAVOR=dev`: `target/Wavo Dev.app`, `make run`'s app beside the installed Wavo, with its own id and data folder, `me.vladkens.wavo-dev`) and is free to run, but never open the app; `make run`, `make install` and `make uninstall` are the person's commands.
 - Run `wavo-app uninstall` only with `--dry-run`: even under a temp `WAVO_HOME` it turns launch at login off, resets the macOS permissions and defaults, and deletes the real caches and the models in the Hugging Face cache.
 - Tests and manual runs never touch the person's data: a temp `WAVO_HOME` every time.
 - Never record from the real microphone (macOS would ask the person for permission): `WAVO_FAKE_MIC=<wav>` plays a file instead, and a test that needs a device is `#[ignore]`.

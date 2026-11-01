@@ -16,7 +16,7 @@ use crate::INFO;
 /// `cmd` to the running app.
 pub fn send(cmd: &str) -> Result<()> {
   if instance::send_in(&crate::home(), cmd).is_err() {
-    bail!("Wavo is not running");
+    bail!("{} is not running", INFO.name);
   }
 
   Ok(())
