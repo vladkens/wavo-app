@@ -334,7 +334,7 @@ mod tests {
   use nimbo::instance::{Claim, claim_in};
 
   use super::*;
-  use crate::testing::{TempDir, entry_ids, tone, wav_count, write_wav};
+  use crate::testing::{TempDir, as_v0_1_0, entry_ids, tone, wav_count, write_wav};
 
   /// 2026-10-09 00:00 UTC.
   const NOW: i64 = 1_791_504_000_000;
@@ -412,6 +412,27 @@ mod tests {
     let done = import(to.path(), &file, |_, _| {}).unwrap();
     assert_eq!((done.added, done.copied), (0, 1));
     assert!(h.audio_file(&entries[1]).is_some());
+  }
+
+  /// Wavo 0.1.0 imports an archive this one exports: the manifest's format and the history's
+  /// schema are its own, the recordings' sizes a column it ignores.
+  #[test]
+  fn an_older_wavo_imports_the_export() {
+    let (home, out) = (TempDir::new("tr-older"), TempDir::new("tr-older-out"));
+    let h = History::open(home.path()).unwrap();
+    add(&h, NOW, "hello", Some(0.5));
+    assert_eq!(h.measure().unwrap(), 1);
+    let file = out.path().join("wavo.zip");
+    export(home.path(), &file, |_, _| {}).unwrap();
+
+    let mut archive = ZipArchive::new(File::open(&file).unwrap()).unwrap();
+    let manifest: Manifest = serde_json::from_reader(archive.by_name(MANIFEST).unwrap()).unwrap();
+    assert!(manifest.format <= 1, "0.1.0 refuses format {}", manifest.format);
+    let db = out.path().join(DB_FILE);
+    io::copy(&mut archive.by_name(DB_FILE).unwrap(), &mut File::create(&db).unwrap()).unwrap();
+    assert_eq!(as_v0_1_0(&db, NOW + 1, "theirs", None), ["hello", "theirs"]);
+    let sized = Db::open(&db).unwrap().get_entries().unwrap()[0].audio_bytes;
+    assert!(sized.is_some(), "the archive has the sizes");
   }
 
   #[test]

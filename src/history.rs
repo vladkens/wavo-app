@@ -12,8 +12,9 @@
 //!   without text whose recording is gone go, and recordings without an entry (the app died while
 //!   recording) become entries without text if they have speech, else they go.
 //! - A recording's size, for the History page's totals, is measured once: as its entry goes in,
-//!   else (an older entry, an import's) by [`History::measure`] off the main thread. One whose file
-//!   is not there is not counted until it is; one deleted outside Wavo later still counts.
+//!   else (an older entry, one an older Wavo added, an import's) by [`History::measure`] off the
+//!   main thread. One whose file is not there is not counted until it is; one deleted outside Wavo
+//!   later still counts.
 
 use std::collections::HashSet;
 use std::io::ErrorKind;
@@ -23,7 +24,7 @@ use std::{fs, mem};
 
 use anyhow::{Context, Result, bail};
 use rusqlite::functions::FunctionFlags;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -137,6 +138,12 @@ pub fn fold(text: &str) -> String {
 }
 
 // MARK: Migrations
+//
+// `user_version` counts only the breaking migrations, `migrate_v<N>`: those an older Wavo can't
+// work with (a column dropped, renamed or NOT NULL without a default), which it refuses. What an
+// older one ignores (a nullable column, an index) is an addition, `add_<what>`: no new version,
+// made where it is missing on every open, so a history this Wavo wrote still opens in an older
+// one, and an archive it exports still imports there.
 
 fn migrate_v1(db: &Connection) -> Result<()> {
   let queries = vec![
@@ -170,8 +177,9 @@ fn migrate_v1(db: &Connection) -> Result<()> {
   Ok(())
 }
 
-fn migrate_v2(db: &Connection) -> Result<()> {
-  let queries = vec![
+fn add_audio_bytes(db: &Connection) -> Result<()> {
+  let made = "SELECT COUNT(*) > 0 FROM pragma_table_info('entries') WHERE name = 'audio_bytes';";
+  let queries = [
     // The recording's size on disk, measured once: NULL until then, and while its file is not
     // there ([History::measure]).
     "ALTER TABLE entries ADD COLUMN audio_bytes INTEGER;",
@@ -179,17 +187,32 @@ fn migrate_v2(db: &Connection) -> Result<()> {
       WHERE audio_bytes IS NULL AND audio_path IS NOT NULL;",
   ];
 
-  for qs in queries {
-    db.execute(qs, [])?;
+  add_once(db, made, &queries)
+}
+
+/// Runs `queries` unless `made` (a query of one bool) finds them run. Checked again under the write
+/// lock, so two Wavos opening the history at once don't both; one that finds them takes no lock.
+fn add_once(db: &Connection, made: &str, queries: &[&str]) -> Result<()> {
+  let made = |db: &Connection| db.query_row(made, [], |row| row.get::<_, bool>(0));
+  if made(db)? {
+    return Ok(());
   }
 
+  let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+  if !made(&tx)? {
+    for qs in queries {
+      tx.execute(qs, [])?;
+    }
+  }
+
+  tx.commit()?;
   Ok(())
 }
 
-/// Runs the migrations the database has not had; one from a newer Wavo is refused rather than
-/// written in a layout this one does not know.
+/// Runs the migrations the database has not had, then the additions; one from a newer Wavo is
+/// refused rather than written in a layout this one does not know.
 fn migrate(db: &Connection) -> Result<()> {
-  let migrations: Vec<fn(&Connection) -> Result<()>> = vec![migrate_v1, migrate_v2];
+  let migrations: Vec<fn(&Connection) -> Result<()>> = vec![migrate_v1];
   let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
   if version > migrations.len() as i64 {
     bail!("the database has schema {version}, newer than this Wavo knows ({})", migrations.len());
@@ -200,6 +223,11 @@ fn migrate(db: &Connection) -> Result<()> {
     migration(&tx)?;
     tx.pragma_update(None, "user_version", i as i64 + 1)?;
     tx.commit()?;
+  }
+
+  let additions: Vec<fn(&Connection) -> Result<()>> = vec![add_audio_bytes];
+  for add in additions {
+    add(db)?;
   }
 
   Ok(())
@@ -771,7 +799,7 @@ impl History {
 mod tests {
   use super::*;
   use crate::audio::WavSink;
-  use crate::testing::{TempDir, entry_ids, tone, wav_count, write_wav};
+  use crate::testing::{TempDir, as_v0_1_0, entry_ids, tone, wav_count, write_wav};
 
   const DAY: i64 = 24 * 60 * 60 * 1000;
   /// 2026-10-09 00:00 UTC.
@@ -894,9 +922,10 @@ mod tests {
     assert_eq!(new.iter().map(|&id| size(id)).collect::<Vec<_>>(), [Some(None), Some(None)]);
   }
 
-  /// A history of schema 1 gets the recordings' sizes, none measured yet.
+  /// A history of schema 1, as Wavo 0.1.0 made it, gets the recordings' sizes, none measured yet,
+  /// and stays schema 1; opened again, it is left as it is.
   #[test]
-  fn migrates_schema_1() {
+  fn adds_the_sizes_to_schema_1() {
     let dir = TempDir::new("history-v1");
     let path = dir.path().join(DB_FILE);
     let db = Connection::open(&path).unwrap();
@@ -906,10 +935,45 @@ mod tests {
     db.execute(qs, params![NOW, "2026-10-09/1.wav"]).unwrap();
     drop(db);
 
-    let db = Db::open(&path).unwrap();
-    let version: i64 = db.db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(version, 2);
-    assert_eq!(db.get_unmeasured().unwrap(), [(1, "2026-10-09/1.wav".to_owned())]);
+    let schema = || {
+      let db = Db::open(&path).unwrap();
+      let version: i64 = db.db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+      let qs =
+        "SELECT group_concat(name) FROM pragma_table_info('entries') WHERE name = 'audio_bytes'
+        UNION ALL SELECT group_concat(name) FROM sqlite_schema WHERE name = 'entries_unmeasured';";
+      let mut stmt = db.db.prepare(qs).unwrap();
+      let made: Vec<String> =
+        stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+      assert_eq!(db.get_unmeasured().unwrap(), [(1, "2026-10-09/1.wav".to_owned())]);
+      (version, made)
+    };
+
+    let made = (1, vec!["audio_bytes".to_owned(), "entries_unmeasured".to_owned()]);
+    assert_eq!(schema(), made);
+    assert_eq!(schema(), made, "once");
+  }
+
+  /// Wavo 0.1.0 opens a history this one made and measured, and what it adds is measured here.
+  #[test]
+  fn an_older_wavo_opens_it() {
+    let dir = TempDir::new("history-older");
+    let h = History::open(dir.path()).unwrap();
+    add(&h, DAY, "one", false);
+    assert_eq!(h.measure().unwrap(), 1);
+    drop(h);
+
+    let (name, path) = Recordings::open(dir.path()).unwrap().new_file(NOW);
+    write_wav(&path, &[0.1; 1_600]);
+    let older = as_v0_1_0(&dir.path().join(DB_FILE), NOW, "two", Some(&name));
+    assert_eq!(older, ["one", "two"]);
+
+    let h = History::open(dir.path()).unwrap();
+    let texts: Vec<String> = h.db.get_entries().unwrap().into_iter().map(|e| e.text).collect();
+    assert_eq!(texts, ["one", "two"]);
+    assert_eq!(h.measure().unwrap(), 1);
+    let sizes: Vec<Option<u64>> =
+      h.db.get_entries().unwrap().iter().map(|e| e.audio_bytes).collect();
+    assert!(sizes.iter().all(Option::is_some), "{sizes:?}");
   }
 
   #[test]
