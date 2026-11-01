@@ -68,7 +68,7 @@ impl Page {
 /// A macOS preferences window: the title over the tabs, under one background.
 pub fn config(page: Page) -> Config {
   let h = if page.scrolls() { SCROLLING } else { 500.0 };
-  crate::with_icon(Config::new("Wavo", WIDTH, h).fixed().unified())
+  crate::with_icon(Config::new(crate::INFO.name, WIDTH, h).fixed().unified())
 }
 
 /// What the system allows the app.
@@ -123,8 +123,8 @@ pub trait Shell {
   fn has_neural_engine(&self) -> bool {
     false
   }
-  /// The app can update itself: not where [shipo::supported] says no, a dev build, a run with its
-  /// own `WAVO_HOME`, unless shipo is [faking](shipo::faking).
+  /// The app can update itself: not where [shipo::supported] says no, a dev build or Wavo Dev, a
+  /// run with its own `WAVO_HOME`, unless shipo is [faking](shipo::faking).
   fn updates(&self) -> bool {
     false
   }
@@ -2031,7 +2031,8 @@ impl Prefs {
       let icon = nimbo::Png::new(crate::ICON).side(128);
       ui.png_image(icon, Style::new().w(px(64.0)).h(px(64.0)));
       ui.el(Style::new().h(px(10.0)));
-      ui.text("Wavo", TextStyle::new(Font { size: 20.0, ..t.bold }, t.text).ellipsis());
+      let title = TextStyle::new(Font { size: 20.0, ..t.bold }, t.text).ellipsis();
+      ui.text(crate::INFO.name, title);
       ui.el(Style::new().h(px(2.0)));
       ui.text(crate::VERSION, fs.note);
       ui.el(Style::new().h(px(8.0)));
