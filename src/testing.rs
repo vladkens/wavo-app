@@ -87,6 +87,45 @@ pub fn entry_ids(home: &Path) -> Vec<i64> {
   stmt.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect()
 }
 
+/// Uses the history database at `path` as Wavo 0.1.0 does, its queries copied from the v0.1.0 tag:
+/// refuses a schema above 1, adds an entry recorded `at` with `text` and recording `audio` by its
+/// own column list, reads every entry with `SELECT *` by column name and sums the totals. Returns
+/// the texts, oldest first.
+pub fn as_v0_1_0(path: &Path, at: i64, text: &str, audio: Option<&str>) -> Vec<String> {
+  let db = Connection::open(path).unwrap();
+  let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+  assert!(version <= 1, "0.1.0 refuses schema {version}");
+
+  let qs = "
+  INSERT INTO entries (
+    created_at, duration_ms, audio_path, text, model, language, tried_model, busy, pasted,
+    not_pasted
+  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);
+  ";
+  let none: Option<&str> = None;
+  db.execute(qs, rusqlite::params![at, 0, audio, text, none, none, none, false, false, none])
+    .unwrap();
+
+  // Its `Entry::from_row`.
+  let entry = |row: &rusqlite::Row| -> rusqlite::Result<String> {
+    let _: (i64, i64, i64, Option<String>) =
+      (row.get("id")?, row.get("created_at")?, row.get("duration_ms")?, row.get("audio_path")?);
+    let _: (Option<String>, Option<String>, Option<String>) =
+      (row.get("model")?, row.get("language")?, row.get("tried_model")?);
+    let _: (bool, bool, Option<String>) =
+      (row.get("busy")?, row.get("pasted")?, row.get("not_pasted")?);
+    row.get("text")
+  };
+  let mut stmt = db.prepare("SELECT * FROM entries ORDER BY created_at, id;").unwrap();
+  let texts = stmt.query_map([], entry).unwrap().map(Result::unwrap).collect();
+
+  let qs = "SELECT COUNT(*), COALESCE(SUM(duration_ms), 0), MIN(created_at) FROM entries;";
+  let total =
+    |r: &rusqlite::Row| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?));
+  db.query_row(qs, [], total).unwrap();
+  texts
+}
+
 /// A `target/fixtures/<name>.wav` from `make fixtures`, with its reference transcript.
 pub struct Fixture {
   pub name: String,
