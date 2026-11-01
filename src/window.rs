@@ -1676,6 +1676,8 @@ enum Act {
   Copy(String),
   Play(i64),
   Stop,
+  CopyPath(i64),
+  Reveal(i64),
   Request(Request),
   Delete { id: i64, start: String, audio: bool },
 }
@@ -1737,7 +1739,7 @@ impl Prefs {
     };
     let row = |ui: &mut Ui, g, i| {
       let e = entry(g, i);
-      if let Some(a) = entry_row(ui, fs, e, &RowState::of(self, e)) {
+      if let Some(a) = entry_row(ui, fs, e, &RowState::of(self, e), h.db.as_deref()) {
         act = Some(a);
       }
     };
@@ -1838,16 +1840,24 @@ impl Prefs {
         ui.clipboard().write(&text);
         h.note = Some(("Copied to the clipboard".into(), ui.now()));
       }
-      Some(Act::Play(id)) => {
+      Some(act @ (Act::Play(id) | Act::CopyPath(id) | Act::Reveal(id))) => {
         let e = h.entries.iter().find(|e| e.id == id).unwrap();
         let Some(path) = h.db.as_ref().unwrap().audio_file(e) else {
           h.note = Some(("The recording is gone".into(), ui.now()));
           return;
         };
 
-        match self.shell.play(&path) {
-          Ok(p) => h.playing = Some((id, p)),
-          Err(e) => h.note = Some((format!("Could not play the recording: {e:#}"), ui.now())),
+        match act {
+          Act::CopyPath(_) => {
+            let path = std::path::absolute(&path).unwrap_or(path);
+            ui.clipboard().write(&path.to_string_lossy());
+            h.note = Some(("Copied to the clipboard".into(), ui.now()));
+          }
+          Act::Reveal(_) => self.shell.reveal(&path),
+          _ => match self.shell.play(&path) {
+            Ok(p) => h.playing = Some((id, p)),
+            Err(e) => h.note = Some((format!("Could not play the recording: {e:#}"), ui.now())),
+          },
         }
       }
       Some(Act::Stop) => h.playing = None,
@@ -1912,8 +1922,14 @@ impl RowState {
 
 /// A dictation's row, all of one height: its text on a line and the details under it, Play and
 /// Copy centred at its right. A click on it selects it (tinted), for the panel under the list; a
-/// right-click selects it too and opens its menu ([row_menu]).
-fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, st: &RowState) -> Option<Act> {
+/// right-click selects it too and opens its menu ([row_menu]), with what `db` has of it on disk.
+fn entry_row(
+  ui: &mut Ui,
+  fs: &FormStyle,
+  e: &Entry,
+  st: &RowState,
+  db: Option<&History>,
+) -> Option<Act> {
   let (selected, playing) = (st.selected, st.playing);
   let line = row_line(e, st.working);
   let caption = details(e);
@@ -1954,7 +1970,8 @@ fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, st: &RowState) -> Option<Ac
 
   // The menu's answer comes in a later pass than the press that selects the row.
   let at = ui.context_press(r.id);
-  let chosen = ui.context_menu_at(r.id, at, || row_menu(e, st));
+  let on_disk = || db.and_then(|db| db.audio_file(e)).is_some();
+  let chosen = ui.context_menu_at(r.id, at, || row_menu(e, st, on_disk()));
   if let Some(a) = chosen.and_then(|item| row_act(&item, e)) {
     return Some(a);
   }
@@ -1963,15 +1980,23 @@ fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, st: &RowState) -> Option<Ac
   act.or(select.then_some(Act::Select(e.id)))
 }
 
-/// A row's context menu: what its buttons and the panel under the list do.
-fn row_menu(e: &Entry, st: &RowState) -> Menu {
+/// A row's context menu: what its buttons and the panel under the list do; with its recording
+/// `on_disk`, its path copied and the file shown in the file manager.
+fn row_menu(e: &Entry, st: &RowState, on_disk: bool) -> Menu {
   let (play, label) = if st.playing { ("stop", "Stop") } else { ("play", "Play the Recording") };
   let mut items = vec![
     Item::new("copy", "Copy Text").enabled(!e.text.is_empty()),
     Item::new(play, label).enabled(e.audio_path.is_some()),
+  ];
+  if on_disk {
+    let show = format!("Show in {}", open::file_manager());
+    items.extend([Item::new("copy-path", "Copy Recording Path"), Item::new("reveal", &show)]);
+  }
+
+  items.extend([
     Item::separator(),
     Item::new("retranscribe", "Transcribe Again").enabled(st.retranscribes(e)),
-  ];
+  ]);
   if st.restorable {
     items.push(Item::new("restore", "Restore the Previous Text").enabled(!st.busy));
   }
@@ -1987,6 +2012,8 @@ fn row_act(item: &str, e: &Entry) -> Option<Act> {
     "copy" => Act::Copy(e.text.clone()),
     "play" => Act::Play(e.id),
     "stop" => Act::Stop,
+    "copy-path" => Act::CopyPath(e.id),
+    "reveal" => Act::Reveal(e.id),
     "retranscribe" => Act::Request(Request::Retranscribe(e.id)),
     "restore" => Act::Request(Request::Restore(e.id)),
     "delete" => Act::delete(e),
@@ -2846,6 +2873,15 @@ mod tests {
     assert!(h.app().history.playing.is_none());
   }
 
+  /// The menu of row `id` by a right-click, answered `answer`: its items' ids, each on or off.
+  fn menu(h: &mut Harness<Prefs>, id: i64, answer: Option<&str>) -> Vec<(String, bool)> {
+    let r = h.rect(Id::of(("text", id))).unwrap();
+    h.right_click(r.x + 20.0, r.y + r.h / 2.0);
+    let (_, menu) = h.context_menu(answer).expect("the row's menu");
+    h.frame();
+    menu.items.into_iter().map(|i| (i.id, i.enabled)).collect()
+  }
+
   /// A right-click on a row selects it and opens its menu, which does what the row's buttons and
   /// the panel under the list do; on the Mac a Control-click opens it too, on Windows it opens as
   /// the button is let go.
@@ -2858,14 +2894,6 @@ mod tests {
     let mut h = home.harness(&fake, Settings::default());
     h.native_menus();
     tab(&mut h, Page::History);
-    // The menu of row `id` by a right-click, answered `answer`: its items' ids, each on or off.
-    let menu = |h: &mut Harness<Prefs>, id: i64, answer: Option<&str>| {
-      let r = h.rect(Id::of(("text", id))).unwrap();
-      h.right_click(r.x + 20.0, r.y + r.h / 2.0);
-      let (_, menu) = h.context_menu(answer).expect("the row's menu");
-      h.frame();
-      menu.items.into_iter().map(|i| (i.id, i.enabled)).collect::<Vec<_>>()
-    };
     let items = |want: &[(&str, bool)]| -> Vec<(String, bool)> {
       want.iter().map(|&(id, on)| (id.into(), on)).collect()
     };
@@ -2880,6 +2908,8 @@ mod tests {
     let all = items(&[
       ("copy", true),
       ("play", true),
+      ("copy-path", true),
+      ("reveal", true),
       ("", true),
       ("retranscribe", true),
       ("", true),
@@ -2891,7 +2921,7 @@ mod tests {
     menu(&mut h, ids[1], None);
     assert_eq!(h.app().history.selected, Some(ids[1]), "kept selected by another one");
 
-    // While it is transcribed again only Copy and Play are on; then its text before comes back.
+    // While it is transcribed again only what reads it is on; then its text before comes back.
     menu(&mut h, ids[0], Some("retranscribe"));
     assert_eq!(h.app().history.selected, Some(ids[0]), "the other row selected");
     let restorable = vec![ids[0]];
@@ -2899,6 +2929,8 @@ mod tests {
     let busy = items(&[
       ("copy", true),
       ("play", true),
+      ("copy-path", true),
+      ("reveal", true),
       ("", true),
       ("retranscribe", false),
       ("restore", false),
@@ -2908,7 +2940,7 @@ mod tests {
     assert_eq!(menu(&mut h, ids[0], None), busy);
     update(&mut h, Status { restorable: vec![ids[0]], ..Status::default() }, 3);
     let got = menu(&mut h, ids[0], Some("restore"));
-    assert_eq!(got[3..5], items(&[("retranscribe", true), ("restore", true)]));
+    assert_eq!(got[5..7], items(&[("retranscribe", true), ("restore", true)]));
 
     menu(&mut h, ids[0], Some("delete"));
     let want = "“Let's move the design review.” and its recording are removed from the history.";
@@ -2935,13 +2967,43 @@ mod tests {
     }
   }
 
+  /// With its recording on disk a row's menu copies the recording's absolute path and shows it in
+  /// the file manager; without, it has neither.
+  #[test]
+  fn a_rows_menu_copies_and_shows_its_recording() {
+    let home = Home::new("window-row-recording", &TWO);
+    let ids = home.dictations(&[("Send the invoice to Anna.", 2), ("Let's move the review.", 1)]);
+    let history = History::open(home.dir.path()).unwrap();
+    let file = |id| history.audio_file(&history.db.get_entry(id).unwrap().unwrap()).unwrap();
+    let (file, other) = (file(ids[0]), file(ids[1]));
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    h.native_menus();
+    tab(&mut h, Page::History);
+
+    let got = menu(&mut h, ids[0], Some("copy-path"));
+    assert_eq!(got[2..4], [("copy-path".into(), true), ("reveal".into(), true)]);
+    assert!(file.is_absolute());
+    assert_eq!(h.clipboard().read(), Some(file.to_string_lossy().into_owned()));
+    assert_eq!(h.text(Id::of("history-total")), Some("Copied to the clipboard"));
+    menu(&mut h, ids[0], Some("reveal"));
+    assert_eq!(fake.log().revealed, [file]);
+
+    // A recording gone from disk: Play stays (it says it is gone), the file's items don't.
+    std::fs::remove_file(&other).unwrap();
+    let ids_of = |items: Vec<(String, bool)>| items.into_iter().map(|i| i.0).collect::<Vec<_>>();
+    let got = ids_of(menu(&mut h, ids[1], None));
+    assert!(got.contains(&"play".into()), "{got:?}");
+    assert!(!got.iter().any(|id| id == "copy-path" || id == "reveal"), "{got:?}");
+  }
+
   /// The menu's answer acts as the item it chose, whatever the row is by then: its Stop doesn't
   /// play again a recording that ended meanwhile.
   #[test]
   fn a_rows_menu_stops_as_it_says() {
     let e = Entry { id: 7, audio_path: Some("a.wav".into()), ..Entry::default() };
     let st = RowState { playing: true, ..RowState::default() };
-    assert_eq!(row_menu(&e, &st).items[1].id, "stop");
+    assert_eq!(row_menu(&e, &st, true).items[1].id, "stop");
     assert!(matches!(row_act("stop", &e), Some(Act::Stop)));
     assert!(matches!(row_act("play", &e), Some(Act::Play(7))));
   }
