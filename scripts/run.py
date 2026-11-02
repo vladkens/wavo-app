@@ -31,6 +31,8 @@ from pathlib import Path
 
 # The release's id, whose history --copy-history copies.
 RELEASE = "me.vladkens.wavo"
+# The history in a data home, which --copy-history replaces.
+HISTORY = ("recordings", "history.db", "history.db-wal", "history.db-shm")
 # In the data home, which `wavo-app uninstall` deletes along with the permissions.
 GRANTED = "permissions-requirement"
 # The fakes passed to the app, which `open` starts without this shell's environment: the
@@ -55,6 +57,11 @@ def copy_history(src: Path, dst: Path):
     if not db.is_file():
         sys.exit(f"{db}: no history to copy, {dst}'s left as it is")
 
+    # dst's own history while the copy takes its place; one left is from a swap that failed.
+    old = dst / "history-old"
+    if old.exists():
+        sys.exit(f"{old}: {dst}'s history a failed copy left aside: put it back or delete it")
+
     new = dst / "history-copy"
     shutil.rmtree(new, ignore_errors=True)
     new.mkdir(parents=True)
@@ -63,18 +70,39 @@ def copy_history(src: Path, dst: Path):
     if recordings.is_dir():
         subprocess.run(["cp", "-Rc", recordings, new / recordings.name], check=True)
 
-    # The recordings first: one that can't go stops it before the database goes.
-    if (dst / "recordings").exists():
-        shutil.rmtree(dst / "recordings")
+    # The swap by renames: dst's own history aside, the copy in its place; when a step fails, what
+    # of the copy got in goes and dst's is put back. Deleted only once the copy is in.
+    old.mkdir()
+    copied = []
+    try:
+        for name in HISTORY:
+            if (dst / name).exists():
+                (dst / name).rename(old / name)
 
-    for name in ("history.db", "history.db-wal", "history.db-shm"):
-        (dst / name).unlink(missing_ok=True)
+        for path in new.iterdir():
+            path.rename(dst / path.name)
+            copied.append(path.name)
+    except OSError:
+        for name in copied:
+            remove(dst / name)
 
-    for path in new.iterdir():
-        path.rename(dst / path.name)
+        for path in old.iterdir():
+            path.rename(dst / path.name)
+
+        old.rmdir()
+        raise
 
     new.rmdir()
+    shutil.rmtree(old)
     print(f"the history of {src} copied into {dst}")
+
+
+def remove(path: Path):
+    """A file or a folder with all in it; nothing when it's not there."""
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def requirement(app: Path) -> str:
