@@ -45,6 +45,11 @@ pub trait SpeechModel {
   /// `Apple M2 (Metal, integrated)`
   fn device(&self) -> String;
 
+  /// The device's warning: a GPU emulated on the CPU.
+  fn warning(&self) -> Option<String> {
+    None
+  }
+
   /// Text of 16 kHz mono audio, cut at pauses into pieces of the model's window. `on_piece(index,
   /// count)` follows each piece; a break stops the run there with an error.
   fn transcribe(
@@ -129,6 +134,10 @@ impl SpeechModel for wavo::Model {
     wavo::Model::device(self).to_string()
   }
 
+  fn warning(&self) -> Option<String> {
+    wavo::Model::device(self).warning()
+  }
+
   /// A language the model cannot be told (any for Parakeet v3, another than its own for a model of
   /// one) is not sent: the model goes by the speech.
   fn transcribe(
@@ -184,6 +193,8 @@ pub struct Status {
   pub phase: Phase,
   /// Where the loaded model runs: `Apple M2 Neural Engine (Core ML)`.
   pub device: Option<String>,
+  /// The loaded model runs on a GPU emulated on the CPU.
+  pub software_gpu: bool,
   /// Finished and planned pieces of the job in progress.
   pub progress: Option<(usize, usize)>,
   /// Why the last load failed, until one succeeds.
@@ -494,11 +505,19 @@ impl Worker {
   }
 
   fn install(&mut self, model: Model, took: Duration, stand_in: bool) {
-    let (path, device) = (self.path.display(), model.device());
+    let (path, device, warning) = (self.path.display(), model.device(), model.warning());
     let meanwhile = if stand_in { ", while the Neural Engine's loads" } else { "" };
     info!("engine loaded {path} on {device} in {took:.2?}{meanwhile}");
+    if let Some(w) = &warning {
+      warn!("engine: {w}");
+    }
+
     (self.model, self.stand_in) = (Some(model), stand_in);
-    self.set(|s| (s.phase, s.device, s.load_error) = (Phase::Idle, Some(device), None));
+    let software_gpu = warning.is_some();
+    self.set(|s| {
+      (s.phase, s.device, s.software_gpu, s.load_error) =
+        (Phase::Idle, Some(device), software_gpu, None)
+    });
   }
 
   fn run_job(&mut self, job: Job) {
@@ -577,7 +596,7 @@ impl Worker {
       discard(model);
     }
 
-    self.set(|s| (s.phase, s.device) = (Phase::Stopped, None));
+    self.set(|s| (s.phase, s.device, s.software_gpu) = (Phase::Stopped, None, false));
   }
 
   fn done(&self, id: u64, result: Result<String, EngineError>) {

@@ -172,6 +172,8 @@ pub struct FakeModels {
   ane_load: Arc<Mutex<Duration>>,
   /// Whether each job ran on a model loaded for the Neural Engine, in order.
   jobs_on_ane: Arc<Mutex<Vec<bool>>>,
+  /// The device's warning of the models loaded from now on.
+  warning: Arc<Mutex<Option<String>>>,
   gate: Arc<Mutex<Option<Receiver<()>>>>,
 }
 
@@ -190,6 +192,7 @@ impl FakeModels {
       ane_ready: false,
       ane_load: Arc::default(),
       jobs_on_ane: Arc::default(),
+      warning: Arc::default(),
       gate: Arc::default(),
     }
   }
@@ -238,6 +241,11 @@ impl FakeModels {
     self.ane_loads.lock().unwrap().clone()
   }
 
+  /// The models loaded from now on run on a device that warns, as a GPU emulated on the CPU does.
+  pub fn warns(&self, warning: &str) {
+    *self.warning.lock().unwrap() = Some(warning.to_owned());
+  }
+
   /// Every piece waits until the sender is dropped.
   pub fn hold(&self) -> Sender<()> {
     let (tx, rx) = bounded(0);
@@ -278,6 +286,10 @@ struct FakeModel(FakeModels, bool);
 impl SpeechModel for FakeModel {
   fn device(&self) -> String {
     "fake".into()
+  }
+
+  fn warning(&self) -> Option<String> {
+    self.0.warning.lock().unwrap().clone()
   }
 
   fn transcribe(

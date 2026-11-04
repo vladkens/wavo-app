@@ -342,6 +342,8 @@ pub struct EngineStatus {
   pub phase: engine::Phase,
   /// Where the loaded model runs.
   pub device: Option<String>,
+  /// The loaded model runs on a GPU emulated on the CPU.
+  pub software_gpu: bool,
   /// Finished and planned pieces of the job in progress.
   pub progress: Option<(usize, usize)>,
 }
@@ -1315,7 +1317,8 @@ impl<O: TextOutput> Controller<O> {
     let engine = self.engine.as_ref().map_or_else(EngineStatus::default, |l| {
       let s = l.engine.status();
       let model = Some(l.name.clone());
-      EngineStatus { model, phase: s.phase, device: s.device, progress: s.progress }
+      let (phase, device, software_gpu, progress) = (s.phase, s.device, s.software_gpu, s.progress);
+      EngineStatus { model, phase, device, software_gpu, progress }
     });
 
     Status {
@@ -1379,7 +1382,9 @@ mod tests {
   use super::*;
   use crate::audio::SAMPLE_RATE;
   use crate::history::{RECORDINGS_DIR, Retention};
+  use crate::menu;
   use crate::testing::{FakeModels, TempDir, download, poll, tone, wav_count, write_wav};
+  use crate::window::Pick;
 
   // MARK: Machine
 
@@ -2022,6 +2027,29 @@ mod tests {
     assert_eq!((failed.state, failed.last), (Phase::Idle, None));
     let dir = s.home.path().join(RECORDINGS_DIR);
     assert_eq!(fs::read_dir(dir).unwrap().count(), 0, "no file, nor its day folder");
+  }
+
+  /// A model on a GPU emulated on the CPU says so in the menu, whole: wavo's sentence goes to the
+  /// log.
+  #[test]
+  fn a_software_gpu_warns_in_the_menu() {
+    let (settings, pcm) = (&Settings::default(), loud(10.0));
+    let s = InProcess::start("session-software-gpu", settings, Some(&pcm), "hi", &["parakeet-v3"]);
+    let warning = "llvmpipe (LLVM 15.0.7, 256 bits) is a software GPU, emulated on the CPU: expect \
+                   10-50x slower transcription; install the GPU's Vulkan driver";
+    s.models.warns(warning);
+    s.record(0.3);
+    thread::sleep(Duration::from_millis(300));
+    s.press();
+
+    let status = s.finished(1);
+    let system = menu::System { accessibility: true, ..menu::System::default() };
+    let shown = menu::warnings(&system, "f5", &status);
+    let text = menu::SOFTWARE_GPU.to_owned();
+    assert_eq!(shown, [menu::Warning { id: "warn:status", text, action: false }]);
+    let mics = (&[][..], &audio::Microphone::Automatic, false);
+    let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;
+    assert_eq!(items[1].label, format!("⚠︎ {}", menu::SOFTWARE_GPU), "not cut");
   }
 
   #[test]
