@@ -44,11 +44,15 @@ DEV_SHIPO := --id me.vladkens.wavo-dev --name "Wavo Dev" --icon $(DEV_ICON)
 # dist's target: this machine's, or T.
 T ?= $(shell rustc -vV | sed -n 's/^host: //p')
 
-# shipo, the packer (`cargo install --locked shipo`), makes the app and the release files from
-# Cargo.toml's [package.metadata.shipo]. The app is signed with a Developer ID in the keychain, else
-# "Wavo Local Signing", which shipo makes in the login keychain before the first bundle, so macOS
-# keeps the grants across rebuilds; no bundle when it can't sign (CI: ad hoc). Built, never opened.
+# shipo, the packer, 0.2.1 or newer (`cargo install --locked shipo`): FLAVOR=dev needs its
+# `app --id`, which bundle checks for, as shipo has no --version. It makes the app and the release
+# files from Cargo.toml's [package.metadata.shipo]. The app is signed with a Developer ID in the
+# keychain, else "Wavo Local Signing", which shipo makes in the login keychain before the first
+# bundle, so macOS keeps the grants across rebuilds; no bundle when it can't sign (CI: ad hoc).
+# Built, never opened.
 bundle: # target/Wavo.app from the release profile, or PROFILE; FLAVOR=dev: target/Wavo Dev.app
+	@shipo app --help 2>/dev/null | grep -q -- --id \
+	  || { echo "shipo 0.2.1 or newer is needed: cargo install --locked shipo" >&2; exit 1; }
 	$(if $(DEV),WAVO_FLAVOR=dev) cargo build --locked --profile $(PROFILE)
 	$(if $(DEV),python3 scripts/dev-icon.py assets/icon.png $(DEV_ICON))
 	shipo app --bin target/$(PROFILE)/wavo-app $(if $(DEV),$(DEV_SHIPO))
