@@ -647,9 +647,9 @@ const TOOK_HELP: &str = "After each dictation the HUD shows for a second how lon
   the stop.";
 const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle this long. The next \
   dictation loads it again, which takes a moment.";
-const ANE_HELP: &str = "Parakeet and GigaAM run on the Neural Engine: as fast as on the GPU at a \
-  fraction of the energy. Each new version of Wavo prepares the model once, in the background \
-  (10–30 s); meanwhile it runs on the GPU. Whisper always runs on the GPU.";
+const ANE_HELP: &str = "Models marked ANE run on the Neural Engine: as fast as on the GPU at a \
+  fraction of the energy. Each new version of Wavo prepares such a model once, in the background \
+  (10–30 s); meanwhile it runs on the GPU. Other models always run on the GPU.";
 const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another computer: the dictations this \
   history does not have are added with their recordings; the settings stay as they are.";
 const EXPORT_HELP: &str = "The history, its recordings and the settings, into a .zip archive: \
@@ -1170,6 +1170,12 @@ impl Prefs {
     self.edit(move |s| s.model = Some(name.to_owned()));
   }
 
+  /// The languages and the size; ANE when the model runs on this Mac's Neural Engine.
+  fn caption(&self, m: &ModelInfo) -> String {
+    let ane = if self.shell.has_neural_engine() && m.neural_engine() { " · ANE" } else { "" };
+    format!("{} · {}{ane}", m.languages, size_text(m.size))
+  }
+
   /// Use (or "✓ In use"), the bin and ↗: the model to ask about deleting.
   fn downloaded_row(
     &mut self,
@@ -1179,7 +1185,7 @@ impl Prefs {
     in_use: bool,
   ) -> Option<&'static ModelInfo> {
     let t = ui.theme();
-    let caption = format!("{} · {}", m.languages, size_text(m.size));
+    let caption = self.caption(m);
     let (mut used, mut act) = (false, None);
     ui.form_row(fs, model_row(m, Some(&caption)), |ui| {
       if in_use {
@@ -1224,7 +1230,7 @@ impl Prefs {
       Some(Download::Failed(e)) => (Some(format!("Could not download: {e}")), None),
       None => {
         let first = if m.name == RECOMMENDED { "Recommended · " } else { "" };
-        (Some(format!("{first}{} · {}", m.languages, size_text(m.size))), None)
+        (Some(format!("{first}{}", self.caption(m))), None)
       }
     };
 
@@ -2120,6 +2126,8 @@ mod tests {
   #[derive(Default)]
   struct Log {
     settings: Settings,
+    /// A Mac with a Neural Engine unless set.
+    no_neural_engine: bool,
     paused: Vec<bool>,
     /// A MacBook's microphone and a USB one unless set.
     devices: Option<Vec<audio::Device>>,
@@ -2160,7 +2168,7 @@ mod tests {
     }
 
     fn has_neural_engine(&self) -> bool {
-      true
+      !self.log().no_neural_engine
     }
 
     fn pause_hotkey(&self, paused: bool) {
@@ -2795,6 +2803,30 @@ mod tests {
     click(&mut h, Id::of(("delete", TWO[1])));
     confirm(&mut h);
     assert_eq!(fake.log().deleted, [TWO[1]]);
+  }
+
+  /// A model that runs on the Neural Engine says ANE in its caption, downloaded or not, on a Mac
+  /// that has one; Whisper's don't.
+  #[test]
+  fn models_for_the_neural_engine_say_ane() {
+    let home = Home::new("window-ane", &["parakeet-v3", "whisper-tiny"]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Models);
+    click(&mut h, Id::of(("use", "whisper-tiny")));
+    let caption = |h: &Harness<Prefs>, text: &str| {
+      let line = format!("static text {text:?}");
+      a11y_line(h, &line) == Some(line)
+    };
+    assert!(caption(&h, "25 European languages · 740 MB · ANE"), "downloaded");
+    assert!(caption(&h, "Recommended · 25 European languages · 740 MB · ANE"), "available");
+
+    click(&mut h, Id::of(("use", "parakeet-v3")));
+    assert!(caption(&h, "99 languages · 46 MB"), "whisper");
+
+    fake.log().no_neural_engine = true;
+    h.frame();
+    assert!(caption(&h, "Recommended · 25 European languages · 740 MB"), "no Neural Engine");
   }
 
   #[test]
