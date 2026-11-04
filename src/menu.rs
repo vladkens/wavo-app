@@ -48,12 +48,13 @@ impl Icon {
   }
 
   /// The tooltip, also what accessibility says.
-  pub fn description(self) -> &'static str {
+  pub fn description(self) -> String {
+    let name = crate::INFO.name;
     match self {
-      Icon::Idle => "Wavo",
-      Icon::Recording => "Wavo — recording",
-      Icon::Transcribing => "Wavo — transcribing",
-      Icon::Warning => "Wavo — needs attention",
+      Icon::Idle => name.into(),
+      Icon::Recording => format!("{name} — recording"),
+      Icon::Transcribing => format!("{name} — transcribing"),
+      Icon::Warning => format!("{name} — needs attention"),
     }
   }
 }
@@ -183,7 +184,7 @@ pub fn menu(
   (found, pick): (&[Found], &Pick),
   update: Option<&State>,
 ) -> Menu {
-  let title = format!("Wavo {}", crate::VERSION);
+  let title = format!("{} {}", crate::INFO.name, crate::VERSION);
   let header = [Some(title.as_str()), hotkey, state(status)].into_iter().flatten();
   let header = header.collect::<Vec<_>>().join(" · ");
   // Labels fit the menu's width by themselves (nimbo's Item::new).
@@ -223,7 +224,8 @@ pub fn menu(
     with_key(Item::new("settings", "Settings…"), "cmd+comma"),
   ]);
   items.extend(update.map(check_item));
-  items.extend([Item::separator(), with_key(Item::new("quit", "Quit Wavo"), "cmd+q")]);
+  let quit = Item::new("quit", &format!("Quit {}", crate::INFO.name));
+  items.extend([Item::separator(), with_key(quit, "cmd+q")]);
   Menu::new(items)
 }
 
