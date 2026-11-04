@@ -37,14 +37,24 @@ use tracing_subscriber::prelude::*;
 /// The build, as the app shows it: `v0.1.0-12-g3672a1b` (build.rs's `WAVO_VERSION`).
 const VERSION: &str = concat!("v", env!("WAVO_VERSION"));
 
-const INFO: AppInfo =
+/// The app this build is: [RELEASE], or [DEV] built with `WAVO_FLAVOR=dev` (build.rs).
+const INFO: AppInfo = if cfg!(wavo_dev) { DEV } else { RELEASE };
+
+/// Wavo, as released and installed: its id is in every install (data, permissions, login item).
+const RELEASE: AppInfo =
   AppInfo { id: "me.vladkens.wavo", name: "Wavo", presence: Presence::Accessory };
+
+/// Wavo Dev, `make run`'s: an app of its own beside the installed Wavo, with its own data,
+/// permissions, login item and instance, all by its id. It never updates itself.
+const DEV: AppInfo =
+  AppInfo { id: "me.vladkens.wavo-dev", name: "Wavo Dev", presence: Presence::Accessory };
 
 /// The app's icon, decoded by nimbo when first shown.
 const ICON: &[u8] = include_bytes!("../assets/icon.png");
 
 /// The app's log in its home, [home]: `~/Library/Application Support/me.vladkens.wavo/wavo.log`,
-/// `%LOCALAPPDATA%\me.vladkens.wavo\wavo.log`, `~/.local/share/me.vladkens.wavo/wavo.log`.
+/// `%LOCALAPPDATA%\me.vladkens.wavo\wavo.log`, `~/.local/share/me.vladkens.wavo/wavo.log` (Wavo
+/// Dev's in `me.vladkens.wavo-dev`).
 const LOG_FILE: &str = "wavo.log";
 /// A log past this at launch is started over.
 const LOG_MAX: u64 = 5 << 20;
@@ -112,8 +122,8 @@ fn main() -> Result<()> {
   }
 }
 
-/// Settings, history and the log: `$WAVO_HOME`, else the platform's data dir. Models are in the
-/// Hugging Face cache.
+/// Settings, history and the log: `$WAVO_HOME`, else the platform's data dir of the app's id
+/// ([INFO]). Models are in the Hugging Face cache, which Wavo Dev shares.
 fn home() -> PathBuf {
   match std::env::var_os("WAVO_HOME") {
     Some(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -162,6 +172,17 @@ mod tests {
 
   use super::*;
   use crate::testing::TempDir;
+
+  #[test]
+  fn wavo_dev_is_an_app_of_its_own() {
+    // What installs and macOS know Wavo by: never changed.
+    assert_eq!((RELEASE.id, RELEASE.name), ("me.vladkens.wavo", "Wavo"));
+    assert_eq!((DEV.id, DEV.name), ("me.vladkens.wavo-dev", "Wavo Dev"));
+    let folder = |info: AppInfo| nimbo::paths::data_dir(info.id).file_name().unwrap().to_owned();
+    assert_eq!(folder(RELEASE), "me.vladkens.wavo");
+    assert_eq!(folder(DEV), "me.vladkens.wavo-dev");
+    assert_eq!(INFO.id, RELEASE.id, "without WAVO_FLAVOR, as `make test` and CI build, it is Wavo");
+  }
 
   #[test]
   fn the_log_is_appended_to_until_too_big() {
