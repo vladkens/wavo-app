@@ -1077,6 +1077,12 @@ fn finds(search: &str, m: &ModelInfo) -> bool {
   search.split_whitespace().all(|w| text.contains(w))
 }
 
+/// Where a model goes in a list of Settings › Models, the least first: with a language chosen,
+/// those made for it alone before the rest; the recommended first in each group.
+fn rank(lang: &str, m: &ModelInfo) -> (bool, bool) {
+  (!lang.is_empty() && m.langs != [lang], m.name != RECOMMENDED)
+}
+
 impl Prefs {
   fn models_head(&mut self, ui: &mut Ui, s: Style) {
     let items: Vec<(usize, &str)> = LANGUAGES.iter().map(|l| l.0.as_str()).enumerate().collect();
@@ -1086,7 +1092,7 @@ impl Prefs {
     });
   }
 
-  /// wavo's models in two plates, in wavo's order, the one in use shown whatever the search.
+  /// wavo's models in two plates by [rank], the one in use shown whatever the search.
   /// Every row is one line of name and one of caption in every state: the list never moves
   /// under the pointer.
   fn models(&mut self, ui: &mut Ui, fs: &FormStyle) {
@@ -1102,12 +1108,12 @@ impl Prefs {
       active == Some(m.name) || (lang && finds(&self.model_search, m))
     };
     let on_disk = |m: &ModelInfo| self.found.iter().any(|f| f.0.name == m.name);
-    let downloaded: Vec<&'static ModelInfo> =
+    let mut downloaded: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| on_disk(m) && shown(m)).collect();
-    // The recommended first.
+    downloaded.sort_by_key(|m| rank(lang, m));
     let mut remote: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| !on_disk(m) && shown(m)).collect();
-    remote.sort_by_key(|m| m.name != RECOMMENDED);
+    remote.sort_by_key(|m| rank(lang, m));
     let count = |n: usize| format!("{n} model{}", if n == 1 { "" } else { "s" });
     let mut act = None;
     if self.found.is_empty() {
@@ -2789,6 +2795,25 @@ mod tests {
     click(&mut h, Id::of(("delete", TWO[1])));
     confirm(&mut h);
     assert_eq!(fake.log().deleted, [TWO[1]]);
+  }
+
+  #[test]
+  fn a_language_lists_its_own_models_first() {
+    let order = |lang: &str| {
+      let mut models: Vec<&ModelInfo> =
+        hub::MODELS.iter().filter(|m| m.langs.contains(&lang)).collect();
+      models.sort_by_key(|m| rank(lang, m));
+      models.into_iter().map(|m| m.name).collect::<Vec<_>>()
+    };
+    assert_eq!(order("he")[..3], ["parakeet-he", "whisper-turbo-he", "whisper-turbo"]);
+    let en = order("en");
+    assert_eq!(en[..4], ["parakeet-v2", "whisper-tiny.en", "whisper-base.en", "whisper-small.en"]);
+    assert_eq!(
+      en[4..9],
+      ["whisper-medium.en", "moonshine-tiny", "moonshine-base", RECOMMENDED, "parakeet-v3"]
+    );
+    let ru = ["gigaam-v3", "gigaam-v3-e2e-ctc", "gigaam-v3-rnnt", "gigaam-v3-ctc", RECOMMENDED];
+    assert_eq!(order("ru")[..5], ru);
   }
 
   #[test]
