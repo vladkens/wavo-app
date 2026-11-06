@@ -75,6 +75,8 @@ pub fn config(page: Page) -> Config {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Access {
   pub accessibility: bool,
+  /// Accessibility is missing and only an administrator can allow it (macOS).
+  pub needs_admin: bool,
   pub microphone: Grant,
   /// Another app holds Secure Input: the hotkey goes through its backup path.
   pub secure_input: bool,
@@ -427,14 +429,18 @@ const LOGIN_APPROVAL: &str = if cfg!(windows) {
 } else {
   "Allow Wavo in System Settings › General › Login Items."
 };
-const KEEP_HELP: &str = "Off: after the paste the clipboard gets back what it held. On: the \
-  dictated text stays on it.";
+const KEEP_HELP: &str = "On: the dictated text stays on the clipboard, pasted or not. Off: after \
+  a paste the clipboard gets back what it held; with pasting off, the text is only in History.";
 const CLIPBOARD_NOTE: &str = "Wavo can’t put the clipboard back after a paste: allow it in System \
   Settings › Privacy & Security › Paste from Other Apps.";
 const MICROPHONE_WHY: &str = "Wavo records your voice through it while you hold the shortcut; \
   the recording stays on this Mac.";
 const ACCESSIBILITY_WHY: &str = "Wavo hears the shortcut in every app and pastes the text where \
   you type through it.";
+const NO_ADMIN: &str = "You’re not an administrator on this Mac, so Wavo can’t paste for you. \
+  You can turn on Keep the text on the clipboard and paste with ⌘V.";
+const LONE_KEY_NOTE: &str = "A single key needs Accessibility, which only an administrator can \
+  allow on this Mac. Use a combination like ⌥Space.";
 
 /// A triangle with "!" in it, for a permission missing.
 const WARNING: Icon = Icon::new("M12 4.5 3 19.5h18ZM12 10v4.5M12 17v.2");
@@ -477,10 +483,14 @@ impl Prefs {
         (false, true) => Some(FN_NOTE),
         (false, false) => None,
       };
-      let mut row = FormRow::new("Shortcut");
-      if let Some(note) = note {
-        row = row.info(note);
-      }
+      // A modifier alone needs the event tap, and so Accessibility.
+      let lone = matches!(Hotkey::parse(&self.settings.hotkey), Ok(Hotkey::Modifier(_)));
+      let row = FormRow::new("Shortcut");
+      let row = match note {
+        _ if lone && self.access.needs_admin => row.warning(LONE_KEY_NOTE),
+        Some(note) => row.info(note),
+        None => row,
+      };
 
       ui.form_row(fs, row, |ui| self.shortcut(ui));
       ui.form_row(fs, FormRow::new("Activation").info(ACTIVATION_HELP), |ui| {
@@ -492,20 +502,21 @@ impl Prefs {
     });
 
     ui.form_section(fs, "Output", |ui| {
-      ui.form_row(fs, FormRow::new("Paste the text into the app you dictate in"), |ui| {
+      let locked = self.access.needs_admin;
+      let row = FormRow::new("Paste the text into the app you dictate in").disabled(locked);
+      ui.form_row(fs, row, |ui| {
         let mut on = self.settings.auto_paste;
         if ui.id("paste").toggle(&mut on, "").changed {
           self.edit(move |s| s.auto_paste = on);
         }
       });
 
-      // Without pasting the text only goes to the clipboard, and stays there.
-      let help = match self.access.clipboard_unread && self.settings.restores_clipboard() {
+      let restores = self.settings.restores_clipboard() && !locked;
+      let help = match self.access.clipboard_unread && restores {
         true => format!("{KEEP_HELP}\n\n{CLIPBOARD_NOTE}"),
         false => KEEP_HELP.to_owned(),
       };
       let row = FormRow::new("Keep the text on the clipboard").info(&help);
-      let row = row.disabled(!self.settings.auto_paste);
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.keep_in_clipboard;
         if ui.id("keep").toggle(&mut on, "").changed {
@@ -517,9 +528,17 @@ impl Prefs {
     ui.form_section(fs, "Startup", |ui| self.login(ui, fs));
   }
 
-  /// While the system does not allow them, a row for the microphone and one for Accessibility.
+  /// While the system does not allow them, a row for the microphone and one for Accessibility, or
+  /// in its place a warning with no button where only an administrator can allow it.
   fn permissions(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    let (mic, ax) = (self.access.microphone != Grant::Granted, !self.access.accessibility);
+    let fs = &FormStyle { tile_icon: ui.theme().warning, ..*fs };
+    if self.access.needs_admin {
+      let row = FormRow::new(NO_ADMIN).tile(Tile::Icon(WARNING));
+      ui.form_section(fs, "", |ui| ui.id("no-admin").form_row(fs, row, |_| {}));
+    }
+
+    let mic = self.access.microphone != Grant::Granted;
+    let ax = !self.access.accessibility && !self.access.needs_admin;
     let title = match (mic, ax) {
       (false, false) => return,
       (true, true) => "Wavo needs two permissions",
@@ -532,7 +551,6 @@ impl Prefs {
       (mic, "Microphone", MICROPHONE_WHY, "open-microphone", Pane::Microphone, ask),
       (ax, "Accessibility", ACCESSIBILITY_WHY, "open-accessibility", Pane::Accessibility, true),
     ];
-    let fs = &FormStyle { tile_icon: ui.theme().warning, ..*fs };
     ui.form_section(fs, title, |ui| {
       for (_, name, why, id, pane, ask) in rows.into_iter().filter(|r| r.0) {
         let row = FormRow::new(name).info(why).tile(Tile::Icon(WARNING));
@@ -2199,6 +2217,7 @@ mod tests {
     fn access(&self) -> Access {
       let all = Access {
         accessibility: true,
+        needs_admin: false,
         microphone: Grant::Granted,
         secure_input: false,
         clipboard_unread: false,
@@ -2506,6 +2525,7 @@ mod tests {
       let fake = Fake::default();
       let none = Access {
         accessibility: false,
+        needs_admin: false,
         microphone: Grant::NotDetermined,
         secure_input: false,
         clipboard_unread: false,
@@ -3095,6 +3115,7 @@ mod tests {
     let fake = Fake::default();
     let none = Access {
       accessibility: false,
+      needs_admin: false,
       microphone: Grant::NotDetermined,
       secure_input: false,
       clipboard_unread: false,
@@ -3118,6 +3139,62 @@ mod tests {
 
     click(&mut h, Id::of("download-model"));
     assert_eq!(h.app().page, Page::Models);
+  }
+
+  /// The Output switches show what is stored and take a click; where only an administrator can
+  /// allow Accessibility, the paste one is disabled under one warning line, first on the page.
+  #[test]
+  fn the_output_switches_show_what_is_stored() {
+    let home = Home::new("window-output", &TWO);
+    let fake = Fake::default();
+    let switches = |h: &Harness<Prefs>| {
+      let state = |name: &str| a11y_line(h, &format!(r#"switch "{name}""#)).unwrap();
+      [state("Paste the text into the app you dictate in"), state("Keep the text on the clipboard")]
+        .map(|l| l.rsplit_once('"').unwrap().1.trim().to_owned())
+    };
+    let mut h = home.harness(&fake, Settings::default());
+    for (id, paste, keep) in [("keep", "on", "on"), ("paste", "off", "on"), ("keep", "off", "off")]
+    {
+      click(&mut h, Id::of(id));
+      let s = &fake.log().settings;
+      assert_eq!((s.auto_paste, s.keep_in_clipboard), (paste == "on", keep == "on"), "{id}");
+      assert_eq!(switches(&h), [paste, keep], "{id}");
+    }
+
+    fake.log().access = Some(Access { accessibility: false, needs_admin: true, ..fake.access() });
+    let mut h = home.harness(&fake, Settings::without_paste());
+    let lines: Vec<_> = h.a11y().lines().map(|l| l.trim().to_owned()).collect();
+    let at = lines.iter().position(|l| *l == format!(r#"static text "{NO_ADMIN}""#)).unwrap();
+    assert_eq!(lines[at - 1], r#"tab "About""#, "first on the page, no title: {lines:?}");
+    assert!(h.rect(Id::of("open-accessibility")).is_none(), "no button");
+    assert_eq!(switches(&h), ["off disabled", "on"]);
+    click(&mut h, Id::of("paste"));
+    click(&mut h, Id::of("keep"));
+    assert_eq!(switches(&h), ["off disabled", "off"]);
+    let h = home.harness(&fake, Settings::default());
+    assert_eq!(switches(&h), ["on disabled", "off"]);
+  }
+
+  /// A single key where only an administrator can allow Accessibility: the Shortcut row's ⓘ is
+  /// the warning, saying to use a combination. A combination, or an administrator, keeps the ⓘ.
+  #[test]
+  fn a_single_key_warns_where_only_an_administrator_can_allow_it() {
+    let home = Home::new("window-single-key", &TWO);
+    let fake = Fake::default();
+    let warning = format!(r#"button "Warning" desc {LONE_KEY_NOTE:?}"#);
+    let admin = fake.access();
+    let no_admin = Access { accessibility: false, needs_admin: true, ..admin };
+    for (access, hotkey, warns) in [
+      (no_admin, "left_option", true),
+      (no_admin, "fn", true),
+      (no_admin, "option+space", false),
+      (admin, "fn", false),
+    ] {
+      fake.log().access = Some(access);
+      let h = home.harness(&fake, Settings { hotkey: hotkey.into(), ..Settings::without_paste() });
+      let mark = a11y_line(&h, r#"button "Warning""#);
+      assert_eq!(mark.as_ref() == Some(&warning), warns, "{hotkey}: {mark:?}");
+    }
   }
 
   /// The devices, the permissions, launch at login and the models are read as the window opens

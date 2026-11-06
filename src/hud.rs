@@ -93,7 +93,7 @@ pub fn after(
     Outcome::Done if last.pasted => None,
     Outcome::Done => match last.not_pasted.as_deref() {
       Some(why) if auto_paste => Some(format!("not pasted: {}", short(why))),
-      // Without auto-paste the text is on the clipboard: only a failed copy is news.
+      // Without auto-paste only a failed copy is news.
       Some(why) if why.contains("copying failed") => Some("copy failed".into()),
       _ => None,
     },

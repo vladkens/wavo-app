@@ -266,7 +266,7 @@ fn start(
   // Nothing is asked at launch: General's buttons ask. Never at a launch at login.
   let pick = Pick::new(&app.hub, saved.model.as_deref(), &app.found);
   let no_model = pick.active.is_none() && pick.other.as_ref().is_none_or(|(_, on)| !on);
-  let missing = !app.accessibility || app.mic() != Access::Granted || no_model;
+  let missing = !app.accessibility && !needs_admin() || app.mic() != Access::Granted || no_model;
   let missing = missing && !may_launch_at_login();
   APP.with(|cell| *cell.borrow_mut() = Some(app));
   main.on_reopen(|main| open_window(main, None));
@@ -428,6 +428,29 @@ fn allow(pane: Pane) {
   }
 }
 
+/// Accessibility needs an administrator (the admin group, 80) to allow it: macOS. Asked once; a
+/// failed ask counts as an administrator, so nothing is locked.
+#[cfg(target_os = "macos")]
+fn needs_admin() -> bool {
+  static NEEDS: OnceLock<bool> = OnceLock::new();
+  *NEEDS.get_or_init(|| {
+    // By name `id -G` asks Open Directory: getgroups and a bare `id -G` stop at 16 groups.
+    let sh = r#"/usr/bin/id -G "$(/usr/bin/id -un)""#;
+    let out = std::process::Command::new("/bin/sh").args(["-c", sh]).output();
+    let groups = match out {
+      Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+      _ => return false,
+    };
+
+    !groups.split_whitespace().any(|g| g == "80")
+  })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn needs_admin() -> bool {
+  false
+}
+
 fn request_microphone() {
   info!("asking for microphone access");
   permissions::request_microphone(|granted| {
@@ -505,7 +528,7 @@ impl App {
         let denied = matches!(self.mic(), Access::Denied | Access::Restricted);
         let hint = match () {
           _ if denied => Some("allow the microphone to record".to_owned()),
-          _ if update.settings.auto_paste && !self.accessibility => {
+          _ if self.pastes(&update.settings) && !self.accessibility => {
             Some("allow Accessibility to paste".to_owned())
           }
           _ => hud::during(status),
@@ -521,7 +544,8 @@ impl App {
       Phase::Transcribing => Show::Transcribing(status.engine.progress),
       Phase::Idle => {
         let before = self.update.as_ref().map(|u| &u.status);
-        let (paste, took) = (update.settings.auto_paste, update.settings.show_transcription_time);
+        let (paste, took) =
+          (self.pastes(&update.settings), update.settings.show_transcription_time);
         match hud::after(status, before, paste, took) {
           Some(show) => show,
           // An error or the time shown stays for its time.
@@ -645,6 +669,11 @@ impl App {
     }
   }
 
+  /// Auto-paste is on and can work, now or once Accessibility is allowed.
+  fn pastes(&self, settings: &Settings) -> bool {
+    settings.auto_paste && (self.accessibility || !needs_admin())
+  }
+
   fn mic(&self) -> Access {
     if self.fake_mic { Access::Granted } else { self.microphone }
   }
@@ -730,12 +759,15 @@ impl App {
     let listening = matches!(hotkeys.listener, Listener::Starting | Listener::Active);
     let dead = hotkeys.listener == Listener::Failed && !hotkeys.fallback;
     let system = menu::System {
-      accessibility: self.accessibility,
+      // Nothing to ask for where only an administrator can allow it.
+      accessibility: self.accessibility || needs_admin(),
       hotkey_error: hotkeys.error.or(hotkeys.listener_error.filter(|_| dead)),
       hotkey_portal: nimbo::hotkey::start_asks() && !listening,
       paste_portal: focus::hidden() && !nimbo::keys::ready(),
       no_microphone: self.mic() != Access::Granted,
-      clipboard_unread: update.settings.restores_clipboard() && !self.clipboard,
+      clipboard_unread: self.pastes(&update.settings)
+        && update.settings.restores_clipboard()
+        && !self.clipboard,
       secure_input: hotkeys.secure_input,
     };
     menu::warnings(&system, &update.settings.hotkey, &update.status)
@@ -1094,8 +1126,10 @@ impl window::Shell for AppShell {
   }
 
   fn access(&self) -> window::Access {
+    let accessibility = permissions::accessibility(false);
     window::Access {
-      accessibility: permissions::accessibility(false),
+      accessibility,
+      needs_admin: !accessibility && needs_admin(),
       microphone: permissions::microphone(),
       secure_input: permissions::secure_input(),
       clipboard_unread: !SystemClipboard.readable(),
@@ -1294,6 +1328,10 @@ impl TextOutput for GuiOutput {
       anyhow::anyhow!("the app was too busy")
     })
   }
+
+  fn can_paste(&self) -> bool {
+    permissions::accessibility(false) || !needs_admin()
+  }
 }
 
 /// nimbo's reason as the session keeps it: the moved focus and a password field have their own.
@@ -1312,4 +1350,13 @@ fn not_pasted(e: paste::NotPasted) -> NotPasted {
 /// The main thread didn't get to the paste in time, or the paste ran out of it.
 fn busy() -> NotPasted {
   NotPasted::Failed("the app was too busy to paste".into())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn needs_admin_is_not_in_the_admin_group() {
+  let sh = r#"/usr/bin/dsmemberutil checkmembership -u "$(/usr/bin/id -u)" -G admin"#;
+  let out = std::process::Command::new("/bin/sh").args(["-c", sh]).output().unwrap();
+  let said = String::from_utf8(out.stdout).unwrap();
+  assert_eq!(needs_admin(), said.contains("is not a member"), "{said}");
 }
