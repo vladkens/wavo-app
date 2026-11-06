@@ -428,13 +428,22 @@ fn allow(pane: Pane) {
   }
 }
 
-/// Accessibility needs an administrator (the admin group, 80) to allow it: macOS.
+/// Accessibility needs an administrator (the admin group, 80) to allow it: macOS. Asked once; a
+/// failed ask counts as an administrator, so nothing is locked.
 #[cfg(target_os = "macos")]
 fn needs_admin() -> bool {
-  let mut groups = [0; 64];
-  // SAFETY: getgroups writes at most `groups.len()` ids and returns how many, or -1.
-  let n = unsafe { libc::getgroups(groups.len() as _, groups.as_mut_ptr()) };
-  n >= 0 && !groups[..n as usize].contains(&80)
+  static NEEDS: OnceLock<bool> = OnceLock::new();
+  *NEEDS.get_or_init(|| {
+    // By name `id -G` asks Open Directory: getgroups and a bare `id -G` stop at 16 groups.
+    let sh = r#"/usr/bin/id -G "$(/usr/bin/id -un)""#;
+    let out = std::process::Command::new("/bin/sh").args(["-c", sh]).output();
+    let groups = match out {
+      Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+      _ => return false,
+    };
+
+    !groups.split_whitespace().any(|g| g == "80")
+  })
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1346,7 +1355,8 @@ fn busy() -> NotPasted {
 #[cfg(all(test, target_os = "macos"))]
 #[test]
 fn needs_admin_is_not_in_the_admin_group() {
-  let id = std::process::Command::new("id").arg("-G").output().unwrap();
-  let groups = String::from_utf8(id.stdout).unwrap();
-  assert_eq!(needs_admin(), !groups.split_whitespace().any(|g| g == "80"), "{groups}");
+  let sh = r#"/usr/bin/dsmemberutil checkmembership -u "$(/usr/bin/id -u)" -G admin"#;
+  let out = std::process::Command::new("/bin/sh").args(["-c", sh]).output().unwrap();
+  let said = String::from_utf8(out.stdout).unwrap();
+  assert_eq!(needs_admin(), said.contains("is not a member"), "{said}");
 }

@@ -1099,14 +1099,13 @@ impl<O: TextOutput> Controller<O> {
   /// As the switches say: pasted where it can be, and on the clipboard when kept, pasted or not.
   fn deliver(&mut self) {
     let d = self.dictation.as_mut().unwrap();
-    let auto_paste = self.settings.auto_paste && self.output.can_paste();
+    let auto_paste = self.settings.auto_paste;
     let keep = self.settings.keep_in_clipboard;
     let refused = match (&d.target, auto_paste) {
       (Some(target), true) => {
         self.output.paste(&d.last.text, target, keep).err().map(|e| e.to_string())
       }
       (None, true) => Some("the app in focus when the dictation started is unknown".into()),
-      (_, false) if self.settings.auto_paste => Some("this account can't paste".into()),
       (_, false) => Some("auto-paste is off".into()),
     };
     let refused = refused.map(|why| match keep {
@@ -1533,6 +1532,9 @@ mod tests {
 
   // MARK: Session
 
+  /// nimbo's refusal without Accessibility.
+  const NO_ACCESS: &str = "no Accessibility access: ⌘V can't be sent";
+
   #[derive(Clone, Default)]
   struct FakeOutput(Arc<Mutex<FakeLog>>);
 
@@ -1544,6 +1546,7 @@ mod tests {
     pasted: Vec<(String, u32, bool)>,
     copied: Vec<String>,
     refuse: Option<NotPasted>,
+    /// A Mac account that isn't an administrator, without Accessibility.
     no_paste: bool,
   }
 
@@ -1563,6 +1566,11 @@ mod tests {
 
     fn paste(&mut self, text: &str, target: &u32, keep: bool) -> Result<(), NotPasted> {
       let mut log = self.log();
+      // As nimbo's paste without Accessibility: refused before the clipboard is touched.
+      if log.no_paste {
+        return Err(NotPasted::Failed(NO_ACCESS.into()));
+      }
+
       if let Some(refused) = log.refuse.clone() {
         return Err(refused);
       }
@@ -1722,10 +1730,10 @@ mod tests {
       "hello there",
       &["parakeet-v3"],
     );
-    let (focus, cant, off) =
-      (NotPasted::FocusChanged, "this account can't paste", "auto-paste is off");
+    let (focus, off) = (NotPasted::FocusChanged, "auto-paste is off");
     let copied = |why: &str| Some(format!("{why}; the text is on the clipboard"));
     let (refused, moved) = (Some(focus.to_string()), copied(&focus.to_string()));
+    let (cant, cant_kept) = (Some(NO_ACCESS.to_owned()), copied(NO_ACCESS));
     // (paste, keep, refused, can't paste): pasted, copied, why not, the history's why. Each case
     // flips a switch: an edit that changes nothing sends no update.
     #[rustfmt::skip]
@@ -1736,8 +1744,10 @@ mod tests {
       (true, false, None, false, true, false, None, None),
       (true, true, Some(focus.clone()), false, false, true, moved.clone(), moved),
       (true, false, Some(focus), false, false, false, refused.clone(), refused),
-      (true, true, None, true, false, true, copied(cant), None),
-      (true, false, None, true, false, false, Some(cant.into()), None),
+      (true, true, None, true, false, true, cant_kept.clone(), cant_kept),
+      (true, false, None, true, false, false, cant.clone(), cant),
+      (false, true, None, true, false, true, copied(off), None),
+      (false, false, None, true, false, false, Some(off.into()), None),
     ];
     for (i, (paste, keep, refuse, no_paste, pasted, copy, why, kept)) in
       cases.into_iter().enumerate()

@@ -438,7 +438,9 @@ const MICROPHONE_WHY: &str = "Wavo records your voice through it while you hold 
 const ACCESSIBILITY_WHY: &str = "Wavo hears the shortcut in every app and pastes the text where \
   you type through it.";
 const NO_ADMIN: &str = "You’re not an administrator on this Mac, so Wavo can’t paste for you. \
-  Turn on Keep the text on the clipboard and paste with ⌘V.";
+  You can turn on Keep the text on the clipboard and paste with ⌘V.";
+const LONE_KEY_NOTE: &str = "A single key needs Accessibility, which only an administrator can \
+  allow on this Mac. Use a combination like ⌥Space.";
 
 /// A triangle with "!" in it, for a permission missing.
 const WARNING: Icon = Icon::new("M12 4.5 3 19.5h18ZM12 10v4.5M12 17v.2");
@@ -481,10 +483,14 @@ impl Prefs {
         (false, true) => Some(FN_NOTE),
         (false, false) => None,
       };
-      let mut row = FormRow::new("Shortcut");
-      if let Some(note) = note {
-        row = row.info(note);
-      }
+      // A modifier alone needs the event tap, and so Accessibility.
+      let lone = matches!(Hotkey::parse(&self.settings.hotkey), Ok(Hotkey::Modifier(_)));
+      let row = FormRow::new("Shortcut");
+      let row = match note {
+        _ if lone && self.access.needs_admin => row.warning(LONE_KEY_NOTE),
+        Some(note) => row.info(note),
+        None => row,
+      };
 
       ui.form_row(fs, row, |ui| self.shortcut(ui));
       ui.form_row(fs, FormRow::new("Activation").info(ACTIVATION_HELP), |ui| {
@@ -3048,6 +3054,28 @@ mod tests {
     assert_eq!(switches(&h), ["off disabled", "off"]);
     let h = home.harness(&fake, Settings::default());
     assert_eq!(switches(&h), ["on disabled", "off"]);
+  }
+
+  /// A single key where only an administrator can allow Accessibility: the Shortcut row's ⓘ is
+  /// the warning, saying to use a combination. A combination, or an administrator, keeps the ⓘ.
+  #[test]
+  fn a_single_key_warns_where_only_an_administrator_can_allow_it() {
+    let home = Home::new("window-single-key", &TWO);
+    let fake = Fake::default();
+    let warning = format!(r#"button "Warning" desc {LONE_KEY_NOTE:?}"#);
+    let admin = fake.access();
+    let no_admin = Access { accessibility: false, needs_admin: true, ..admin };
+    for (access, hotkey, warns) in [
+      (no_admin, "left_option", true),
+      (no_admin, "fn", true),
+      (no_admin, "option+space", false),
+      (admin, "fn", false),
+    ] {
+      fake.log().access = Some(access);
+      let h = home.harness(&fake, Settings { hotkey: hotkey.into(), ..Settings::without_paste() });
+      let mark = a11y_line(&h, r#"button "Warning""#);
+      assert_eq!(mark.as_ref() == Some(&warning), warns, "{hotkey}: {mark:?}");
+    }
   }
 
   /// The devices, the permissions, launch at login and the models are read as the window opens
