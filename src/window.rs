@@ -6,7 +6,7 @@
 //! shell keeps current ([Prefs::update]), and reaches the app only through [Shell]: tests run it
 //! in nimbo's harness with a fake one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -18,9 +18,9 @@ use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
 use nimbo::system::Change;
 use nimbo::{
-  Align, Answer, App, Button, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
-  FormStyle, Hotkey, Icon, Id, Item, Key, Menu, NamedKey, PopUp, Select, Style, TextStyle, Tile,
-  Ui, Weight, grow, open, paths, px,
+  Align, Answer, App, Button, CMD, Config, Cx, Dialog, Event, FileDialog, Float, Font, FormRow,
+  FormStyle, Hotkey, Icon, Id, Item, Key, Menu, Modifiers, NamedKey, PopUp, Select, Selection,
+  Style, TextStyle, Tile, Ui, Weight, grow, open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -136,7 +136,7 @@ pub trait Shell {
 
 enum Delete {
   Model(&'static ModelInfo),
-  Entry(i64),
+  Entries(Vec<i64>),
 }
 
 /// A delete the dialog asks about.
@@ -295,7 +295,7 @@ impl Prefs {
         info!("settings: delete model {}", m.name);
         self.shell.delete_model(m);
       }
-      Delete::Entry(id) => self.shell.history(Request::Delete(id)),
+      Delete::Entries(ids) => self.shell.history(Request::Delete(ids)),
     }
   }
 }
@@ -346,9 +346,9 @@ impl App for Prefs {
   }
 
   /// The file Export's or Import's panel picked; Esc, or a click on nothing above the panel
-  /// under the history, unselects its dictation; the microphones or the lid changed: read again
-  /// for the Microphone row; back in front, from another app (System Settings, where a permission
-  /// was given): [Prefs::refresh].
+  /// under the history, unselects its dictations, Delete or Backspace (outside the search) asks to
+  /// delete them; the microphones or the lid changed: read again for the Microphone row; back in
+  /// front, from another app (System Settings, where a permission was given): [Prefs::refresh].
   fn event(&mut self, cx: &mut Cx, ev: &Event) -> bool {
     let history = self.page == Page::History;
     match ev {
@@ -375,11 +375,21 @@ impl App for Prefs {
         true
       }
       Event::KeyDown(k) if history && k.key == Key::Named(NamedKey::Escape) => {
-        self.history.selected.take().is_some()
+        self.history.unselect()
+      }
+      // The search's own Backspace comes here first.
+      Event::KeyDown(k)
+        if history
+          && matches!(k.key, Key::Named(NamedKey::Delete | NamedKey::Backspace))
+          && (k.mods.is_empty() || k.mods == CMD)
+          && cx.focused() != Some(Id::of("history-search")) =>
+      {
+        self.ask_delete(None);
+        self.ask.is_some()
       }
       Event::MouseDown { pos, .. } if history && cx.target().is_none() => {
         let above = pos.y < cx.size.h - FOOT_H - TOTAL_H;
-        above && self.history.selected.take().is_some()
+        above && self.history.unselect()
       }
       _ => false,
     }
@@ -862,6 +872,7 @@ impl Prefs {
   /// A history request the session refused: said under the panel.
   pub fn history_failed(&mut self, req: Request, error: &str) {
     let what = match req {
+      Request::Delete(ids) if ids.len() > 1 => "Could not delete the dictations",
       Request::Delete(_) => "Could not delete the dictation",
       Request::Retranscribe(_) => "Could not transcribe it again",
       Request::Restore(_) => "Could not put the previous text back",
@@ -1539,8 +1550,8 @@ struct HistoryPage {
   /// The search as typed last, and when ([Ui::now]).
   typed: Option<(String, Duration)>,
   playing: Option<(i64, Playback)>,
-  /// The entry the panel under the list shows.
-  selected: Option<i64>,
+  /// The dictations selected, by id: the one the panel under the list shows, or how many.
+  selected: Selection,
   /// What the line under the panel says for [NOTE_TIME], and since when ([Ui::now]): an error,
   /// "Copied".
   note: Option<(String, Duration)>,
@@ -1560,7 +1571,7 @@ impl HistoryPage {
 
   /// Reads the history again when it or the search changed; a search being typed keeps the last
   /// result until it stays the same for [SEARCH_WAIT]. Returns how long it still waits. The
-  /// selected dictation is unselected when it is not read again: deleted, or out of the search.
+  /// selection goes when one of it is not read again: deleted, or out of the search.
   fn load(&mut self, now: Duration) -> Option<Duration> {
     let search = self.search.trim().to_owned();
     let since = self.typed.as_ref().map_or(SEARCH_WAIT, |(_, at)| now.saturating_sub(*at));
@@ -1590,13 +1601,49 @@ impl HistoryPage {
     // All of them: 86k entries read in about 0.1 s.
     match db.get_page(&key.0, i64::MAX as usize) {
       Ok(entries) => {
-        self.selected = self.selected.filter(|id| entries.iter().any(|e| e.id == *id));
+        if !self.selected.is_empty() {
+          let read: HashSet<u64> = entries.iter().map(|e| e.id as u64).collect();
+          if self.selected.keys().any(|k| !read.contains(&k)) {
+            self.selected.clear();
+          }
+        }
+
         (self.days, self.entries) = (days(&entries), entries);
       }
       Err(e) => self.note = Some((format!("Could not read the history: {e:#}"), now)),
     }
 
     None
+  }
+
+  /// The selected dictations, newest first.
+  fn chosen(&self) -> Vec<&Entry> {
+    if self.selected.is_empty() {
+      return Vec::new();
+    }
+
+    self.entries.iter().filter(|e| self.selected.contains(e.id as u64)).collect()
+  }
+
+  /// Clears the selection; false if there was none.
+  fn unselect(&mut self) -> bool {
+    let some = !self.selected.is_empty();
+    self.selected.clear();
+    some
+  }
+
+  /// A click on row `id` with `mods`, as nimbo's lists take one: Cmd toggles it, Shift selects
+  /// from the anchor to it, a plain click selects it alone or, the only one selected, unselects it.
+  fn select(&mut self, id: i64, mods: Modifiers) {
+    let Some(i) = self.entries.iter().position(|e| e.id == id) else { return };
+    let (k, sel) = (id as u64, &mut self.selected);
+    let key = |i: usize| self.entries[i].id as u64;
+    match (mods.contains(CMD), mods.shift()) {
+      (true, _) => sel.toggle(k, i),
+      (_, true) => sel.extend(i, self.entries.len(), &key),
+      _ if sel.len() == 1 && sel.contains(k) => sel.clear(),
+      _ => sel.select(k, i),
+    }
   }
 }
 
@@ -1702,22 +1749,15 @@ fn day_note((n, ms): (usize, i64)) -> String {
 }
 
 enum Act {
-  Select(i64),
+  Select(i64, Modifiers),
   Copy(String),
   Play(i64),
   Stop,
   CopyPath(i64),
   Reveal(i64),
   Request(Request),
-  Delete { id: i64, start: String, audio: bool },
-}
-
-impl Act {
-  /// Deleting `e`, asked first ([Prefs::history_act]) with the start of its text.
-  fn delete(e: &Entry) -> Act {
-    let start = crate::history::shorten(&first_line(e), 60);
-    Act::Delete { id: e.id, start, audio: e.audio_path.is_some() }
-  }
+  /// Deleting row `id` or the selection it is one of; `None`, the selection ([Prefs::ask_delete]).
+  Delete(Option<i64>),
 }
 
 /// The panel under the list, with the selected dictation's whole text and its actions.
@@ -1779,19 +1819,33 @@ impl Prefs {
   }
 
   /// Under the list, where it stays: the selected dictation's whole text, Transcribe Again,
-  /// Restore the Previous Text and Delete.
+  /// Restore the Previous Text and Delete; several selected, how many and Delete.
   fn history_foot(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let t = ui.theme();
-    let h = &self.history;
-    let e = h.selected.and_then(|id| h.entries.iter().find(|e| e.id == id));
+    let chosen = self.history.chosen();
     let mut act = None;
     ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
     let s = Style::new().w(grow()).h(px(FOOT_H)).pads([12.0, 20.0, 16.0, 20.0]).gap(10.0);
     ui.col(s, |ui| {
-      let Some(e) = e else {
-        let muted = t.label().color(t.muted);
-        ui.text("Select a dictation to see all of its text.", muted);
-        return;
+      let e = match chosen[..] {
+        [] => {
+          let muted = t.label().color(t.muted);
+          ui.text("Select a dictation to see all of its text.", muted);
+          return;
+        }
+        [e] => e,
+        _ => {
+          ui.id("history-chosen").text(format!("{} dictations selected", chosen.len()), t.body());
+          ui.el(Style::new().h(grow()));
+          ui.row(Style::new().w(grow()), |ui| {
+            ui.el(Style::new().w(grow()));
+            let busy = self.selection_busy();
+            if ui.disabled(busy).id("delete-chosen").button("Delete…").clicked {
+              act = Some(Act::Delete(None));
+            }
+          });
+          return;
+        }
       };
 
       let text = if e.text.is_empty() { no_text(e.tried_model.as_deref()) } else { e.text.clone() };
@@ -1814,7 +1868,7 @@ impl Prefs {
 
         ui.el(Style::new().w(grow()));
         if ui.disabled(st.busy).id(("delete", e.id)).button("Delete…").clicked {
-          act = Some(Act::delete(e));
+          act = Some(Act::Delete(None));
         }
       });
     });
@@ -1864,8 +1918,7 @@ impl Prefs {
   fn history_act(&mut self, ui: &mut Ui, act: Option<Act>) {
     let h = &mut self.history;
     match act {
-      // Clicked again, it is unselected.
-      Some(Act::Select(id)) => h.selected = (h.selected != Some(id)).then_some(id),
+      Some(Act::Select(id, mods)) => h.select(id, mods),
       Some(Act::Copy(text)) => {
         ui.clipboard().write(&text);
         h.note = Some(("Copied to the clipboard".into(), ui.now()));
@@ -1895,14 +1948,50 @@ impl Prefs {
         h.note = None;
         self.shell.history(req);
       }
-      Some(Act::Delete { id, start, audio }) => {
-        let and = if audio { " and its recording are" } else { " is" };
-        let message = format!("“{start}”{and} removed from the history.");
-        let title = "Delete this dictation?".into();
-        self.ask = Some(Ask { title, message, delete: Delete::Entry(id) });
-      }
+      Some(Act::Delete(row)) => self.ask_delete(row),
       None => {}
     }
+  }
+
+  /// Asks to delete dictation `row` (its menu's Delete…), or the selection it is one of; `None`,
+  /// the selection. Not while one of them is being transcribed again.
+  fn ask_delete(&mut self, row: Option<i64>) {
+    let h = &self.history;
+    let doomed = match row {
+      Some(id) if !h.selected.contains(id as u64) => {
+        h.entries.iter().filter(|e| e.id == id).collect()
+      }
+      _ => h.chosen(),
+    };
+    let busy = |e: &&Entry| self.status.retranscribing.contains(&e.id);
+    if doomed.is_empty() || doomed.iter().any(busy) {
+      return;
+    }
+
+    let ids = doomed.iter().map(|e| e.id).collect();
+    let audio = doomed.iter().any(|e| e.audio_path.is_some());
+    let (title, message) = match doomed[..] {
+      [e] => {
+        let start = crate::history::shorten(&first_line(e), 60);
+        let and = if audio { " and its recording are" } else { " is" };
+        ("Delete this dictation?".into(), format!("“{start}”{and} removed from the history."))
+      }
+      _ => {
+        let n = doomed.len();
+        let and = if audio { " and their recordings are" } else { " are" };
+        (
+          format!("Delete {n} dictations?"),
+          format!("{n} dictations{and} removed from the history."),
+        )
+      }
+    };
+    self.ask = Some(Ask { title, message, delete: Delete::Entries(ids) });
+  }
+
+  /// One of the selection is being transcribed again: it can't be deleted.
+  fn selection_busy(&self) -> bool {
+    let h = &self.history;
+    self.status.retranscribing.iter().any(|&id| h.selected.contains(id as u64))
   }
 
   /// The recording playing ended, or could not play ([Shell::play]): the speakers are let go
@@ -1919,7 +2008,8 @@ impl Prefs {
 
 /// A dictation as its row, its menu and the panel under the list show it: `working`, being
 /// recorded or transcribed now; the model `transcribes`; `busy`, being transcribed again, when the
-/// session refuses to change it; its previous text `restorable`.
+/// session refuses to change it; its previous text `restorable`; `deletable` with the selection it
+/// is one of.
 #[derive(Default)]
 struct RowState {
   selected: bool,
@@ -1928,14 +2018,17 @@ struct RowState {
   transcribes: bool,
   busy: bool,
   restorable: bool,
+  deletable: bool,
 }
 
 impl RowState {
   fn of(p: &Prefs, e: &Entry) -> RowState {
     let (h, status) = (&p.history, &p.status);
     let busy = status.retranscribing.contains(&e.id);
+    let selected = h.selected.contains(e.id as u64);
     RowState {
-      selected: h.selected == Some(e.id),
+      selected,
+      deletable: if selected { !p.selection_busy() } else { !busy },
       playing: h.playing.as_ref().is_some_and(|(id, _)| *id == e.id),
       working: busy || status.current == Some(e.id),
       transcribes: p.transcribes(),
@@ -1951,8 +2044,9 @@ impl RowState {
 }
 
 /// A dictation's row, all of one height: its text on a line and the details under it, Play and
-/// Copy centred at its right. A click on it selects it (tinted), for the panel under the list; a
-/// right-click selects it too and opens its menu ([row_menu]), with what `db` has of it on disk.
+/// Copy centred at its right. A click on it selects it (tinted), for the panel under the list, as
+/// [HistoryPage::select] takes it; a right-click selects it too and opens its menu ([row_menu]),
+/// with what `db` has of it on disk.
 fn entry_row(
   ui: &mut Ui,
   fs: &FormStyle,
@@ -2006,8 +2100,14 @@ fn entry_row(
     return Some(a);
   }
 
-  let select = r.clicked || on_text || at.is_some() && !selected;
-  act.or(select.then_some(Act::Select(e.id)))
+  // A click with its modifiers; a right-click selects the row alone unless it is selected.
+  let click = ui.click(r.id).or(ui.click(text)).filter(|_| r.clicked || on_text);
+  let select = match (click, at) {
+    (Some(c), _) => Some(c.mods),
+    (None, Some(_)) if !selected => Some(Modifiers::empty()),
+    _ => None,
+  };
+  act.or(select.map(|mods| Act::Select(e.id, mods)))
 }
 
 /// A row's context menu: what its buttons and the panel under the list do; with its recording
@@ -2031,7 +2131,8 @@ fn row_menu(e: &Entry, st: &RowState, on_disk: bool) -> Menu {
     items.push(Item::new("restore", "Restore the Previous Text").enabled(!st.busy));
   }
 
-  items.extend([Item::separator(), Item::new("delete", "Delete…").destructive().enabled(!st.busy)]);
+  let delete = Item::new("delete", "Delete…").destructive().enabled(st.deletable);
+  items.extend([Item::separator(), delete]);
   Menu::new(items)
 }
 
@@ -2046,7 +2147,7 @@ fn row_act(item: &str, e: &Entry) -> Option<Act> {
     "reveal" => Act::Reveal(e.id),
     "retranscribe" => Act::Request(Request::Retranscribe(e.id)),
     "restore" => Act::Request(Request::Restore(e.id)),
-    "delete" => Act::delete(e),
+    "delete" => Act::Delete(Some(e.id)),
     _ => return None,
   })
 }
@@ -2377,6 +2478,13 @@ mod tests {
     click(h, Id::of(TABS).key(i));
     h.frame();
     assert_eq!(h.app().page, page);
+  }
+
+  /// The ids of the dictations selected, smallest first.
+  fn selected(h: &Harness<Prefs>) -> Vec<i64> {
+    let mut ids: Vec<i64> = h.app().history.selected.keys().map(|k| k as i64).collect();
+    ids.sort();
+    ids
   }
 
   /// The dialog's Delete, once it has faded in.
@@ -2887,20 +2995,20 @@ mod tests {
     // Nothing selected: the panel under the list has no actions; a click on a row selects it.
     assert!(h.rect(Id::of(("retranscribe", ids[0]))).is_none());
     click(&mut h, Id::of(("text", ids[0])));
-    assert_eq!(h.app().history.selected, Some(ids[0]));
+    assert_eq!(selected(&h), [ids[0]]);
     let total = h.text(Id::of("history-total")).unwrap();
     assert!(total.starts_with("2 dictations · ") && total.contains(" · since "), "{total}");
 
     // Unselected by a click on it again, by Esc, and by a click on nothing above the panel.
     click(&mut h, Id::of(("text", ids[0])));
-    assert_eq!(h.app().history.selected, None);
+    assert!(selected(&h).is_empty());
     click(&mut h, Id::of(("text", ids[0])));
     h.key(NamedKey::Escape, Modifiers::empty());
-    assert_eq!(h.app().history.selected, None);
+    assert!(selected(&h).is_empty());
     click(&mut h, Id::of(("text", ids[0])));
     let last = h.rect(Id::of(("text", ids[1]))).unwrap();
     h.click(last.x, last.y + last.h + 60.0);
-    assert_eq!(h.app().history.selected, None);
+    assert!(selected(&h).is_empty());
     click(&mut h, Id::of(("text", ids[0])));
 
     // Transcribed again from the panel: its new text came, and the one before comes back.
@@ -2918,7 +3026,8 @@ mod tests {
     let want = "“Move the design review.” and its recording are removed from the history.";
     assert_eq!(h.app().ask.as_ref().map(|a| a.message.as_str()), Some(want));
     confirm(&mut h);
-    let want = [Request::Retranscribe(ids[0]), Request::Restore(ids[0]), Request::Delete(ids[0])];
+    let want =
+      [Request::Retranscribe(ids[0]), Request::Restore(ids[0]), Request::Delete(vec![ids[0]])];
     assert_eq!(fake.log().requests, want);
 
     // The search finds by text, in any case, once it is typed: meanwhile the last result stays.
@@ -2926,13 +3035,13 @@ mod tests {
     h.type_text("INVOICE");
     h.frame();
     assert!(h.rect(Id::of(("copy", ids[0]))).is_some(), "the last result while it is typed");
-    assert_eq!(h.app().history.selected, Some(ids[0]));
+    assert_eq!(selected(&h), [ids[0]]);
     h.wait(SEARCH_WAIT);
     h.frame();
     assert!(
       h.rect(Id::of(("copy", ids[1]))).is_some() && h.rect(Id::of(("copy", ids[0]))).is_none()
     );
-    assert_eq!(h.app().history.selected, None, "out of the search");
+    assert!(selected(&h).is_empty(), "out of the search");
   }
 
   /// Play goes to the shell, which calls [Prefs::played] when it ends; a recording that could not
@@ -2994,14 +3103,14 @@ mod tests {
       ("delete", true),
     ]);
     assert_eq!(menu(&mut h, ids[1], Some("copy")), all);
-    assert_eq!(h.app().history.selected, Some(ids[1]), "selected by the right-click");
+    assert_eq!(selected(&h), [ids[1]], "selected by the right-click");
     assert_eq!(h.clipboard().read().as_deref(), Some("Send the invoice to Anna."));
     menu(&mut h, ids[1], None);
-    assert_eq!(h.app().history.selected, Some(ids[1]), "kept selected by another one");
+    assert_eq!(selected(&h), [ids[1]], "kept selected by another one");
 
     // While it is transcribed again only what reads it is on; then its text before comes back.
     menu(&mut h, ids[0], Some("retranscribe"));
-    assert_eq!(h.app().history.selected, Some(ids[0]), "the other row selected");
+    assert_eq!(selected(&h), [ids[0]], "the other row selected");
     let restorable = vec![ids[0]];
     update(&mut h, Status { retranscribing: vec![ids[0]], restorable, ..Status::default() }, 2);
     let busy = items(&[
@@ -3024,7 +3133,8 @@ mod tests {
     let want = "“Let's move the design review.” and its recording are removed from the history.";
     assert_eq!(h.app().ask.as_ref().map(|a| a.message.as_str()), Some(want));
     confirm(&mut h);
-    let want = [Request::Retranscribe(ids[0]), Request::Restore(ids[0]), Request::Delete(ids[0])];
+    let want =
+      [Request::Retranscribe(ids[0]), Request::Restore(ids[0]), Request::Delete(vec![ids[0]])];
     assert_eq!(fake.log().requests, want);
 
     // A Control-click on the Mac asks for it as the button goes down; Windows as it is let go.
@@ -3041,8 +3151,91 @@ mod tests {
       let up = h.context_menu(None).is_some();
       h.frame();
       assert_eq!((down, up), (os == Os::Mac, os == Os::Windows), "{os:?}: the menu, once");
-      assert_eq!(h.app().history.selected, Some(id), "{os:?}: selected");
+      assert_eq!(selected(&h), [id], "{os:?}: selected");
     }
+  }
+
+  /// A click on row `id` with `mods` held as it goes down.
+  fn click_with(h: &mut Harness<Prefs>, id: i64, mods: Modifiers) {
+    let r = h.rect(Id::of(("text", id))).unwrap();
+    let (x, y) = (r.x + 20.0, r.y + r.h / 2.0);
+    h.press_with(x, y, 1, mods);
+    h.release(x, y);
+    h.frame();
+    h.frame();
+  }
+
+  /// A click selects one, Shift-click from it, Cmd-click toggles; with several the panel says how
+  /// many and deletes them all, as Delete does, and so does the menu of a row among them; the menu
+  /// of a row not among them deletes only it.
+  #[test]
+  fn the_history_selects_and_deletes_several() {
+    let home = Home::new("window-history-several", &TWO);
+    let texts = [("Let's move the review.", 4), ("Send the invoice.", 3), ("Call Anna.", 2)];
+    let ids = home.dictations(&[texts[0], texts[1], texts[2], ("Book a table.", 1)]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    h.native_menus();
+    tab(&mut h, Page::History);
+
+    // Newest first: ids[3] at the top.
+    click_with(&mut h, ids[3], Modifiers::empty());
+    assert_eq!(selected(&h), [ids[3]]);
+    click_with(&mut h, ids[1], Modifiers::SHIFT);
+    assert_eq!(selected(&h), [ids[1], ids[2], ids[3]]);
+    click_with(&mut h, ids[2], CMD);
+    assert_eq!(selected(&h), [ids[1], ids[3]]);
+    click_with(&mut h, ids[0], CMD);
+    assert_eq!(selected(&h), [ids[0], ids[1], ids[3]]);
+    assert_eq!(h.text(Id::of("history-chosen")), Some("3 dictations selected"));
+    assert!(h.rect(Id::of(("retranscribe", ids[0]))).is_none(), "no single one's actions");
+
+    // One of them being transcribed again: none of them is deleted.
+    let update = |h: &mut Harness<Prefs>, status: Status, n| {
+      let settings = h.app().settings.clone();
+      h.app_mut().update(&settings, &status, n);
+      h.waker().wake();
+      h.frame();
+    };
+    update(&mut h, Status { retranscribing: vec![ids[1]], ..Status::default() }, 0);
+    let delete = |items: Vec<(String, bool)>| items.into_iter().find(|i| i.0 == "delete").unwrap();
+    assert_eq!(delete(menu(&mut h, ids[3], None)), ("delete".into(), false));
+    h.key(NamedKey::Backspace, Modifiers::empty());
+    assert!(h.app().ask.is_none(), "busy");
+    update(&mut h, Status::default(), 0);
+
+    // Delete in the search is the search's.
+    click(&mut h, Id::of("history-search"));
+    h.key(NamedKey::Backspace, Modifiers::empty());
+    assert!(h.app().ask.is_none(), "the search's");
+    h.set_focus(None);
+
+    // Delete, then the panel's Delete…: all of them, asked with their count.
+    h.key(NamedKey::Delete, Modifiers::empty());
+    let ask = h.app().ask.as_ref().map(|a| (a.title.as_str(), a.message.as_str()));
+    let want = "3 dictations and their recordings are removed from the history.";
+    assert_eq!(ask, Some(("Delete 3 dictations?", want)));
+    h.wait(Duration::from_millis(200));
+    click(&mut h, Id::of(CONFIRM).key("cancel"));
+    assert!(h.app().ask.is_none());
+    click(&mut h, Id::of("delete-chosen"));
+    confirm(&mut h);
+    assert_eq!(fake.log().requests, [Request::Delete(vec![ids[3], ids[1], ids[0]])]);
+
+    // The menu of a row among them: all of them; of one not among them: only it.
+    menu(&mut h, ids[1], Some("delete"));
+    assert_eq!(selected(&h), [ids[0], ids[1], ids[3]], "kept by the right-click");
+    confirm(&mut h);
+    menu(&mut h, ids[2], Some("delete"));
+    assert_eq!(selected(&h), [ids[2]]);
+    let want = "“Call Anna.” and its recording are removed from the history.";
+    assert_eq!(h.app().ask.as_ref().map(|a| a.message.as_str()), Some(want));
+    confirm(&mut h);
+    let log = fake.log().requests.clone();
+    assert_eq!(
+      log[1..],
+      [Request::Delete(vec![ids[3], ids[1], ids[0]]), Request::Delete(vec![ids[2]])]
+    );
   }
 
   /// With its recording on disk a row's menu copies the recording's absolute path and shows it in

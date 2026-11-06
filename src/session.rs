@@ -406,13 +406,14 @@ pub struct Session {
 #[derive(Clone)]
 pub struct Handle(Sender<Msg>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
   /// Transcribe an entry's recording again; new text replaces the text.
   Retranscribe(i64),
   /// Put back the text an entry had before it was transcribed again in this run.
   Restore(i64),
-  Delete(i64),
+  /// Delete entries with their recordings, none of them while one is being transcribed.
+  Delete(Vec<i64>),
   /// Free the model's memory, after the job in progress.
   Unload,
   /// An import added dictations: the update after it carries the history's change.
@@ -736,7 +737,7 @@ impl<O: TextOutput> Controller<O> {
         self.originals.remove(&id);
         Ok(())
       }
-      Request::Delete(id) => self.delete(id),
+      Request::Delete(ids) => self.delete(&ids),
       Request::Unload => {
         info!("the model is unloaded on request");
         self.untried = false;
@@ -1216,7 +1217,7 @@ impl<O: TextOutput> Controller<O> {
       }
 
       info!("entry {id}: {why}; it goes");
-      return self.delete(id);
+      return self.delete(&[id]);
     };
 
     let language = self.settings.engine_language();
@@ -1288,19 +1289,23 @@ impl<O: TextOutput> Controller<O> {
     }
   }
 
-  /// Deletes entry `id` with its recording; the last dictation's text goes with it.
-  fn delete(&mut self, id: i64) -> Result<()> {
-    if self.is_busy(id) {
+  /// Deletes entries `ids` with their recordings; the last dictation's text goes with its own.
+  fn delete(&mut self, ids: &[i64]) -> Result<()> {
+    if let Some(id) = ids.iter().find(|&&id| self.is_busy(id)) {
       bail!("entry {id} is being transcribed");
     }
 
-    if !self.history.delete(id)? {
-      bail!("no history entry {id}");
+    let found = self.history.delete(ids)?;
+    if found.is_empty() {
+      bail!("no history entry {ids:?}");
     }
 
-    info!("entry {id}: deleted with its recording");
-    self.originals.remove(&id);
-    if self.last.as_ref().is_some_and(|l| l.entry == Some(id)) {
+    info!("entries {found:?}: deleted with their recordings");
+    for id in &found {
+      self.originals.remove(id);
+    }
+
+    if self.last.as_ref().is_some_and(|l| l.entry.is_some_and(|id| found.contains(&id))) {
       self.last = None;
     }
 
@@ -2127,6 +2132,23 @@ mod tests {
     restore().unwrap();
     assert_eq!(s.entry(id).unwrap().text, "текст");
     assert!(restore().is_err(), "once");
+  }
+
+  /// Several entries go at once with their recordings; none while one of them is transcribed.
+  #[test]
+  fn deletes_several_but_not_a_busy_one() {
+    let s = InProcess::start("session-delete", &Settings::default(), None, "hi", &["parakeet-v3"]);
+    let ids: Vec<i64> = (0..3).map(|i| s.add_entry(1_000 * i, "текст", &loud(1.0))).collect();
+    let gate = s.models.hold();
+    s.handle.request(Request::Retranscribe(ids[2])).unwrap();
+    let refused = s.handle.request(Request::Delete(vec![ids[0], ids[2]])).unwrap_err();
+    assert!(refused.contains("being transcribed"), "{refused}");
+    assert_eq!(s.recordings(), 3);
+
+    drop(gate);
+    s.handle.request(Request::Delete(vec![ids[0], ids[1]])).unwrap();
+    assert_eq!((s.entry(ids[0]), s.entry(ids[1])), (None, None));
+    assert_eq!(s.recordings(), 1);
   }
 
   #[test]
