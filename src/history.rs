@@ -585,7 +585,9 @@ impl History {
     let mut found = Vec::new();
     for &id in ids {
       let Some(entry) = self.db.get_entry(id)? else { continue };
-      if let Some(Err(e)) = entry.audio_path.as_deref().map(|name| self.recordings.remove(name)) {
+      if let Some(name) = &entry.audio_path
+        && let Err(e) = self.recordings.remove(name)
+      {
         self.db.delete_entries(&found)?;
         return Err(e);
       }
@@ -704,8 +706,8 @@ mod tests {
   fn deletes_several_with_their_recordings() {
     let dir = TempDir::new("history-delete");
     let h = History::open(dir.path()).unwrap();
-    let added: Vec<(i64, PathBuf)> = (0..3).map(|i| add(&h, i * 1_000, "text", false)).collect();
-    let (ids, wavs): (Vec<i64>, Vec<PathBuf>) = added.into_iter().unzip();
+    let (ids, wavs): (Vec<i64>, Vec<PathBuf>) =
+      (0..3).map(|i| add(&h, i * 1_000, "text", false)).unzip();
 
     // One that isn't there is skipped.
     assert_eq!(h.delete(&[ids[0], ids[2], 404]).unwrap(), [ids[0], ids[2]]);

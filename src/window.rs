@@ -3231,11 +3231,8 @@ mod tests {
     let want = "“Call Anna.” and its recording are removed from the history.";
     assert_eq!(h.app().ask.as_ref().map(|a| a.message.as_str()), Some(want));
     confirm(&mut h);
-    let log = fake.log().requests.clone();
-    assert_eq!(
-      log[1..],
-      [Request::Delete(vec![ids[3], ids[1], ids[0]]), Request::Delete(vec![ids[2]])]
-    );
+    let want = [Request::Delete(vec![ids[3], ids[1], ids[0]]), Request::Delete(vec![ids[2]])];
+    assert_eq!(fake.log().requests[1..], want);
   }
 
   /// With its recording on disk a row's menu copies the recording's absolute path and shows it in
