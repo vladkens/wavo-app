@@ -75,9 +75,6 @@ pub fn icon(status: &Status, warnings: &[Warning]) -> Icon {
 #[derive(Debug, Clone, Default)]
 pub struct System {
   pub accessibility: bool,
-  /// This account can't allow Accessibility: it isn't an administrator (macOS). Wavo copies the
-  /// text then, as it works there, and asks for nothing.
-  pub needs_admin: bool,
   /// The hotkey does not parse, or the OS refused it.
   pub hotkey_error: Option<String>,
   /// The hotkey waits for the person to let the desktop's portal ask them (Wayland).
@@ -101,7 +98,7 @@ pub struct Warning {
 pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> {
   let mut list = Vec::new();
   let mut add = |id, text: String, action| list.push(Warning { id, text, action });
-  if !system.accessibility && !system.needs_admin {
+  if !system.accessibility {
     add("warn:accessibility", "Allow Accessibility…".into(), true);
   }
 
@@ -447,19 +444,6 @@ mod tests {
     }
 
     assert!(!items.iter().any(|i| i.id.starts_with("update")), "a build that doesn't update");
-  }
-
-  /// An account that isn't an administrator can't allow Accessibility: copying is how Wavo works
-  /// there, so the menu asks for nothing and the icon stays as it is.
-  #[test]
-  fn without_an_administrator_the_menu_asks_nothing() {
-    let s = Status::default();
-    let system = System { needs_admin: true, ..System::default() };
-    let list = warnings(&system, "f5", &s);
-    assert_eq!((list.as_slice(), icon(&s, &list)), (&[][..], Icon::Idle));
-    let more = System { no_microphone: true, ..system };
-    let ids: Vec<_> = warnings(&more, "f5", &s).into_iter().map(|w| w.id).collect();
-    assert_eq!(ids, ["warn:microphone"], "the others still show");
   }
 
   /// A chosen microphone that isn't connected stays checked in the submenu; the menu names the one

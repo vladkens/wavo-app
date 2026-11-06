@@ -15,7 +15,7 @@ use nimbo::{
 };
 
 use crate::audio::Meter;
-use crate::session::{NoModel, ON_CLIPBOARD, Outcome, Status};
+use crate::session::{NoModel, Outcome, Status};
 use crate::settings::HudPosition;
 
 // Points.
@@ -57,9 +57,6 @@ const TRIANGLE: Icon =
   Icon::filled("M10.3 3.9a2 2 0 0 1 3.4 0l8 13.6a2 2 0 0 1-1.7 3H4a2 2 0 0 1-1.7-3Z");
 const MARK: Icon = Icon::new("M12 9v4.5M12 16.8v.1");
 
-/// A text copied in the paste's place (no Accessibility): the person pastes it.
-pub const COPIED: &str = "copied, press ⌘V";
-
 const fn ms(n: u64) -> Duration {
   Duration::from_millis(n)
 }
@@ -77,8 +74,8 @@ pub fn config(position: HudPosition) -> Config {
 // MARK: What it says
 
 /// What came of a dictation that ended since `before`, or a new error of a recording that did not
-/// start; `None` is no news. With `auto_paste` a refused paste is an error, and a text copied in
-/// its place says to paste it; with `took` a dictation without one says how long its text took.
+/// start; `None` is no news. With `auto_paste` a refused paste is an error; with `took` a dictation
+/// without one says how long its text took.
 pub fn after(
   status: &Status,
   before: Option<&Status>,
@@ -95,11 +92,9 @@ pub fn after(
   let error = match last.outcome {
     Outcome::Done if last.pasted => None,
     Outcome::Done => match last.not_pasted.as_deref() {
-      Some(why) if auto_paste && why.ends_with(ON_CLIPBOARD) => Some(COPIED.into()),
-      // Without auto-paste the text is copied or only kept, as the switches say: only a failed
-      // copy is news.
-      Some(why) if why.contains("copying failed") => Some("copy failed".into()),
       Some(why) if auto_paste => Some(format!("not pasted: {}", short(why))),
+      // Without auto-paste only a failed copy is news.
+      Some(why) if why.contains("copying failed") => Some("copy failed".into()),
       _ => None,
     },
     Outcome::NoSpeech | Outcome::Cancelled => None,
@@ -598,36 +593,6 @@ mod tests {
       (refused(NotPasted::FocusChanged), true, "not pasted: focus moved"),
       (refused(NotPasted::SecureField), true, "not pasted: password field"),
       (refused(NotPasted::Failed("x".into())), false, "collapse"),
-      (
-        ended(Outcome::Done, None, Some(format!("no Accessibility access; {ON_CLIPBOARD}"))),
-        true,
-        COPIED,
-      ),
-      (
-        ended(Outcome::Done, None, Some("no Accessibility access, and copying failed: x".into())),
-        true,
-        "copy failed",
-      ),
-      (
-        ended(Outcome::Done, None, Some(format!("auto-paste is off; {ON_CLIPBOARD}"))),
-        false,
-        "collapse",
-      ),
-      // An account that can't paste: the app passes no auto-paste, copied or not is no news.
-      (
-        ended(Outcome::Done, None, Some(format!("this account can't paste; {ON_CLIPBOARD}"))),
-        false,
-        "collapse",
-      ),
-      (
-        ended(
-          Outcome::Done,
-          None,
-          Some("auto-paste is off; the text is only in the history".into()),
-        ),
-        false,
-        "collapse",
-      ),
       (ended(Outcome::NoText, None, None), false, "nothing recognized"),
       (ended(Outcome::NoModel, Some("x is not on disk"), None), true, "download a model"),
       (ended(Outcome::Failed, Some("the engine panicked"), None), true, "engine crashed"),

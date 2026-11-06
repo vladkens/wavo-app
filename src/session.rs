@@ -256,10 +256,8 @@ pub trait TextOutput: Send + 'static {
 
   fn copy(&mut self, text: &str) -> Result<()>;
 
-  /// Pasting is possible here, or the person can make it so: false for a macOS account that isn't
-  /// an administrator and has no Accessibility. Then the keep switch alone says where the text
-  /// goes, and a first launch takes [Settings::without_paste].
-  fn can_paste(&mut self) -> bool;
+  /// False on a Mac account that isn't an administrator and has no Accessibility.
+  fn can_paste(&self) -> bool;
 }
 
 /// Why a text was not pasted. It is in the history either way.
@@ -269,17 +267,9 @@ pub enum NotPasted {
   FocusChanged,
   #[error("the focused field is a password field")]
   SecureField,
-  /// macOS: the paste shortcut can't be sent. The text is copied instead.
-  #[error("no Accessibility access")]
-  NoAccess,
   #[error("{0}")]
   Failed(String),
 }
-
-/// How a reason ends when the text went to the clipboard in the paste's place.
-pub const ON_CLIPBOARD: &str = "the text is on the clipboard";
-/// How a reason ends when the text went nowhere but the history.
-const IN_HISTORY: &str = "the text is only in the history";
 
 // MARK: Status
 
@@ -443,23 +433,17 @@ enum Msg {
 impl Session {
   /// Loads the settings and the history in `config.home` and starts the session thread; the
   /// observer's first update comes once the history is recovered.
-  pub fn start<O: TextOutput>(config: Config, mut output: O, observer: Observer) -> Result<Self> {
+  pub fn start<O: TextOutput>(config: Config, output: O, observer: Observer) -> Result<Self> {
     fs::create_dir_all(&config.home)
       .with_context(|| format!("create {}", config.home.display()))?;
     let file = config.home.join(settings::FILE);
-    let first = !file.exists();
-    let (mut settings, warning) = Settings::load(&file);
-    if let Some(w) = &warning {
-      warn!("{w}");
+    if !file.exists() && !output.can_paste() {
+      Settings::without_paste().save(&file)?;
     }
 
-    // The first launch on an account that can't paste: its own defaults, saved, as the person
-    // sees and changes them.
-    if first && !output.can_paste() {
-      settings = Settings::without_paste();
-      if let Err(e) = settings.save(&file) {
-        warn!("save the settings: {e:#}");
-      }
+    let (settings, warning) = Settings::load(&file);
+    if let Some(w) = &warning {
+      warn!("{w}");
     }
 
     let history = History::open(&config.home)?;
@@ -627,14 +611,6 @@ struct Controller<O: TextOutput> {
   observer: Observer,
   /// The last update's status (without the recording's time), settings and history changes.
   published: Option<(Status, Settings, u64)>,
-}
-
-/// Copies `text` in a paste's place: why it was not pasted, `why` first.
-fn copy<O: TextOutput>(output: &mut O, text: &str, why: &str) -> String {
-  match output.copy(text) {
-    Ok(()) => format!("{why}; {ON_CLIPBOARD}"),
-    Err(e) => format!("{why}, and copying failed: {e:#}"),
-  }
 }
 
 impl<O: TextOutput> Controller<O> {
@@ -1120,35 +1096,26 @@ impl<O: TextOutput> Controller<O> {
     self.complete();
   }
 
-  /// As the switches say: pasted (the clipboard put back unless kept), on the clipboard when kept,
-  /// else only in the history. Where the account can't paste ([TextOutput::can_paste]) the keep
-  /// switch alone says.
+  /// As the switches say: pasted where it can be, and on the clipboard when kept, pasted or not.
   fn deliver(&mut self) {
     let d = self.dictation.as_mut().unwrap();
-    let can_paste = self.output.can_paste();
-    let auto_paste = self.settings.auto_paste && can_paste;
+    let auto_paste = self.settings.auto_paste && self.output.can_paste();
     let keep = self.settings.keep_in_clipboard;
     let refused = match (&d.target, auto_paste) {
-      (Some(target), true) => match self.output.paste(&d.last.text, target, keep) {
-        Ok(()) => None,
-        // The shortcut can't be sent: the text kept on the clipboard is there to paste.
-        Err(e @ NotPasted::NoAccess) if keep => {
-          Some(copy(&mut self.output, &d.last.text, &e.to_string()))
-        }
-        Err(e) => Some(e.to_string()),
-      },
-      (None, true) => Some("the app in focus when the dictation started is unknown".into()),
-      (_, false) => {
-        let why = match self.settings.auto_paste {
-          true => "this account can't paste",
-          false => "auto-paste is off",
-        };
-        Some(match keep {
-          true => copy(&mut self.output, &d.last.text, why),
-          false => format!("{why}; {IN_HISTORY}"),
-        })
+      (Some(target), true) => {
+        self.output.paste(&d.last.text, target, keep).err().map(|e| e.to_string())
       }
+      (None, true) => Some("the app in focus when the dictation started is unknown".into()),
+      (_, false) if self.settings.auto_paste => Some("this account can't paste".into()),
+      (_, false) => Some("auto-paste is off".into()),
     };
+    let refused = refused.map(|why| match keep {
+      true => match self.output.copy(&d.last.text) {
+        Ok(()) => format!("{why}; the text is on the clipboard"),
+        Err(e) => format!("{why}, and copying failed: {e:#}"),
+      },
+      false => why,
+    });
 
     if let Some(why) = &refused {
       info!("dictation {}: not pasted: {why}", d.last.take);
@@ -1577,7 +1544,6 @@ mod tests {
     pasted: Vec<(String, u32, bool)>,
     copied: Vec<String>,
     refuse: Option<NotPasted>,
-    /// An account that can't paste: [TextOutput::can_paste] is false.
     no_paste: bool,
   }
 
@@ -1610,7 +1576,7 @@ mod tests {
       Ok(())
     }
 
-    fn can_paste(&mut self) -> bool {
+    fn can_paste(&self) -> bool {
       !self.log().no_paste
     }
   }
@@ -1745,10 +1711,8 @@ mod tests {
   }
 
   /// Taken for speech by the VAD; dictations of it are transcribed, kept and delivered where they
-  /// started, as the switches say: pasted (the clipboard put back or kept), copied when kept, else
-  /// only in the history. A refused paste keeps its reason in the history; one without
-  /// Accessibility is copied when kept. Where the account can't paste, the keep switch alone says,
-  /// whatever paste has stored.
+  /// started, as the switches say: pasted when on and possible, else copied when kept, else only in
+  /// the history. The history keeps why a paste was refused.
   #[test]
   fn dictations_are_transcribed_kept_and_delivered() {
     let s = InProcess::start(
@@ -1758,46 +1722,36 @@ mod tests {
       "hello there",
       &["parakeet-v3"],
     );
-    let copied = |why: &str| format!("{why}; {ON_CLIPBOARD}");
-    let nowhere = |why: &str| format!("{why}; {IN_HISTORY}");
-    let (focus, no_access) = (NotPasted::FocusChanged, NotPasted::NoAccess);
-    let refused = Some(focus.to_string());
-    let (ax, no_ax) = (Some(copied("no Accessibility access")), Some(no_access.to_string()));
-    let (off, cant) = ("auto-paste is off", "this account can't paste");
-    // (paste, keep, the paste refused, the account can't paste): pasted keeping the clipboard or
-    // not, copied, why not pasted, and what the history keeps of it.
+    let (focus, cant, off) =
+      (NotPasted::FocusChanged, "this account can't paste", "auto-paste is off");
+    let copied = |why: &str| Some(format!("{why}; the text is on the clipboard"));
+    let (refused, moved) = (Some(focus.to_string()), copied(&focus.to_string()));
+    // (paste, keep, refused, can't paste): pasted, copied, why not, the history's why. Each case
+    // flips a switch: an edit that changes nothing sends no update.
     #[rustfmt::skip]
     let cases = [
-      (true, false, None, false, Some(false), false, None, None),
-      (true, true, None, false, Some(true), false, None, None),
-      (false, true, None, false, None, true, Some(copied(off)), None),
-      (false, false, None, false, None, false, Some(nowhere(off)), None),
-      (true, false, Some(focus), false, None, false, refused.clone(), refused),
-      (true, true, Some(no_access.clone()), false, None, true, ax.clone(), ax),
-      (true, false, Some(no_access), false, None, false, no_ax.clone(), no_ax),
-      (true, false, None, true, None, false, Some(nowhere(cant)), None),
-      (true, true, None, true, None, true, Some(copied(cant)), None),
-      (false, true, None, true, None, true, Some(copied(off)), None),
-      (false, false, None, true, None, false, Some(nowhere(off)), None),
+      (true, true, None, false, true, false, None, None),
+      (false, true, None, false, false, true, copied(off), None),
+      (false, false, None, false, false, false, Some(off.into()), None),
+      (true, false, None, false, true, false, None, None),
+      (true, true, Some(focus.clone()), false, false, true, moved.clone(), moved),
+      (true, false, Some(focus), false, false, false, refused.clone(), refused),
+      (true, true, None, true, false, true, copied(cant), None),
+      (true, false, None, true, false, false, Some(cant.into()), None),
     ];
-    let mut now = (true, false);
     for (i, (paste, keep, refuse, no_paste, pasted, copy, why, kept)) in
       cases.into_iter().enumerate()
     {
       let take = i as Take + 1;
-      if now != (paste, keep) {
-        now = (paste, keep);
-        s.handle.edit_settings(move |s| (s.auto_paste, s.keep_in_clipboard) = (paste, keep));
-        s.update_where("the switches", |u| {
-          (u.settings.auto_paste, u.settings.keep_in_clipboard) == now
-        });
-      }
-
+      let now = |u: &Update| (u.settings.auto_paste, u.settings.keep_in_clipboard) == (paste, keep);
+      s.handle.edit_settings(move |s| (s.auto_paste, s.keep_in_clipboard) = (paste, keep));
+      s.update_where("the switches", now);
       let (pastes, copies) = {
         let mut log = s.output.log();
         (log.refuse, log.no_paste) = (refuse, no_paste);
         (log.pasted.len(), log.copied.len())
       };
+
       let last = s.dictate(take);
       assert_eq!((last.outcome, last.text.as_str()), (Outcome::Done, "hello there"), "{take}");
       let entry = s.kept(&last);
@@ -1807,32 +1761,30 @@ mod tests {
       );
       assert_eq!(entry.model.as_deref(), Some("parakeet-tdt-0.6b-v3-Q8_0"));
       let log = s.output.log();
-      let pasted_now =
-        log.pasted[pastes..].iter().map(|(text, target, keep)| (text.as_str(), *target, *keep));
-      let expected = pasted.map(|keep| ("hello there", take as u32, keep));
+      let want: Vec<_> =
+        pasted.then(|| ("hello there".to_owned(), take as u32, keep)).into_iter().collect();
       assert_eq!(
-        pasted_now.collect::<Vec<_>>(),
-        expected.into_iter().collect::<Vec<_>>(),
+        (&log.pasted[pastes..], log.copied.len() - copies),
+        (&want[..], usize::from(copy)),
         "{take}"
       );
-      assert_eq!(
-        (log.copied.len() - copies, last.pasted),
-        (usize::from(copy), pasted.is_some()),
-        "{take}"
-      );
-      assert_eq!((last.not_pasted, entry.not_pasted), (why, kept), "{take}");
+      assert_eq!((last.pasted, last.not_pasted, entry.not_pasted), (pasted, why, kept), "{take}");
     }
   }
 
-  /// A first launch on an account that can't paste takes its own defaults, saved: no paste, the
-  /// text kept on the clipboard. An account that can, or settings already there, as they are.
+  /// A first launch where pasting can't work saves its own defaults; settings already there stay.
   #[test]
   fn a_first_launch_that_cant_paste_takes_its_defaults() {
-    let start = |name: &str, no_paste: bool, saved: Option<&Settings>| {
+    let saved = Settings { hotkey: "f5".into(), ..Settings::default() };
+    for (name, no_paste, before, after) in [
+      ("session-first-no-paste", true, None, Settings::without_paste()),
+      ("session-first", false, None, Settings::default()),
+      ("session-saved-no-paste", true, Some(&saved), saved.clone()),
+    ] {
       let home = TempDir::new(name);
       let file = home.path().join(settings::FILE);
-      if let Some(saved) = saved {
-        saved.save(&file).unwrap();
+      if let Some(s) = before {
+        s.save(&file).unwrap();
       }
 
       let config = Config {
@@ -1844,19 +1796,10 @@ mod tests {
       let output = FakeOutput::default();
       output.log().no_paste = no_paste;
       let (tx, updates) = unbounded();
-      let session = Session::start(config, output, Box::new(move |u| _ = tx.send(u))).unwrap();
+      let _session = Session::start(config, output, Box::new(move |u| _ = tx.send(u))).unwrap();
       let first = updates.recv_timeout(Duration::from_secs(10)).expect("the first update");
-      drop(session);
-      let stored = file.exists().then(|| Settings::load(&file).0);
-      (first.settings, stored)
-    };
-    let own = Settings::without_paste();
-    assert_eq!((own.auto_paste, own.keep_in_clipboard), (false, true));
-    assert_eq!(start("session-first-no-paste", true, None), (own.clone(), Some(own)));
-    assert_eq!(start("session-first", false, None), (Settings::default(), None));
-    let saved = Settings::default();
-    let kept = start("session-saved-no-paste", true, Some(&saved));
-    assert_eq!(kept, (saved.clone(), Some(saved)), "an install's settings stay");
+      assert_eq!((first.settings, Settings::load(&file).0), (after.clone(), after), "{name}");
+    }
   }
 
   #[test]

@@ -266,9 +266,7 @@ fn start(
   // Nothing is asked at launch: General's buttons ask. Never at a launch at login.
   let pick = Pick::new(&app.hub, saved.model.as_deref(), &app.found);
   let no_model = pick.active.is_none() && pick.other.as_ref().is_none_or(|(_, on)| !on);
-  // Not for Accessibility that only an administrator can allow: the text is copied then.
-  let ax = !app.accessibility && !needs_admin();
-  let missing = ax || app.mic() != Access::Granted || no_model;
+  let missing = !app.accessibility && !needs_admin() || app.mic() != Access::Granted || no_model;
   let missing = missing && !may_launch_at_login();
   APP.with(|cell| *cell.borrow_mut() = Some(app));
   main.on_reopen(|main| open_window(main, None));
@@ -430,52 +428,18 @@ fn allow(pane: Pane) {
   }
 }
 
-/// This account can't allow Accessibility: on macOS only an administrator can (one in the admin
-/// group), elsewhere it is always allowed. Looked up once, when first missing: a change of groups
-/// takes a new login anyway. Not known: taken for an administrator, as before.
-fn needs_admin() -> bool {
-  static NEEDS: OnceLock<bool> = OnceLock::new();
-  *NEEDS.get_or_init(|| {
-    let admin = admin().unwrap_or(true);
-    if !admin {
-      info!("not an administrator: without Accessibility the text is copied");
-    }
-
-    !admin
-  })
-}
-
-/// The account is in the admin group (gid 80), by the directory's own list of its groups.
+/// Accessibility needs an administrator (the admin group, 80) to allow it: macOS.
 #[cfg(target_os = "macos")]
-fn admin() -> Option<bool> {
-  const ADMIN: libc::c_int = 80;
-  // SAFETY: getuid can't fail; getpwuid_r fills `pw` with pointers into `buf`, which outlives
-  // their use, and `found` with `&pw` or null.
-  let uid = unsafe { libc::getuid() };
-  let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
-  let mut buf = vec![0 as libc::c_char; 4096];
-  let mut found = std::ptr::null_mut();
-  let e = unsafe { libc::getpwuid_r(uid, &mut pw, buf.as_mut_ptr(), buf.len(), &mut found) };
-  if e != 0 || found.is_null() {
-    warn!("the account of uid {uid} is not known (error {e})");
-    return None;
-  }
-
-  let mut groups = [0 as libc::c_int; 1024];
-  let mut n = groups.len() as libc::c_int;
-  let base = pw.pw_gid as libc::c_int;
-  // SAFETY: `groups` holds `n` entries; getgrouplist fills up to that many and says how many.
-  if unsafe { libc::getgrouplist(pw.pw_name, base, groups.as_mut_ptr(), &mut n) } != 0 {
-    warn!("the groups of uid {uid} are not known");
-    return None;
-  }
-
-  Some(groups[..n as usize].contains(&ADMIN))
+fn needs_admin() -> bool {
+  let mut groups = [0; 64];
+  // SAFETY: getgroups writes at most `groups.len()` ids and returns how many, or -1.
+  let n = unsafe { libc::getgroups(groups.len() as _, groups.as_mut_ptr()) };
+  n >= 0 && !groups[..n as usize].contains(&80)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn admin() -> Option<bool> {
-  Some(true)
+fn needs_admin() -> bool {
+  false
 }
 
 fn request_microphone() {
@@ -551,8 +515,7 @@ impl App {
         }
 
         // A permission missing shows here and in the menu: no window opens by itself. A denied
-        // microphone sends silence: no level to show. Where only an administrator can allow
-        // Accessibility, copying is how Wavo works: nothing to ask for.
+        // microphone sends silence: no level to show.
         let denied = matches!(self.mic(), Access::Denied | Access::Restricted);
         let hint = match () {
           _ if denied => Some("allow the microphone to record".to_owned()),
@@ -697,8 +660,7 @@ impl App {
     }
   }
 
-  /// Auto-paste is on and can work: not on an account that can't allow Accessibility without it,
-  /// where the session only copies ([GuiOutput::can_paste]).
+  /// Auto-paste is on and can work, now or once Accessibility is allowed.
   fn pastes(&self, settings: &Settings) -> bool {
     settings.auto_paste && (self.accessibility || !needs_admin())
   }
@@ -788,14 +750,14 @@ impl App {
     let listening = matches!(hotkeys.listener, Listener::Starting | Listener::Active);
     let dead = hotkeys.listener == Listener::Failed && !hotkeys.fallback;
     let system = menu::System {
-      accessibility: self.accessibility,
-      needs_admin: !self.accessibility && needs_admin(),
+      // Nothing to ask for where only an administrator can allow it.
+      accessibility: self.accessibility || needs_admin(),
       hotkey_error: hotkeys.error.or(hotkeys.listener_error.filter(|_| dead)),
       hotkey_portal: nimbo::hotkey::start_asks() && !listening,
       paste_portal: focus::hidden() && !nimbo::keys::ready(),
       no_microphone: self.mic() != Access::Granted,
-      clipboard_unread: update.settings.restores_clipboard()
-        && self.pastes(&update.settings)
+      clipboard_unread: self.pastes(&update.settings)
+        && update.settings.restores_clipboard()
         && !self.clipboard,
       secure_input: hotkeys.secure_input,
     };
@@ -1358,8 +1320,7 @@ impl TextOutput for GuiOutput {
     })
   }
 
-  /// Looked at for each dictation: once an administrator allows Accessibility, it pastes again.
-  fn can_paste(&mut self) -> bool {
+  fn can_paste(&self) -> bool {
     permissions::accessibility(false) || !needs_admin()
   }
 }
@@ -1372,7 +1333,6 @@ fn not_pasted(e: paste::NotPasted) -> NotPasted {
       NotPasted::FocusChanged
     }
     paste::NotPasted::SecureField => NotPasted::SecureField,
-    paste::NotPasted::NoAccess => NotPasted::NoAccess,
     paste::NotPasted::Late => busy(),
     e => NotPasted::Failed(e.to_string()),
   }
@@ -1384,14 +1344,9 @@ fn busy() -> NotPasted {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod tests {
-  /// [super::admin] agrees with `id -G`, which asks the directory too, for the account running
-  /// the tests.
-  #[test]
-  fn admin_is_the_admin_group() {
-    let id = std::process::Command::new("id").arg("-G").output().unwrap();
-    let groups = String::from_utf8(id.stdout).unwrap();
-    let admin = groups.split_whitespace().any(|g| g == "80");
-    assert_eq!(super::admin(), Some(admin), "{groups}");
-  }
+#[test]
+fn needs_admin_is_not_in_the_admin_group() {
+  let id = std::process::Command::new("id").arg("-G").output().unwrap();
+  let groups = String::from_utf8(id.stdout).unwrap();
+  assert_eq!(needs_admin(), !groups.split_whitespace().any(|g| g == "80"), "{groups}");
 }

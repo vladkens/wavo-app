@@ -1,8 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! `settings.json` in the data home: a missing file or field is the default; a file that does not
-//! parse is copied to `settings.json.bad` and the defaults are used; one from an older Wavo is
-//! migrated and saved.
+//! parse is copied to `settings.json.bad` and the defaults are used.
 
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
@@ -21,14 +20,10 @@ pub const FILE: &str = "settings.json";
 // opens a window's menu.
 const DEFAULT_HOTKEY: &str =
   if cfg!(target_os = "macos") { "option+space" } else { "ctrl+alt+space" };
-/// The file's layout: [Settings::migrate] brings an older one up to it.
-const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-  /// A file without it predates the version 2.
-  #[serde(default = "first_schema")]
   pub schema_version: u32,
   /// A chord (`option+space`) or a modifier alone (`left_option`, `fn`), nimbo's hotkey grammar.
   pub hotkey: String,
@@ -78,14 +73,10 @@ pub enum HudPosition {
   Top,
 }
 
-fn first_schema() -> u32 {
-  1
-}
-
 impl Default for Settings {
   fn default() -> Self {
     Self {
-      schema_version: SCHEMA_VERSION,
+      schema_version: 1,
       hotkey: DEFAULT_HOTKEY.into(),
       activation: Activation::HoldOrToggle,
       microphone: Microphone::Automatic,
@@ -107,13 +98,12 @@ impl Default for Settings {
 }
 
 impl Settings {
-  /// The defaults where pasting can't work (a Mac account that isn't an administrator, without
-  /// Accessibility): no paste, the text kept on the clipboard.
+  /// The defaults where pasting can't work (a Mac account that isn't an administrator).
   pub fn without_paste() -> Self {
     Self { auto_paste: false, keep_in_clipboard: true, ..Self::default() }
   }
 
-  /// The settings at `path`, and a warning when they could not be used or, migrated, saved.
+  /// The settings at `path`, and a warning when they could not be used.
   pub fn load(path: &Path) -> (Self, Option<String>) {
     let bytes = match fs::read(path) {
       Ok(bytes) => bytes,
@@ -127,12 +117,8 @@ impl Settings {
       }
     };
 
-    match serde_json::from_slice::<Self>(&bytes) {
-      Ok(mut settings) => {
-        let saved = if settings.migrate() { settings.save(path).err() } else { None };
-        let warning = saved.map(|e| format!("save the migrated {}: {e:#}", path.display()));
-        (settings, warning)
-      }
+    match serde_json::from_slice(&bytes) {
+      Ok(settings) => (settings, None),
       Err(e) => {
         let bad = path.with_extension("json.bad");
         let _ = fs::write(&bad, &bytes);
@@ -157,22 +143,6 @@ impl Settings {
     file.sync_all()?;
     fs::rename(&tmp, path)?;
     Ok(())
-  }
-
-  /// Brings settings from an older file up to [SCHEMA_VERSION]; whether they changed.
-  fn migrate(&mut self) -> bool {
-    if self.schema_version >= SCHEMA_VERSION {
-      return false;
-    }
-
-    // 2: `keep_in_clipboard` became what it says; before, with the paste off, every dictation was
-    // left on the clipboard whatever it said, and the switch was disabled.
-    if self.schema_version < 2 && !self.auto_paste {
-      self.keep_in_clipboard = true;
-    }
-
-    self.schema_version = SCHEMA_VERSION;
-    true
   }
 
   /// The paste puts the clipboard back afterwards, which needs reading it.
@@ -243,42 +213,6 @@ mod tests {
       Settings { microphone: mic, ..Settings::default() }.save(&path).unwrap();
       assert!(fs::read_to_string(&path).unwrap().contains(&format!(r#""microphone": {stored}"#)));
     }
-  }
-
-  /// A file from before the version 2 with the paste off keeps the text on the clipboard, as that
-  /// Wavo did, and is saved so; the paste on, or a newer file, stays as it is.
-  #[test]
-  fn an_older_file_is_migrated_and_saved() {
-    let dir = TempDir::new("settings-migrate");
-    let path = dir.path().join(FILE);
-    let with = |paste: bool, keep: bool| Settings {
-      auto_paste: paste,
-      keep_in_clipboard: keep,
-      ..Settings::default()
-    };
-
-    for (stored, migrated) in [
-      (
-        r#"{"schema_version": 1, "auto_paste": false, "keep_in_clipboard": false}"#,
-        with(false, true),
-      ),
-      (r#"{"auto_paste": false}"#, with(false, true)),
-      (
-        r#"{"schema_version": 1, "auto_paste": true, "keep_in_clipboard": false}"#,
-        with(true, false),
-      ),
-      (r#"{"schema_version": 1, "auto_paste": true, "keep_in_clipboard": true}"#, with(true, true)),
-    ] {
-      fs::write(&path, stored).unwrap();
-      assert_eq!(Settings::load(&path), (migrated.clone(), None), "{stored}");
-      let saved: Settings = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-      assert_eq!(saved, migrated, "{stored} saved");
-    }
-
-    let newer = r#"{"schema_version": 2, "auto_paste": false, "keep_in_clipboard": false}"#;
-    fs::write(&path, newer).unwrap();
-    assert_eq!(Settings::load(&path), (with(false, false), None));
-    assert_eq!(fs::read_to_string(&path).unwrap(), newer, "not written");
   }
 
   #[test]
