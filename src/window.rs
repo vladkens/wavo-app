@@ -75,6 +75,8 @@ pub fn config(page: Page) -> Config {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Access {
   pub accessibility: bool,
+  /// This account can't allow Accessibility: it isn't an administrator (macOS).
+  pub needs_admin: bool,
   pub microphone: Grant,
   /// Another app holds Secure Input: the hotkey goes through its backup path.
   pub secure_input: bool,
@@ -427,14 +429,16 @@ const LOGIN_APPROVAL: &str = if cfg!(windows) {
 } else {
   "Allow Wavo in System Settings › General › Login Items."
 };
-const KEEP_HELP: &str = "Off: after the paste the clipboard gets back what it held. On: the \
-  dictated text stays on it.";
+const KEEP_HELP: &str = "On: the dictated text stays on the clipboard, pasted or not. Off: after \
+  a paste the clipboard gets back what it held; with pasting off, the text is only in History.";
 const CLIPBOARD_NOTE: &str = "Wavo can’t put the clipboard back after a paste: allow it in System \
   Settings › Privacy & Security › Paste from Other Apps.";
 const MICROPHONE_WHY: &str = "Wavo records your voice through it while you hold the shortcut; \
   the recording stays on this Mac.";
 const ACCESSIBILITY_WHY: &str = "Wavo hears the shortcut in every app and pastes the text where \
   you type through it.";
+const NO_ADMIN: &str = "You’re not an administrator on this Mac, so Wavo can’t paste for you. \
+  Turn on Keep the text on the clipboard and paste with ⌘V.";
 
 /// A triangle with "!" in it, for a permission missing.
 const WARNING: Icon = Icon::new("M12 4.5 3 19.5h18ZM12 10v4.5M12 17v.2");
@@ -491,22 +495,25 @@ impl Prefs {
       });
     });
 
+    // Both switches as stored: pasted, kept on the clipboard, or only in History.
     ui.form_section(fs, "Output", |ui| {
-      ui.form_row(fs, FormRow::new("Paste the text into the app you dictate in"), |ui| {
+      // An account that can't paste: the switch can't work there, the top's warning says why.
+      let locked = self.access.needs_admin;
+      let row = FormRow::new("Paste the text into the app you dictate in").disabled(locked);
+      ui.form_row(fs, row, |ui| {
         let mut on = self.settings.auto_paste;
         if ui.id("paste").toggle(&mut on, "").changed {
           self.edit(move |s| s.auto_paste = on);
         }
       });
 
-      // Without pasting the text only goes to the clipboard, and stays there.
-      let help = match self.access.clipboard_unread && self.settings.restores_clipboard() {
+      let restores = self.settings.restores_clipboard() && !locked;
+      let help = match self.access.clipboard_unread && restores {
         true => format!("{KEEP_HELP}\n\n{CLIPBOARD_NOTE}"),
         false => KEEP_HELP.to_owned(),
       };
       let row = FormRow::new("Keep the text on the clipboard").info(&help);
-      let row = row.disabled(!self.settings.auto_paste);
-      ui.form_row(fs, row, |ui| {
+      ui.id("keep-row").form_row(fs, row, |ui| {
         let mut on = self.settings.keep_in_clipboard;
         if ui.id("keep").toggle(&mut on, "").changed {
           self.edit(move |s| s.keep_in_clipboard = on);
@@ -518,8 +525,18 @@ impl Prefs {
   }
 
   /// While the system does not allow them, a row for the microphone and one for Accessibility.
+  /// Where only an administrator can allow Accessibility, a warning on how Wavo works then, with no
+  /// button: nothing here changes it.
   fn permissions(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    let (mic, ax) = (self.access.microphone != Grant::Granted, !self.access.accessibility);
+    let fs = &FormStyle { tile_icon: ui.theme().warning, ..*fs };
+    let locked = !self.access.accessibility && self.access.needs_admin;
+    if locked {
+      let row = FormRow::new(NO_ADMIN).tile(Tile::Icon(WARNING));
+      ui.form_section(fs, "", |ui| ui.id("no-admin").form_row(fs, row, |_| {}));
+    }
+
+    let (mic, ax) =
+      (self.access.microphone != Grant::Granted, !self.access.accessibility && !locked);
     let title = match (mic, ax) {
       (false, false) => return,
       (true, true) => "Wavo needs two permissions",
@@ -532,7 +549,6 @@ impl Prefs {
       (mic, "Microphone", MICROPHONE_WHY, "open-microphone", Pane::Microphone, ask),
       (ax, "Accessibility", ACCESSIBILITY_WHY, "open-accessibility", Pane::Accessibility, true),
     ];
-    let fs = &FormStyle { tile_icon: ui.theme().warning, ..*fs };
     ui.form_section(fs, title, |ui| {
       for (_, name, why, id, pane, ask) in rows.into_iter().filter(|r| r.0) {
         let row = FormRow::new(name).info(why).tile(Tile::Icon(WARNING));
@@ -2158,6 +2174,7 @@ mod tests {
     fn access(&self) -> Access {
       let all = Access {
         accessibility: true,
+        needs_admin: false,
         microphone: Grant::Granted,
         secure_input: false,
         clipboard_unread: false,
@@ -2465,6 +2482,7 @@ mod tests {
       let fake = Fake::default();
       let none = Access {
         accessibility: false,
+        needs_admin: false,
         microphone: Grant::NotDetermined,
         secure_input: false,
         clipboard_unread: false,
@@ -2976,6 +2994,7 @@ mod tests {
     let fake = Fake::default();
     let none = Access {
       accessibility: false,
+      needs_admin: false,
       microphone: Grant::NotDetermined,
       secure_input: false,
       clipboard_unread: false,
@@ -2999,6 +3018,89 @@ mod tests {
 
     click(&mut h, Id::of("download-model"));
     assert_eq!(h.app().page, Page::Models);
+  }
+
+  /// An account that isn't an administrator can't allow Accessibility: one warning line at the
+  /// top, no title and no button; pasting disabled, showing what is stored; keep takes a click.
+  /// Once an administrator allows it, all is as before.
+  #[test]
+  fn without_an_administrator_general_says_to_keep() {
+    let home = Home::new("window-no-admin", &TWO);
+    let fake = Fake::default();
+    let none = Access {
+      accessibility: false,
+      needs_admin: true,
+      microphone: Grant::Granted,
+      secure_input: false,
+      clipboard_unread: false,
+    };
+    fake.log().access = Some(none);
+    let mut h = home.harness(&fake, Settings::without_paste());
+    let shows = |h: &Harness<Prefs>, line: &str| a11y_line(h, line).as_deref() == Some(line);
+    let switch = |h: &Harness<Prefs>, name: &str| a11y_line(h, &format!(r#"switch "{name}""#));
+    let (paste, keep) =
+      ("Paste the text into the app you dictate in", "Keep the text on the clipboard");
+    assert_eq!(h.text(Id::of("no-admin").key("label")), Some(NO_ADMIN));
+    let lines: Vec<String> = h.a11y().lines().map(|l| l.trim().to_owned()).collect();
+    let at = lines.iter().position(|l| *l == format!(r#"static text "{NO_ADMIN}""#)).unwrap();
+    assert_eq!(lines[at - 1], r#"tab "About""#, "first on the page, no title: {lines:?}");
+    assert!(!shows(&h, r#"static text "Wavo needs a permission""#));
+    assert!(h.rect(Id::of("open-accessibility")).is_none(), "no button");
+    assert_eq!(switch(&h, paste), Some(format!(r#"switch "{paste}" off disabled"#)));
+    assert_eq!(switch(&h, keep), Some(format!(r#"switch "{keep}" on"#)));
+    click(&mut h, Id::of("paste"));
+    click(&mut h, Id::of("keep"));
+    let s = fake.log().settings.clone();
+    assert_eq!((s.auto_paste, s.keep_in_clipboard), (false, false), "paste can't change, keep can");
+    assert_eq!(switch(&h, keep), Some(format!(r#"switch "{keep}" off"#)));
+
+    // An install's paste stored on shows on, still disabled.
+    let mut h = home.harness(&fake, Settings::default());
+    assert_eq!(switch(&h, paste), Some(format!(r#"switch "{paste}" on disabled"#)));
+    assert_eq!(switch(&h, keep), Some(format!(r#"switch "{keep}" off"#)));
+
+    // The microphone missing too: its block under the warning.
+    fake.log().access = Some(Access { microphone: Grant::NotDetermined, ..none });
+    h.event(Event::Focus(true));
+    h.frame();
+    h.frame();
+    assert!(shows(&h, r#"static text "Wavo needs a permission""#));
+    assert!(h.rect(Id::of("open-microphone")).is_some() && h.rect(Id::of("no-admin")).is_some());
+
+    // An administrator allowed it.
+    fake.log().access = Some(Access { accessibility: true, needs_admin: false, ..none });
+    h.event(Event::Focus(true));
+    h.frame();
+    h.frame();
+    assert!(h.rect(Id::of("no-admin")).is_none());
+    assert_eq!(switch(&h, paste), Some(format!(r#"switch "{paste}" on"#)));
+  }
+
+  /// Both switches always take a click and show what is stored: all four ways are the person's.
+  #[test]
+  fn the_output_switches_show_what_is_stored() {
+    let home = Home::new("window-output", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    let state = |h: &Harness<Prefs>| {
+      let line = |name: &str| a11y_line(h, &format!(r#"switch "{name}""#)).unwrap();
+      let (paste, keep) = (
+        line("Paste the text into the app you dictate in"),
+        line("Keep the text on the clipboard"),
+      );
+      assert!(!paste.contains("disabled") && !keep.contains("disabled"), "{paste}; {keep}");
+      (paste.ends_with(" on"), keep.ends_with(" on"))
+    };
+    assert_eq!(state(&h), (true, false));
+    for (id, expected) in
+      [("keep", (true, true)), ("paste", (false, true)), ("keep", (false, false))]
+    {
+      click(&mut h, Id::of(id));
+      let s = &fake.log().settings;
+      assert_eq!(((s.auto_paste, s.keep_in_clipboard), state(&h)), (expected, expected), "{id}");
+    }
+
+    assert_eq!(tip(&mut h, "keep-row"), KEEP_HELP);
   }
 
   /// The devices, the permissions, launch at login and the models are read as the window opens

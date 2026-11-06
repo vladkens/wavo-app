@@ -98,6 +98,12 @@ impl Default for Settings {
 }
 
 impl Settings {
+  /// The defaults where pasting can't work (a Mac account that isn't an administrator, without
+  /// Accessibility): no paste, the text kept on the clipboard.
+  pub fn without_paste() -> Self {
+    Self { auto_paste: false, keep_in_clipboard: true, ..Self::default() }
+  }
+
   /// The settings at `path`, and a warning when they could not be used.
   pub fn load(path: &Path) -> (Self, Option<String>) {
     let bytes = match fs::read(path) {
