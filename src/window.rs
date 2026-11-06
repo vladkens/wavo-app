@@ -1646,14 +1646,13 @@ impl HistoryPage {
   /// from the anchor to it, a plain click selects it alone or, the only one selected, unselects it.
   fn select(&mut self, id: i64, mods: Modifiers) {
     let Some(i) = self.entries.iter().position(|e| e.id == id) else { return };
-    let (k, sel) = (id as u64, &mut self.selected);
-    let key = |i: usize| self.entries[i].id as u64;
-    match (mods.contains(CMD), mods.shift()) {
-      (true, _) => sel.toggle(k, i),
-      (_, true) => sel.extend(i, self.entries.len(), &key),
-      _ if sel.len() == 1 && sel.contains(k) => sel.clear(),
-      _ => sel.select(k, i),
+    let sel = &mut self.selected;
+    if !mods.contains(CMD) && !mods.shift() && sel.len() == 1 && sel.contains(id as u64) {
+      return sel.clear();
     }
+
+    let key = |i: usize| self.entries[i].id as u64;
+    sel.click(i, mods, self.entries.len(), &key);
   }
 
   /// Selects all the dictations shown, those the search found; false if there are none.
