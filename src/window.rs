@@ -347,8 +347,9 @@ impl App for Prefs {
 
   /// The file Export's or Import's panel picked; Esc, or a click on nothing above the panel
   /// under the history, unselects its dictations, Delete or Backspace (outside the search) asks to
-  /// delete them; the microphones or the lid changed: read again for the Microphone row; back in
-  /// front, from another app (System Settings, where a permission was given): [Prefs::refresh].
+  /// delete them, Cmd-A (outside the search) selects all it shows; the microphones or the lid
+  /// changed: read again for the Microphone row; back in front, from another app (System Settings,
+  /// where a permission was given): [Prefs::refresh].
   fn event(&mut self, cx: &mut Cx, ev: &Event) -> bool {
     let history = self.page == Page::History;
     match ev {
@@ -386,6 +387,15 @@ impl App for Prefs {
       {
         self.ask_delete(None);
         self.ask.is_some()
+      }
+      // In the search, Cmd-A selects its text.
+      Event::KeyDown(k)
+        if history
+          && k.key == Key::Char('a')
+          && k.mods == CMD
+          && cx.focused() != Some(Id::of("history-search")) =>
+      {
+        self.history.select_all()
       }
       Event::MouseDown { pos, .. } if history && cx.target().is_none() => {
         let above = pos.y < cx.size.h - FOOT_H - TOTAL_H;
@@ -1645,6 +1655,13 @@ impl HistoryPage {
       _ => sel.select(k, i),
     }
   }
+
+  /// Selects all the dictations shown, those the search found; false if there are none.
+  fn select_all(&mut self) -> bool {
+    let entries = &self.entries;
+    self.selected.select_all(entries.len(), &|i| entries[i].id as u64);
+    !entries.is_empty()
+  }
 }
 
 /// `file`, with `.zip` added unless it ends in it; added, to a name not taken, as the panel asked
@@ -1758,6 +1775,8 @@ enum Act {
   Request(Request),
   /// Deleting row `id` or the selection it is one of; `None`, the selection ([Prefs::ask_delete]).
   Delete(Option<i64>),
+  /// Transcribing the selection again: each one with its recording that isn't busy.
+  RetranscribeChosen,
 }
 
 /// The panel under the list, with the selected dictation's whole text and its actions.
@@ -1809,7 +1828,7 @@ impl Prefs {
     };
     let row = |ui: &mut Ui, g, i| {
       let e = entry(g, i);
-      if let Some(a) = entry_row(ui, fs, e, &RowState::of(self, e), h.db.as_deref()) {
+      if let Some(a) = entry_row(ui, fs, e, &RowState::of(self, e), h) {
         act = Some(a);
       }
     };
@@ -1949,6 +1968,15 @@ impl Prefs {
         self.shell.history(req);
       }
       Some(Act::Delete(row)) => self.ask_delete(row),
+      Some(Act::RetranscribeChosen) => {
+        h.note = None;
+        let busy = &self.status.retranscribing;
+        let chosen = h.chosen().into_iter().filter(|e| e.audio_path.is_some());
+        let ids: Vec<i64> = chosen.map(|e| e.id).filter(|id| !busy.contains(id)).collect();
+        for id in ids {
+          self.shell.history(Request::Retranscribe(id));
+        }
+      }
       None => {}
     }
   }
@@ -2009,10 +2037,11 @@ impl Prefs {
 /// A dictation as its row, its menu and the panel under the list show it: `working`, being
 /// recorded or transcribed now; the model `transcribes`; `busy`, being transcribed again, when the
 /// session refuses to change it; its previous text `restorable`; `deletable` with the selection it
-/// is one of.
+/// is one of; `several`, one of two or more selected.
 #[derive(Default)]
 struct RowState {
   selected: bool,
+  several: bool,
   playing: bool,
   working: bool,
   transcribes: bool,
@@ -2028,6 +2057,7 @@ impl RowState {
     let selected = h.selected.contains(e.id as u64);
     RowState {
       selected,
+      several: selected && h.selected.len() > 1,
       deletable: if selected { !p.selection_busy() } else { !busy },
       playing: h.playing.as_ref().is_some_and(|(id, _)| *id == e.id),
       working: busy || status.current == Some(e.id),
@@ -2045,14 +2075,14 @@ impl RowState {
 
 /// A dictation's row, all of one height: its text on a line and the details under it, Play and
 /// Copy centred at its right. A click on it selects it (tinted), for the panel under the list, as
-/// [HistoryPage::select] takes it; a right-click selects it too and opens its menu ([row_menu]),
-/// with what `db` has of it on disk.
+/// [HistoryPage::select] takes it; a right-click selects it too and opens its menu ([row_menu],
+/// or [several_menu] when it is one of several selected), with what `h` has of it on disk.
 fn entry_row(
   ui: &mut Ui,
   fs: &FormStyle,
   e: &Entry,
   st: &RowState,
-  db: Option<&History>,
+  h: &HistoryPage,
 ) -> Option<Act> {
   let (selected, playing) = (st.selected, st.playing);
   let line = row_line(e, st.working);
@@ -2094,8 +2124,12 @@ fn entry_row(
 
   // The menu's answer comes in a later pass than the press that selects the row.
   let at = ui.context_press(r.id);
-  let on_disk = || db.and_then(|db| db.audio_file(e)).is_some();
-  let chosen = ui.context_menu_at(r.id, at, || row_menu(e, st, on_disk()));
+  let on_disk = || h.db.as_deref().and_then(|db| db.audio_file(e)).is_some();
+  let recorded = || h.chosen().iter().any(|x| x.audio_path.is_some());
+  let chosen = ui.context_menu_at(r.id, at, || match st.several {
+    true => several_menu(st, recorded()),
+    false => row_menu(e, st, on_disk()),
+  });
   if let Some(a) = chosen.and_then(|item| row_act(&item, e)) {
     return Some(a);
   }
@@ -2136,6 +2170,17 @@ fn row_menu(e: &Entry, st: &RowState, on_disk: bool) -> Menu {
   Menu::new(items)
 }
 
+/// The menu of a row among several selected: what is done to all of them. Transcribe Again is on
+/// when the model transcribes, one of them is `recorded`, and none is busy, as with Delete.
+fn several_menu(st: &RowState, recorded: bool) -> Menu {
+  let again = st.transcribes && st.deletable && recorded;
+  Menu::new(vec![
+    Item::new("retranscribe-chosen", "Transcribe Again").enabled(again),
+    Item::separator(),
+    Item::new("delete", "Delete…").destructive().enabled(st.deletable),
+  ])
+}
+
 /// The act of the row menu's item `item`, whatever the row is when the answer comes: Stop, chosen
 /// as the playback ended, doesn't play it again.
 fn row_act(item: &str, e: &Entry) -> Option<Act> {
@@ -2147,6 +2192,7 @@ fn row_act(item: &str, e: &Entry) -> Option<Act> {
     "reveal" => Act::Reveal(e.id),
     "retranscribe" => Act::Request(Request::Retranscribe(e.id)),
     "restore" => Act::Request(Request::Restore(e.id)),
+    "retranscribe-chosen" => Act::RetranscribeChosen,
     "delete" => Act::Delete(Some(e.id)),
     _ => return None,
   })
@@ -3233,6 +3279,52 @@ mod tests {
     confirm(&mut h);
     let want = [Request::Delete(vec![ids[3], ids[1], ids[0]]), Request::Delete(vec![ids[2]])];
     assert_eq!(fake.log().requests[1..], want);
+  }
+
+  /// Cmd-A selects all the search shows, but in the search its text; the menu of a row among
+  /// several has only what is done to all of them, and transcribes each one again, none while one
+  /// of them is busy.
+  #[test]
+  fn the_history_selects_all_and_transcribes_several_again() {
+    let home = Home::new("window-history-all", &TWO);
+    let texts = [("Send the invoice.", 3), ("Call Anna.", 2), ("Send the report.", 1)];
+    let ids = home.dictations(&texts);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    h.native_menus();
+    tab(&mut h, Page::History);
+
+    h.key(Key::Char('a'), CMD);
+    assert_eq!(selected(&h), ids);
+    h.key(NamedKey::Escape, Modifiers::empty());
+
+    // In the search Cmd-A is its own; outside, all it found.
+    click(&mut h, Id::of("history-search"));
+    h.type_text("send");
+    h.wait(SEARCH_WAIT);
+    h.frame();
+    h.key(Key::Char('a'), CMD);
+    assert!(selected(&h).is_empty(), "the search's");
+    h.set_focus(None);
+    h.key(Key::Char('a'), CMD);
+    assert_eq!(selected(&h), [ids[0], ids[2]]);
+
+    // One of them being transcribed again: Transcribe Again and Delete are off.
+    let update = |h: &mut Harness<Prefs>, status: Status| {
+      let settings = h.app().settings.clone();
+      h.app_mut().update(&settings, &status, 0);
+      h.waker().wake();
+      h.frame();
+    };
+    update(&mut h, Status { retranscribing: vec![ids[2]], ..Status::default() });
+    let items =
+      |on| vec![("retranscribe-chosen".into(), on), ("".into(), true), ("delete".into(), on)];
+    assert_eq!(menu(&mut h, ids[0], None), items(false));
+    update(&mut h, Status::default());
+    assert_eq!(menu(&mut h, ids[0], Some("retranscribe-chosen")), items(true));
+    assert_eq!(selected(&h), [ids[0], ids[2]], "kept by the right-click");
+    let want = [Request::Retranscribe(ids[2]), Request::Retranscribe(ids[0])];
+    assert_eq!(fake.log().requests, want);
   }
 
   /// With its recording on disk a row's menu copies the recording's absolute path and shows it in
