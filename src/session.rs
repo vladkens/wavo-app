@@ -1535,6 +1535,16 @@ mod tests {
   /// nimbo's refusal without Accessibility.
   const NO_ACCESS: &str = "no Accessibility access: ⌘V can't be sent";
 
+  /// Where a dictation's text went.
+  #[derive(Debug, PartialEq)]
+  enum Went {
+    Pasted,
+    PastedAndKept,
+    Clipboard,
+    HistoryOnly,
+  }
+  use Went::*;
+
   #[derive(Clone, Default)]
   struct FakeOutput(Arc<Mutex<FakeLog>>);
 
@@ -1553,6 +1563,20 @@ mod tests {
   impl FakeOutput {
     fn log(&self) -> std::sync::MutexGuard<'_, FakeLog> {
       self.0.lock().unwrap()
+    }
+
+    /// Where the last dictation's "hello there" went; forgets it for the next one.
+    fn went(&self) -> Went {
+      let mut log = self.log();
+      let (pasted, copied) = (mem::take(&mut log.pasted), mem::take(&mut log.copied));
+      let text = "hello there";
+      match (&pasted[..], &copied[..]) {
+        ([], []) => HistoryOnly,
+        ([], [t]) if t == text => Clipboard,
+        ([(t, at, false)], []) if t == text && *at == log.targets => Pasted,
+        ([(t, at, true)], []) if t == text && *at == log.targets => PastedAndKept,
+        _ => panic!("pasted {pasted:?}, copied {copied:?}"),
+      }
     }
   }
 
@@ -1648,6 +1672,13 @@ mod tests {
       }
     }
 
+    /// Sets auto-paste and keeping in the clipboard; an edit that changes nothing sends no update.
+    fn switch(&self, paste: bool, keep: bool) {
+      let now = |u: &Update| (u.settings.auto_paste, u.settings.keep_in_clipboard) == (paste, keep);
+      self.handle.edit_settings(move |s| (s.auto_paste, s.keep_in_clipboard) = (paste, keep));
+      self.update_where("the switches", now);
+    }
+
     fn press(&self) {
       self.handle.input(Input::KeyDown { at: Instant::now(), repeat: false });
       self.handle.input(Input::KeyUp { at: Instant::now() });
@@ -1718,68 +1749,71 @@ mod tests {
     tone(seconds, 0.5)
   }
 
+  /// A session that hears speech for 10 s and transcribes it as "hello there".
+  fn hello(name: &str) -> InProcess {
+    InProcess::start(name, &Settings::default(), Some(&loud(10.0)), "hello there", &["parakeet-v3"])
+  }
+
   /// Taken for speech by the VAD; dictations of it are transcribed, kept and delivered where they
   /// started, as the switches say: pasted when on and possible, else copied when kept, else only in
-  /// the history. The history keeps why a paste was refused.
+  /// the history.
   #[test]
   fn dictations_are_transcribed_kept_and_delivered() {
-    let s = InProcess::start(
-      "session-done",
-      &Settings::default(),
-      Some(&loud(10.0)),
-      "hello there",
-      &["parakeet-v3"],
-    );
-    let (focus, off) = (NotPasted::FocusChanged, "auto-paste is off");
-    let copied = |why: &str| Some(format!("{why}; the text is on the clipboard"));
-    let (refused, moved) = (Some(focus.to_string()), copied(&focus.to_string()));
-    let (cant, cant_kept) = (Some(NO_ACCESS.to_owned()), copied(NO_ACCESS));
-    // (paste, keep, refused, can't paste): pasted, copied, why not, the history's why. Each case
-    // flips a switch: an edit that changes nothing sends no update.
-    #[rustfmt::skip]
+    let s = hello("session-done");
+    // (auto-paste, keep in clipboard, can paste): where the text went. Each row flips a switch.
     let cases = [
-      (true, true, None, false, true, false, None, None),
-      (false, true, None, false, false, true, copied(off), None),
-      (false, false, None, false, false, false, Some(off.into()), None),
-      (true, false, None, false, true, false, None, None),
-      (true, true, Some(focus.clone()), false, false, true, moved.clone(), moved),
-      (true, false, Some(focus), false, false, false, refused.clone(), refused),
-      (true, true, None, true, false, true, cant_kept.clone(), cant_kept),
-      (true, false, None, true, false, false, cant.clone(), cant),
-      (false, true, None, true, false, true, copied(off), None),
-      (false, false, None, true, false, false, Some(off.into()), None),
+      (true, true, true, PastedAndKept),
+      (false, true, true, Clipboard),
+      (false, false, true, HistoryOnly),
+      (true, false, true, Pasted),
+      (true, true, false, Clipboard),
+      (true, false, false, HistoryOnly),
+      (false, true, false, Clipboard),
+      (false, false, false, HistoryOnly),
     ];
-    for (i, (paste, keep, refuse, no_paste, pasted, copy, why, kept)) in
-      cases.into_iter().enumerate()
-    {
+    for (i, (paste, keep, can_paste, went)) in cases.into_iter().enumerate() {
       let take = i as Take + 1;
-      let now = |u: &Update| (u.settings.auto_paste, u.settings.keep_in_clipboard) == (paste, keep);
-      s.handle.edit_settings(move |s| (s.auto_paste, s.keep_in_clipboard) = (paste, keep));
-      s.update_where("the switches", now);
-      let (pastes, copies) = {
-        let mut log = s.output.log();
-        (log.refuse, log.no_paste) = (refuse, no_paste);
-        (log.pasted.len(), log.copied.len())
-      };
+      s.switch(paste, keep);
+      s.output.log().no_paste = !can_paste;
 
       let last = s.dictate(take);
-      assert_eq!((last.outcome, last.text.as_str()), (Outcome::Done, "hello there"), "{take}");
       let entry = s.kept(&last);
-      assert_eq!(
-        (entry.text.as_str(), entry.busy, entry.pasted),
-        ("hello there", false, last.pasted)
-      );
+      assert_eq!((last.outcome, last.text.as_str()), (Outcome::Done, "hello there"), "{take}");
+      assert_eq!((entry.text.as_str(), entry.busy), ("hello there", false), "{take}");
       assert_eq!(entry.model.as_deref(), Some("parakeet-tdt-0.6b-v3-Q8_0"));
-      let log = s.output.log();
-      let want: Vec<_> =
-        pasted.then(|| ("hello there".to_owned(), take as u32, keep)).into_iter().collect();
-      assert_eq!(
-        (&log.pasted[pastes..], log.copied.len() - copies),
-        (&want[..], usize::from(copy)),
-        "{take}"
-      );
-      assert_eq!((last.pasted, last.not_pasted, entry.not_pasted), (pasted, why, kept), "{take}");
+      assert_eq!(s.output.went(), went, "{take}");
+
+      let pasted = matches!(went, Pasted | PastedAndKept);
+      assert_eq!((last.pasted, entry.pasted, last.not_pasted.is_some()), (pasted, pasted, !pasted));
+      assert_eq!(entry.not_pasted.is_some(), paste && !pasted, "{take}: a refused paste");
     }
+  }
+
+  /// A dictation that isn't pasted says why; the history keeps why only for a refused paste.
+  #[test]
+  fn a_dictation_not_pasted_says_why() {
+    let s = hello("session-why");
+    s.output.log().refuse = Some(NotPasted::FocusChanged);
+    let moved = "the focus moved to another window during the dictation";
+    let moved_kept = format!("{moved}; the text is on the clipboard");
+
+    s.switch(true, true);
+    let last = s.dictate(1);
+    assert_eq!(last.not_pasted.as_ref(), Some(&moved_kept));
+    assert_eq!(s.kept(&last).not_pasted.as_ref(), Some(&moved_kept));
+    assert_eq!(s.output.went(), Clipboard);
+
+    s.switch(true, false);
+    let last = s.dictate(2);
+    assert_eq!(last.not_pasted.as_deref(), Some(moved));
+    assert_eq!(s.kept(&last).not_pasted.as_deref(), Some(moved));
+    assert_eq!(s.output.went(), HistoryOnly);
+
+    s.switch(false, true);
+    let last = s.dictate(3);
+    assert_eq!(last.not_pasted.as_deref(), Some("auto-paste is off; the text is on the clipboard"));
+    assert_eq!(s.kept(&last).not_pasted, None, "nothing was refused");
+    assert_eq!(s.output.went(), Clipboard);
   }
 
   /// A first launch where pasting can't work saves its own defaults; settings already there stay.
