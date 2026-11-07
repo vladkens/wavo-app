@@ -27,6 +27,7 @@ use wavo::hub::{self, Hub, ModelInfo};
 use crate::audio::{self, Clip, Meter, Recorder, Source};
 use crate::engine::{self, Engine, EngineError, Loader, Wavo};
 use crate::history::{Entry, History, now_ms};
+use crate::mic_start::{SlowStart, Start};
 use crate::settings::{self, Activation, Settings, language_name};
 
 /// The microphone stays open at least this long after the stop, for the end of a word the key-up
@@ -475,6 +476,7 @@ impl Session {
       model_fallback: None,
       error: None,
       settings_warning: warning,
+      slow_start: SlowStart::default(),
       observer,
       published: None,
     };
@@ -611,6 +613,7 @@ struct Controller<O: TextOutput> {
   model_fallback: Option<String>,
   error: Option<String>,
   settings_warning: Option<String>,
+  slow_start: SlowStart,
   observer: Observer,
   /// The last update's status (without the recording's time), settings and history changes.
   published: Option<(Status, Settings, u64)>,
@@ -1009,6 +1012,7 @@ impl<O: TextOutput> Controller<O> {
     let d = self.dictation.as_mut().unwrap();
     let take = d.last.take;
     let recorder = d.recorder.take().unwrap();
+    self.slow_start.note(take, Start::of(&recorder, false));
     let rec = match recorder.stop() {
       Ok(rec) => rec,
       Err(e) => {
@@ -1148,6 +1152,7 @@ impl<O: TextOutput> Controller<O> {
   fn cancel(&mut self) {
     let d = self.dictation.as_mut().unwrap();
     if let Some(recorder) = d.recorder.take() {
+      self.slow_start.note(d.last.take, Start::of(&recorder, true));
       let _ = recorder.stop();
     }
 
@@ -1331,6 +1336,7 @@ impl<O: TextOutput> Controller<O> {
     let mut warnings: Vec<String> =
       self.settings_warning.iter().chain(&self.model_fallback).cloned().collect();
     warnings.extend(d.map_or(&self.last_warnings, |d| &d.warnings).iter().cloned());
+    warnings.extend(self.slow_start.warning());
     let engine = self.engine.as_ref().map_or_else(EngineStatus::default, |l| {
       let s = l.engine.status();
       let model = Some(l.name.clone());

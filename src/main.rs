@@ -12,6 +12,7 @@ mod engine;
 mod history;
 mod hud;
 mod menu;
+mod mic_start;
 mod session;
 mod settings;
 #[cfg(test)]
