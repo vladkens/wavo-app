@@ -1383,15 +1383,16 @@ impl<O: TextOutput> Controller<O> {
 /// suspended PipeWire node), and a replug wouldn't help them.
 #[derive(Debug, Default)]
 struct SlowStart {
-  /// By name.
+  /// By the device's ID, else its name.
   devices: HashMap<String, Starts>,
-  /// The device of the last recording: only its warning shows.
-  device: Option<String>,
+  /// The device of the last recording, its key and name: only its warning shows.
+  device: Option<(String, String)>,
 }
 
 /// A recording's start, as its recorder tells at the stop.
 struct Start<'a> {
   device: &'a str,
+  id: Option<&'a str>,
   transport: Transport,
   /// The first samples came this long after the open began.
   heard: Option<Duration>,
@@ -1407,6 +1408,7 @@ impl<'a> Start<'a> {
   fn of(recorder: &'a Recorder, cancelled: bool) -> Self {
     Self {
       device: recorder.device(),
+      id: recorder.id(),
       transport: recorder.transport(),
       heard: recorder.started_in(),
       open: recorder.opened().elapsed(),
@@ -1429,13 +1431,14 @@ impl SlowStart {
       return false;
     }
 
-    self.device = Some(start.device.to_owned());
+    let key = start.id.unwrap_or(start.device).to_owned();
+    self.device = Some((key.clone(), start.device.to_owned()));
     if start.transport != Transport::Usb || start.gave_way {
       return false;
     }
 
     // Stopped before any sound: a start at least that slow, which counts only past the limit.
-    let starts = self.devices.entry(start.device.to_owned()).or_default();
+    let starts = self.devices.entry(key).or_default();
     let limit = |b| start.open < b + SLOWER_BY;
     if start.heard.is_none() && starts.baseline.is_none_or(limit) {
       return false;
@@ -1452,8 +1455,8 @@ impl SlowStart {
   /// The menu leaves out the name in brackets where the line would run past its width; the log
   /// keeps it.
   fn warning(&self) -> Option<String> {
-    let device = self.device.as_ref()?;
-    let starts = self.devices.get(device).filter(|s| s.slow)?;
+    let (key, device) = self.device.as_ref()?;
+    let starts = self.devices.get(key).filter(|s| s.slow)?;
     let (now, was) = (seconds(median(&starts.last)), seconds(starts.baseline?));
     Some(format!("Replug the mic ({device}): starts in {now}, was {was}"))
   }
@@ -1497,7 +1500,7 @@ impl Starts {
 
     // A whole window faster: the new normal. Fewer may be another app holding the device open.
     let (full, now) = (self.last.len() == WINDOW, median(&self.last));
-    if full && now < baseline.saturating_sub(SLOWER_BY / 2) {
+    if full && self.last.iter().all(|&d| d < baseline.saturating_sub(SLOWER_BY / 2)) {
       (self.baseline, self.slow) = (Some(now), false);
       return false;
     }
@@ -2352,7 +2355,7 @@ mod tests {
   fn start(device: &str, transport: Transport, ms: u64) -> Start<'_> {
     let after = Duration::from_millis(ms);
     let (heard, open, gave_way, cancelled) = (Some(after), after, false, false);
-    Start { device, transport, heard, open, gave_way, cancelled }
+    Start { device, id: None, transport, heard, open, gave_way, cancelled }
   }
 
   /// `ms` starts on the USB `device`: how many raised the warning.
@@ -2392,8 +2395,10 @@ mod tests {
     let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;
     assert_eq!(items[1].label, "⚠︎ Replug the mic: starts in 0.6 s, was 0.4 s");
 
-    // Another device records: no warning; each keeps its own.
+    // Another device records, one of the same name too: no warning; each keeps its own.
     assert_eq!(starts(&mut s, elgato, level(300, 5)), 0);
+    assert_eq!(s.warning(), None);
+    s.note(1, Start { id: Some("usb-2"), ..start(RODE, Transport::Usb, 610) });
     assert_eq!(s.warning(), None);
     s.note(1, start(RODE, Transport::Usb, 610));
     assert_eq!(s.warning().as_deref(), Some(warning));
@@ -2408,8 +2413,8 @@ mod tests {
   }
 
   /// A climb that comes back near the normal clears the warning and keeps the normal; a second
-  /// climb warns again. A few very fast starts (another app holding the device open) are no new
-  /// normal.
+  /// climb warns again. Fast starts for a while (another app holding the device open) are no new
+  /// normal, a whole window of them (a replug) is.
   #[test]
   fn a_cleared_warning_comes_back_with_the_next_climb() {
     let mut s = SlowStart::default();
@@ -2422,8 +2427,10 @@ mod tests {
     assert!(s.warning().is_some());
 
     let mut s = SlowStart::default();
-    starts(&mut s, RODE, level(359, 20).chain(level(10, 3)).chain(level(359, 20)));
-    assert_eq!((baseline(&s), s.warning()), (Some(359), None));
+    let held = level(359, 20).chain(level(10, 11)).chain(level(359, 20));
+    assert_eq!((starts(&mut s, RODE, held), baseline(&s)), (0, Some(359)));
+    assert_eq!((starts(&mut s, RODE, level(83, 19)), baseline(&s)), (0, Some(359)));
+    assert_eq!((starts(&mut s, RODE, level(83, 1)), baseline(&s)), (0, Some(83)));
   }
 
   /// Only a kept recording's start counts: not a cancelled or aborted one, nor one after the chosen

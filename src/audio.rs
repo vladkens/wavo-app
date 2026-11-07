@@ -94,6 +94,7 @@ pub struct Device {
 }
 
 /// A cpal input, or the tests' stand-in for one.
+#[derive(Clone)]
 struct Input<D = cpal::Device> {
   id: Option<String>,
   name: String,
@@ -119,6 +120,11 @@ impl<D> Input<D> {
       Some(id) => self.id.as_ref() == Some(id),
       None => self.name == choice.name,
     }
+  }
+
+  /// The same input with what opening it made in its device's place.
+  fn with<T>(self, device: T) -> Input<T> {
+    Input { id: self.id, name: self.name, transport: self.transport, device }
   }
 }
 
@@ -371,13 +377,13 @@ impl GaveWay {
   }
 }
 
-/// Opens `mic` with `open`: its name and transport, what `open` made, and a warning when a chosen
-/// device fails and the system's input records instead ([in_use]), as when it is missing
-/// ([GaveWay]). The choice stays: once the device is back, the next recording uses it.
+/// Opens `mic` with `open`: the input with what `open` made, and a warning when a chosen device
+/// fails and the system's input records instead ([in_use]), as when it is missing ([GaveWay]). The
+/// choice stays: once the device is back, the next recording uses it.
 fn open_device<T>(
   mic: &Microphone,
   open: impl Fn(&cpal::Device) -> Result<T>,
-) -> Result<(String, Transport, T, Option<String>)> {
+) -> Result<(Input<T>, Option<String>)> {
   let host = cpal::default_host();
   // The default first: usually it is the one, and listing every device is slower.
   let default = host.default_input_device().and_then(Input::new);
@@ -398,12 +404,12 @@ fn open_input<D: Clone, T>(
   all: impl FnOnce() -> Vec<Input<D>>,
   instead: impl FnOnce(Option<Input<D>>) -> Result<Option<Input<D>>>,
   open: impl Fn(&D) -> Result<T>,
-) -> Result<(String, Transport, T, Option<String>)> {
+) -> Result<(Input<T>, Option<String>)> {
   let mut gave_way = None;
   if let Microphone::Device(choice) = mic {
     // The chosen one, and whether it is the system's input.
     let (found, system) = match &default {
-      Some(d) if d.is(choice) => (Some((d.device.clone(), d.name.clone(), d.transport)), true),
+      Some(d) if d.is(choice) => (Some(d.clone()), true),
       _ => {
         // By ID among all, an unlisted one too; by name among the listed: ALSA names a card's PCMs
         // after the card, and the one listed is the best.
@@ -415,13 +421,13 @@ fn open_input<D: Clone, T>(
         // Found by its name, its ID gone stale, it may be the system's input all the same.
         let same = |(x, d): (&Input<D>, &Input<D>)| x.id.is_some() && x.id == d.id;
         let system = found.as_ref().zip(default.as_ref()).is_some_and(same);
-        (found.map(|x| (x.device, x.name, x.transport)), system)
+        (found, system)
       }
     };
 
     let why = match found {
-      Some((device, name, transport)) => match open(&device) {
-        Ok(value) => return Ok((name, transport, value, None)),
+      Some(x) => match open(&x.device) {
+        Ok(value) => return Ok((x.with(value), None)),
         Err(e) => GaveWay::Failed(choice.name.clone(), format!("{e:#}")),
       },
       None => GaveWay::NotConnected(choice.name.clone()),
@@ -435,19 +441,20 @@ fn open_input<D: Clone, T>(
     gave_way = Some(why);
   }
 
-  let Some(Input { name, device, transport, .. }) = instead(default)? else {
+  let Some(input) = instead(default)? else {
     match gave_way {
       Some(w) => bail!("{w}, and there is no default microphone"),
       None => bail!("no microphone found"),
     }
   };
 
-  let value = open(&device).map_err(|e| match &gave_way {
+  let name = &input.name;
+  let value = open(&input.device).map_err(|e| match &gave_way {
     Some(w) => anyhow!("{w}, and the default microphone {name:?} failed too: {e:#}"),
     None => anyhow!("could not open the microphone {name:?}: {e:#}"),
   })?;
-  let warning = gave_way.and_then(|w| w.warning(&name));
-  Ok((name, transport, value, warning))
+  let warning = gave_way.and_then(|w| w.warning(name));
+  Ok((input.with(value), warning))
 }
 
 /// The first device query in a process costs CoreAudio 40–50 ms: done ahead of the first
@@ -517,6 +524,8 @@ struct Capture {
   rate: u32,
   channels: usize,
   device: String,
+  /// The device's ID, as [Input] has it.
+  id: Option<String>,
   transport: Transport,
   warning: Option<String>,
   /// The source's first fatal error: capture has stopped.
@@ -564,9 +573,10 @@ fn capture(source: &Source) -> Result<(Capture, Consumer<f32>)> {
     Source::Mic(mic) => mic,
   };
 
-  let (device, transport, (mut capture, ring), warning) =
-    open_device(mic, |device| open_stream(device, first.clone()))?;
-  (capture.device, capture.transport, capture.warning) = (device, transport, warning);
+  let (input, warning) = open_device(mic, |device| open_stream(device, first.clone()))?;
+  let (mut capture, ring) = input.device;
+  (capture.device, capture.id, capture.transport) = (input.name, input.id, input.transport);
+  capture.warning = warning;
   Ok((capture, ring))
 }
 
@@ -581,8 +591,9 @@ fn open_stream(device: &cpal::Device, first: Arc<FirstSound>) -> Result<(Capture
   let stream = by_format!(format, build(device, config, producer, failure.clone(), first.clone()))?;
   stream.play().context("start the input stream")?;
   let feed = Feed::Mic { _stream: stream };
-  let (device, transport, warning) = (String::new(), Transport::Unknown, None);
-  let capture = Capture { rate, channels, device, transport, warning, failure, first, _feed: feed };
+  let (device, id, transport, warning) = (String::new(), None, Transport::Unknown, None);
+  let capture =
+    Capture { rate, channels, device, id, transport, warning, failure, first, _feed: feed };
   Ok((capture, ring))
 }
 
@@ -669,6 +680,7 @@ fn fake_capture(path: &Path, first: Arc<FirstSound>) -> Result<(Capture, Consume
     rate: SAMPLE_RATE,
     channels: 1,
     device: format!("fake mic ({name})"),
+    id: None,
     transport: Transport::Virtual,
     warning: None,
     failure: Arc::default(),
@@ -768,6 +780,10 @@ impl Recorder {
   /// The device actually recording.
   pub fn device(&self) -> &str {
     &self.capture.as_ref().unwrap().device
+  }
+
+  pub fn id(&self) -> Option<&str> {
+    self.capture.as_ref().unwrap().id.as_deref()
   }
 
   pub fn transport(&self) -> Transport {
@@ -1564,7 +1580,7 @@ mod tests {
         }
       };
       let got = open_input(&mic, all().into_iter().nth(default), all, Ok, open);
-      let got = got.map(|(name, _, (), warning)| (name, warning)).map_err(|e| format!("{e:#}"));
+      let got = got.map(|(x, warning)| (x.name, warning)).map_err(|e| format!("{e:#}"));
       (got, tried.into_inner())
     };
 
