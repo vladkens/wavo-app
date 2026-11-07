@@ -629,17 +629,85 @@ fn reason_width(text: f32) -> f32 {
   (REASON_X + text + PAD).clamp(WIDTH, MAX_WIDTH)
 }
 
+/// A level (linear RMS) on a dB scale: −60 dBFS and below is the shortest bar, −12 the tallest.
+fn bar_height(level: f32) -> f32 {
+  let db = 20.0 * level.max(1e-6).log10();
+  lerp(BAR_MIN, BAR_MAX, ((db + 60.0) / 48.0).clamp(0.0, 1.0))
+}
+
+/// Bar `i` of the wave: low to high and back, each bar [`WAVE_STAGGER`] after the one before.
+fn wave(i: usize, elapsed: Duration) -> f32 {
+  let Some(t) = elapsed.checked_sub(WAVE_STAGGER * i as u32) else { return WAVE_LOW };
+  let half = WAVE_HALF.as_secs_f32();
+  let phase = t.as_secs_f32() % (2.0 * half) / half;
+  lerp(WAVE_LOW, WAVE_HIGH, ease(if phase <= 1.0 { phase } else { 2.0 - phase }))
+}
+
+fn lerp(a: f32, b: f32, k: f32) -> f32 {
+  a + (b - a) * k
+}
+
+/// How far `t` is into `span`, eased in and out.
+fn eased(t: Duration, span: Duration) -> f32 {
+  ease((t.as_secs_f32() / span.as_secs_f32()).clamp(0.0, 1.0))
+}
+
+fn ease(t: f32) -> f32 {
+  t * t * (3.0 - 2.0 * t)
+}
+
+// MARK: Gradient
+
+/// The gradient of a pill `width` points wide at `phase`: straight RGBA rows, a pixel per pixel
+/// at `scale`, drawn 1:1. A few slow sines pick each pixel's place on [COOL]; it thins out to
+/// nothing at the pill's edge (a rounded clip it doesn't have), where [GROUND] and the edge take
+/// over.
+fn field(width: f32, phase: f32, scale: f32) -> (usize, usize, Vec<u8>) {
+  let (cols, rows) = ((width * scale).ceil() as usize, (HEIGHT * scale).round() as usize);
+  let r = HEIGHT / 2.0;
+  let at = |i: usize| (i as f32 + 0.5) / scale;
+  // Each sine is of a column's angle plus a row's: sin(a + b) = sin a cos b + cos a sin b, so
+  // only columns and rows take sines, not pixels.
+  let columns: Vec<_> = (0..cols)
+    .map(|i| {
+      let u = at(i) / WIDTH;
+      ((u * 1.9 - 1.25 + phase * 0.8).sin_cos(), (u * 6.3 + phase * 1.3).sin_cos())
+    })
+    .collect();
+
+  let mut px = Vec::with_capacity(cols * rows * 4);
+  for j in 0..rows {
+    let (y, v) = (at(j), at(j) / HEIGHT);
+    let (sb, cb) = (0.6 * (v * 2.6 + phase * 0.55).sin()).sin_cos();
+    let (sd, cd) = (-v * 3.0).sin_cos();
+    for (i, ((sa, ca), (sc, cc))) in columns.iter().enumerate() {
+      let t = 0.44 + 0.36 * (sa * cb + ca * sb) + 0.16 * (v - 0.5) + 0.07 * (sc * cd + cc * sd);
+      let c = SHADES[((t * 0.92).clamp(0.0, 1.0) * 1023.0).round() as usize];
+
+      // Opaque a point inside the pill, the edge's width: the rows along the top and bottom too.
+      let x = at(i);
+      let dx = (r - x).max(x - (width - r)).max(0.0);
+      let inside = r - (dx * dx + (y - r) * (y - r)).sqrt();
+      px.extend_from_slice(&[c[0], c[1], c[2], (inside.clamp(0.0, 1.0) * 255.0) as u8]);
+    }
+  }
+
+  (cols, rows, px)
+}
+
 /// [COOL] from 0 to 1, mixed in OKLCH, for a lookup per pixel.
 static SHADES: LazyLock<Vec<[u8; 3]>> = LazyLock::new(|| {
-  let shade = |k| srgb(lch_ramp(&COOL, k as f32 / 1023.0)).map(|v| v.round() as u8);
+  let shade = |k| srgb(cool(k as f32 / 1023.0)).map(|v| v.round() as u8);
   (0..1024).map(shade).collect()
 });
 
-/// `stops` at `t`, mixed in OKLCH: hue the short way round, so no grey between two colours.
-fn lch_ramp(stops: &[(f32, u32)], t: f32) -> [f32; 3] {
-  let (a, b, k) = segment(stops, t);
+/// [COOL] at `t`, 0..1, mixed in OKLCH: hue the short way round, so no grey between two colours.
+fn cool(t: f32) -> [f32; 3] {
+  let t = t.clamp(0.0, 1.0);
+  let i = COOL.iter().position(|(at, _)| t <= *at).unwrap_or(COOL.len() - 1).max(1);
+  let ((t0, a), (t1, b)) = (COOL[i - 1], COOL[i]);
   let ([l0, c0, h0], [l1, c1, h1]) = (oklch(a), oklch(b));
-  let turn = (h1 - h0 + 540.0) % 360.0 - 180.0;
+  let (k, turn) = ((t - t0) / (t1 - t0), (h1 - h0 + 540.0) % 360.0 - 180.0);
   [lerp(l0, l1, k), lerp(c0, c1, k), h0 + turn * k]
 }
 
@@ -680,78 +748,6 @@ fn srgb([l, mut c, h]: [f32; 3]) -> [f32; 3] {
 
     c *= 0.97;
   }
-}
-
-/// The gradient of a pill `width` points wide at `phase`: straight RGBA rows, a pixel per pixel
-/// at `scale`, drawn 1:1. A few slow sines pick each pixel's place on [COOL]; it thins out to
-/// nothing at the pill's edge (a rounded clip it doesn't have), where [GROUND] and the edge take
-/// over.
-fn field(width: f32, phase: f32, scale: f32) -> (usize, usize, Vec<u8>) {
-  let (cols, rows) = ((width * scale).ceil() as usize, (HEIGHT * scale).round() as usize);
-  let r = HEIGHT / 2.0;
-  let at = |i: usize| (i as f32 + 0.5) / scale;
-  // Each sine is of a column's angle plus a row's: sin(a + b) = sin a cos b + cos a sin b, so
-  // only columns and rows take sines, not pixels.
-  let columns: Vec<_> = (0..cols)
-    .map(|i| {
-      let u = at(i) / WIDTH;
-      ((u * 1.9 - 1.25 + phase * 0.8).sin_cos(), (u * 6.3 + phase * 1.3).sin_cos())
-    })
-    .collect();
-
-  let mut px = Vec::with_capacity(cols * rows * 4);
-  for j in 0..rows {
-    let (y, v) = (at(j), at(j) / HEIGHT);
-    let (sb, cb) = (0.6 * (v * 2.6 + phase * 0.55).sin()).sin_cos();
-    let (sd, cd) = (-v * 3.0).sin_cos();
-    for (i, ((sa, ca), (sc, cc))) in columns.iter().enumerate() {
-      let t = 0.44 + 0.36 * (sa * cb + ca * sb) + 0.16 * (v - 0.5) + 0.07 * (sc * cd + cc * sd);
-      let c = SHADES[((t * 0.92).clamp(0.0, 1.0) * 1023.0).round() as usize];
-
-      // Opaque a point inside the pill, the edge's width: the rows along the top and bottom too.
-      let x = at(i);
-      let dx = (r - x).max(x - (width - r)).max(0.0);
-      let inside = r - (dx * dx + (y - r) * (y - r)).sqrt();
-      px.extend_from_slice(&[c[0], c[1], c[2], (inside.clamp(0.0, 1.0) * 255.0) as u8]);
-    }
-  }
-
-  (cols, rows, px)
-}
-
-/// The two stops around `t` and how far it is from the first to the second.
-fn segment(stops: &[(f32, u32)], t: f32) -> (u32, u32, f32) {
-  let t = t.clamp(0.0, 1.0);
-  let i = stops.iter().position(|(at, _)| t <= *at).unwrap_or(stops.len() - 1).max(1);
-  let ((t0, a), (t1, b)) = (stops[i - 1], stops[i]);
-  (a, b, (t - t0) / (t1 - t0))
-}
-
-/// A level (linear RMS) on a dB scale: −60 dBFS and below is the shortest bar, −12 the tallest.
-fn bar_height(level: f32) -> f32 {
-  let db = 20.0 * level.max(1e-6).log10();
-  lerp(BAR_MIN, BAR_MAX, ((db + 60.0) / 48.0).clamp(0.0, 1.0))
-}
-
-/// Bar `i` of the wave: low to high and back, each bar [`WAVE_STAGGER`] after the one before.
-fn wave(i: usize, elapsed: Duration) -> f32 {
-  let Some(t) = elapsed.checked_sub(WAVE_STAGGER * i as u32) else { return WAVE_LOW };
-  let half = WAVE_HALF.as_secs_f32();
-  let phase = t.as_secs_f32() % (2.0 * half) / half;
-  lerp(WAVE_LOW, WAVE_HIGH, ease(if phase <= 1.0 { phase } else { 2.0 - phase }))
-}
-
-fn lerp(a: f32, b: f32, k: f32) -> f32 {
-  a + (b - a) * k
-}
-
-/// How far `t` is into `span`, eased in and out.
-fn eased(t: Duration, span: Duration) -> f32 {
-  ease((t.as_secs_f32() / span.as_secs_f32()).clamp(0.0, 1.0))
-}
-
-fn ease(t: f32) -> f32 {
-  t * t * (3.0 - 2.0 * t)
 }
 
 #[cfg(test)]
@@ -829,6 +825,11 @@ mod tests {
       let failed = Status { error: Some(error.into()), ..done.clone() };
       assert_eq!(said(&failed, Some(&done), true).as_deref(), Some(expected), "{error}");
     }
+  }
+
+  fn recording(warning: Option<&str>) -> Show {
+    let warning = warning.map(str::to_owned);
+    Show::Recording { meter: None, device: "Mic".into(), seconds: 7.0, warning }
   }
 
   /// What the HUD says of a dictation that ended as `last`, made by [after] as in the app.
@@ -967,9 +968,7 @@ mod tests {
   #[test]
   fn frames_come_only_when_something_changes() {
     let (mut h, _) = hud();
-    let recording =
-      Show::Recording { meter: None, device: "Mic".into(), seconds: 1.0, warning: None };
-    h.app_mut().show(recording);
+    h.app_mut().show(recording(None));
     h.wait(ms(300));
     let frames = h.wait(ms(1000));
     assert!((28..=32).contains(&frames), "{frames} a second");
@@ -996,9 +995,7 @@ mod tests {
     assert!(before > 10.0 && (before - after).abs() < 2.0, "{before} {after}");
 
     let (mut h, _) = hud();
-    let recording =
-      Show::Recording { meter: None, device: "Mic".into(), seconds: 1.0, warning: None };
-    h.app_mut().show(recording);
+    h.app_mut().show(recording(None));
     h.wait(ms(300));
     h.app_mut().show(Show::Error(too_busy()));
     h.wait(RESIZE / 2);
@@ -1015,12 +1012,6 @@ mod tests {
   /// `WAVO_SHOTS` set (`make shots`), written there.
   #[test]
   fn every_state_renders() {
-    let recording = |warning: Option<&str>| Show::Recording {
-      meter: None,
-      device: "Mic".into(),
-      seconds: 7.0,
-      warning: warning.map(str::to_owned),
-    };
     let states = [
       ("recording", vec![recording(None)]),
       ("transcribing", vec![recording(None), Show::Transcribing(None)]),
