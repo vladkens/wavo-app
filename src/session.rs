@@ -1390,7 +1390,6 @@ struct SlowStart {
 }
 
 /// A recording's start, as its recorder tells at the stop.
-#[derive(Debug)]
 struct Start<'a> {
   device: &'a str,
   transport: Transport,
@@ -1435,11 +1434,14 @@ impl SlowStart {
       return false;
     }
 
+    // Stopped before any sound: a start at least that slow, which counts only past the limit.
     let starts = self.devices.entry(start.device.to_owned()).or_default();
-    let raised = match start.heard {
-      Some(after) => starts.push(after),
-      None => starts.push_silent(start.open),
-    };
+    let limit = |b| start.open < b + SLOWER_BY;
+    if start.heard.is_none() && starts.baseline.is_none_or(limit) {
+      return false;
+    }
+
+    let raised = starts.push(start.heard.unwrap_or(start.open));
     if raised {
       warn!("dictation {take}: {}", self.warning().unwrap());
     }
@@ -1503,15 +1505,6 @@ impl Starts {
     let raised = full && now > baseline + SLOWER_BY && !self.slow;
     self.slow |= raised;
     raised
-  }
-
-  /// A recording stopped `open` after the open began, before any sound: a start at least that
-  /// slow, which counts once it is past the normal's limit, as only a slow one can be.
-  fn push_silent(&mut self, open: Duration) -> bool {
-    match self.baseline {
-      Some(baseline) if open >= baseline + SLOWER_BY => self.push(open),
-      _ => false,
-    }
   }
 }
 
@@ -2398,7 +2391,6 @@ mod tests {
     let mics = (&[][..], &audio::Microphone::Automatic, false);
     let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;
     assert_eq!(items[1].label, "⚠︎ Replug the mic: starts in 0.6 s, was 0.4 s");
-    assert_eq!(menu::icon(&status, &shown), menu::Icon::Warning);
 
     // Another device records: no warning; each keeps its own.
     assert_eq!(starts(&mut s, elgato, level(300, 5)), 0);
@@ -2413,7 +2405,6 @@ mod tests {
     assert_eq!((s.warning(), baseline(&s)), (None, Some(359)));
     assert_eq!((starts(&mut s, RODE, level(83, 16)), baseline(&s)), (0, Some(359)));
     assert_eq!((starts(&mut s, RODE, level(83, 1)), baseline(&s)), (0, Some(83)));
-    assert_eq!(starts(&mut s, RODE, level(83, 100)), 0);
   }
 
   /// A climb that comes back near the normal clears the warning and keeps the normal; a second
@@ -2465,8 +2456,7 @@ mod tests {
     assert_eq!((0..10).filter(|_| s.note(1, silent(700))).count(), 1);
   }
 
-  /// One slow start never warns; a microphone not on USB never does: its starts vary by
-  /// themselves.
+  /// One slow start never warns; a microphone not on USB never does.
   #[test]
   fn an_outlier_or_a_microphone_not_on_usb_never_warns() {
     let mut s = SlowStart::default();

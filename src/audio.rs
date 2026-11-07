@@ -527,7 +527,6 @@ struct Capture {
 
 /// When the first samples came, from the start of opening the microphone: set once by the thread
 /// that delivers them, without locks.
-#[derive(Debug)]
 struct FirstSound {
   opened: Instant,
   /// Microseconds, 0 until then.
