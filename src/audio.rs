@@ -7,7 +7,7 @@
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -371,13 +371,13 @@ impl GaveWay {
   }
 }
 
-/// Opens `mic` with `open`: its name, what `open` made, and a warning when a chosen device fails
-/// and the system's input records instead ([in_use]), as when it is missing ([GaveWay]). The
-/// choice stays: once the device is back, the next recording uses it.
+/// Opens `mic` with `open`: its name and transport, what `open` made, and a warning when a chosen
+/// device fails and the system's input records instead ([in_use]), as when it is missing
+/// ([GaveWay]). The choice stays: once the device is back, the next recording uses it.
 fn open_device<T>(
   mic: &Microphone,
   open: impl Fn(&cpal::Device) -> Result<T>,
-) -> Result<(String, T, Option<String>)> {
+) -> Result<(String, Transport, T, Option<String>)> {
   let host = cpal::default_host();
   // The default first: usually it is the one, and listing every device is slower.
   let default = host.default_input_device().and_then(Input::new);
@@ -398,12 +398,12 @@ fn open_input<D: Clone, T>(
   all: impl FnOnce() -> Vec<Input<D>>,
   instead: impl FnOnce(Option<Input<D>>) -> Result<Option<Input<D>>>,
   open: impl Fn(&D) -> Result<T>,
-) -> Result<(String, T, Option<String>)> {
+) -> Result<(String, Transport, T, Option<String>)> {
   let mut gave_way = None;
   if let Microphone::Device(choice) = mic {
     // The chosen one, and whether it is the system's input.
     let (found, system) = match &default {
-      Some(d) if d.is(choice) => (Some((d.device.clone(), d.name.clone())), true),
+      Some(d) if d.is(choice) => (Some((d.device.clone(), d.name.clone(), d.transport)), true),
       _ => {
         // By ID among all, an unlisted one too; by name among the listed: ALSA names a card's PCMs
         // after the card, and the one listed is the best.
@@ -415,13 +415,13 @@ fn open_input<D: Clone, T>(
         // Found by its name, its ID gone stale, it may be the system's input all the same.
         let same = |(x, d): (&Input<D>, &Input<D>)| x.id.is_some() && x.id == d.id;
         let system = found.as_ref().zip(default.as_ref()).is_some_and(same);
-        (found.map(|x| (x.device, x.name)), system)
+        (found.map(|x| (x.device, x.name, x.transport)), system)
       }
     };
 
     let why = match found {
-      Some((device, name)) => match open(&device) {
-        Ok(value) => return Ok((name, value, None)),
+      Some((device, name, transport)) => match open(&device) {
+        Ok(value) => return Ok((name, transport, value, None)),
         Err(e) => GaveWay::Failed(choice.name.clone(), format!("{e:#}")),
       },
       None => GaveWay::NotConnected(choice.name.clone()),
@@ -435,7 +435,7 @@ fn open_input<D: Clone, T>(
     gave_way = Some(why);
   }
 
-  let Some(Input { name, device, .. }) = instead(default)? else {
+  let Some(Input { name, device, transport, .. }) = instead(default)? else {
     match gave_way {
       Some(w) => bail!("{w}, and there is no default microphone"),
       None => bail!("no microphone found"),
@@ -447,7 +447,7 @@ fn open_input<D: Clone, T>(
     None => anyhow!("could not open the microphone {name:?}: {e:#}"),
   })?;
   let warning = gave_way.and_then(|w| w.warning(&name));
-  Ok((name, value, warning))
+  Ok((name, transport, value, warning))
 }
 
 /// The first device query in a process costs CoreAudio 40–50 ms: done ahead of the first
@@ -517,10 +517,39 @@ struct Capture {
   rate: u32,
   channels: usize,
   device: String,
+  transport: Transport,
   warning: Option<String>,
   /// The source's first fatal error: capture has stopped.
   failure: Arc<OnceLock<String>>,
+  first: Arc<FirstSound>,
   _feed: Feed,
+}
+
+/// When the first samples came, from the start of opening the microphone: set once by the thread
+/// that delivers them, without locks.
+#[derive(Debug)]
+struct FirstSound {
+  opened: Instant,
+  /// Microseconds, 0 until then.
+  after: AtomicU64,
+}
+
+impl FirstSound {
+  fn new() -> Arc<Self> {
+    Arc::new(Self { opened: Instant::now(), after: AtomicU64::new(0) })
+  }
+
+  fn heard(&self) {
+    if self.after.load(Ordering::Relaxed) == 0 {
+      let us = self.opened.elapsed().as_micros().max(1) as u64;
+      self.after.store(us, Ordering::Relaxed);
+    }
+  }
+
+  fn after(&self) -> Option<Duration> {
+    let us = self.after.load(Ordering::Relaxed);
+    (us > 0).then(|| Duration::from_micros(us))
+  }
 }
 
 enum Feed {
@@ -529,17 +558,20 @@ enum Feed {
 }
 
 fn capture(source: &Source) -> Result<(Capture, Consumer<f32>)> {
+  // From here: a chosen device that fails first delays the sound too.
+  let first = FirstSound::new();
   let mic = match source {
-    Source::File(path) => return fake_capture(path),
+    Source::File(path) => return fake_capture(path, first),
     Source::Mic(mic) => mic,
   };
 
-  let (device, (mut capture, ring), warning) = open_device(mic, open_stream)?;
-  (capture.device, capture.warning) = (device, warning);
+  let (device, transport, (mut capture, ring), warning) =
+    open_device(mic, |device| open_stream(device, first.clone()))?;
+  (capture.device, capture.transport, capture.warning) = (device, transport, warning);
   Ok((capture, ring))
 }
 
-fn open_stream(device: &cpal::Device) -> Result<(Capture, Consumer<f32>)> {
+fn open_stream(device: &cpal::Device, first: Arc<FirstSound>) -> Result<(Capture, Consumer<f32>)> {
   let supported = device.default_input_config().context("input format")?;
   let config = supported.config();
   let (rate, channels) = (config.sample_rate, config.channels as usize);
@@ -547,11 +579,11 @@ fn open_stream(device: &cpal::Device) -> Result<(Capture, Consumer<f32>)> {
   let (producer, ring) = RingBuffer::new(rate as usize * channels * RING_SECONDS);
   let failure = Arc::new(OnceLock::new());
   let format = supported.sample_format();
-  let stream = by_format!(format, build(device, config, producer, failure.clone()))?;
+  let stream = by_format!(format, build(device, config, producer, failure.clone(), first.clone()))?;
   stream.play().context("start the input stream")?;
   let feed = Feed::Mic { _stream: stream };
-  let capture =
-    Capture { rate, channels, device: String::new(), warning: None, failure, _feed: feed };
+  let (device, transport, warning) = (String::new(), Transport::Unknown, None);
+  let capture = Capture { rate, channels, device, transport, warning, failure, first, _feed: feed };
   Ok((capture, ring))
 }
 
@@ -562,6 +594,7 @@ fn build<T: SizedSample>(
   config: cpal::StreamConfig,
   mut ring: Producer<f32>,
   failure: Arc<OnceLock<String>>,
+  first: Arc<FirstSound>,
 ) -> Result<cpal::Stream>
 where
   f32: FromSample<T>,
@@ -569,7 +602,13 @@ where
   let channels = config.channels as usize;
   let stream = device.build_input_stream(
     config,
-    move |samples: &[T], _: &cpal::InputCallbackInfo| push(&mut ring, samples, channels),
+    move |samples: &[T], _: &cpal::InputCallbackInfo| {
+      if !samples.is_empty() {
+        first.heard();
+      }
+
+      push(&mut ring, samples, channels)
+    },
     move |e: cpal::Error| match e.kind() {
       // A glitch, a refused real-time priority, a route cpal follows: capture goes on.
       cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => {
@@ -606,16 +645,20 @@ impl Drop for FakeMic {
   }
 }
 
-fn fake_capture(path: &Path) -> Result<(Capture, Consumer<f32>)> {
+fn fake_capture(path: &Path, first: Arc<FirstSound>) -> Result<(Capture, Consumer<f32>)> {
   let pcm = read_wav(path).context("WAVO_FAKE_MIC")?;
   let (mut producer, ring) = RingBuffer::new(SAMPLE_RATE as usize * RING_SECONDS);
   let stop = Arc::new(AtomicBool::new(false));
-  let flag = stop.clone();
+  let (flag, heard) = (stop.clone(), first.clone());
   let thread = thread::Builder::new().name("fake-mic".into()).spawn(move || {
     let (started, mut sent) = (Instant::now(), 0);
     while !flag.load(Ordering::Relaxed) {
       let due = (started.elapsed().as_secs_f64() * f64::from(SAMPLE_RATE)) as usize;
       let block: Vec<f32> = (sent..due).map(|i| pcm.get(i).copied().unwrap_or(0.0)).collect();
+      if !block.is_empty() {
+        heard.heard();
+      }
+
       push(&mut producer, &block, 1);
       sent = due;
       thread::sleep(POLL);
@@ -627,8 +670,10 @@ fn fake_capture(path: &Path) -> Result<(Capture, Consumer<f32>)> {
     rate: SAMPLE_RATE,
     channels: 1,
     device: format!("fake mic ({name})"),
+    transport: Transport::Virtual,
     warning: None,
     failure: Arc::default(),
+    first,
     _feed: Feed::File { _mic: FakeMic { stop, thread: Some(thread) } },
   };
   Ok((capture, ring))
@@ -726,9 +771,24 @@ impl Recorder {
     &self.capture.as_ref().unwrap().device
   }
 
+  pub fn transport(&self) -> Transport {
+    self.capture.as_ref().unwrap().transport
+  }
+
   /// Why the device is not the one asked for, if it is not.
   pub fn warning(&self) -> Option<&str> {
     self.capture.as_ref().unwrap().warning.as_deref()
+  }
+
+  /// How long the microphone took from the start of opening to its first samples; `None` until
+  /// they come.
+  pub fn started_in(&self) -> Option<Duration> {
+    self.capture.as_ref().unwrap().first.after()
+  }
+
+  /// When opening the microphone began.
+  pub fn opened(&self) -> Instant {
+    self.capture.as_ref().unwrap().first.opened
   }
 
   pub fn meter(&self) -> Meter {
@@ -1505,7 +1565,7 @@ mod tests {
         }
       };
       let got = open_input(&mic, all().into_iter().nth(default), all, Ok, open);
-      let got = got.map(|(name, (), warning)| (name, warning)).map_err(|e| format!("{e:#}"));
+      let got = got.map(|(name, _, (), warning)| (name, warning)).map_err(|e| format!("{e:#}"));
       (got, tried.into_inner())
     };
 
@@ -1661,6 +1721,9 @@ mod tests {
       thread::sleep(Duration::from_millis(5));
     }
 
+    // The file's first samples come with the fake microphone's first poll.
+    let started = recorder.started_in().unwrap();
+    assert!(started < Duration::from_millis(500), "{started:?}");
     let _ = recorder.failure.set("The requested device is not available".into());
     let failure = recorder.failures().recv_timeout(Duration::from_secs(10)).unwrap();
     assert!(failure.contains("not available"));
