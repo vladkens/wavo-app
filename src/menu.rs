@@ -67,6 +67,21 @@ pub enum Warn {
 
 // MARK: Icon
 
+// Wavo Dev's "w" is outlined (`assets/status-icon/dev/`), to tell the two apps apart.
+#[cfg(not(wavo_dev))]
+macro_rules! status_icon {
+  ($name:literal) => {
+    include_str!(concat!("../assets/status-icon/", $name, ".svg"))
+  };
+}
+
+#[cfg(wavo_dev)]
+macro_rules! status_icon {
+  ($name:literal) => {
+    include_str!(concat!("../assets/status-icon/dev/", $name, ".svg"))
+  };
+}
+
 /// The app icon's wave-"w" (`assets/status-icon/`); a state cuts a disc with a letter out of its
 /// right arm: R recording, T transcribing, ! needs attention. A template: the OS draws it at every
 /// scale.
@@ -81,10 +96,10 @@ pub enum Icon {
 impl Icon {
   pub fn tray(self) -> TrayIcon {
     let svg = match self {
-      Icon::Idle => include_str!("../assets/status-icon/idle.svg"),
-      Icon::Recording => include_str!("../assets/status-icon/recording.svg"),
-      Icon::Transcribing => include_str!("../assets/status-icon/transcribing.svg"),
-      Icon::Warning => include_str!("../assets/status-icon/warning.svg"),
+      Icon::Idle => status_icon!("idle"),
+      Icon::Recording => status_icon!("recording"),
+      Icon::Transcribing => status_icon!("transcribing"),
+      Icon::Warning => status_icon!("warning"),
     };
     TrayIcon::from_svg(svg).expect("the status icons are tested")
   }
@@ -398,6 +413,20 @@ mod tests {
     for icon in [Icon::Idle, Icon::Recording, Icon::Transcribing, Icon::Warning] {
       let TrayIcon::Path { size, d, even_odd } = icon.tray() else { unreachable!() };
       assert!(size == 18.0 && even_odd && !d.is_empty(), "{icon:?}");
+    }
+
+    // Wavo Dev's too, which only its flavor builds in.
+    let dev = [
+      include_str!("../assets/status-icon/dev/idle.svg"),
+      include_str!("../assets/status-icon/dev/recording.svg"),
+      include_str!("../assets/status-icon/dev/transcribing.svg"),
+      include_str!("../assets/status-icon/dev/warning.svg"),
+    ];
+    for svg in dev {
+      let TrayIcon::Path { size, d, even_odd } = TrayIcon::from_svg(svg).unwrap() else {
+        unreachable!()
+      };
+      assert!(size == 18.0 && even_odd && !d.is_empty());
     }
   }
 
