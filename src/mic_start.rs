@@ -2,8 +2,7 @@
 
 //! A USB microphone grown slow to start against its own normal: macOS's usbaudiod lengthens a USB
 //! device's start 50 ms at a time until it is plugged in again, and the start of every phrase is
-//! lost. Wavo can't fix the driver; the menu says to reconnect it. Only on macOS, where that cause
-//! and its fix are known; elsewhere the log has the times.
+//! lost. Wavo can't fix the driver; the menu says to reconnect it.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
@@ -65,16 +64,14 @@ impl<'a> Start<'a> {
 }
 
 impl SlowStart {
-  /// Logs the recording's start once, before its stop, and on macOS records it.
+  /// Logs the recording's start once, before its stop, and records it.
   pub fn note(&mut self, take: Take, start: Start) {
     match start.heard {
       Some(after) => info!("dictation {take}: sound after {} ms", after.as_millis()),
       None => info!("dictation {take}: no sound in {} ms, up to the stop", start.open.as_millis()),
     }
 
-    if cfg!(target_os = "macos") {
-      self.record(take, start);
-    }
+    self.record(take, start);
   }
 
   /// Counts a kept USB recording's start; `true` when it raises the warning.
