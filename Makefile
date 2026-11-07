@@ -85,7 +85,7 @@ uninstall: # remove Wavo and all it left (data, models, permissions, the app): t
 	$(if $(wildcard $(INSTALLED)),,cargo build $(CARGO_FLAGS))
 	$(or $(wildcard $(INSTALLED)),target/release/wavo-app) uninstall $(ARGS)
 
-shots: # the settings window's pages and the update window's states, headless, into target/shots/
+shots: # the settings window's pages, the update window's and the HUD's states, headless, into target/shots/
 	WAVO_SHOTS=$(CURDIR)/target/shots cargo test $(CARGO_FLAGS) -- every_page_renders every_state_renders
 
 # WAV fixtures and reference transcripts in target/fixtures/ (scripts/fixtures.py, macOS

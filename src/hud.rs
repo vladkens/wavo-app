@@ -5,13 +5,16 @@
 //! become a travelling wave, the time freezes (`n/m` for a recording in pieces). Then the pill
 //! collapses to a circle and fades: no "done" state. An error shows a glyph and a short lowercase
 //! reason for a few seconds, the pill widening to fit; while recording, a warning (no sound, no
-//! model, a permission) takes the level's place.
+//! model, a permission) takes the level's place. The pill is dark in either appearance: the cool
+//! half of the icon's gradient (indigo, violet, electric blue) flowing slowly under a dictation; a
+//! still grey under an error or a warning.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use nimbo::ui::widgets::icon;
 use nimbo::{
-  Anchor, App, Color, Config, Cx, Event, Font, Frame, Icon, Quad, Rect, Theme, Weight, alpha,
+  Anchor, App, Color, Config, Font, Frame, Icon, ImageId, Quad, Rect, Theme, Ui, Weight, alpha, rgb,
 };
 
 use crate::audio::Meter;
@@ -37,6 +40,8 @@ const GLYPH: f32 = 20.0;
 const REASON_X: f32 = PAD + GLYPH + 8.0;
 const WAVE_LOW: f32 = 3.0;
 const WAVE_HIGH: f32 = 9.0;
+// The white ring around the red dot, for the gradient under it.
+const RING: f32 = 1.2;
 
 const APPEAR: Duration = ms(100);
 // The level's bars become the wave.
@@ -49,6 +54,21 @@ const DONE_HOLD: Duration = ms(1000);
 const METER_TICK: Duration = ms(33);
 const WAVE_HALF: Duration = ms(600);
 const WAVE_STAGGER: Duration = ms(75);
+// The gradient is made again this often while it shows, and at every new width.
+const FLOW_TICK: Duration = ms(66);
+
+// The gradient's phase per second: a slow flow. Its sines turn whole circles every 40π of
+// phase (×0.8, ×0.55, ×1.3), where it wraps unseen: f32 keeps its precision over days on.
+const FLOW: f32 = 0.25;
+const FLOW_PERIOD: f64 = 40.0 * std::f64::consts::PI;
+// The cool half of the icon's colours (assets/icon.png): deep indigo, violet, electric blue.
+const COOL: [(f32, u32); 4] = [(0.0, 0x1e1470), (0.35, 0x3a1fb4), (0.6, 0x6a2be0), (1.0, 0x1f5cff)];
+// Under the gradient, where it thins out at the rounded ends; an error's and a warning's.
+const GROUND: Color = rgb(0x181028);
+const GREY: Color = rgb(0x3a3a3c);
+const EDGE: Color = alpha([1.0; 4], 0.24);
+// White text on the gradient: the dark look in either appearance.
+const THEME: Theme = Theme::PLATES_DARK;
 
 const FONT: Font = Font::ui(13.0);
 const TIME: Font = Font::mono(13.0).weight(Weight::Medium);
@@ -214,7 +234,8 @@ pub struct Hud {
   warning: Option<String>,
   silent: bool,
   pending: Vec<Show>,
-  theme: Theme,
+  // The gradient's image, the pill's width and the scale it was made for, and when.
+  field: Option<(ImageId, f32, f32, Duration)>,
   hidden: Box<dyn FnMut()>,
 }
 
@@ -238,7 +259,7 @@ impl Hud {
       warning: None,
       silent: false,
       pending: Vec::new(),
-      theme: Theme::PLATES_LIGHT,
+      field: None,
       hidden: Box::new(hidden),
     }
   }
@@ -382,26 +403,90 @@ impl Hud {
     }
   }
 
+  /// What the contents show: a collapse's, what it fades out.
+  fn shown(&self) -> Mode {
+    if self.mode == Mode::Closing { self.from } else { self.mode }
+  }
+
+  /// The gradient under a dictation, not under an error or a warning.
+  fn flows(&self) -> bool {
+    let shown = self.shown();
+    shown != Mode::Error && !(shown == Mode::Recording && self.text.is_some())
+  }
+
+  /// Makes the gradient again when [FLOW_TICK] has passed or the pill's width changed: an image
+  /// is never updated, so the old one goes and the new one takes its id.
+  fn flow(&mut self, f: &mut Frame) {
+    let (now, width) = (f.now, self.pill(f.now).0);
+    let fresh = self
+      .field
+      .is_some_and(|(_, w, scale, at)| (w, scale) == (width, f.scale) && now < at + FLOW_TICK);
+    if !self.flows() || fresh {
+      return;
+    }
+
+    let phase = (now.as_secs_f64() * f64::from(FLOW) % FLOW_PERIOD) as f32;
+    let (w, h, px) = field(width, phase, f.scale);
+    if let Some((id, ..)) = self.field.take() {
+      f.images().remove(id);
+    }
+
+    self.field = Some((f.images().add(w, h, &px), width, f.scale, now));
+  }
+
+  /// When the next frame is due: `None` for the next refresh, while something moves (a fade, a
+  /// resize, the wave, the collapse); else at the next change: the meter's tick (which polls it
+  /// too), the gradient's, a hold's end. A tick due now is taken by this frame's paint: the next
+  /// is a period on.
+  fn due(&self, now: Duration) -> Option<Duration> {
+    if now < self.appeared + APPEAR || now < self.width.2 + RESIZE {
+      return None;
+    }
+
+    let next =
+      |at: Duration, every: Duration| if at + every > now { at + every } else { now + every };
+    let made = self.field.map_or(now, |(.., at)| at);
+    let flow = if self.flows() { next(made, FLOW_TICK) } else { Duration::MAX };
+    match self.mode {
+      Mode::Recording => Some(next(self.ticked, METER_TICK).min(flow)),
+      Mode::Error => Some(self.since + ERROR_HOLD),
+      Mode::Done => Some((self.since + DONE_HOLD).min(flow)),
+      _ => None,
+    }
+  }
+
   fn draw(&self, f: &mut Frame) {
-    let (th, now) = (&self.theme, f.now);
+    let (th, now) = (&THEME, f.now);
     let (width, pill_alpha, a) = self.pill(now);
     let fade = |c: Color, k: f32| alpha(c, c[3] * pill_alpha * k);
     let pill = Rect::new((f.size.w - width) / 2.0, MARGIN, width, HEIGHT);
     let shadow = Rect::new(pill.x, pill.y + 2.0, pill.w, pill.h);
     f.shadow(shadow, HEIGHT / 2.0, 6.0, fade(th.shadow, 1.0));
-    let quad =
-      Quad::new(pill, fade(th.menu, 1.0)).radius(HEIGHT / 2.0).border(1.0, fade(th.line, 1.0));
-    f.quad(quad);
-    f.layer();
+    let flows = self.flows();
+    let ground = if flows { GROUND } else { GREY };
+    f.rect(pill, fade(ground, 1.0), HEIGHT / 2.0);
     f.push_clip(pill);
+    if let Some((id, w, ..)) = self.field.filter(|_| flows) {
+      // On the pixel grid, drawn 1:1.
+      let s = f.scale;
+      let rect = Rect::new((pill.x * s).round() / s, pill.y, (w * s).ceil() / s, HEIGHT);
+      f.image(id, rect, pill_alpha);
+    }
+
+    // The edge over the gradient's soft one.
+    f.layer();
+    let edge = Quad::new(pill, [0.0; 4]).radius(HEIGHT / 2.0).border(1.0, fade(EDGE, 1.0));
+    f.quad(edge);
 
     // The contents keep their place as the pill narrows: centred at the recording's width.
     let x = (f.size.w - width.max(WIDTH)) / 2.0;
     let mid = pill.y + HEIGHT / 2.0;
     let baseline = |f: &mut Frame, font| mid + (f.metrics(font).cap_height / 2.0).round();
     let dot = |f: &mut Frame, k: f32| {
-      let rect = Rect::new(x + PAD, mid - DOT / 2.0, DOT, DOT);
-      f.rect(rect, fade(th.danger, k), DOT / 2.0);
+      let side = DOT + 2.0 * RING;
+      let rect = Rect::new(x + PAD - RING, mid - side / 2.0, side, side);
+      let ring = fade(alpha([1.0; 4], 0.9), k);
+      f.quad(Quad::new(rect, fade(th.danger, k)).radius(side / 2.0).border(RING, ring));
     };
     let bar = |f: &mut Frame, i: usize, height: f32, k: f32| {
       let rect = Rect::new(x + BARS_X + i as f32 * BAR_STEP, mid - height / 2.0, BAR_WIDTH, height);
@@ -416,15 +501,18 @@ impl Hud {
       format!("{}:{:02}", secs / 60, secs % 60)
     };
 
-    let shown = if self.mode == Mode::Closing { self.from } else { self.mode };
     let t = now.saturating_sub(self.since);
-    match (shown, &self.text) {
+    match (self.shown(), &self.text) {
+      // The reason centred in the room right of the glyph.
       (Mode::Recording | Mode::Error, Some(text)) => {
         let glyph = Rect::new(x + PAD, mid - GLYPH / 2.0, GLYPH, GLYPH);
         icon::draw(f, TRIANGLE, glyph, fade(th.warning, a));
-        icon::draw(f, MARK.stroke(2.2), glyph, fade(th.menu, a));
+        icon::draw(f, MARK.stroke(2.2), glyph, fade(ground, a));
+        // Never left of its place: a pill still widening to fit the reason has less room.
+        let room = width.max(WIDTH) - REASON_X - PAD;
+        let gap = ((room - f.measure(text, FONT)) / 2.0).max(0.0);
         let y = baseline(f, FONT);
-        f.text(x + REASON_X, y, text, FONT, fade(th.text, a));
+        f.text(x + REASON_X + gap, y, text, FONT, fade(th.text, a));
       }
       // The check and the time, centred.
       (Mode::Done, Some(took)) => {
@@ -473,13 +561,16 @@ impl Hud {
 }
 
 impl App for Hud {
-  fn event(&mut self, _cx: &mut Cx, ev: &Event) -> bool {
-    let Event::Appearance(a) = ev else { return false };
-    self.theme = Theme::system(*a);
-    true
+  /// Asks for the next frame when nothing moves: the HUD paints only what changed.
+  fn view<'a>(&'a mut self, ui: &mut Ui<'a>) {
+    if let Some(at) = self.due(ui.now()) {
+      ui.request_frame_in(at.saturating_sub(ui.now()));
+    }
   }
 
   fn paint(&mut self, f: &mut Frame) {
+    // What the view asked for, from the state before this frame's changes.
+    let asked = self.due(f.now);
     let shown = self.mode != Mode::Hidden;
     let shows = std::mem::take(&mut self.pending);
     let silent = self.meter.as_ref().is_some_and(Meter::silent);
@@ -498,11 +589,20 @@ impl App for Hud {
         (self.hidden)();
       }
 
+      if let Some((id, ..)) = self.field.take() {
+        f.images().remove(id);
+      }
+
       return;
     }
 
+    self.flow(f);
     self.draw(f);
-    f.animate();
+    // The next refresh while something moves, or to ask for the new time when it changed.
+    let due = self.due(f.now);
+    if due.is_none() || due != asked {
+      f.animate();
+    }
   }
 }
 
@@ -527,6 +627,104 @@ fn fit(f: &mut Frame, text: String) -> String {
 /// The pill's width for a reason `text` wide.
 fn reason_width(text: f32) -> f32 {
   (REASON_X + text + PAD).clamp(WIDTH, MAX_WIDTH)
+}
+
+/// [COOL] from 0 to 1, mixed in OKLCH, for a lookup per pixel.
+static SHADES: LazyLock<Vec<[u8; 3]>> = LazyLock::new(|| {
+  let shade = |k| srgb(lch_ramp(&COOL, k as f32 / 1023.0)).map(|v| v.round() as u8);
+  (0..1024).map(shade).collect()
+});
+
+/// `stops` at `t`, mixed in OKLCH: hue the short way round, so no grey between two colours.
+fn lch_ramp(stops: &[(f32, u32)], t: f32) -> [f32; 3] {
+  let (a, b, k) = segment(stops, t);
+  let ([l0, c0, h0], [l1, c1, h1]) = (oklch(a), oklch(b));
+  let turn = (h1 - h0 + 540.0) % 360.0 - 180.0;
+  [lerp(l0, l1, k), lerp(c0, c1, k), h0 + turn * k]
+}
+
+/// An sRGB colour (0xrrggbb) in OKLCH: lightness 0..1, chroma, hue in degrees (Björn Ottosson's
+/// OKLab).
+fn oklch(c: u32) -> [f32; 3] {
+  let [r, g, b] = [16, 8, 0].map(|s| {
+    let v = ((c >> s) & 0xff) as f32 / 255.0;
+    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+  });
+  let l = (0.4122215 * r + 0.5363325 * g + 0.0514460 * b).cbrt();
+  let m = (0.2119035 * r + 0.6806995 * g + 0.107397 * b).cbrt();
+  let s = (0.0883025 * r + 0.2817188 * g + 0.6299787 * b).cbrt();
+  let a = 1.9779985 * l - 2.4285922 * m + 0.4505937 * s;
+  let b = 0.0259040 * l + 0.7827718 * m - 0.8086758 * s;
+  [0.2104543 * l + 0.7936178 * m - 0.0040720 * s, a.hypot(b), b.atan2(a).to_degrees()]
+}
+
+/// An OKLCH colour in sRGB, 0..255, its chroma cut until it fits.
+fn srgb([l, mut c, h]: [f32; 3]) -> [f32; 3] {
+  let (sin, cos) = h.to_radians().sin_cos();
+  loop {
+    let (a, b) = (c * cos, c * sin);
+    let l_ = (l + 0.3963378 * a + 0.2158038 * b).powi(3);
+    let m_ = (l - 0.1055613 * a - 0.0638542 * b).powi(3);
+    let s_ = (l - 0.0894842 * a - 1.2914855 * b).powi(3);
+    let rgb = [
+      4.0767417 * l_ - 3.3077116 * m_ + 0.2309699 * s_,
+      -1.268438 * l_ + 2.6097574 * m_ - 0.3413194 * s_,
+      -0.0041961 * l_ - 0.7034186 * m_ + 1.7076147 * s_,
+    ];
+    if rgb.iter().all(|v| (-0.001..=1.001).contains(v)) || c < 0.001 {
+      return rgb.map(|v| {
+        let v = v.clamp(0.0, 1.0);
+        255.0 * if v <= 0.0031308 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
+      });
+    }
+
+    c *= 0.97;
+  }
+}
+
+/// The gradient of a pill `width` points wide at `phase`: straight RGBA rows, a pixel per pixel
+/// at `scale`, drawn 1:1. A few slow sines pick each pixel's place on [COOL]; it thins out to
+/// nothing at the pill's edge (a rounded clip it doesn't have), where [GROUND] and the edge take
+/// over.
+fn field(width: f32, phase: f32, scale: f32) -> (usize, usize, Vec<u8>) {
+  let (cols, rows) = ((width * scale).ceil() as usize, (HEIGHT * scale).round() as usize);
+  let r = HEIGHT / 2.0;
+  let at = |i: usize| (i as f32 + 0.5) / scale;
+  // Each sine is of a column's angle plus a row's: sin(a + b) = sin a cos b + cos a sin b, so
+  // only columns and rows take sines, not pixels.
+  let columns: Vec<_> = (0..cols)
+    .map(|i| {
+      let u = at(i) / WIDTH;
+      ((u * 1.9 - 1.25 + phase * 0.8).sin_cos(), (u * 6.3 + phase * 1.3).sin_cos())
+    })
+    .collect();
+
+  let mut px = Vec::with_capacity(cols * rows * 4);
+  for j in 0..rows {
+    let (y, v) = (at(j), at(j) / HEIGHT);
+    let (sb, cb) = (0.6 * (v * 2.6 + phase * 0.55).sin()).sin_cos();
+    let (sd, cd) = (-v * 3.0).sin_cos();
+    for (i, ((sa, ca), (sc, cc))) in columns.iter().enumerate() {
+      let t = 0.44 + 0.36 * (sa * cb + ca * sb) + 0.16 * (v - 0.5) + 0.07 * (sc * cd + cc * sd);
+      let c = SHADES[((t * 0.92).clamp(0.0, 1.0) * 1023.0).round() as usize];
+
+      // Opaque a point inside the pill, the edge's width: the rows along the top and bottom too.
+      let x = at(i);
+      let dx = (r - x).max(x - (width - r)).max(0.0);
+      let inside = r - (dx * dx + (y - r) * (y - r)).sqrt();
+      px.extend_from_slice(&[c[0], c[1], c[2], (inside.clamp(0.0, 1.0) * 255.0) as u8]);
+    }
+  }
+
+  (cols, rows, px)
+}
+
+/// The two stops around `t` and how far it is from the first to the second.
+fn segment(stops: &[(f32, u32)], t: f32) -> (u32, u32, f32) {
+  let t = t.clamp(0.0, 1.0);
+  let i = stops.iter().position(|(at, _)| t <= *at).unwrap_or(stops.len() - 1).max(1);
+  let ((t0, a), (t1, b)) = (stops[i - 1], stops[i]);
+  (a, b, (t - t0) / (t1 - t0))
 }
 
 /// A level (linear RMS) on a dB scale: −60 dBFS and below is the shortest bar, −12 the tallest.
@@ -559,9 +757,10 @@ fn ease(t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
   use std::cell::Cell;
+  use std::path::PathBuf;
   use std::rc::Rc;
 
-  use nimbo::{Appearance, Harness};
+  use nimbo::Harness;
 
   use super::*;
   use crate::session::{Last, NotPasted};
@@ -632,6 +831,26 @@ mod tests {
     }
   }
 
+  /// What the HUD says of a dictation that ended as `last`, made by [after] as in the app.
+  fn reason(last: Last) -> String {
+    let status = Status { last: Some(Last { take: 1, ..last }), ..Status::default() };
+    said(&status, None, true).unwrap()
+  }
+
+  fn refused(why: NotPasted) -> String {
+    reason(Last { outcome: Outcome::Done, not_pasted: Some(why.to_string()), ..Last::default() })
+  }
+
+  fn crashed() -> String {
+    let error = Some("the engine panicked".into());
+    reason(Last { outcome: Outcome::Failed, error, ..Last::default() })
+  }
+
+  /// The longest a refused paste says: the app's own reason when it was too busy.
+  fn too_busy() -> String {
+    refused(NotPasted::Failed("the app was too busy to paste".into()))
+  }
+
   /// The HUD in the harness, transparent as an overlay is, and how often it asked to be hidden.
   fn hud() -> (Harness<Hud>, Rc<Cell<u32>>) {
     let hidden = Rc::new(Cell::new(0));
@@ -639,7 +858,6 @@ mod tests {
     let config = config(HudPosition::Bottom);
     let mut h = Harness::new(Hud::new(move || count.set(count.get() + 1)), config.size, 2.0);
     h.set_transparent(true);
-    h.event(Event::Appearance(Appearance::DARK));
     (h, hidden)
   }
 
@@ -712,7 +930,7 @@ mod tests {
   #[test]
   fn an_error_widens_the_pill_holds_then_hides() {
     let (mut h, hidden) = hud();
-    h.app_mut().show(Show::Error("not pasted: password field".into()));
+    h.app_mut().show(Show::Error(refused(NotPasted::SecureField)));
     h.wait(ms(300));
     let img = h.render();
     let mid = MARGIN + HEIGHT / 2.0;
@@ -742,6 +960,100 @@ mod tests {
     meter.set_silent(true);
     h.wait(ms(300));
     assert_eq!(h.app().text.as_deref(), Some("download a model"), "no switch to no sound");
+  }
+
+  /// Frames only when something changes: the meter's ticks while recording, none through an
+  /// error's hold.
+  #[test]
+  fn frames_come_only_when_something_changes() {
+    let (mut h, _) = hud();
+    let recording =
+      Show::Recording { meter: None, device: "Mic".into(), seconds: 1.0, warning: None };
+    h.app_mut().show(recording);
+    h.wait(ms(300));
+    let frames = h.wait(ms(1000));
+    assert!((28..=32).contains(&frames), "{frames} a second");
+    h.app_mut().show(Show::Error(crashed()));
+    h.wait(ms(300));
+    assert_eq!(h.wait(ms(1000)), 0);
+  }
+
+  /// A short reason sits in the middle of the room right of the glyph, not against it; a long
+  /// one never runs over the glyph, also while the pill widens to fit it.
+  #[test]
+  fn a_short_reason_is_centred_right_of_the_glyph() {
+    let (mut h, _) = hud();
+    h.app_mut().show(Show::Error(crashed()));
+    h.wait(ms(300));
+    let img = h.render();
+    let left = (config(HudPosition::Bottom).size.w - WIDTH) / 2.0;
+    let (from, to) = (left + REASON_X, left + WIDTH - PAD);
+    let ink = |x: f32| (-6..=6).any(|dy| img.pixel(x, MARGIN + HEIGHT / 2.0 + dy as f32)[0] > 150);
+    let xs: Vec<f32> = (0..((to - from) * 2.0) as usize).map(|i| from + i as f32 / 2.0).collect();
+    let first = xs.iter().find(|&&x| ink(x)).unwrap();
+    let last = xs.iter().rev().find(|&&x| ink(x)).unwrap();
+    let (before, after) = (first - from, to - last);
+    assert!(before > 10.0 && (before - after).abs() < 2.0, "{before} {after}");
+
+    let (mut h, _) = hud();
+    let recording =
+      Show::Recording { meter: None, device: "Mic".into(), seconds: 1.0, warning: None };
+    h.app_mut().show(recording);
+    h.wait(ms(300));
+    h.app_mut().show(Show::Error(too_busy()));
+    h.wait(RESIZE / 2);
+    let img = h.render();
+    let mid = MARGIN + HEIGHT / 2.0;
+    let left = (0..800).map(|x| x as f32 / 2.0).find(|&x| img.pixel(x, mid)[3] == 255).unwrap();
+    let text =
+      |x: f32| (-6..=6).any(|dy| img.pixel(x, mid + dy as f32)[..3].iter().all(|&c| c > 150));
+    let over = (0..(REASON_X * 2.0) as usize).map(|i| left + i as f32 / 2.0).find(|&x| text(x));
+    assert_eq!(over, None, "text over the glyph mid-resize, the pill from {left}");
+  }
+
+  /// Every state draws on the gradient or the grey, transparent around the pill; with
+  /// `WAVO_SHOTS` set (`make shots`), written there.
+  #[test]
+  fn every_state_renders() {
+    let recording = |warning: Option<&str>| Show::Recording {
+      meter: None,
+      device: "Mic".into(),
+      seconds: 7.0,
+      warning: warning.map(str::to_owned),
+    };
+    let states = [
+      ("recording", vec![recording(None)]),
+      ("transcribing", vec![recording(None), Show::Transcribing(None)]),
+      ("done", vec![Show::Done("420 ms".into())]),
+      ("error", vec![Show::Error(refused(NotPasted::SecureField))]),
+      ("error-short", vec![Show::Error(crashed())]),
+      ("error-long", vec![Show::Error(too_busy())]),
+      ("warning", vec![recording(Some(&no_model(false)))]),
+    ];
+    let dir = std::env::var_os("WAVO_SHOTS").map(PathBuf::from);
+    for (name, shows) in states {
+      let (mut h, _) = hud();
+      // A clock far enough on for the recording's seconds.
+      h.advance(ms(60_000));
+      for show in shows {
+        h.app_mut().show(show);
+        h.wait(ms(500));
+      }
+
+      h.app_mut().levels =
+        std::array::from_fn(|i| 0.002 * (1.0 + (i as f32 * 1.7).sin()) * i as f32);
+      h.redraw();
+      let img = h.render();
+      let mid = MARGIN + HEIGHT / 2.0;
+      let [r, g, b, a] = img.pixel(config(HudPosition::Bottom).size.w / 2.0, MARGIN + 3.0);
+      assert!(a == 255 && img.pixel(1.0, mid)[3] == 0, "{name}: {r} {g} {b} {a}");
+      let grey = r.abs_diff(g) < 8 && g.abs_diff(b) < 8;
+      assert_eq!(grey, name.starts_with("error") || name == "warning", "{name}: {r} {g} {b}");
+      if let Some(dir) = &dir {
+        std::fs::create_dir_all(dir).unwrap();
+        h.shot(&dir.join(format!("hud-{name}.png"))).unwrap();
+      }
+    }
   }
 
   /// A Windows microphone's name in full would run past the pill's rounded end.
