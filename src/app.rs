@@ -1102,7 +1102,7 @@ impl window::Shell for AppShell {
   fn history(&self, req: Request) {
     let handle = self.handle.clone();
     spawn("history", move || {
-      if let Err(e) = handle.request(req) {
+      if let Err(e) = handle.request(req.clone()) {
         warn!("{req:?}: {e}");
         with_window(move |prefs| prefs.history_failed(req, &e));
       }

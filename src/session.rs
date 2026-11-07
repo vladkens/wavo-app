@@ -345,6 +345,8 @@ pub struct EngineStatus {
   pub phase: engine::Phase,
   /// Where the loaded model runs.
   pub device: Option<String>,
+  /// The loaded model runs on a GPU emulated on the CPU.
+  pub software_gpu: bool,
   /// Finished and planned pieces of the job in progress.
   pub progress: Option<(usize, usize)>,
 }
@@ -404,13 +406,14 @@ pub struct Session {
 #[derive(Clone)]
 pub struct Handle(Sender<Msg>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
   /// Transcribe an entry's recording again; new text replaces the text.
   Retranscribe(i64),
   /// Put back the text an entry had before it was transcribed again in this run.
   Restore(i64),
-  Delete(i64),
+  /// Delete entries with their recordings, none of them while one is being transcribed.
+  Delete(Vec<i64>),
   /// Free the model's memory, after the job in progress.
   Unload,
   /// An import added dictations: the update after it carries the history's change.
@@ -734,7 +737,7 @@ impl<O: TextOutput> Controller<O> {
         self.originals.remove(&id);
         Ok(())
       }
-      Request::Delete(id) => self.delete(id),
+      Request::Delete(ids) => self.delete(&ids),
       Request::Unload => {
         info!("the model is unloaded on request");
         self.untried = false;
@@ -1214,7 +1217,7 @@ impl<O: TextOutput> Controller<O> {
       }
 
       info!("entry {id}: {why}; it goes");
-      return self.delete(id);
+      return self.delete(&[id]);
     };
 
     let language = self.settings.engine_language();
@@ -1286,19 +1289,23 @@ impl<O: TextOutput> Controller<O> {
     }
   }
 
-  /// Deletes entry `id` with its recording; the last dictation's text goes with it.
-  fn delete(&mut self, id: i64) -> Result<()> {
-    if self.is_busy(id) {
+  /// Deletes entries `ids` with their recordings; the last dictation's text goes with its own.
+  fn delete(&mut self, ids: &[i64]) -> Result<()> {
+    if let Some(id) = ids.iter().find(|&&id| self.is_busy(id)) {
       bail!("entry {id} is being transcribed");
     }
 
-    if !self.history.delete(id)? {
-      bail!("no history entry {id}");
+    let found = self.history.delete(ids)?;
+    if found.is_empty() {
+      bail!("no history entry {ids:?}");
     }
 
-    info!("entry {id}: deleted with its recording");
-    self.originals.remove(&id);
-    if self.last.as_ref().is_some_and(|l| l.entry == Some(id)) {
+    info!("entries {found:?}: deleted with their recordings");
+    for id in &found {
+      self.originals.remove(id);
+    }
+
+    if self.last.as_ref().is_some_and(|l| l.entry.is_some_and(|id| found.contains(&id))) {
       self.last = None;
     }
 
@@ -1327,7 +1334,8 @@ impl<O: TextOutput> Controller<O> {
     let engine = self.engine.as_ref().map_or_else(EngineStatus::default, |l| {
       let s = l.engine.status();
       let model = Some(l.name.clone());
-      EngineStatus { model, phase: s.phase, device: s.device, progress: s.progress }
+      let (phase, device, software_gpu, progress) = (s.phase, s.device, s.software_gpu, s.progress);
+      EngineStatus { model, phase, device, software_gpu, progress }
     });
 
     Status {
@@ -1391,7 +1399,9 @@ mod tests {
   use super::*;
   use crate::audio::SAMPLE_RATE;
   use crate::history::{RECORDINGS_DIR, Retention};
+  use crate::menu;
   use crate::testing::{FakeModels, TempDir, download, poll, tone, wav_count, write_wav};
+  use crate::window::Pick;
 
   // MARK: Machine
 
@@ -2124,6 +2134,23 @@ mod tests {
     assert!(restore().is_err(), "once");
   }
 
+  /// Several entries go at once with their recordings; none while one of them is transcribed.
+  #[test]
+  fn deletes_several_but_not_a_busy_one() {
+    let s = InProcess::start("session-delete", &Settings::default(), None, "hi", &["parakeet-v3"]);
+    let ids: Vec<i64> = (0..3).map(|i| s.add_entry(1_000 * i, "текст", &loud(1.0))).collect();
+    let gate = s.models.hold();
+    s.handle.request(Request::Retranscribe(ids[2])).unwrap();
+    let refused = s.handle.request(Request::Delete(vec![ids[0], ids[2]])).unwrap_err();
+    assert!(refused.contains("being transcribed"), "{refused}");
+    assert_eq!(s.recordings(), 3);
+
+    drop(gate);
+    s.handle.request(Request::Delete(vec![ids[0], ids[1]])).unwrap();
+    assert_eq!((s.entry(ids[0]), s.entry(ids[1])), (None, None));
+    assert_eq!(s.recordings(), 1);
+  }
+
   #[test]
   fn a_microphone_that_will_not_open_leaves_nothing_behind() {
     let settings = Settings { history_retention: Retention::Count(1), ..Settings::default() };
@@ -2134,6 +2161,29 @@ mod tests {
     assert_eq!((failed.state, failed.last), (Phase::Idle, None));
     let dir = s.home.path().join(RECORDINGS_DIR);
     assert_eq!(fs::read_dir(dir).unwrap().count(), 0, "no file, nor its day folder");
+  }
+
+  /// A model on a GPU emulated on the CPU says so in the menu, whole: wavo's sentence goes to the
+  /// log.
+  #[test]
+  fn a_software_gpu_warns_in_the_menu() {
+    let (settings, pcm) = (&Settings::default(), loud(10.0));
+    let s = InProcess::start("session-software-gpu", settings, Some(&pcm), "hi", &["parakeet-v3"]);
+    let warning = "llvmpipe (LLVM 15.0.7, 256 bits) is a software GPU, emulated on the CPU: expect \
+                   10-50x slower transcription; install the GPU's Vulkan driver";
+    s.models.warns(warning);
+    s.record(0.3);
+    thread::sleep(Duration::from_millis(300));
+    s.press();
+
+    let status = s.finished(1);
+    let system = menu::System { accessibility: true, ..menu::System::default() };
+    let shown = menu::warnings(&system, "f5", &status);
+    let text = menu::SOFTWARE_GPU.to_owned();
+    assert_eq!(shown, [menu::Warning { id: "warn:status", text, action: false }]);
+    let mics = (&[][..], &audio::Microphone::Automatic, false);
+    let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;
+    assert_eq!(items[1].label, format!("⚠︎ {}", menu::SOFTWARE_GPU), "not cut");
   }
 
   #[test]

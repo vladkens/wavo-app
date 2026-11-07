@@ -579,16 +579,24 @@ impl History {
     self.recordings.path(name).filter(|p| p.is_file())
   }
 
-  /// Deletes entry `id` and its recording, the file first: if it cannot be deleted, the entry
-  /// stays. False if there is no such entry.
-  pub fn delete(&self, id: i64) -> Result<bool> {
-    let Some(entry) = self.db.get_entry(id)? else { return Ok(false) };
-    if let Some(name) = &entry.audio_path {
-      self.recordings.remove(name)?;
+  /// Deletes entries `ids` and their recordings, each file first: the entry whose file cannot be
+  /// deleted stays, with those after it. Returns the ids there were entries for.
+  pub fn delete(&self, ids: &[i64]) -> Result<Vec<i64>> {
+    let mut found = Vec::new();
+    for &id in ids {
+      let Some(entry) = self.db.get_entry(id)? else { continue };
+      if let Some(name) = &entry.audio_path
+        && let Err(e) = self.recordings.remove(name)
+      {
+        self.db.delete_entries(&found)?;
+        return Err(e);
+      }
+
+      found.push(id);
     }
 
-    self.db.delete_entries(&[id])?;
-    Ok(true)
+    self.db.delete_entries(&found)?;
+    Ok(found)
   }
 
   /// Applies `retention` at `now` (Unix ms); entries without text stay when `spare`, and do not
@@ -692,6 +700,19 @@ mod tests {
     let e = h.db.get_entry(id).unwrap().unwrap();
     let got = (e.text.as_str(), e.model.as_deref(), e.tried_model.as_deref(), e.busy);
     assert_eq!(got, ("Привет", Some("gigaam"), Some("whisper"), false));
+  }
+
+  #[test]
+  fn deletes_several_with_their_recordings() {
+    let dir = TempDir::new("history-delete");
+    let h = History::open(dir.path()).unwrap();
+    let (ids, wavs): (Vec<i64>, Vec<PathBuf>) =
+      (0..3).map(|i| add(&h, i * 1_000, "text", false)).unzip();
+
+    // One that isn't there is skipped.
+    assert_eq!(h.delete(&[ids[0], ids[2], 404]).unwrap(), [ids[0], ids[2]]);
+    assert_eq!(entry_ids(dir.path()), [ids[1]]);
+    assert!(!wavs[0].exists() && wavs[1].exists() && !wavs[2].exists());
   }
 
   #[test]

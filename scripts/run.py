@@ -115,6 +115,19 @@ def requirement(app: Path) -> str:
     return dr.removeprefix("designated => ")
 
 
+def reset(app_id: str) -> bool:
+    """The permissions of the bundle's id reset; False when macOS doesn't know the id yet (a
+    bundle never started), so it has granted it none."""
+    out = subprocess.run(["tccutil", "reset", "All", app_id], capture_output=True, text=True)
+    if out.returncode == 0:
+        return True
+
+    if "No such bundle identifier" in out.stderr:
+        return False
+
+    sys.exit(f"{app_id}'s permissions not reset: {out.stderr.strip()}")
+
+
 def main() -> int:
     args = sys.argv[1:]
     copy = "--copy-history" in args
@@ -151,10 +164,15 @@ def main() -> int:
 
     granted = home(app_id) / GRANTED
     if not granted.is_file() or granted.read_text() != dr:
-        subprocess.run(["tccutil", "reset", "All", app_id], check=True, capture_output=True)
+        was_reset = reset(app_id)
         granted.parent.mkdir(parents=True, exist_ok=True)
+        # Written even when there was nothing to reset: the grants it gets next are this
+        # signature's.
         granted.write_text(dr)
-        print(f"a new signature: {name}'s permissions reset, macOS asks for them again")
+        if was_reset:
+            print(f"a new signature: {name}'s permissions reset, macOS asks for them again")
+        else:
+            print(f"{name}'s first start: macOS asks for its permissions")
 
     if dest:
         shutil.rmtree(dest, ignore_errors=True)

@@ -18,6 +18,10 @@ use crate::window::{
 };
 
 pub const RECENT: usize = 10;
+
+/// A model on a GPU emulated on the CPU; wavo's whole warning is in the log.
+pub const SOFTWARE_GPU: &str = "Slow transcription: install the GPU's driver";
+
 /// The update's row under the warnings while it has news, and Check for Updates… above Quit: both
 /// open the update's window.
 pub const UPDATE: &str = "update";
@@ -142,8 +146,9 @@ pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> 
   let failed = failed.map(|l| l.error.as_deref().unwrap_or("unknown error"));
   let failed = failed.map(|e| format!("The last dictation failed: {e}"));
   let error = status.error.as_ref().map(|e| format!("Error: {e}"));
-  for text in error.into_iter().chain(failed).chain(status.warnings.iter().map(|w| capitalized(w)))
-  {
+  let device = status.engine.software_gpu.then(|| SOFTWARE_GPU.to_owned());
+  let warnings = status.warnings.iter().map(|w| capitalized(w));
+  for text in error.into_iter().chain(failed).chain(device).chain(warnings) {
     add("warn:status", text, false);
   }
 
