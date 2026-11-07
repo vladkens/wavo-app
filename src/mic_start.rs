@@ -2,7 +2,8 @@
 
 //! A USB microphone grown slow to start against its own normal: macOS's usbaudiod lengthens a USB
 //! device's start 50 ms at a time until it is plugged in again, and the start of every phrase is
-//! lost. Wavo can't fix the driver; the menu says to replug.
+//! lost. Wavo can't fix the driver; the menu says to reconnect it. Only on macOS, where that cause
+//! and its fix are known; elsewhere the log has the times.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
@@ -20,6 +21,8 @@ const SLOWER_BY: Duration = Duration::from_millis(200);
 /// Starts in a row back near the normal that clear the warning: a replug drops the delay by
 /// hundreds of ms at once.
 const RECENT: usize = 5;
+/// The menu's warning; the log has the device and the times.
+const SLOW: &str = "Microphone is slow to start: reconnect it";
 
 /// Each USB microphone's starts, in memory since the app launched, and the warning, raised once per
 /// climb. Others vary by themselves (a Bluetooth headset held open by another app or cold, a
@@ -28,8 +31,8 @@ const RECENT: usize = 5;
 pub struct SlowStart {
   /// By the device's ID, else its name.
   devices: HashMap<String, Starts>,
-  /// The device of the last recording, its key and name: only its warning shows.
-  device: Option<(String, String)>,
+  /// The key of the last recording's device: only its warning shows.
+  device: Option<String>,
 }
 
 /// A recording's start, as its recorder tells at the stop.
@@ -62,20 +65,26 @@ impl<'a> Start<'a> {
 }
 
 impl SlowStart {
-  /// Logs the recording's start once, before its stop, and counts a kept USB one's. `true` when it
-  /// raises the warning.
-  pub fn note(&mut self, take: Take, start: Start) -> bool {
+  /// Logs the recording's start once, before its stop, and on macOS records it.
+  pub fn note(&mut self, take: Take, start: Start) {
     match start.heard {
       Some(after) => info!("dictation {take}: sound after {} ms", after.as_millis()),
       None => info!("dictation {take}: no sound in {} ms, up to the stop", start.open.as_millis()),
     }
 
+    if cfg!(target_os = "macos") {
+      self.record(take, start);
+    }
+  }
+
+  /// Counts a kept USB recording's start; `true` when it raises the warning.
+  fn record(&mut self, take: Take, start: Start) -> bool {
     if start.cancelled {
       return false;
     }
 
     let key = start.id.unwrap_or(start.device).to_owned();
-    self.device = Some((key.clone(), start.device.to_owned()));
+    self.device = Some(key.clone());
     if start.transport != Transport::Usb || start.gave_way {
       return false;
     }
@@ -89,19 +98,16 @@ impl SlowStart {
 
     let raised = starts.push(start.heard.unwrap_or(start.open));
     if raised {
-      warn!("dictation {take}: {}", self.warning().unwrap());
+      let (now, normal) = (median(&starts.last).as_millis(), starts.baseline.unwrap().as_millis());
+      warn!("dictation {take}: {} starts in {now} ms, normal {normal} ms: replug", start.device);
     }
 
     raised
   }
 
-  /// The menu leaves out the name in brackets where the line would run past its width; the log
-  /// keeps it.
   pub fn warning(&self) -> Option<String> {
-    let (key, device) = self.device.as_ref()?;
-    let starts = self.devices.get(key).filter(|s| s.slow)?;
-    let (now, was) = (seconds(median(&starts.last)), seconds(starts.baseline?));
-    Some(format!("Replug the mic ({device}): starts in {now}, was {was}"))
+    let key = self.device.as_ref()?;
+    self.devices.get(key).filter(|s| s.slow).map(|_| SLOW.to_owned())
   }
 }
 
@@ -161,11 +167,6 @@ fn median(starts: &VecDeque<Duration>) -> Duration {
   sorted[sorted.len() / 2]
 }
 
-/// `0.6 s`: tenths, `0.1 s` at least; the log has the milliseconds.
-fn seconds(d: Duration) -> String {
-  format!("{:.1} s", d.as_secs_f64().max(0.1))
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -184,7 +185,7 @@ mod tests {
 
   /// `ms` starts on the USB `device`: how many raised the warning.
   fn starts(s: &mut SlowStart, device: &str, ms: impl IntoIterator<Item = u64>) -> usize {
-    ms.into_iter().filter(|&ms| s.note(1, start(device, Transport::Usb, ms))).count()
+    ms.into_iter().filter(|&ms| s.record(1, start(device, Transport::Usb, ms))).count()
   }
 
   /// `n` starts of `ms`.
@@ -208,23 +209,23 @@ mod tests {
     assert_eq!(starts(&mut s, RODE, climb), 0);
     assert_eq!((starts(&mut s, RODE, level(560, 320)), s.warning().is_some()), (1, true));
     assert_eq!((starts(&mut s, RODE, level(610, 71)), s.warning().is_some()), (0, true));
-    let warning = "Replug the mic (RØDE PodMic USB): starts in 0.6 s, was 0.4 s";
+    let warning = "Microphone is slow to start: reconnect it";
     assert_eq!(s.warning().as_deref(), Some(warning));
 
-    // In the menu, whole but for the name, which the log keeps.
+    // In the menu, whole.
     let status = Status { warnings: vec![warning.into()], ..Status::default() };
     let system = menu::System { accessibility: true, ..menu::System::default() };
     let shown = menu::warnings(&system, "f5", &status);
     let mics = (&[][..], &audio::Microphone::Automatic, false);
     let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;
-    assert_eq!(items[1].label, "⚠︎ Replug the mic: starts in 0.6 s, was 0.4 s");
+    assert_eq!(items[1].label, format!("⚠︎ {warning}"));
 
     // Another device records, one of the same name too: no warning; each keeps its own.
     assert_eq!(starts(&mut s, elgato, level(300, 5)), 0);
     assert_eq!(s.warning(), None);
-    s.note(1, Start { id: Some("usb-2"), ..start(RODE, Transport::Usb, 610) });
+    s.record(1, Start { id: Some("usb-2"), ..start(RODE, Transport::Usb, 610) });
     assert_eq!(s.warning(), None);
-    s.note(1, start(RODE, Transport::Usb, 610));
+    s.record(1, start(RODE, Transport::Usb, 610));
     assert_eq!(s.warning().as_deref(), Some(warning));
 
     // Replugged: cleared on the fifth start, the new normal after a whole window.
@@ -264,12 +265,12 @@ mod tests {
   fn only_a_kept_start_counts() {
     let mut s = SlowStart::default();
     let count = |s: &SlowStart| s.devices.get(RODE).map_or(0, |d| d.last.len());
-    s.note(1, Start { cancelled: true, ..start(RODE, Transport::Usb, 20) });
-    s.note(1, Start { gave_way: true, ..start(RODE, Transport::Usb, 900) });
+    s.record(1, Start { cancelled: true, ..start(RODE, Transport::Usb, 20) });
+    s.record(1, Start { gave_way: true, ..start(RODE, Transport::Usb, 900) });
     assert_eq!(count(&s), 0);
 
     let silent = |ms| Start { heard: None, ..start(RODE, Transport::Usb, ms) };
-    s.note(1, silent(1000));
+    s.record(1, silent(1000));
     assert_eq!(count(&s), 0, "in the calibration");
 
     // Calibration on its own device's starts, whatever records in between.
@@ -280,11 +281,11 @@ mod tests {
     assert_eq!((count(&s), baseline(&s)), (20, Some(359)));
 
     // Stopped before any sound: 100 ms is no start, 700 ms one at least that slow.
-    s.note(1, silent(100));
+    s.record(1, silent(100));
     assert_eq!(s.devices[RODE].last.back(), Some(&Duration::from_millis(359)));
-    s.note(1, silent(700));
+    s.record(1, silent(700));
     assert_eq!(s.devices[RODE].last.back(), Some(&Duration::from_millis(700)));
-    assert_eq!((0..10).filter(|_| s.note(1, silent(700))).count(), 1);
+    assert_eq!((0..10).filter(|_| s.record(1, silent(700))).count(), 1);
   }
 
   /// One slow start never warns; a microphone not on USB never does.
@@ -299,7 +300,7 @@ mod tests {
       [Transport::BuiltIn, Transport::Bluetooth, Transport::Virtual, Transport::Unknown]
     {
       for ms in level(20, 30).chain(level(1000, 30)) {
-        assert!(!s.note(1, start(wh, transport, ms)));
+        assert!(!s.record(1, start(wh, transport, ms)));
       }
 
       assert_eq!(s.warning(), None, "{transport:?}");
