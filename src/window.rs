@@ -2211,7 +2211,7 @@ impl Prefs {
     }
 
     let (now, mut act) = (now_ms(), None);
-    let fs = &FormStyle { caption: fs.caption.line_limit(1), pad_y: fs.pad_y + 4.0, ..*fs };
+    let fs = &FormStyle { caption: fs.caption.line_limit(1), ..*fs };
     let HistoryPage { entries, days, selected, playing, .. } = &mut self.history;
     let status = &self.status;
     let starts: Vec<usize> = days.iter().map(|(_, r, _)| r.start).collect();
@@ -3597,6 +3597,19 @@ mod tests {
     click(&mut h, Id::of("delete-models"));
     let ask = h.app().ask.as_ref().map(|a| a.title.clone());
     assert_eq!(ask, Some(format!("Delete {}?", hub::lookup(m).unwrap().full_name)));
+  }
+
+  /// A dictation's row is as high as a model's: both a line over a caption, padded alike.
+  #[test]
+  fn history_and_models_rows_are_one_height() {
+    let home = Home::new("window-row-h", &TWO);
+    let ids = home.dictations(&[("Call Anna.", 1)]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::History);
+    let entry = h.rect(row(ids[0])).unwrap().h;
+    tab(&mut h, Page::Models);
+    assert_eq!(entry, h.rect(row_of(TWO[0])).unwrap().h);
   }
 
   /// Downloaded models selected go at once by Delete or the menu after the dialog, but the one in
