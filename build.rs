@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! The build script: the version the app shows, `WAVO_VERSION` ([version]), and the flavor,
-//! `cfg(wavo_dev)` ([dev]).
+//! `cfg(wavo_dev)` ([dev]) with Wavo Dev's icon ([dev_icon]).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -11,6 +11,7 @@ fn main() {
   println!("cargo:rustc-check-cfg=cfg(wavo_dev)");
   if dev() {
     println!("cargo:rustc-cfg=wavo_dev");
+    dev_icon();
   }
 }
 
@@ -23,6 +24,18 @@ fn dev() -> bool {
     "dev" => true,
     other => panic!("WAVO_FLAVOR={other}: release or dev"),
   }
+}
+
+/// Wavo Dev's icon, Wavo's in orange, into `OUT_DIR/dev-icon.png` (main.rs's `ICON`): by the
+/// script that makes its bundle's (the Makefile's `bundle`), so the app shows the same icon as its
+/// bundle.
+fn dev_icon() {
+  let (script, icon) = ("scripts/dev-icon.py", "assets/icon.png");
+  println!("cargo:rerun-if-changed={script}");
+  println!("cargo:rerun-if-changed={icon}");
+  let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("dev-icon.png");
+  let made = Command::new("python3").args([script, icon]).arg(&out).status();
+  assert!(made.is_ok_and(|s| s.success()), "{script}: no Wavo Dev icon (needs python3)");
 }
 
 /// The version the build shows, as CI's dev builds have it (vladkens/actions dev-version): Cargo's

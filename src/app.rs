@@ -32,7 +32,7 @@ use wavo::hub::{self, Hub, ModelInfo};
 
 use crate::history::{self, Entry, History};
 use crate::hud::{self, Hud, Mode, Show};
-use crate::menu::{self, Icon, Warning};
+use crate::menu::{self, Action, Icon, Warn, Warning};
 use crate::session::{self, Handle, NotPasted, Phase, Request, Session, TextOutput, Update};
 use crate::settings::{self, HudPosition, Settings};
 use crate::updater::{Act, State, UpdateWindow, Updater};
@@ -77,9 +77,9 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 struct App {
-  tray: Tray,
+  tray: Tray<Action>,
   icon: Icon,
-  menu: Menu,
+  menu: Menu<Action>,
   hotkeys: Hotkeys,
   hud: (Window<Hud>, HudPosition),
   handle: Handle,
@@ -218,7 +218,7 @@ fn start(
   let saved = Settings::load(&home.join(settings::FILE)).0;
   let tray = Tray::new(Icon::Idle.tray(), &Icon::Idle.description());
   tray.on_open(|_, _| _ = with_app(App::menu_opening));
-  tray.on_item(|main, _, id| chosen(main, id));
+  tray.on_item(|main, _, action| chosen(main, action));
   let position = HudPosition::default();
   let mut app = App {
     tray,
@@ -303,46 +303,39 @@ fn shutdown() {
   drop(app.session);
 }
 
-fn chosen(main: &mut Main, id: &str) {
-  // One without text has nothing to copy: History shows it, with Transcribe Again.
-  if let Some(i) = id.strip_prefix("recent:").and_then(|i| i.parse().ok()) {
-    if with_app(|app| app.copy_recent(i)) == Some(false) {
-      open_window(main, Some(Page::History));
+fn chosen(main: &mut Main, action: Action) {
+  match action {
+    // One without text has nothing to copy: History shows it, with Transcribe Again.
+    Action::Recent(i) => {
+      if with_app(|app| app.copy_recent(i)) == Some(false) {
+        open_window(main, Some(Page::History));
+      }
     }
-
-    return;
-  }
-
-  if let Some(i) = id.strip_prefix("mic:").and_then(|i| i.parse().ok()) {
-    with_app(|app| app.choose_mic(i));
-    return;
-  }
-
-  if id == menu::UPDATE || id == menu::CHECK_UPDATES {
-    return open_update(main);
-  }
-
-  if let Some(name) = id.strip_prefix("model:") {
-    let name = name.to_owned();
-    info!("model {name} chosen in the menu");
-    with_app(|app| app.handle.edit_settings(move |s| s.model = Some(name)));
-    return;
-  }
-
-  match id {
-    "copy-last" => _ = with_app(App::copy_last),
-    "unload" => _ = with_app(App::unload),
-    "models" | "warn:download" | "warn:model" => open_window(main, Some(Page::Models)),
-    "history" => open_window(main, Some(Page::History)),
-    "settings" => open_window(main, None),
-    "quit" => main.quit(),
-    "warn:accessibility" | "warn:microphone" | "warn:secure-input" | "warn:hotkey" => {
+    Action::Mic(i) => _ = with_app(|app| app.choose_mic(i)),
+    Action::Update | Action::CheckUpdates => open_update(main),
+    Action::Model(name) => {
+      info!("model {name} chosen in the menu");
+      with_app(|app| app.handle.edit_settings(move |s| s.model = Some(name.to_owned())));
+    }
+    Action::CopyLast => _ = with_app(App::copy_last),
+    Action::Unload => _ = with_app(App::unload),
+    Action::Models | Action::Warning(Warn::Download | Warn::Model) => {
+      open_window(main, Some(Page::Models))
+    }
+    Action::History => open_window(main, Some(Page::History)),
+    Action::Settings => open_window(main, None),
+    Action::Quit => main.quit(),
+    Action::Warning(Warn::Accessibility | Warn::Microphone | Warn::SecureInput | Warn::Hotkey) => {
       open_window(main, Some(Page::General))
     }
-    "warn:clipboard" => allow(Pane::Pasteboard),
-    "warn:hotkey-portal" => _ = with_app(App::allow_portal),
-    "warn:paste-portal" => allow_paste(),
-    _ => {}
+    Action::Warning(Warn::Clipboard) => allow(Pane::Pasteboard),
+    Action::Warning(Warn::HotkeyPortal) => _ = with_app(App::allow_portal),
+    Action::Warning(Warn::PastePortal) => allow_paste(),
+    Action::Header
+    | Action::MicNote
+    | Action::ModelChosen
+    | Action::NoModels
+    | Action::Warning(Warn::Status) => {}
   }
 }
 
@@ -412,11 +405,10 @@ fn open_window(main: &mut Main, page: Option<Page>) {
 fn allow(pane: Pane) {
   match pane {
     Pane::Accessibility
-      if !permissions::accessibility(false)
-        && !ASKED_ACCESSIBILITY.swap(true, Ordering::Relaxed) =>
+      if !permissions::accessibility() && !ASKED_ACCESSIBILITY.swap(true, Ordering::Relaxed) =>
     {
       info!("no Accessibility access: asking for it");
-      permissions::accessibility(true);
+      permissions::request_accessibility();
       with_window(Prefs::access_changed);
     }
     Pane::Microphone if permissions::microphone() == Access::NotDetermined => request_microphone(),
@@ -625,7 +617,7 @@ impl App {
   /// does. Elsewhere the listener starts once: on Linux it may be the GlobalShortcuts portal, whose
   /// dialog a retry would bring back after the person cancelled it.
   fn check_access(&mut self) {
-    self.accessibility = permissions::accessibility(false);
+    self.accessibility = permissions::accessibility();
     // The tap starts in the background: how it went shows at the next poll.
     if self.accessibility
       && self.may_listen
@@ -1126,7 +1118,7 @@ impl window::Shell for AppShell {
   }
 
   fn access(&self) -> window::Access {
-    let accessibility = permissions::accessibility(false);
+    let accessibility = permissions::accessibility();
     window::Access {
       accessibility,
       needs_admin: !accessibility && needs_admin(),
@@ -1330,7 +1322,7 @@ impl TextOutput for GuiOutput {
   }
 
   fn can_paste(&self) -> bool {
-    permissions::accessibility(false) || !needs_admin()
+    permissions::accessibility() || !needs_admin()
   }
 }
 
