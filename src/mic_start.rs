@@ -215,7 +215,7 @@ mod tests {
     let shown = menu::warnings(&system, "f5", &status);
     let mics = (&[][..], &audio::Microphone::Automatic, false);
     let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;
-    assert_eq!(items[1].label, format!("⚠︎ {warning}"));
+    assert_eq!(items[1].label(), format!("⚠︎ {warning}"));
 
     // Another device records, one of the same name too: no warning; each keeps its own.
     assert_eq!(starts(&mut s, elgato, level(300, 5)), 0);

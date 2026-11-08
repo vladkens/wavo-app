@@ -14,7 +14,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use nimbo::{Align, Button, Config, Png, Style, TextStyle, Ui, grow, px};
+use nimbo::{Align, Button, ButtonStyle, Config, Png, Style, TextStyle, Ui, grow, px};
 use shipo::{Error, Feed, Release};
 
 /// `update.txt` beside the latest release's files, which CI's publish job writes and signs
@@ -329,7 +329,7 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
     ui.row(Style::new().w(grow()).gap(16.0), |ui| {
       ui.png_image(ICON, Style::new().w(px(64.0)).h(px(64.0)));
       ui.col(Style::new().w(grow()).gap(6.0), |ui| {
-        ui.text(title, TextStyle::new(t.bold, t.text).ellipsis());
+        ui.text(title, TextStyle::new(t.bold, t.text).line_limit(1));
         if !text.is_empty() {
           ui.text(&text, t.body());
         }
@@ -349,7 +349,7 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
             ui.progress(None);
           }
           State::Available(r) if r.notes.is_some() => {
-            if ui.id(NOTES).link("Release notes", t.body().color(t.link)).clicked {
+            if ui.id(NOTES).link("Release notes").clicked {
               act = Some(Act::Notes);
             }
           }
@@ -363,7 +363,11 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
     let bar = Style::new().w(grow()).gap(8.0).align(Align::Start, Align::Center);
     ui.row(bar, |ui| {
       let mut button = |ui: &mut Ui, id, label, then, primary| {
-        let b = if primary { Button::new(label).primary() } else { Button::new(label) };
+        let b = if primary {
+          Button::new(label).style(ButtonStyle::BorderedProminent)
+        } else {
+          Button::new(label)
+        };
         if b.show(ui.id(id)).clicked {
           act = Some(then);
         }
@@ -763,7 +767,7 @@ mod tests {
         let (mut h, _) = window(state.clone());
         h.event(Event::Appearance(appearance));
         let ground = h.render().pixel(4.0, 4.0);
-        assert_eq!(ground[0] < 100, appearance.dark, "{name} {look}: {ground:?}");
+        assert_eq!(ground[0] < 100, appearance.scheme.is_dark(), "{name} {look}: {ground:?}");
         let out = [CLOSE, LATER].iter().any(|id| h.rect(Id::of(*id)).is_some());
         assert!(out, "{name}: no way out");
         if let Some(dir) = &dir {

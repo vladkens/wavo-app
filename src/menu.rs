@@ -5,8 +5,8 @@
 //! model in use with the others downloaded; Unload Model, History…, Settings…, Check for Updates…,
 //! Quit.
 
-use nimbo::Hotkey;
 use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
+use nimbo::{Hotkey, Shortcut};
 
 use crate::audio::{Auto, Device, Microphone};
 use crate::engine::Phase as EnginePhase;
@@ -24,8 +24,46 @@ pub const SOFTWARE_GPU: &str = "Slow transcription: install the GPU's driver";
 
 /// The update's row under the warnings while it has news, and Check for Updates… above Quit: both
 /// open the update's window.
-pub const UPDATE: &str = "update";
-pub const CHECK_UPDATES: &str = "update-check";
+/// What the tray menu's items do ([crate::app] runs them); the header and the notes do nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Action {
+  Header,
+  Warning(Warn),
+  CopyLast,
+  /// A recent dictation, by its place in the list.
+  Recent(usize),
+  /// A microphone, by its place among the choices ([mic_choices]).
+  Mic(usize),
+  MicNote,
+  /// A downloaded model, by name.
+  Model(&'static str),
+  /// The model chosen, not among those downloaded.
+  ModelChosen,
+  NoModels,
+  Models,
+  Unload,
+  History,
+  Settings,
+  Update,
+  CheckUpdates,
+  Quit,
+}
+
+/// What a warning is about: a click opens where it is fixed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Warn {
+  Accessibility,
+  Hotkey,
+  HotkeyPortal,
+  PastePortal,
+  Microphone,
+  Clipboard,
+  SecureInput,
+  Download,
+  Model,
+  /// The engine's or the last dictation's: nothing to click.
+  Status,
+}
 
 // MARK: Icon
 
@@ -94,7 +132,7 @@ pub struct System {
 /// `action`: a click opens where it is fixed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Warning {
-  pub id: &'static str,
+  pub id: Warn,
   pub text: String,
   pub action: bool,
 }
@@ -103,41 +141,41 @@ pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> 
   let mut list = Vec::new();
   let mut add = |id, text: String, action| list.push(Warning { id, text, action });
   if !system.accessibility {
-    add("warn:accessibility", "Allow Accessibility…".into(), true);
+    add(Warn::Accessibility, "Allow Accessibility…".into(), true);
   }
 
   if let Some(e) = &system.hotkey_error {
     // As the platform names its keys (Ctrl+Alt+K, not the stored ctrl+option+k); a click opens
     // General, where it changes.
     let label = Hotkey::parse(hotkey).map_or_else(|_| hotkey.to_owned(), |h| h.label());
-    add("warn:hotkey", format!("The hotkey “{label}” does not work: {e}"), true);
+    add(Warn::Hotkey, format!("The hotkey “{label}” does not work: {e}"), true);
   }
 
   if system.hotkey_portal {
-    add("warn:hotkey-portal", "Allow the Hotkey…".into(), true);
+    add(Warn::HotkeyPortal, "Allow the Hotkey…".into(), true);
   }
 
   if system.paste_portal {
-    add("warn:paste-portal", "Allow Paste…".into(), true);
+    add(Warn::PastePortal, "Allow Paste…".into(), true);
   }
 
   if system.no_microphone {
-    add("warn:microphone", "Allow Microphone…".into(), true);
+    add(Warn::Microphone, "Allow Microphone…".into(), true);
   }
 
   if system.clipboard_unread {
-    add("warn:clipboard", "Allow Paste…".into(), true);
+    add(Warn::Clipboard, "Allow Paste…".into(), true);
   }
 
   if system.secure_input {
-    add("warn:secure-input", "Secure Input is on…".into(), true);
+    add(Warn::SecureInput, "Secure Input is on…".into(), true);
   }
 
   match &status.no_model {
-    Some(NoModel::NoneDownloaded) => add("warn:download", "Download a Speech Model…".into(), true),
-    Some(NoModel::Gone { model }) => add("warn:model", format!("{model} is not on disk…"), true),
+    Some(NoModel::NoneDownloaded) => add(Warn::Download, "Download a Speech Model…".into(), true),
+    Some(NoModel::Gone { model }) => add(Warn::Model, format!("{model} is not on disk…"), true),
     Some(NoModel::LoadFailed { model, .. }) => {
-      add("warn:model", format!("{model} does not load…"), true)
+      add(Warn::Model, format!("{model} does not load…"), true)
     }
     None => {}
   }
@@ -149,7 +187,7 @@ pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> 
   let device = status.engine.software_gpu.then(|| SOFTWARE_GPU.to_owned());
   let warnings = status.warnings.iter().map(|w| capitalized(w));
   for text in error.into_iter().chain(failed).chain(device).chain(warnings) {
-    add("warn:status", text, false);
+    add(Warn::Status, text, false);
   }
 
   list
@@ -188,54 +226,56 @@ pub fn menu(
   mics: (&[Device], &Microphone, bool),
   (found, pick): (&[Found], &Pick),
   update: Option<&State>,
-) -> Menu {
+) -> Menu<Action> {
   let title = format!("{} {}", crate::INFO.name, crate::VERSION);
   let header = [Some(title.as_str()), hotkey, state(status)].into_iter().flatten();
   let header = header.collect::<Vec<_>>().join(" · ");
-  // Labels fit the menu's width by themselves (nimbo's Item::new).
-  let mut items = vec![Item::new("header", &header).enabled(false)];
+  // Labels fit the menu's width by themselves (nimbo's Item::button).
+  let mut items = vec![Item::button(Action::Header, &header).enabled(false)];
   for w in warnings {
     // Downloading a first model is a step of the setup, not a problem.
-    let mark = if w.id == "warn:download" { "" } else { "⚠︎ " };
-    items.push(Item::new(w.id, &format!("{mark}{}", w.text)).enabled(w.action));
+    let mark = if w.id == Warn::Download { "" } else { "⚠︎ " };
+    let label = format!("{mark}{}", w.text);
+    items.push(Item::button(Action::Warning(w.id), &label).enabled(w.action));
   }
 
   items.extend(update.and_then(update_item));
 
   let last = status.last.as_ref().is_some_and(|l| !l.text.is_empty());
   let loaded = status.engine.phase != EnginePhase::Stopped && status.state == Phase::Idle;
-  let recent: Vec<Item> =
-    recent.iter().enumerate().map(|(i, title)| Item::new(&format!("recent:{i}"), title)).collect();
+  let recent: Vec<Item<Action>> =
+    recent.iter().enumerate().map(|(i, title)| Item::button(Action::Recent(i), title)).collect();
   let (mic, mics, note) = microphones(mics);
   let (model, models) = models(found, pick);
+  let empty = recent.is_empty();
   items.extend([
-    Item::separator(),
-    Item::new("copy-last", "Copy Last Dictation").enabled(last),
-    Item::new("recent", "Recent").enabled(!recent.is_empty()).submenu(Menu::new(recent)),
-    Item::separator(),
-    Item::new("mic", &mic).submenu(mics),
+    Item::Divider,
+    Item::button(Action::CopyLast, "Copy Last Dictation").enabled(last),
+    Item::submenu("Recent", Menu::new(recent)).enabled(!empty),
+    Item::Divider,
+    Item::submenu(&mic, mics),
   ]);
   if let Some(note) = note {
-    items.push(Item::new("mic-note", &note).enabled(false));
+    items.push(Item::button(Action::MicNote, &note).enabled(false));
   }
 
   items.extend([
-    Item::new("model", &model).submenu(models),
-    Item::new("unload", "Unload Model").enabled(loaded),
-    Item::separator(),
-    Item::new("history", "History…"),
+    Item::submenu(&model, models),
+    Item::button(Action::Unload, "Unload Model").enabled(loaded),
+    Item::Divider,
+    Item::button(Action::History, "History…"),
     // A tray menu's keys work only in macOS's; Windows' and Linux's would show keys that do
     // nothing.
-    with_key(Item::new("settings", "Settings…"), "cmd+comma"),
+    with_key(Item::button(Action::Settings, "Settings…"), Shortcut::char(',').cmd()),
   ]);
   items.extend(update.map(check_item));
-  let quit = Item::new("quit", &format!("Quit {}", crate::INFO.name));
-  items.extend([Item::separator(), with_key(quit, "cmd+q")]);
+  let quit = Item::button(Action::Quit, &format!("Quit {}", crate::INFO.name));
+  items.extend([Item::Divider, with_key(quit, Shortcut::char('q').cmd())]);
   Menu::new(items)
 }
 
 /// The update's row while it has news: a release on offer, its download, the restart, a failure.
-fn update_item(state: &State) -> Option<Item> {
+fn update_item(state: &State) -> Option<Item<Action>> {
   let label = match state {
     State::Available(r) => format!("Update Available: {}…", updater::shown(&r.version)),
     State::Downloading(_, done) => format!("Downloading Update: {done}%"),
@@ -244,18 +284,18 @@ fn update_item(state: &State) -> Option<Item> {
     State::Idle | State::Checking | State::UpToDate => return None,
   };
 
-  Some(Item::new(UPDATE, &label))
+  Some(Item::button(Action::Update, &label))
 }
 
 /// Check for Updates…, which opens the window ([updater::Updater::open]): Checking while the
 /// person's check runs.
-fn check_item(state: &State) -> Item {
+fn check_item(state: &State) -> Item<Action> {
   let label =
     if *state == State::Checking { "Checking for Updates…" } else { "Check for Updates…" };
-  Item::new(CHECK_UPDATES, label)
+  Item::button(Action::CheckUpdates, label)
 }
 
-fn with_key(item: Item, key: &str) -> Item {
+fn with_key(item: Item<Action>, key: Shortcut) -> Item<Action> {
   if cfg!(target_os = "macos") { item.key(key) } else { item }
 }
 
@@ -264,12 +304,12 @@ fn with_key(item: Item, key: &str) -> Item {
 /// system's input), or Automatic has only a Bluetooth one.
 fn microphones(
   (devices, saved, lid_closed): (&[Device], &Microphone, bool),
-) -> (String, Menu, Option<String>) {
+) -> (String, Menu<Action>, Option<String>) {
   let (mics, at) = mic_choices(devices, saved, lid_closed);
-  let mut items: Vec<Item> = (mics.iter().enumerate())
-    .map(|(i, (label, _))| Item::new(&format!("mic:{i}"), label).checked(i == at))
+  let mut items: Vec<Item<Action>> = (mics.iter().enumerate())
+    .map(|(i, (label, _))| Item::toggle(Action::Mic(i), label, i == at))
     .collect();
-  items.insert(2, Item::separator());
+  items.insert(2, Item::Divider);
   let menu = Menu::new(items);
   let Some((name, instead)) = not_connected(devices, saved, lid_closed) else {
     let note = bluetooth_only(devices, saved, lid_closed).map(str::to_owned);
@@ -286,11 +326,11 @@ fn microphones(
 
 /// The model in use, and the submenu: the models downloaded with the one that transcribes checked,
 /// then the chosen one when it is none of them.
-fn models(found: &[Found], pick: &Pick) -> (String, Menu) {
+fn models(found: &[Found], pick: &Pick) -> (String, Menu<Action>) {
   let only = pick.other.is_none();
-  let mut items: Vec<Item> = (found.iter().enumerate())
+  let mut items: Vec<Item<Action>> = (found.iter().enumerate())
     .map(|(i, (m, _))| {
-      Item::new(&format!("model:{}", m.name), m.full_name).checked(only && pick.active == Some(i))
+      Item::toggle(Action::Model(m.name), m.full_name, only && pick.active == Some(i))
     })
     .collect();
   let other = pick.other.as_ref().map(|(name, there)| match there {
@@ -303,14 +343,14 @@ fn models(found: &[Found], pick: &Pick) -> (String, Menu) {
     (None, None) => "No Model".to_owned(),
   };
   if let Some(other) = other {
-    items.push(Item::new("model-chosen", &other).checked(pick.gone().is_none()));
+    items.push(Item::toggle(Action::ModelChosen, &other, pick.gone().is_none()));
   }
 
   if items.is_empty() {
-    items.push(Item::new("model-none", "No Models Downloaded").enabled(false));
+    items.push(Item::button(Action::NoModels, "No Models Downloaded").enabled(false));
   }
 
-  items.extend([Item::separator(), Item::new("models", "All Models…")]);
+  items.extend([Item::Divider, Item::button(Action::Models, "All Models…")]);
   (title, Menu::new(items))
 }
 
@@ -333,6 +373,25 @@ mod tests {
 
   use super::*;
   use crate::audio::{Choice, Transport};
+
+  /// The microphone's submenu among `items`: its title and its items.
+  fn mic_menu(items: &[Item<Action>]) -> (&str, &[Item<Action>]) {
+    let mic = |it: &&Item<Action>| match it {
+      Item::Submenu { menu, .. } => {
+        menu.items.iter().any(|i| matches!(i.action(), Some(Action::Mic(_))))
+      }
+      _ => false,
+    };
+    let Some(Item::Submenu { label, menu, .. }) = items.iter().find(mic) else {
+      panic!("no mic menu")
+    };
+    (label, &menu.items)
+  }
+
+  /// The label of the item doing `action`.
+  fn label_of(items: &[Item<Action>], action: Action) -> Option<String> {
+    items.iter().find(|i| i.action() == Some(&action)).map(|i| i.label().to_owned())
+  }
 
   #[test]
   fn every_icon_is_an_18_point_even_odd_path() {
@@ -362,15 +421,15 @@ mod tests {
     let list = warnings(&system, "f5", &s);
     let ids: Vec<_> = list.iter().map(|w| (w.id, w.action)).collect();
     let expected = [
-      ("warn:accessibility", true),
-      ("warn:hotkey", true),
-      ("warn:hotkey-portal", true),
-      ("warn:paste-portal", true),
-      ("warn:microphone", true),
-      ("warn:clipboard", true),
-      ("warn:secure-input", true),
-      ("warn:download", true),
-      ("warn:status", false),
+      (Warn::Accessibility, true),
+      (Warn::Hotkey, true),
+      (Warn::HotkeyPortal, true),
+      (Warn::PastePortal, true),
+      (Warn::Microphone, true),
+      (Warn::Clipboard, true),
+      (Warn::SecureInput, true),
+      (Warn::Download, true),
+      (Warn::Status, false),
     ];
     assert_eq!(ids, expected);
     assert_eq!(list[8].text, "No sound from USB Mic");
@@ -393,23 +452,22 @@ mod tests {
     let items = menu(Some("⌥Space"), &s, &list, &[], mics, (&[], &pick), None).items;
     // The header as long as the build's version lets it be (a dirty build's runs longer).
     let header = format!("Wavo {} · ⌥Space · Recording…", crate::VERSION);
-    let label = &items[0].label;
+    let label = items[0].label();
     match header.chars().count() <= 48 {
       true => assert_eq!(*label, header),
       false => assert!(label.starts_with("Wavo v") && label.contains("⌥Space"), "{label}"),
     }
     assert_eq!(
-      (items[1].label.as_str(), items[8].label.as_str()),
+      (items[1].label(), items[8].label()),
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")
     );
     // The hotkey's warning opens General too, its key as the platform names it.
-    assert!(items[1].enabled && items[2].enabled);
-    assert!(items[2].label.contains("“F5” does not work"), "{}", items[2].label);
+    assert!(items[1].is_enabled() && items[2].is_enabled());
+    assert!(items[2].label().contains("“F5” does not work"), "{}", items[2].label());
     // One name in the menu and its submenu.
-    let mic = items.iter().find(|i| i.id == "mic").unwrap();
-    assert_eq!(mic.label, "Elgato Wave:3 Microphone Array");
-    let sub = &mic.submenu.as_ref().unwrap().items;
-    let got: Vec<_> = sub.iter().map(|i| (i.label.as_str(), i.checked)).collect();
+    let (mic, sub) = mic_menu(&items);
+    assert_eq!(mic, "Elgato Wave:3 Microphone Array");
+    let got: Vec<_> = sub.iter().map(|i| (i.label(), i.is_on())).collect();
     assert_eq!(got[0], ("Automatic (Elgato Wave:3 Microphone Array)", false));
     assert_eq!(got[1], ("System Default (MacBook Pro Microphone)", false));
     let devices_got = &got[3..];
@@ -417,8 +475,7 @@ mod tests {
 
     let mic_label = |devices: &[Device], saved: &Microphone, lid_closed| {
       let items = menu(None, &s, &list, &[], (devices, saved, lid_closed), (&[], &pick), None);
-      let label = |id| items.items.iter().find(|i| i.id == id).map(|i| i.label.clone());
-      (label("mic").unwrap(), label("mic-note"))
+      (mic_menu(&items.items).0.to_owned(), label_of(&items.items, Action::MicNote))
     };
     let system = mic_label(&devices, &Microphone::System, false);
     assert_eq!(system, ("System Default (MacBook Pro Microphone)".into(), None));
@@ -448,7 +505,9 @@ mod tests {
       assert_eq!(got, (label.to_owned(), note.map(str::to_owned)), "lid closed: {lid_closed}");
     }
 
-    assert!(!items.iter().any(|i| i.id.starts_with("update")), "a build that doesn't update");
+    let update =
+      |i: &Item<Action>| matches!(i.action(), Some(Action::Update | Action::CheckUpdates));
+    assert!(!items.iter().any(update), "a build that doesn't update");
   }
 
   /// A chosen microphone that isn't connected stays checked in the submenu; the menu names the one
@@ -468,10 +527,9 @@ mod tests {
     let mics = |devices: &[Device], lid_closed| {
       let mics = (devices, &headphones, lid_closed);
       let items = menu(None, &s, &[], &[], mics, (&[], &pick), None).items;
-      let label = |id| items.iter().find(|i| i.id == id).map(|i| i.label.clone());
-      let sub = &items.iter().find(|i| i.id == "mic").unwrap().submenu.as_ref().unwrap().items;
-      let checked = sub.iter().find(|i| i.checked).map(|i| i.label.clone());
-      (label("mic").unwrap(), label("mic-note"), checked)
+      let (title, sub) = mic_menu(&items);
+      let checked = sub.iter().find(|i| i.is_on()).map(|i| i.label().to_owned());
+      (title.to_owned(), label_of(&items, Action::MicNote), checked)
     };
 
     let rode =
@@ -512,21 +570,21 @@ mod tests {
     let items = |state: State| {
       let mics = (&[][..], &Microphone::System, false);
       let items = menu(None, &s, &[], &[], mics, (&[], &pick), Some(&state)).items;
-      items.into_iter().map(|i| (i.id, i.label)).collect::<Vec<_>>()
+      items.into_iter().map(|i| (i.action().cloned(), i.label().to_owned())).collect::<Vec<_>>()
     };
     let idle = items(State::Idle);
-    let ids: Vec<_> = idle[idle.len() - 4..].iter().map(|(id, _)| id.as_str()).collect();
-    assert_eq!(ids, ["settings", CHECK_UPDATES, "", "quit"]);
+    let ids: Vec<_> = idle[idle.len() - 4..].iter().map(|(a, _)| a.clone()).collect();
+    assert_eq!(ids, [Some(Action::Settings), Some(Action::CheckUpdates), None, Some(Action::Quit)]);
     assert_eq!(idle[idle.len() - 3].1, "Check for Updates…");
-    assert!(!idle.iter().any(|(id, _)| id == UPDATE), "no news");
+    assert!(!idle.iter().any(|(a, _)| *a == Some(Action::Update)), "no news");
     let available = items(State::Available(Release::test("1.2.0")));
-    assert_eq!(available[1], (UPDATE.into(), "Update Available: v1.2.0…".into()));
+    assert_eq!(available[1], (Some(Action::Update), "Update Available: v1.2.0…".into()));
   }
 
   #[test]
   fn the_update_items_say_what_goes_on() {
     let r = || Release::test("1.2.0");
-    let label = |s: State| update_item(&s).map(|i| i.label);
+    let label = |s: State| update_item(&s).map(|i| i.label().to_owned());
     assert_eq!([State::Idle, State::Checking, State::UpToDate].map(label), [None, None, None]);
     assert_eq!(label(State::Available(r())).unwrap(), "Update Available: v1.2.0…");
     assert_eq!(label(State::Downloading(r(), 42)).unwrap(), "Downloading Update: 42%");
@@ -534,7 +592,7 @@ mod tests {
     assert_eq!(label(State::Failed(None, "offline".into())).unwrap(), "Update Failed…");
     assert_eq!(label(State::Relaunched("the swap failed".into())).unwrap(), "Update Failed…");
 
-    let check = |s: State| check_item(&s).label;
+    let check = |s: State| check_item(&s).label().to_owned();
     assert_eq!(check(State::Idle), "Check for Updates…");
     assert_eq!(check(State::Checking), "Checking for Updates…");
     assert_eq!(check(State::Available(r())), "Check for Updates…");

@@ -2186,10 +2186,10 @@ mod tests {
     let system = menu::System { accessibility: true, ..menu::System::default() };
     let shown = menu::warnings(&system, "f5", &status);
     let text = menu::SOFTWARE_GPU.to_owned();
-    assert_eq!(shown, [menu::Warning { id: "warn:status", text, action: false }]);
+    assert_eq!(shown, [menu::Warning { id: menu::Warn::Status, text, action: false }]);
     let mics = (&[][..], &audio::Microphone::Automatic, false);
     let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;
-    assert_eq!(items[1].label, format!("⚠︎ {}", menu::SOFTWARE_GPU), "not cut");
+    assert_eq!(items[1].label(), format!("⚠︎ {}", menu::SOFTWARE_GPU), "not cut");
   }
 
   #[test]

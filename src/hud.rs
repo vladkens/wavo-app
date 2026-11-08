@@ -421,8 +421,8 @@ impl Hud {
     match (shown, &self.text) {
       (Mode::Recording | Mode::Error, Some(text)) => {
         let glyph = Rect::new(x + PAD, mid - GLYPH / 2.0, GLYPH, GLYPH);
-        icon::draw(f, TRIANGLE, glyph, fade(th.warning, a), 0.0);
-        icon::draw(f, MARK, glyph, fade(th.menu, a), 2.2);
+        icon::draw(f, TRIANGLE, glyph, fade(th.warning, a));
+        icon::draw(f, MARK.stroke(2.2), glyph, fade(th.menu, a));
         let y = baseline(f, FONT);
         f.text(x + REASON_X, y, text, FONT, fade(th.text, a));
       }
@@ -430,7 +430,7 @@ impl Hud {
       (Mode::Done, Some(took)) => {
         let start = x + (WIDTH - GLYPH - 6.0 - f.measure(took, TIME)) / 2.0;
         let glyph = Rect::new(start, mid - GLYPH / 2.0, GLYPH, GLYPH);
-        icon::draw(f, Icon::CHECK, glyph, fade(th.success, a), 2.2);
+        icon::draw(f, Icon::CHECK.stroke(2.2), glyph, fade(th.success, a));
         let y = baseline(f, TIME);
         f.text(start + GLYPH + 6.0, y, took, TIME, fade(th.text, a));
       }
