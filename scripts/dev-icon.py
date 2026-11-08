@@ -3,6 +3,9 @@
 
   scripts/dev-icon.py <icon.png> <out.png>
 
+The Makefile's bundle makes the app's icon with it and build.rs the one the binary shows (the
+settings window's About, the update window), so the two are the same bytes.
+
 The icon is a palette PNG: only its PLTE chunk changes, the pixels stay, so no image library is
 needed. Each colour takes the hue HUE and keeps its saturation and brightness: the gradient's
 light and dark stay, the white mark and the grey shadow too.

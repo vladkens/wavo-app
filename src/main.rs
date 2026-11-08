@@ -50,8 +50,12 @@ const RELEASE: AppInfo =
 const DEV: AppInfo =
   AppInfo { id: "me.vladkens.wavo-dev", name: "Wavo Dev", presence: Presence::Accessory };
 
-/// The app's icon, decoded by nimbo when first shown.
+/// The app's icon, decoded by nimbo when first shown; Wavo Dev's is orange, as its bundle's
+/// (build.rs, scripts/dev-icon.py).
+#[cfg(not(wavo_dev))]
 const ICON: &[u8] = include_bytes!("../assets/icon.png");
+#[cfg(wavo_dev)]
+const ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dev-icon.png"));
 
 /// The app's log in its home, [home]: `~/Library/Application Support/me.vladkens.wavo/wavo.log`,
 /// `%LOCALAPPDATA%\me.vladkens.wavo\wavo.log`, `~/.local/share/me.vladkens.wavo/wavo.log` (Wavo
@@ -183,6 +187,41 @@ mod tests {
     assert_eq!(folder(RELEASE), "me.vladkens.wavo");
     assert_eq!(folder(DEV), "me.vladkens.wavo-dev");
     assert_eq!(INFO.id, RELEASE.id, "without WAVO_FLAVOR, as `make test` and CI build, it is Wavo");
+  }
+
+  #[test]
+  fn wavo_dev_has_the_icon_in_orange() {
+    let release = include_bytes!("../assets/icon.png");
+    if !cfg!(wavo_dev) {
+      assert_eq!(ICON, release, "Wavo shows its own icon");
+      return;
+    }
+
+    // The PNG's chunks, kind and body: only the palette differs, the pixels stay.
+    let chunks = |png: &'static [u8]| {
+      let mut at = 8;
+      let mut out = vec![];
+      while at < png.len() {
+        let size = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+        out.push((&png[at + 4..at + 8], &png[at + 8..at + 8 + size]));
+        at += 12 + size;
+      }
+
+      out
+    };
+    let (dev, release) = (chunks(ICON), chunks(release));
+    assert_eq!(dev.len(), release.len());
+    for ((kind, body), (release_kind, release_body)) in dev.into_iter().zip(release) {
+      assert_eq!(kind, release_kind);
+      if kind != b"PLTE" {
+        assert_eq!(body, release_body, "{}", String::from_utf8_lossy(kind));
+        continue;
+      }
+
+      assert_ne!(body, release_body, "the palette recoloured");
+      // Orange or grey: red the most, blue the least.
+      assert!(body.as_chunks::<3>().0.iter().all(|[r, g, b]| r >= g && g >= b), "{body:?}");
+    }
   }
 
   #[test]

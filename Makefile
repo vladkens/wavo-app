@@ -36,7 +36,8 @@ PROFILE := release
 # FLAVOR=dev: Wavo Dev, `make run`'s, an app of its own beside the installed Wavo: its bundle id
 # and data folder me.vladkens.wavo-dev, so its own permissions, login item and history; it never
 # updates itself. The binary takes it from WAVO_FLAVOR (build.rs), the bundle from shipo's
-# overrides, with an orange icon made into target/ (scripts/dev-icon.py).
+# overrides; its orange icon is scripts/dev-icon.py's, made into target/ for the bundle and by
+# build.rs into the binary, so both are the same.
 DEV := $(filter dev,$(FLAVOR))
 DEV_APP := target/Wavo Dev.app
 DEV_ICON := target/dev-icon.png
