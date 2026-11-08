@@ -467,18 +467,18 @@ fn marked<'s>(
 ) -> impl FnOnce(&mut Ui, TextStyle) + 's {
   move |ui: &mut Ui, s: TextStyle| {
     ui.text(name, s);
-    let named = |ui: &mut Ui, tip: &str| match id {
+    let help = |ui: &mut Ui, tip: &str| match id {
       Some(id) => _ = ui.help(tip).with_id(id),
       None => _ = ui.help(tip),
     };
     match mark {
       Mark::None => {}
       Mark::Info(tip) => {
-        named(ui, tip);
+        help(ui, tip);
         ui.info_button();
       }
       Mark::Warning(tip) => {
-        named(ui, tip);
+        help(ui, tip);
         ui.warning_button();
       }
     }
@@ -1197,8 +1197,8 @@ fn finds(search: &str, m: &ModelInfo) -> bool {
 /// ones by [measure], then the rest, with a language chosen those made for it alone first.
 fn rank(lang: &str, best: Option<&str>, m: &ModelInfo) -> (bool, bool, i32, bool) {
   let by = measure(lang, m);
-  let by = by.map_or(0, |x| (x * 100.0).round() as i32);
-  (Some(m.name) != best, measure(lang, m).is_none(), by, !lang.is_empty() && m.langs != [lang])
+  let at = by.map_or(0, |x| (x * 100.0).round() as i32);
+  (Some(m.name) != best, by.is_none(), at, !lang.is_empty() && m.langs != [lang])
 }
 
 /// What orders a measured model, the least first: its errors in `lang`, or with all languages
@@ -1236,7 +1236,7 @@ fn recommended(lang: &str) -> Option<&'static ModelInfo> {
 
 /// `WER 4.5%` of `m` in `lang`, a decimal under 10 (`WER 32%`); `None` when not measured.
 fn wer_text(lang: &str, m: &ModelInfo) -> Option<String> {
-  Some(format!("WER {}%", wer_number(m.wer(lang)?)))
+  Some(format!("WER {}%", figure(m.wer(lang)?)))
 }
 
 /// Languages written without spaces, whose WER wavo counts in characters: `BY_CHARACTER` in
@@ -1248,10 +1248,11 @@ fn errors_per(lang: &str) -> &'static str {
   if BY_CHARACTER.contains(&lang) { "Errors per 100 characters" } else { "Errors per 100 words" }
 }
 
-/// `4.5`, a decimal under 10, `32` from it (9.96 is `10`).
-fn wer_number(wer: f32) -> String {
-  let tenths = (wer * 10.0).round() / 10.0;
-  if tenths < 10.0 { format!("{tenths:.1}") } else { format!("{:.0}", wer.round()) }
+/// A WER or a speed as Settings › Models shows it: a decimal under 10 (`4.5`), whole from it
+/// (`32`; 9.96 is `10`).
+fn figure(x: f32) -> String {
+  let tenths = (x * 10.0).round() / 10.0;
+  if tenths < 10.0 { format!("{tenths:.1}") } else { format!("{:.0}", x.round()) }
 }
 
 /// The model Settings › Models recommends for `lang` and why: [recommended], else whisper-turbo
@@ -1267,10 +1268,14 @@ fn best_for(lang: &str) -> Option<(&'static str, String)> {
   }
 }
 
+/// `1 model`, `3 models`.
+fn model_count(n: usize) -> String {
+  format!("{n} model{}", if n == 1 { "" } else { "s" })
+}
+
 /// A speed as times whisper-turbo's: `22×`, a decimal under 10 (`8.5×`, `0.9×`).
 fn times(x: f32) -> String {
-  let tenths = (x * 10.0).round() / 10.0;
-  if tenths < 10.0 { format!("{tenths:.1}×") } else { format!("{:.0}×", x.round()) }
+  format!("{}×", figure(x))
 }
 
 /// What [times] says on hover: `22× faster than whisper-turbo`, `As fast as whisper-turbo` when
@@ -1335,8 +1340,8 @@ impl Prefs {
       remote.sort_by_key(|m| rank(lang, best, m));
     }
 
-    let count = |n: usize| format!("{n} model{}", if n == 1 { "" } else { "s" });
-    let (mut act, mut acts) = (None, vec![]);
+    let fit = |m: &ModelInfo| Fit { lang, best: why(m) };
+    let mut acts = vec![];
     if self.found.is_empty() {
       ui.form_section(fs, "Downloaded", |ui| {
         let row = FormRow::new("No model yet")
@@ -1345,78 +1350,11 @@ impl Prefs {
         ui.form_row(fs, row, |_| {});
       });
     } else if !downloaded.is_empty() {
-      let size: u64 = downloaded.iter().map(|m| m.size).sum();
-      let note = format!("{} · {}", count(downloaded.len()), size_text(size));
-      let line = ui.line_height(fs.head);
-      let mut sel = std::mem::take(&mut self.model_sel);
-      let picked = |sel: &Selection| -> Vec<&'static ModelInfo> {
-        downloaded.iter().copied().filter(|m| sel.contains(model_key(m))).collect()
-      };
-      // The header is built in the list, before this frame's input reaches the selection: a
-      // change asks for the next frame, which shows it.
-      let before = picked(&sel);
-      let off = before.iter().all(|m| self.in_use(m));
-      let delete = Cell::new(false);
-      // As a form section's title: the note centred on the title's line; with a selection, how
-      // many and Delete, as the History page's, over the line's right end, the button being
-      // taller than the line.
-      let head = |ui: &mut Ui, _| {
-        ui.row(Style::new().w(grow()).h(px(line)).align(Align::Start, Align::Center), |ui| {
-          ui.text("Downloaded", fs.head);
-          ui.spacer();
-          if before.is_empty() {
-            ui.text(&note, fs.note);
-            return;
-          }
-
-          let right = Float::parent().attach(UnitPoint::TRAILING).anchor(UnitPoint::TRAILING);
-          ui.float(right).row(Style::new().gap(8.0).align(Align::Start, Align::Center), |ui| {
-            ui.id("models-chosen").text(format!("{} selected", count(before.len())), fs.note);
-            if off {
-              ui.help("In use: choose another to delete it");
-            }
-
-            let ui = ui.disabled(off).control_size(ControlSize::Small);
-            delete.set(ui.id("delete-models").button("Delete…").clicked);
-          });
-        });
-      };
-      // A list for selecting several to delete, as the History page's; its rows the form's,
-      // padded by the list.
-      let keys: Vec<u64> = downloaded.iter().map(|m| model_key(m)).collect();
-      let key = |i: usize| keys[i];
-      let (row_h, head_h) = (two_line_h(ui, fs), line + fs.head_pad[2]);
-      let rfs = &FormStyle { row: fs.row.pad(0.0), tile_x: fs.tile_x - fs.row.pad[3], ..*fs };
-      let list = List::new(downloaded.len(), row_h).key(&key).multi().selection(&mut sel);
-      let list = list.sections(&[0], head_h, &head).list_style(ListStyle::Grouped);
-      let list = list.style(Style::new().w(grow()).h(px(head_h + row_h * keys.len() as f32)));
-      let r = list.show(ui.id("downloaded"), |ui, row| {
-        let m = downloaded[row.index];
-        let fit = Fit { lang, best: why(m) };
-        act = self.downloaded_row(ui, rfs, m, fit, active == Some(m.name)).or(act);
-      });
-      if r.changed {
-        ui.request_frame_in(Duration::ZERO);
-      }
-
-      let chosen = picked(&sel);
-      self.model_sel = sel;
-      let n = chosen.iter().filter(|m| !self.in_use(m)).count();
-      let label = format!("Delete {n} Model{}…", if n == 1 { "" } else { "s" });
-      let item = match chosen.is_empty() {
-        true => None,
-        false => ui.context_menu(r.id, || {
-          let delete = Item::button((), &label).role(ButtonRole::Destructive);
-          Menu::new(vec![delete.enabled(n > 0)])
-        }),
-      };
-      if r.delete || item.is_some() || delete.get() {
-        acts = chosen;
-      }
+      acts = self.downloaded_list(ui, fs, &downloaded, fit);
     }
 
     if !remote.is_empty() || !other.is_empty() {
-      let note = count(remote.len() + other.len());
+      let note = model_count(remote.len() + other.len());
       let more = match lang {
         "" => format!("{} more, not measured yet", other.len()),
         _ => format!("{} more, not measured in {}", other.len(), language_name(lang)),
@@ -1428,7 +1366,7 @@ impl Prefs {
       };
       ui.form_section(fs, Section::new(head), |ui| {
         for &m in &remote {
-          self.remote_row(ui, fs, m, Fit { lang, best: why(m) });
+          self.remote_row(ui, fs, m, fit(m));
         }
 
         if !other.is_empty() {
@@ -1446,11 +1384,88 @@ impl Prefs {
       ui.text("No model matches.", fs.caption);
     }
 
-    if let Some(m) = act {
-      acts = vec![m];
+    self.ask_delete_models(acts);
+  }
+
+  /// The models on disk in a list for selecting several to delete, as the History page's, under
+  /// its Downloaded header: the models to ask about deleting, by a row's bin or the selection's
+  /// Delete.
+  fn downloaded_list<'f>(
+    &mut self,
+    ui: &mut Ui,
+    fs: &FormStyle,
+    downloaded: &[&'static ModelInfo],
+    fit: impl Fn(&ModelInfo) -> Fit<'f>,
+  ) -> Vec<&'static ModelInfo> {
+    let (active, mut act) = (self.active().map(|f| f.0.name), None);
+    let size: u64 = downloaded.iter().map(|m| m.size).sum();
+    let note = format!("{} · {}", model_count(downloaded.len()), size_text(size));
+    let line = ui.line_height(fs.head);
+    let mut sel = std::mem::take(&mut self.model_sel);
+    let picked = |sel: &Selection| -> Vec<&'static ModelInfo> {
+      downloaded.iter().copied().filter(|m| sel.contains(model_key(m))).collect()
+    };
+    // The header is built in the list, before this frame's input reaches the selection: a
+    // change asks for the next frame, which shows it.
+    let before = picked(&sel);
+    let off = before.iter().all(|m| self.in_use(m));
+    let delete = Cell::new(false);
+    // As a form section's title: the note centred on the title's line; with a selection, how
+    // many and Delete, as the History page's, over the line's right end, the button being
+    // taller than the line.
+    let head = |ui: &mut Ui, _| {
+      ui.row(Style::new().w(grow()).h(px(line)).align(Align::Start, Align::Center), |ui| {
+        ui.text("Downloaded", fs.head);
+        ui.spacer();
+        if before.is_empty() {
+          ui.text(&note, fs.note);
+          return;
+        }
+
+        let right = Float::parent().attach(UnitPoint::TRAILING).anchor(UnitPoint::TRAILING);
+        ui.float(right).row(Style::new().gap(8.0).align(Align::Start, Align::Center), |ui| {
+          ui.id("models-chosen").text(format!("{} selected", model_count(before.len())), fs.note);
+          if off {
+            ui.help("In use: choose another to delete it");
+          }
+
+          let ui = ui.disabled(off).control_size(ControlSize::Small);
+          delete.set(ui.id("delete-models").button("Delete…").clicked);
+        });
+      });
+    };
+    // Its rows the form's, padded by the list.
+    let keys: Vec<u64> = downloaded.iter().map(|m| model_key(m)).collect();
+    let key = |i: usize| keys[i];
+    let (row_h, head_h) = (two_line_h(ui, fs), line + fs.head_pad[2]);
+    let rfs = &FormStyle { row: fs.row.pad(0.0), tile_x: fs.tile_x - fs.row.pad[3], ..*fs };
+    let list = List::new(downloaded.len(), row_h).key(&key).multi().selection(&mut sel);
+    let list = list.sections(&[0], head_h, &head).list_style(ListStyle::Grouped);
+    let list = list.style(Style::new().w(grow()).h(px(head_h + row_h * keys.len() as f32)));
+    let r = list.show(ui.id("downloaded"), |ui, row| {
+      let m = downloaded[row.index];
+      act = self.downloaded_row(ui, rfs, m, fit(m), active == Some(m.name)).or(act);
+    });
+    if r.changed {
+      ui.request_frame_in(Duration::ZERO);
     }
 
-    self.ask_delete_models(acts);
+    let chosen = picked(&sel);
+    self.model_sel = sel;
+    let n = chosen.iter().filter(|m| !self.in_use(m)).count();
+    let label = format!("Delete {n} Model{}…", if n == 1 { "" } else { "s" });
+    let item = match chosen.is_empty() {
+      true => None,
+      false => ui.context_menu(r.id, || {
+        let delete = Item::button((), &label).role(ButtonRole::Destructive);
+        Menu::new(vec![delete.enabled(n > 0)])
+      }),
+    };
+    match act {
+      Some(m) => vec![m],
+      None if r.delete || item.is_some() || delete.get() => chosen,
+      None => vec![],
+    }
   }
 
   /// Asks about deleting `models`, but those [in use](Self::in_use), which stay.
@@ -1491,7 +1506,7 @@ impl Prefs {
     self.shell.has_neural_engine() && m.neural_engine()
   }
 
-  /// Its [Fit], Use (or "✓ In use") and the bin in [ACTIONS], ↗: the model to ask about deleting.
+  /// Its [Fit], Use (or "✓ In use") and the bin in [actions], ↗: the model to ask about deleting.
   fn downloaded_row(
     &mut self,
     ui: &mut Ui,
@@ -1532,6 +1547,7 @@ impl Prefs {
       });
       self.card(ui, m);
     });
+
     if used {
       self.use_model(m.name);
     }
@@ -1539,7 +1555,7 @@ impl Prefs {
     act
   }
 
-  /// Its [Fit] and Download (Retry after a failure) in [ACTIONS], or its progress in place of the
+  /// Its [Fit] and Download (Retry after a failure) in [actions], or its progress in place of the
   /// caption with ✕ there.
   fn remote_row(&self, ui: &mut Ui, fs: &FormStyle, m: &'static ModelInfo, fit: Fit) {
     let state = self.shell.download_state(m.name);
@@ -3524,7 +3540,6 @@ mod tests {
     let mut h = home.harness(&fake, Settings::default());
     tab(&mut h, Page::Models);
     let list = Id::of("downloaded");
-    let row = |name: &str| list.key(("row", model_key(hub::lookup(name).unwrap())));
     click(&mut h, Id::of(("use", "parakeet-v2")));
     h.set_focus(Some(list));
     h.key('a', nimbo::CMD);
@@ -3532,7 +3547,7 @@ mod tests {
     assert_eq!(h.app().model_sel.len(), 3);
     // The menu says how many go.
     h.native_menus();
-    let r = h.rect(row("whisper-tiny")).unwrap();
+    let r = h.rect(row_of("whisper-tiny")).unwrap();
     h.right_click(r.x + 60.0, r.y + r.h / 2.0);
     h.frame();
     let (_, menu) = h.context_menu(None).expect("the row's menu");
@@ -3761,10 +3776,11 @@ mod tests {
     assert_eq!(wer_text("ru", m("gigaam-v3")).as_deref(), Some("WER 4.5%"));
     assert_eq!(wer_text("el", m("parakeet-ultra")).as_deref(), Some("WER 32%"));
     assert_eq!(wer_text("", m("parakeet-ultra")), None, "all languages");
-    assert_eq!([9.94, 9.96, 31.6].map(wer_number), ["9.9", "10", "32"]);
+    assert_eq!([9.94, 9.96, 31.6].map(figure), ["9.9", "10", "32"]);
     for (_, lang) in LANGUAGES.iter() {
       assert!(recommended(lang).is_none_or(|m| m.punctuated), "{lang}");
     }
+
     assert_eq!([22.1, 9.96, 8.5, 0.9].map(times), ["22×", "10×", "8.5×", "0.9×"]);
     let speed = |name| speed_text(m(name)).unwrap();
     assert_eq!(speed("gigaam-v3"), "13× faster than whisper-turbo");
@@ -3872,9 +3888,8 @@ mod tests {
     // A row among several has its own Transcribe Again.
     let several = menu.items.len() == 3;
     let name = |label: &str| {
-      let mut found = names.iter().filter(|n| n.1 == label);
-      let mut found = found.by_ref().filter(|n| !several || n.0 != "retranscribe");
-      found.next().map_or("", |n| n.0).to_owned()
+      let found = names.iter().find(|n| n.1 == label && !(several && n.0 == "retranscribe"));
+      found.map_or("", |n| n.0).to_owned()
     };
     let item = |i: &nimbo::Item<usize>| match i {
       nimbo::Item::Divider => (String::new(), true),

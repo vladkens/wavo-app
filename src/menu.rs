@@ -22,8 +22,6 @@ pub const RECENT: usize = 10;
 /// A model on a GPU emulated on the CPU; wavo's whole warning is in the log.
 pub const SOFTWARE_GPU: &str = "Slow transcription: install the GPU's driver";
 
-/// The update's row under the warnings while it has news, and Check for Updates… above Quit: both
-/// open the update's window.
 /// What the tray menu's items do ([crate::app] runs them); the header and the notes do nothing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -44,7 +42,9 @@ pub enum Action {
   Unload,
   History,
   Settings,
+  /// The update's row under the warnings while it has news: it opens the update's window.
   Update,
+  /// Check for Updates… above Quit: it opens the update's window too.
   CheckUpdates,
   Quit,
 }
