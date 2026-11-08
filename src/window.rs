@@ -6,6 +6,7 @@
 //! shell keeps current ([Prefs::update]), and reaches the app only through [Shell]: tests run it
 //! in nimbo's harness with a fake one.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
@@ -21,9 +22,9 @@ use nimbo::ui::Role;
 use nimbo::ui::widgets::icon;
 use nimbo::{
   Align, Answer, App, Button, ButtonRole, ButtonStyle, Config, ControlSize, Cx, Dialog, Event,
-  FileDialog, Font, FormRow, FormStyle, Frame, Hotkey, Icon, Id, Item, LinePattern, List,
+  FileDialog, Float, Font, FormRow, FormStyle, Frame, Hotkey, Icon, Id, Item, LinePattern, List,
   ListStyle, Menu, Picker, Rect, Section, Selection, Style, TabItem, Tag, TextStyle, Tone, Ui,
-  Weight, grow, open, paths, px,
+  UnitPoint, Weight, grow, open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -1347,23 +1348,46 @@ impl Prefs {
       let size: u64 = downloaded.iter().map(|m| m.size).sum();
       let note = format!("{} · {}", count(downloaded.len()), size_text(size));
       let line = ui.line_height(fs.head);
-      // As a form section's title: the note centred on the title's line.
+      let mut sel = std::mem::take(&mut self.model_sel);
+      let picked = |sel: &Selection| -> Vec<&'static ModelInfo> {
+        downloaded.iter().copied().filter(|m| sel.contains(model_key(m))).collect()
+      };
+      // The header is built in the list, before this frame's input reaches the selection: a
+      // change asks for the next frame, which shows it.
+      let before = picked(&sel);
+      let off = before.iter().all(|m| self.in_use(m));
+      let delete = Cell::new(false);
+      // As a form section's title: the note centred on the title's line; with a selection, how
+      // many and Delete, as the History page's, over the line's right end, the button being
+      // taller than the line.
       let head = |ui: &mut Ui, _| {
         ui.row(Style::new().w(grow()).h(px(line)).align(Align::Start, Align::Center), |ui| {
           ui.text("Downloaded", fs.head);
           ui.spacer();
-          ui.text(&note, fs.note);
+          if before.is_empty() {
+            ui.text(&note, fs.note);
+            return;
+          }
+
+          let right = Float::parent().attach(UnitPoint::TRAILING).anchor(UnitPoint::TRAILING);
+          ui.float(right).row(Style::new().gap(8.0).align(Align::Start, Align::Center), |ui| {
+            ui.id("models-chosen").text(format!("{} selected", count(before.len())), fs.note);
+            if off {
+              ui.help("In use: choose another to delete it");
+            }
+
+            let ui = ui.disabled(off).control_size(ControlSize::Small);
+            delete.set(ui.id("delete-models").button("Delete…").clicked);
+          });
         });
       };
-      // A list for selecting several to delete by Cmd- and Shift-click and the keys, a plain
-      // click leaving the rows to their buttons; its rows the form's, padded by the list.
+      // A list for selecting several to delete, as the History page's; its rows the form's,
+      // padded by the list.
       let keys: Vec<u64> = downloaded.iter().map(|m| model_key(m)).collect();
       let key = |i: usize| keys[i];
       let (row_h, head_h) = (two_line_h(ui, fs), line + fs.head_pad[2]);
       let rfs = &FormStyle { row: fs.row.pad(0.0), tile_x: fs.tile_x - fs.row.pad[3], ..*fs };
-      let mut sel = std::mem::take(&mut self.model_sel);
-      let list = List::new(downloaded.len(), row_h).key(&key).multi().click_selects(false);
-      let list = list.selection(&mut sel);
+      let list = List::new(downloaded.len(), row_h).key(&key).multi().selection(&mut sel);
       let list = list.sections(&[0], head_h, &head).list_style(ListStyle::Grouped);
       let list = list.style(Style::new().w(grow()).h(px(head_h + row_h * keys.len() as f32)));
       let r = list.show(ui.id("downloaded"), |ui, row| {
@@ -1371,9 +1395,12 @@ impl Prefs {
         let fit = Fit { lang, best: why(m) };
         act = self.downloaded_row(ui, rfs, m, fit, active == Some(m.name)).or(act);
       });
+      if r.changed {
+        ui.request_frame_in(Duration::ZERO);
+      }
+
+      let chosen = picked(&sel);
       self.model_sel = sel;
-      let chosen: Vec<&'static ModelInfo> =
-        downloaded.iter().copied().filter(|m| self.model_sel.contains(model_key(m))).collect();
       let n = chosen.iter().filter(|m| !self.in_use(m)).count();
       let label = format!("Delete {n} Model{}…", if n == 1 { "" } else { "s" });
       let item = match chosen.is_empty() {
@@ -1383,7 +1410,7 @@ impl Prefs {
           Menu::new(vec![delete.enabled(n > 0)])
         }),
       };
-      if r.delete || item.is_some() {
+      if r.delete || item.is_some() || delete.get() {
         acts = chosen;
       }
     }
@@ -1596,7 +1623,7 @@ const MORE: Icon = Icon::filled(concat!(
   "M10.2 12a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0",
   "M16 12a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0"
 ));
-/// A bolt, as SF Symbols' bolt.fill, before a speed.
+/// A bolt, as SF Symbols' bolt.fill, after a speed.
 const BOLT: Icon = Icon::filled("M14.24 1.78 6.68 13.26H12.14L10.46 22.22 18.02 10.74H12.56Z");
 
 /// How a model suits the language chosen in Settings › Models.
@@ -1608,14 +1635,14 @@ struct Fit<'a> {
 }
 
 impl Fit<'_> {
-  /// The model's speed, a bolt and [times], in the secondary label's colour, at the right of a
-  /// slot as wide as the widest speed, empty for a model not measured; what it means on hover
-  /// and for assistive technology.
+  /// The model's speed, [times] and a bolt after it, in the secondary label's colour, at the right
+  /// of a slot as wide as the widest speed, so the bolts and the × line up from row to row; empty
+  /// for a model not measured; what it means on hover and for assistive technology.
   fn show(self, ui: &mut Ui, m: &ModelInfo) {
     let t = ui.theme();
     let s = TextStyle::new(t.small, t.muted).nowrap();
     let w = ["8.8×", "88×"].map(|x| ui.measure(x, s)).into_iter().fold(0.0, f32::max);
-    let slot = Style::new().w(px((w + 9.0).ceil())).h(px(16.0)).gap(2.0);
+    let slot = Style::new().w(px((w + 11.0).ceil())).h(px(16.0)).gap(4.0);
     let slot = slot.align(Align::End, Align::Center);
     let (Some(speed), Some(text)) = (m.speed(), speed_text(m)) else {
       ui.row(slot, |_| {});
@@ -1624,12 +1651,12 @@ impl Fit<'_> {
 
     let (id, times) = (Id::of(("speed", m.name)), times(speed));
     ui.help(&text).with_id(id).row(slot.hit(), |ui| {
+      ui.text(&times, s);
       // Its view box 13 square, the bolt 3.6 in from the left.
       let draw = move |f: &mut Frame, r: Rect| {
         icon::draw(f, BOLT, Rect::new(r.x - 3.6, r.y, 13.0, 13.0), t.muted)
       };
-      ui.canvas(Style::new().w(px(7.0)).h(px(13.0)), draw);
-      ui.text(&times, s);
+      ui.with_id(id.key("bolt")).canvas(Style::new().w(px(7.0)).h(px(13.0)), draw);
     });
     ui.a11y_label(&times).a11y(id, Role::StaticText);
   }
@@ -3014,13 +3041,14 @@ mod tests {
         h.frame();
         let name = if code.is_empty() { "all" } else { code };
         shot(&mut h, &format!("models-{name}-{look}"));
-        // The bolts line up whatever the button.
-        let x: Vec<f32> = hub::MODELS
-          .iter()
-          .filter_map(|m| h.rect(Id::of(("speed", m.name))))
-          .map(|r| r.x)
-          .collect();
-        assert!(x.len() >= 2 && x.iter().all(|&x0| x0 == x[0]), "{name}: {x:?}");
+        // The speeds and their bolts line up whatever the button.
+        for part in [None, Some("bolt")] {
+          let id = |m: &ModelInfo| {
+            part.map_or(Id::of(("speed", m.name)), |p| Id::of(("speed", m.name)).key(p))
+          };
+          let x: Vec<f32> = hub::MODELS.iter().filter_map(|m| h.rect(id(m))).map(|r| r.x).collect();
+          assert!(x.len() >= 2 && x.iter().all(|&x0| x0 == x[0]), "{name} {part:?}: {x:?}");
+        }
       }
 
       h.app_mut().model_lang = LANGUAGES.iter().position(|l| l.1 == "ru").unwrap();
@@ -3387,8 +3415,108 @@ mod tests {
     assert!(h.rect(Id::of(("other-models", ""))).is_none());
   }
 
-  /// Downloaded models selected by Cmd-click and Cmd-A, not a plain click, go at once by Delete or
-  /// the menu after the dialog, but the one in use, which stays and says so.
+  /// The downloaded model `name`'s row.
+  fn row_of(name: &str) -> Id {
+    Id::of("downloaded").key(("row", model_key(hub::lookup(name).unwrap())))
+  }
+
+  /// Clicks the downloaded model `name`'s row by its name, with `mods`.
+  fn click_model(h: &mut Harness<Prefs>, name: &str, mods: Modifiers) {
+    let r = h.rect(row_of(name)).unwrap_or_else(|| panic!("no row for {name}"));
+    h.press_with(r.x + 60.0, r.y + r.h / 2.0, 1, mods);
+    h.release(r.x + 60.0, r.y + r.h / 2.0);
+    h.frame();
+    h.frame();
+  }
+
+  /// The downloaded models selected, by name.
+  fn models_chosen(h: &Harness<Prefs>) -> Vec<&'static str> {
+    let sel = &h.app().model_sel;
+    hub::MODELS.iter().filter(|m| sel.contains(model_key(m))).map(|m| m.name).collect()
+  }
+
+  /// Downloaded models are selected as the History page's dictations: a click selects one,
+  /// Cmd-click toggles, Shift-click extends, Escape clears; a click on a row's button is the
+  /// button's.
+  #[test]
+  fn downloaded_models_are_selected_by_click() {
+    let home = Home::new("window-model-sel", &["parakeet-v3", "parakeet-v2", "whisper-tiny"]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Models);
+    click(&mut h, Id::of(("use", "parakeet-v2")));
+    assert!(h.app().model_sel.is_empty(), "the button's click, not the row's");
+    assert_eq!(fake.log().settings.model.as_deref(), Some("parakeet-v2"));
+
+    click_model(&mut h, "whisper-tiny", Modifiers::empty());
+    assert_eq!(models_chosen(&h), ["whisper-tiny"], "a click selects");
+    click_model(&mut h, "parakeet-v3", Modifiers::empty());
+    assert_eq!(models_chosen(&h), ["parakeet-v3"], "another click selects that one instead");
+    click_model(&mut h, "whisper-tiny", nimbo::CMD);
+    assert_eq!(models_chosen(&h).len(), 2, "Cmd-click adds");
+    click_model(&mut h, "parakeet-v3", nimbo::CMD);
+    assert_eq!(models_chosen(&h), ["whisper-tiny"], "Cmd-click takes away");
+    click(&mut h, Id::of(("delete", "parakeet-v3")));
+    assert_eq!(models_chosen(&h), ["whisper-tiny"], "the bin's click, not the row's");
+    h.wait(Duration::from_millis(200));
+    click(&mut h, Id::of(CONFIRM).key("cancel"));
+    assert!(h.app().ask.is_none() && fake.log().deleted.is_empty());
+
+    // The rows are by fit, whatever their order: Shift-click from the first to the last takes all.
+    let mut order = ["parakeet-v3", "parakeet-v2", "whisper-tiny"];
+    order.sort_by(|a, b| {
+      let y = |name: &str| h.rect(row_of(name)).unwrap().y;
+      y(a).total_cmp(&y(b))
+    });
+    click_model(&mut h, order[0], Modifiers::empty());
+    click_model(&mut h, order[2], Modifiers::SHIFT);
+    assert_eq!(models_chosen(&h).len(), 3, "Shift-click extends");
+
+    h.key(NamedKey::Escape, Modifiers::empty());
+    h.frame();
+    h.frame();
+    assert!(h.app().model_sel.is_empty(), "Escape clears");
+    assert!(h.rect(Id::of("delete-models")).is_none(), "the header's Delete goes with it");
+  }
+
+  /// With models selected the Downloaded header says how many and has Delete…, which asks about
+  /// those not in use and deletes them; off when all are in use.
+  #[test]
+  fn the_header_deletes_the_selected_models() {
+    let home = Home::new("window-model-head", &["parakeet-v3", "parakeet-v2", "whisper-tiny"]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Models);
+    assert!(h.rect(Id::of("delete-models")).is_none(), "nothing selected");
+
+    let active = h.app().active().unwrap().0.name;
+    let off = "button \"Delete…\" disabled desc \"In use: choose another to delete it\"";
+    click_model(&mut h, active, Modifiers::empty());
+    assert_eq!(h.text(Id::of("models-chosen")), Some("1 model selected"));
+    assert_eq!(a11y_line(&h, "button \"Delete…\"").as_deref(), Some(off));
+    click(&mut h, Id::of("delete-models"));
+    assert!(h.app().ask.is_none(), "the one in use stays");
+
+    h.set_focus(Some(Id::of("downloaded")));
+    h.key('a', nimbo::CMD);
+    h.frame();
+    h.frame();
+    assert_eq!(h.text(Id::of("models-chosen")), Some("3 models selected"));
+    assert_eq!(a11y_line(&h, "button \"Delete…\"").as_deref(), Some("button \"Delete…\""));
+    click(&mut h, Id::of("delete-models"));
+    assert_eq!(h.app().ask.as_ref().map(|a| a.title.as_str()), Some("Delete 2 models?"));
+    confirm(&mut h);
+    let mut deleted = fake.log().deleted.clone();
+    deleted.sort();
+    let mut want: Vec<&str> = ["parakeet-v3", "parakeet-v2", "whisper-tiny"].into();
+    want.retain(|&m| m != active);
+    want.sort();
+    assert_eq!(deleted, want);
+    assert!(h.app().model_sel.is_empty(), "the selection goes with them");
+  }
+
+  /// Downloaded models selected go at once by Delete or the menu after the dialog, but the one in
+  /// use, which stays and says so.
   #[test]
   fn downloaded_models_are_deleted_together() {
     let home = Home::new("window-bulk", &["parakeet-v3", "parakeet-v2", "whisper-tiny"]);
@@ -3398,15 +3526,6 @@ mod tests {
     let list = Id::of("downloaded");
     let row = |name: &str| list.key(("row", model_key(hub::lookup(name).unwrap())));
     click(&mut h, Id::of(("use", "parakeet-v2")));
-    assert!(h.app().model_sel.is_empty(), "the button's click, not the row's");
-    click(&mut h, row("whisper-tiny"));
-    assert!(h.app().model_sel.is_empty(), "a plain click doesn't select");
-    let r = h.rect(row("whisper-tiny")).unwrap();
-    h.press_with(r.x + 60.0, r.y + r.h / 2.0, 1, nimbo::CMD);
-    h.release(r.x + 60.0, r.y + r.h / 2.0);
-    h.frame();
-    assert_eq!(h.app().model_sel.len(), 1, "Cmd-click");
-
     h.set_focus(Some(list));
     h.key('a', nimbo::CMD);
     h.frame();
