@@ -23,8 +23,8 @@ use nimbo::ui::widgets::icon;
 use nimbo::{
   Align, Answer, App, Button, ButtonRole, ButtonStyle, Config, ControlSize, Cx, Dialog, Event,
   FileDialog, Float, Font, FormRow, FormStyle, Frame, Hotkey, Icon, Id, Item, LinePattern, List,
-  ListStyle, Menu, Picker, Rect, Section, Selection, Style, TabItem, Tag, TextStyle, Tone, Ui,
-  UnitPoint, Weight, grow, open, paths, px,
+  ListStyle, Menu, Picker, Rect, Response, Section, Selection, Style, TabItem, Tag, TextStyle,
+  Tone, Ui, UnitPoint, Weight, grow, open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -46,6 +46,8 @@ pub const SCROLLING: f32 = 600.0;
 
 const TABS: &str = "tabs";
 const CONFIRM: &str = "confirm";
+/// The row of the Models and History pages' search, over the page.
+const PAGE_HEAD: &str = "page-head";
 /// A page's padding in the window, the History list's too.
 const PAGE_PAD: [f32; 4] = [12.0, 20.0, 20.0, 20.0];
 
@@ -339,6 +341,18 @@ impl Prefs {
       Delete::Entries(ids) => self.shell.history(Request::Delete(ids)),
     }
   }
+
+  /// A click on the page's ground (the margins, the room between its sections, the search's
+  /// row) clears its list's selection, as Finder's; the list clears it on its own ground, the
+  /// History list's margins and the room between its days. The History panel under the list
+  /// keeps it: it shows the selection.
+  fn deselect(&mut self) {
+    match self.page {
+      Page::Models => self.model_sel.clear(),
+      Page::History => self.history.selected.clear(),
+      _ => {}
+    }
+  }
 }
 
 impl App for Prefs {
@@ -355,25 +369,32 @@ impl App for Prefs {
       ui.id(TABS).toolbar_tabs(&fs, &mut self.page, &PAGES);
       let head = Style::new().w(grow()).pads([12.0, 20.0, 2.0, 20.0]).gap(10.0);
       let head = head.align(Align::Start, Align::Center);
-      match self.page {
-        Page::Models => self.models_head(ui, head),
-        Page::History => self.history_head(ui, head),
-        _ => {}
-      }
+      let head = match self.page {
+        Page::Models => self.models_head(ui, head).clicked,
+        Page::History => self.history_head(ui, head).clicked,
+        _ => false,
+      };
 
       // History is a list, its own scroll area.
-      match self.page {
-        Page::History => self.history(ui, &fs),
+      let page = match self.page {
+        Page::History => {
+          self.history(ui, &fs);
+          false
+        }
         page => {
-          _ = ui.id(("page", page as u8)).form_scroll(&fs, Style::new().grow(), |ui| {
+          let r = ui.id(("page", page as u8)).form_scroll(&fs, Style::new().grow(), |ui| {
             ui.col(fs.page.pads(PAGE_PAD), |ui| match page {
               Page::General => self.general(ui, &fs),
               Page::Models => self.models(ui, &fs),
               Page::Advanced => self.advanced(ui, &fs),
               _ => self.about(ui, &fs),
             });
-          })
+          });
+          r.clicked
         }
+      };
+      if head || page {
+        self.deselect();
       }
 
       if self.page == Page::History {
@@ -1292,13 +1313,13 @@ fn speed_text(m: &ModelInfo) -> Option<String> {
 }
 
 impl Prefs {
-  fn models_head(&mut self, ui: &mut Ui, s: Style) {
+  fn models_head(&mut self, ui: &mut Ui, s: Style) -> Response {
     let items: Vec<Tag<usize>> =
       LANGUAGES.iter().enumerate().map(|(i, l)| Tag::new(i, l.0.as_str())).collect();
-    ui.row(s, |ui| {
+    ui.id(PAGE_HEAD).row(s, |ui| {
       ui.id("model-search").search(&mut self.model_search, "Search models");
       ui.id("model-lang").picker(&mut self.model_lang, &items);
-    });
+    })
   }
 
   /// wavo's models in two plates by [rank], the one in use and the one chosen shown whatever the
@@ -2156,13 +2177,13 @@ const FOOT_H: f32 = 150.0;
 const TOTAL_H: f32 = 30.0;
 
 impl Prefs {
-  fn history_head(&mut self, ui: &mut Ui, s: Style) {
+  fn history_head(&mut self, ui: &mut Ui, s: Style) -> Response {
     let h = &mut self.history;
-    ui.row(s, |ui| {
+    ui.id(PAGE_HEAD).row(s, |ui| {
       if ui.id("history-search").search(&mut h.search, "Search dictations").changed {
         h.typed(ui.now());
       }
-    });
+    })
   }
 
   /// The dictations, newest first, on a plate a day: nimbo's list, which builds only the rows in
@@ -3531,6 +3552,53 @@ mod tests {
     assert!(h.app().model_sel.is_empty(), "the selection goes with them");
   }
 
+  /// Clicks the window at `x`, `y` and lets the frames after it settle.
+  fn click_at(h: &mut Harness<Prefs>, x: f32, y: f32) {
+    h.click(x, y);
+    h.frame();
+    h.frame();
+  }
+
+  /// As in Finder, a click on the page's ground clears the selection: beside the Downloaded
+  /// header's title, in the page's margin, between its sections, beside the search; one on a
+  /// control keeps it, and the header's Delete… asks about it.
+  #[test]
+  fn a_click_on_the_models_pages_ground_clears_the_selection() {
+    let names = ["parakeet-v3", "parakeet-v2", "whisper-tiny"];
+    let home = Home::new("window-model-ground", &names);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Models);
+    let active = h.app().active().unwrap().0.name;
+    let m = *names.iter().find(|&&n| n != active).unwrap();
+    click_model(&mut h, m, Modifiers::empty());
+    let (list, row) = (h.rect(Id::of("downloaded")).unwrap(), h.rect(row_of(m)).unwrap());
+    let (note, search) = (h.rect(Id::of("models-chosen")).unwrap(), h.rect(Id::of("model-search")));
+    let search = search.unwrap();
+    let ground = [
+      ("the header", list.x + list.w / 2.0, note.y + note.h / 2.0),
+      ("the margin", list.x - 10.0, row.y + row.h / 2.0),
+      ("between the sections", list.x + list.w / 2.0, list.y + list.h + 4.0),
+      ("the search's row", search.x - 10.0, search.y + search.h / 2.0),
+    ];
+    for (what, x, y) in ground {
+      click_model(&mut h, m, Modifiers::empty());
+      assert_eq!(models_chosen(&h), [m]);
+      click_at(&mut h, x, y);
+      assert!(h.app().model_sel.is_empty(), "a click on {what} clears");
+      assert!(h.rect(Id::of("delete-models")).is_none(), "{what}: the header's Delete goes");
+    }
+
+    click_model(&mut h, m, Modifiers::empty());
+    click(&mut h, Id::of("model-search"));
+    let other = *names.iter().find(|&&n| n != active && n != m).unwrap();
+    click(&mut h, Id::of(("use", other)));
+    assert_eq!(models_chosen(&h), [m], "the controls' clicks keep it");
+    click(&mut h, Id::of("delete-models"));
+    let ask = h.app().ask.as_ref().map(|a| a.title.clone());
+    assert_eq!(ask, Some(format!("Delete {}?", hub::lookup(m).unwrap().full_name)));
+  }
+
   /// Downloaded models selected go at once by Delete or the menu after the dialog, but the one in
   /// use, which stays and says so.
   #[test]
@@ -4044,6 +4112,29 @@ mod tests {
     click(&mut h, Id::of("delete-chosen"));
     confirm(&mut h);
     assert_eq!(fake.log().requests, [Request::Delete(vec![ids[2], ids[1], ids[0]])]);
+  }
+
+  /// As on Models, a click on the ground clears the selection: the list's margin, the room under
+  /// its rows, beside the search; one on the panel under the list, which shows it, keeps it.
+  #[test]
+  fn a_click_on_the_history_pages_ground_clears_the_selection() {
+    let (home, fake) = (Home::new("window-history-ground", &TWO), Fake::default());
+    let (mut h, ids) = several(&home, &fake);
+    click(&mut h, Id::of("history-chosen"));
+    assert_eq!(selected(&h), ids[..3], "the panel's click keeps it");
+    let (list, row) = (h.rect(Id::of("history-list")).unwrap(), h.rect(row(ids[0])).unwrap());
+    let search = h.rect(Id::of("history-search")).unwrap();
+    let ground = [
+      ("the margin", list.x + 10.0, row.y + row.h / 2.0),
+      ("under the rows", list.x + list.w / 2.0, list.y + list.h - 10.0),
+      ("the search's row", search.x - 10.0, search.y + search.h / 2.0),
+    ];
+    for (what, x, y) in ground {
+      h.app_mut().history.selected.select(ids[0] as u64, 3);
+      h.frame();
+      click_at(&mut h, x, y);
+      assert!(selected(&h).is_empty(), "a click on {what} clears");
+    }
   }
 
   /// One of the selection being transcribed again, none of it is deleted: the menu's and the
