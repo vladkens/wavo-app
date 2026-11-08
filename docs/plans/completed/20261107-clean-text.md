@@ -1,5 +1,7 @@
 # Clean text
 
+Done: 2026-11-08, PR #61
+
 Goal: a dictation pastes cleaner text: hesitation sounds (`э-э`, `um`) go in Russian and English, every paste ends with one space so parts don't glue, and a part pasted into the same window within 20 s after one that left its sentence open starts in lower case. It is one step between recognition and paste, behind one switch, on by default. No stitching of audio, no numbers, no new model and no LLM.
 
 The person dictates a part, stops, types a term by hand, and goes on. Today each recording is recognized alone, so a part gets a period and the next one a capital. Measured on FLEURS with one mid-sentence cut per clip (`gigaam-v3` ru, `parakeet-ultra` ru, `parakeet-ultra` en): false period in 73 / 83 / 60%, false capital in 90 / 60 / 28%. Dropping the period and lowercasing also kills every real sentence end, so it is rejected. Recognizing the new part together with the audio before it makes the seam equal to one pass over the whole clip in 98 / 95 / 93%, with false periods 8 / 3 / 4%; with 4 s of context in 89 / 91 / 84%. Whisper and Moonshine weren't measured.
