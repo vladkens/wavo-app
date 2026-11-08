@@ -6,7 +6,6 @@
 //! shell keeps current ([Prefs::update]), and reaches the app only through [Shell]: tests run it
 //! in nimbo's harness with a fake one.
 
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
@@ -22,9 +21,9 @@ use nimbo::ui::Role;
 use nimbo::ui::widgets::icon;
 use nimbo::{
   Align, Answer, App, Button, ButtonRole, ButtonStyle, Config, ControlSize, Cx, Dialog, Event,
-  FileDialog, Float, Font, FormRow, FormStyle, Frame, Hotkey, Icon, Id, Item, LinePattern, List,
+  FileDialog, Font, FormRow, FormStyle, Frame, Hotkey, Icon, Id, Item, LinePattern, List,
   ListStyle, Menu, Picker, Rect, Response, Section, Selection, Style, TabItem, Tag, TextStyle,
-  Tone, Ui, UnitPoint, Weight, grow, open, paths, px,
+  Tone, Ui, Weight, grow, open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -1409,8 +1408,8 @@ impl Prefs {
   }
 
   /// The models on disk in a list for selecting several to delete, as the History page's, under
-  /// its Downloaded header: the models to ask about deleting, by a row's bin or the selection's
-  /// Delete.
+  /// its Downloaded header: the models to ask about deleting, by a row's bin, or the selection's
+  /// Delete key or menu.
   fn downloaded_list<'f>(
     &mut self,
     ui: &mut Ui,
@@ -1423,36 +1422,12 @@ impl Prefs {
     let note = format!("{} · {}", model_count(downloaded.len()), size_text(size));
     let line = ui.line_height(fs.head);
     let mut sel = std::mem::take(&mut self.model_sel);
-    let picked = |sel: &Selection| -> Vec<&'static ModelInfo> {
-      downloaded.iter().copied().filter(|m| sel.contains(model_key(m))).collect()
-    };
-    // The header is built in the list, before this frame's input reaches the selection: a
-    // change asks for the next frame, which shows it.
-    let before = picked(&sel);
-    let off = before.iter().all(|m| self.in_use(m));
-    let delete = Cell::new(false);
-    // As a form section's title: the note centred on the title's line; with a selection, how
-    // many and Delete, as the History page's, over the line's right end, the button being
-    // taller than the line.
+    // As a form section's title: the note centred on the title's line.
     let head = |ui: &mut Ui, _| {
       ui.row(Style::new().w(grow()).h(px(line)).align(Align::Start, Align::Center), |ui| {
         ui.text("Downloaded", fs.head);
         ui.spacer();
-        if before.is_empty() {
-          ui.text(&note, fs.note);
-          return;
-        }
-
-        let right = Float::parent().attach(UnitPoint::TRAILING).anchor(UnitPoint::TRAILING);
-        ui.float(right).row(Style::new().gap(8.0).align(Align::Start, Align::Center), |ui| {
-          ui.id("models-chosen").text(format!("{} selected", model_count(before.len())), fs.note);
-          if off {
-            ui.help("In use: choose another to delete it");
-          }
-
-          let ui = ui.disabled(off).control_size(ControlSize::Small);
-          delete.set(ui.id("delete-models").button("Delete…").clicked);
-        });
+        ui.text(&note, fs.note);
       });
     };
     // Its rows the form's, padded by the list.
@@ -1467,11 +1442,9 @@ impl Prefs {
       let m = downloaded[row.index];
       act = self.downloaded_row(ui, rfs, m, fit(m), active == Some(m.name)).or(act);
     });
-    if r.changed {
-      ui.request_frame_in(Duration::ZERO);
-    }
 
-    let chosen = picked(&sel);
+    let chosen: Vec<_> =
+      downloaded.iter().copied().filter(|m| sel.contains(model_key(m))).collect();
     self.model_sel = sel;
     let n = chosen.iter().filter(|m| !self.in_use(m)).count();
     let label = format!("Delete {n} Model{}…", if n == 1 { "" } else { "s" });
@@ -1484,7 +1457,7 @@ impl Prefs {
     };
     match act {
       Some(m) => vec![m],
-      None if r.delete || item.is_some() || delete.get() => chosen,
+      None if r.delete || item.is_some() => chosen,
       None => vec![],
     }
   }
@@ -3138,6 +3111,19 @@ mod tests {
       assert_eq!(h.app().model_sel.len(), 3, "{look}");
 
       shot(&mut h, &format!("models-selected-{look}"));
+      // Scrolled, the header goes under the search with the rows.
+      let page = Id::of(("page", Page::Models as u8));
+      let v = h.scroll(page).expect("the page's scroll area").viewport;
+      let wheel = |h: &mut Harness<Prefs>, dy: f32| {
+        let (pos, delta) = (Point::new(v.x + v.w / 2.0, v.y + v.h / 2.0), Point::new(0.0, dy));
+        let (phase, momentum, mods) = (Phase::None, Phase::None, Modifiers::default());
+        h.event(Event::Scroll { pos, delta, precise: true, phase, momentum, mods });
+        h.frame();
+      };
+      wheel(&mut h, -20.0);
+      assert!(h.scroll(page).unwrap().offset.y > 0.0, "{look}: it scrolled");
+      shot(&mut h, &format!("models-selected-scrolled-{look}"));
+      wheel(&mut h, 20.0);
       h.key(NamedKey::Delete, Modifiers::empty());
       h.frame();
       assert!(h.rect(Id::of(CONFIRM).key("card")).is_some(), "{look}: the dialog");
@@ -3508,48 +3494,12 @@ mod tests {
     click_model(&mut h, order[0], Modifiers::empty());
     click_model(&mut h, order[2], Modifiers::SHIFT);
     assert_eq!(models_chosen(&h).len(), 3, "Shift-click extends");
+    assert_eq!(a11y_line(&h, "button \"Delete…\""), None, "the header has its note only");
 
     h.key(NamedKey::Escape, Modifiers::empty());
     h.frame();
     h.frame();
     assert!(h.app().model_sel.is_empty(), "Escape clears");
-    assert!(h.rect(Id::of("delete-models")).is_none(), "the header's Delete goes with it");
-  }
-
-  /// With models selected the Downloaded header says how many and has Delete…, which asks about
-  /// those not in use and deletes them; off when all are in use.
-  #[test]
-  fn the_header_deletes_the_selected_models() {
-    let home = Home::new("window-model-head", &["parakeet-v3", "parakeet-v2", "whisper-tiny"]);
-    let fake = Fake::default();
-    let mut h = home.harness(&fake, Settings::default());
-    tab(&mut h, Page::Models);
-    assert!(h.rect(Id::of("delete-models")).is_none(), "nothing selected");
-
-    let active = h.app().active().unwrap().0.name;
-    let off = "button \"Delete…\" disabled desc \"In use: choose another to delete it\"";
-    click_model(&mut h, active, Modifiers::empty());
-    assert_eq!(h.text(Id::of("models-chosen")), Some("1 model selected"));
-    assert_eq!(a11y_line(&h, "button \"Delete…\"").as_deref(), Some(off));
-    click(&mut h, Id::of("delete-models"));
-    assert!(h.app().ask.is_none(), "the one in use stays");
-
-    h.set_focus(Some(Id::of("downloaded")));
-    h.key('a', nimbo::CMD);
-    h.frame();
-    h.frame();
-    assert_eq!(h.text(Id::of("models-chosen")), Some("3 models selected"));
-    assert_eq!(a11y_line(&h, "button \"Delete…\"").as_deref(), Some("button \"Delete…\""));
-    click(&mut h, Id::of("delete-models"));
-    assert_eq!(h.app().ask.as_ref().map(|a| a.title.as_str()), Some("Delete 2 models?"));
-    confirm(&mut h);
-    let mut deleted = fake.log().deleted.clone();
-    deleted.sort();
-    let mut want: Vec<&str> = ["parakeet-v3", "parakeet-v2", "whisper-tiny"].into();
-    want.retain(|&m| m != active);
-    want.sort();
-    assert_eq!(deleted, want);
-    assert!(h.app().model_sel.is_empty(), "the selection goes with them");
   }
 
   /// Clicks the window at `x`, `y` and lets the frames after it settle.
@@ -3561,7 +3511,7 @@ mod tests {
 
   /// As in Finder, a click on the page's ground clears the selection: beside the Downloaded
   /// header's title, in the page's margin, between its sections, beside the search; one on a
-  /// control keeps it, and the header's Delete… asks about it.
+  /// control keeps it, and the Delete key asks about it.
   #[test]
   fn a_click_on_the_models_pages_ground_clears_the_selection() {
     let names = ["parakeet-v3", "parakeet-v2", "whisper-tiny"];
@@ -3573,10 +3523,11 @@ mod tests {
     let m = *names.iter().find(|&&n| n != active).unwrap();
     click_model(&mut h, m, Modifiers::empty());
     let (list, row) = (h.rect(Id::of("downloaded")).unwrap(), h.rect(row_of(m)).unwrap());
-    let (note, search) = (h.rect(Id::of("models-chosen")).unwrap(), h.rect(Id::of("model-search")));
-    let search = search.unwrap();
+    let search = h.rect(Id::of("model-search")).unwrap();
+    // The header over the first row.
+    let top = names.iter().map(|&n| h.rect(row_of(n)).unwrap().y).fold(f32::MAX, f32::min);
     let ground = [
-      ("the header", list.x + list.w / 2.0, note.y + note.h / 2.0),
+      ("the header", list.x + list.w / 2.0, (list.y + top) / 2.0),
       ("the margin", list.x - 10.0, row.y + row.h / 2.0),
       ("between the sections", list.x + list.w / 2.0, list.y + list.h + 4.0),
       ("the search's row", search.x - 10.0, search.y + search.h / 2.0),
@@ -3586,7 +3537,6 @@ mod tests {
       assert_eq!(models_chosen(&h), [m]);
       click_at(&mut h, x, y);
       assert!(h.app().model_sel.is_empty(), "a click on {what} clears");
-      assert!(h.rect(Id::of("delete-models")).is_none(), "{what}: the header's Delete goes");
     }
 
     click_model(&mut h, m, Modifiers::empty());
@@ -3594,7 +3544,10 @@ mod tests {
     let other = *names.iter().find(|&&n| n != active && n != m).unwrap();
     click(&mut h, Id::of(("use", other)));
     assert_eq!(models_chosen(&h), [m], "the controls' clicks keep it");
-    click(&mut h, Id::of("delete-models"));
+    h.set_focus(Some(Id::of("downloaded")));
+    h.key(NamedKey::Delete, Modifiers::empty());
+    h.frame();
+    h.frame();
     let ask = h.app().ask.as_ref().map(|a| a.title.clone());
     assert_eq!(ask, Some(format!("Delete {}?", hub::lookup(m).unwrap().full_name)));
   }
