@@ -29,8 +29,9 @@ use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
 use crate::audio::{self, Auto, Choice, Microphone, Playback, Transport};
+use crate::engine;
 use crate::history::{Entry, History, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms};
-use crate::session::{NoModel, Request, Status, label};
+use crate::session::{self, NoModel, Request, Status, label};
 use crate::settings::{Activation, HudPosition, Settings, language_name};
 use crate::transfer::Imported;
 
@@ -264,6 +265,27 @@ impl Prefs {
     self.found.get(self.pick.active?)
   }
 
+  /// wavo's model chosen in the settings, on disk or not.
+  fn chosen(&self) -> Option<&'static str> {
+    hub::lookup(self.settings.model.as_deref()?).ok().map(|m| m.name)
+  }
+
+  /// The model the engine has loaded while a dictation or a transcription again runs: it goes on
+  /// with it after a switch to another.
+  fn busy(&self, m: &ModelInfo) -> bool {
+    let s = &self.status;
+    let working = s.state != session::Phase::Idle
+      || !s.retranscribing.is_empty()
+      || matches!(s.engine.phase, engine::Phase::Loading | engine::Phase::Running);
+    let file = m.file();
+    working && s.engine.model.as_deref().is_some_and(|l| file.strip_suffix(".gguf") == Some(l))
+  }
+
+  /// The model stays on disk: it transcribes now, or is [busy](Self::busy).
+  fn in_use(&self, m: &ModelInfo) -> bool {
+    self.active().is_some_and(|f| f.0.name == m.name) || self.busy(m)
+  }
+
   /// Some model transcribes: the chosen one, or the first downloaded in its place.
   fn transcribes(&self) -> bool {
     self.pick.active.is_some() || self.pick.other.as_ref().is_some_and(|o| o.1)
@@ -300,7 +322,13 @@ impl Prefs {
 
     match ask.delete {
       Delete::Models(models) => {
+        // In use since the dialog opened, by a switch from the menu bar, it stays.
         for m in models {
+          if self.in_use(m) {
+            info!("settings: keep model {}, in use", m.name);
+            continue;
+          }
+
           info!("settings: delete model {}", m.name);
           self.shell.delete_model(m);
         }
@@ -1210,6 +1238,15 @@ fn wer_text(lang: &str, m: &ModelInfo) -> Option<String> {
   Some(format!("WER {}%", wer_number(m.wer(lang)?)))
 }
 
+/// Languages written without spaces, whose WER wavo counts in characters: `BY_CHARACTER` in
+/// wavo's `scripts/wer.py`, which makes `src/hub/scores.rs` (the crate doesn't say it).
+const BY_CHARACTER: [&str; 7] = ["zh", "yue", "ja", "th", "lo", "my", "km"];
+
+/// What a WER in `lang` counts, on its hover.
+fn errors_per(lang: &str) -> &'static str {
+  if BY_CHARACTER.contains(&lang) { "Errors per 100 characters" } else { "Errors per 100 words" }
+}
+
 /// `4.5`, a decimal under 10, `32` from it (9.96 is `10`).
 fn wer_number(wer: f32) -> String {
   let tenths = (wer * 10.0).round() / 10.0;
@@ -1258,7 +1295,8 @@ impl Prefs {
     });
   }
 
-  /// wavo's models in two plates by [rank], the one in use shown whatever the search.
+  /// wavo's models in two plates by [rank], the one in use and the one chosen shown whatever the
+  /// search.
   /// Every row is one line of name and one of caption in every state: the list never moves
   /// under the pointer.
   fn models(&mut self, ui: &mut Ui, fs: &FormStyle) {
@@ -1268,10 +1306,10 @@ impl Prefs {
 
     let fs = &FormStyle { caption: fs.caption.line_limit(1), ..*fs };
     let lang = LANGUAGES[self.model_lang].1;
-    let active = self.active().map(|f| f.0.name);
+    let (active, chosen) = (self.active().map(|f| f.0.name), self.chosen());
     let shown = |m: &ModelInfo| {
       let lang = lang.is_empty() || m.langs.contains(&lang);
-      active == Some(m.name) || (lang && finds(&self.model_search, m))
+      active == Some(m.name) || chosen == Some(m.name) || (lang && finds(&self.model_search, m))
     };
     let on_disk = |m: &ModelInfo| self.found.iter().any(|f| f.0.name == m.name);
     let pick = best_for(lang);
@@ -1280,15 +1318,16 @@ impl Prefs {
     let mut downloaded: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| on_disk(m) && shown(m)).collect();
     downloaded.sort_by_key(|m| rank(lang, best, m));
-    // Lowercase without punctuation only to delete.
+    // Lowercase without punctuation only to delete, but the one chosen, to download it again.
+    let offered = |m: &ModelInfo| m.punctuated || chosen == Some(m.name);
     let mut remote: Vec<&'static ModelInfo> =
-      hub::MODELS.iter().filter(|m| !on_disk(m) && m.punctuated && shown(m)).collect();
+      hub::MODELS.iter().filter(|m| !on_disk(m) && offered(m) && shown(m)).collect();
     remote.sort_by_key(|m| rank(lang, best, m));
-    // The ones not measured under Other models, folded, but one downloading; all of them while
-    // searching or with none measured.
+    // The ones not measured under Other models, folded, but one downloading and the one chosen;
+    // all of them while searching or with none measured.
     let busy = |m: &ModelInfo| self.shell.download_state(m.name).is_some();
-    let (mut remote, mut other): (Vec<&ModelInfo>, Vec<&ModelInfo>) =
-      remote.into_iter().partition(|m| measure(lang, m).is_some() || busy(m));
+    let (mut remote, mut other): (Vec<&ModelInfo>, Vec<&ModelInfo>) = (remote.into_iter())
+      .partition(|m| measure(lang, m).is_some() || busy(m) || chosen == Some(m.name));
     let searching = !self.model_search.trim().is_empty();
     if searching || !remote.iter().any(|m| measure(lang, m).is_some()) {
       remote.append(&mut other);
@@ -1335,7 +1374,7 @@ impl Prefs {
       self.model_sel = sel;
       let chosen: Vec<&'static ModelInfo> =
         downloaded.iter().copied().filter(|m| self.model_sel.contains(model_key(m))).collect();
-      let n = chosen.iter().filter(|m| active != Some(m.name)).count();
+      let n = chosen.iter().filter(|m| !self.in_use(m)).count();
       let label = format!("Delete {n} Model{}…", if n == 1 { "" } else { "s" });
       let item = match chosen.is_empty() {
         true => None,
@@ -1384,13 +1423,13 @@ impl Prefs {
       acts = vec![m];
     }
 
-    self.ask_delete_models(acts, active);
+    self.ask_delete_models(acts);
   }
 
-  /// Asks about deleting `models`, but the one in use (`active`), which stays.
-  fn ask_delete_models(&mut self, models: Vec<&'static ModelInfo>, active: Option<&str>) {
-    let kept = models.iter().find(|m| Some(m.name) == active).map(|m| m.name);
-    let models: Vec<_> = models.into_iter().filter(|m| Some(m.name) != active).collect();
+  /// Asks about deleting `models`, but those [in use](Self::in_use), which stay.
+  fn ask_delete_models(&mut self, models: Vec<&'static ModelInfo>) {
+    let (kept, models): (Vec<&ModelInfo>, Vec<_>) =
+      models.into_iter().partition(|m| self.in_use(m));
     let size = size_text(models.iter().map(|m| m.size).sum());
     let (title, mut message) = match &models[..] {
       [] => return,
@@ -1403,8 +1442,13 @@ impl Prefs {
         format!("They free {size} in the Hugging Face cache. You can download them again."),
       ),
     };
-    if let Some(name) = kept {
-      message += &format!(" {name} is in use and stays.");
+    match &kept[..] {
+      [] => {}
+      [m] => message += &format!(" {} is in use and stays.", m.name),
+      _ => {
+        let names: Vec<&str> = kept.iter().map(|m| m.name).collect();
+        message += &format!(" {} are in use and stay.", names.join(" and "));
+      }
     }
 
     self.ask = Some(Ask { title, message, delete: Delete::Models(models) });
@@ -1447,9 +1491,15 @@ impl Prefs {
           used = ui.id(("use", m.name)).button("Use").clicked;
         }
 
-        // The one in use stays.
-        let tip = if in_use { "In use: choose another to delete it" } else { "Delete…" };
-        if ui.help(tip).disabled(in_use).id(("delete", m.name)).icon_button(Icon::TRASH).clicked {
+        // The one in use stays, and the one a dictation goes on with after a switch.
+        let busy = !in_use && self.busy(m);
+        let tip = match (in_use, busy) {
+          (true, _) => "In use: choose another to delete it",
+          (_, true) => "In use until the dictation ends",
+          _ => "Delete…",
+        };
+        let off = in_use || busy;
+        if ui.help(tip).disabled(off).id(("delete", m.name)).icon_button(Icon::TRASH).clicked {
           act = Some(m);
         }
       });
@@ -1614,7 +1664,7 @@ fn model_caption(ui: &mut Ui, s: TextStyle, row: Id, m: &ModelInfo, fit: Fit, an
     match wer_text(fit.lang, m) {
       Some(wer) => ui
         .with_id(row.key("wer"))
-        .help("Errors per 100 words")
+        .help(errors_per(fit.lang))
         .text(wer, s.underline(LinePattern::Dot)),
       None => ui.text(m.languages, s),
     }
@@ -2552,6 +2602,7 @@ mod tests {
   };
 
   use super::*;
+  use crate::session::EngineStatus;
   use crate::testing::TempDir;
 
   #[derive(Default)]
@@ -3381,6 +3432,86 @@ mod tests {
     let mut deleted = fake.log().deleted.clone();
     deleted.sort();
     assert_eq!(deleted, ["parakeet-v3", "whisper-tiny"]);
+  }
+
+  /// A switch from the menu bar to a model the dialog asks about keeps it; so does the one a
+  /// dictation goes on with after a switch, its bin off.
+  #[test]
+  fn a_model_in_use_by_the_confirm_stays() {
+    let home = Home::new("window-bulk-switch", &["parakeet-v3", "parakeet-v2", "whisper-tiny"]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Models);
+    let ask_all = |h: &mut Harness<Prefs>| {
+      h.set_focus(Some(Id::of("downloaded")));
+      h.key('a', nimbo::CMD);
+      h.frame();
+      h.key(NamedKey::Delete, Modifiers::empty());
+      h.frame();
+      h.frame();
+      h.app().ask.as_ref().map(|a| a.message.clone()).expect("the dialog")
+    };
+    let switch = |h: &mut Harness<Prefs>, name: &str, status: Status| {
+      let settings = Settings { model: Some(name.into()), ..h.app().settings.clone() };
+      h.app_mut().update(&settings, &status, 0);
+      h.waker().wake();
+      h.frame();
+    };
+    assert!(ask_all(&mut h).ends_with("parakeet-v3 is in use and stays."));
+    switch(&mut h, "parakeet-v2", Status::default());
+    confirm(&mut h);
+    assert_eq!(fake.log().deleted, ["whisper-tiny"]);
+
+    // Back to parakeet-v3 while a dictation transcribes with parakeet-v2.
+    fake.log().deleted.clear();
+    let file = hub::lookup("parakeet-v2").unwrap().file();
+    let model = file.strip_suffix(".gguf").map(str::to_owned);
+    let engine = EngineStatus { model, phase: engine::Phase::Running, ..EngineStatus::default() };
+    let working = Status { state: session::Phase::Transcribing, engine, ..Status::default() };
+    switch(&mut h, "parakeet-v3", working);
+    click(&mut h, Id::of(("delete", "parakeet-v2")));
+    assert!(h.app().ask.is_none(), "the bin of the one a dictation has is off");
+    let message = ask_all(&mut h);
+    assert!(message.ends_with(" are in use and stay."), "{message}");
+    confirm(&mut h);
+    assert_eq!(fake.log().deleted, ["whisper-tiny"]);
+  }
+
+  /// The model chosen, gone from disk, shows to download it again, without punctuation too and
+  /// whatever the search; the other ones without punctuation don't.
+  #[test]
+  fn a_chosen_model_gone_shows_to_download_again() {
+    let home = Home::new("window-gone", &["parakeet-v3"]);
+    let fake = Fake::default();
+    let settings = Settings { model: Some("gigaam-v3-ctc".into()), ..Settings::default() };
+    let mut h = home.harness(&fake, settings);
+    tab(&mut h, Page::Models);
+    let search = |h: &mut Harness<Prefs>, s: &str| {
+      h.app_mut().model_search = s.to_owned();
+      h.frame();
+    };
+    let shown = |h: &Harness<Prefs>, name: &str| h.rect(Id::of(("card", name))).is_some();
+    search(&mut h, "gigaam");
+    assert!(h.rect(Id::of(("download", "gigaam-v3-ctc"))).is_some(), "to download again");
+    assert!(shown(&h, "gigaam-v3") && !shown(&h, "gigaam-v3-rnnt"), "without punctuation");
+    search(&mut h, "whisper");
+    assert!(shown(&h, "gigaam-v3-ctc") && shown(&h, "parakeet-v3"), "whatever the search");
+  }
+
+  /// A WER's hover says what it counts: characters in a language written without spaces.
+  #[test]
+  fn the_errors_count_characters_where_words_have_no_spaces() {
+    let per = |lang: &str| errors_per(lang).trim_start_matches("Errors per 100 ");
+    assert_eq!(["zh", "yue", "ja", "th"].map(per), ["characters"; 4]);
+    assert_eq!(["en", "ru", "ko", ""].map(per), ["words"; 4]);
+
+    let home = Home::new("window-cer", &["parakeet-v3"]);
+    let mut h = home.harness(&Fake::default(), Settings::default());
+    tab(&mut h, Page::Models);
+    h.app_mut().model_lang = LANGUAGES.iter().position(|l| l.1 == "zh").unwrap();
+    h.frame();
+    let read = r#"static text "WER 8.4%" desc "Errors per 100 characters""#;
+    assert!(h.a11y().lines().any(|l| l.trim() == read), "{}", h.a11y());
   }
 
   /// A model that runs on the Neural Engine says ANE in its caption, downloaded or not, on a Mac
