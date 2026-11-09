@@ -79,12 +79,20 @@ const CLOUDS: [(f64, f64); 3] = [(6.1, 4.3), (7.3, 5.3), (8.9, 6.7)];
 const STARTS: u64 = 3_600_000;
 // Between the clouds the colour deepens, this much at most: the clouds' depth.
 const DEEPEN: f32 = 0.25;
-// The icon's colours (assets/icon.png's pixels, from its top left): pink (234, 234), violet
-// (392, 392), indigo (560, 345), blue (646, 431), and back to pink by its magenta; each only as
-// much darker as white text needs on it, WCAG AA's 4.5:1 with room, its hue and chroma kept. Not
-// its cyan: the cyan dark enough for white text is a muddy teal.
-const BRAND: [u32; 5] = [0xff50d0, 0x9b42fe, 0x5950fc, 0x1080f7, 0xee3ef5];
-const CONTRAST: f32 = 4.7;
+// The icon's colours (assets/icon.png), calmed, in OKLCH (lightness, chroma, hue): a soft orchid
+// for its pink, its violet, indigo and blue, and back by a periwinkle and an iris, no two
+// neighbours far apart. All about as light, dark enough for white text (WCAG AA's 4.5:1 with
+// room), and as colourful: chroma 0.15 to 0.18, the orchid's less, as a warm hue glares sooner;
+// the icon's own sit at sRGB's edge, where its pinks glare. Not its cyan: dark enough for white
+// text, it is a muddy teal.
+const BRAND: [[f32; 3]; 6] = [
+  [0.55, 0.13, 328.0],
+  [0.54, 0.17, 302.0],
+  [0.53, 0.18, 282.0],
+  [0.55, 0.155, 260.0],
+  [0.54, 0.165, 272.0],
+  [0.54, 0.17, 293.0],
+];
 // An error's and a warning's.
 const GREY: Color = rgb(0x3a3a3c);
 // The edge, a glass pill lit from above: white over the fill a point inside the pill, at its top
@@ -826,48 +834,15 @@ fn renew(f: &mut Frame, old: Option<ImageId>, (w, h, px): (usize, usize, Vec<u8>
 static SHADES: LazyLock<Vec<[f32; 3]>> =
   LazyLock::new(|| (0..4096).map(|k| srgb(brand(k as f32 / 4096.0))).collect());
 
-/// [BRAND]'s stops in OKLCH, each darkened only as far as white text needs: [CONTRAST].
-static STOPS: LazyLock<Vec<[f32; 3]>> = LazyLock::new(|| {
-  let darkened = |[l, c, h]: [f32; 3]| {
-    let reads = |l: f32| contrast(srgb([l, c, h])) >= CONTRAST;
-    if reads(l) {
-      return [l, c, h];
-    }
-
-    let (mut lo, mut hi) = (0.0, l);
-    while hi - lo > 1e-4 {
-      let mid = (lo + hi) / 2.0;
-      if reads(mid) { lo = mid } else { hi = mid }
-    }
-
-    [lo, c, h]
-  };
-  BRAND.iter().map(|&c| darkened(oklch(c))).collect()
-});
-
-/// White's contrast on an sRGB colour, 0..255 (WCAG's).
-fn contrast(c: [f32; 3]) -> f32 {
-  1.05 / (luminance(c) + 0.05)
-}
-
-/// An sRGB colour's relative luminance, 0..255 (WCAG's).
-fn luminance(c: [f32; 3]) -> f32 {
-  let [r, g, b] = c.map(|v| {
-    let v = v / 255.0;
-    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
-  });
-  0.2126 * r + 0.7152 * g + 0.0722 * b
-}
-
-/// [STOPS] round at `t`, 0..1 (the last back to the first), mixed in OKLCH: a Catmull-Rom spline
+/// [BRAND] round at `t`, 0..1 (the last back to the first), mixed in OKLCH: a Catmull-Rom spline
 /// through their lightness, chroma and hue, the hue the short way round, so no grey between two
 /// colours and no crease at a stop.
 fn brand(t: f32) -> [f32; 3] {
-  let n = STOPS.len();
+  let n = BRAND.len();
   let at = t.rem_euclid(1.0) * n as f32;
   let (i, k) = (at as usize % n, at.fract());
   // The stops around the segment.
-  let mut p = [0, 1, 2, 3].map(|m| STOPS[(i + n + m - 1) % n]);
+  let mut p = [0, 1, 2, 3].map(|m| BRAND[(i + n + m - 1) % n]);
   for m in 1..4 {
     p[m][2] = p[m - 1][2] + (p[m][2] - p[m - 1][2] + 540.0) % 360.0 - 180.0;
   }
@@ -878,21 +853,6 @@ fn brand(t: f32) -> [f32; 3] {
   };
   let [l, c, h] = [0, 1, 2].map(|n| spline(p.map(|c| c[n])));
   [l, c.max(0.0), h]
-}
-
-/// An sRGB colour (0xrrggbb) in OKLCH: lightness 0..1, chroma, hue in degrees (Björn Ottosson's
-/// OKLab).
-fn oklch(c: u32) -> [f32; 3] {
-  let [r, g, b] = [16, 8, 0].map(|s| {
-    let v = ((c >> s) & 0xff) as f32 / 255.0;
-    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
-  });
-  let l = (0.4122215 * r + 0.5363325 * g + 0.0514460 * b).cbrt();
-  let m = (0.2119035 * r + 0.6806995 * g + 0.107397 * b).cbrt();
-  let s = (0.0883025 * r + 0.2817188 * g + 0.6299787 * b).cbrt();
-  let a = 1.9779985 * l - 2.4285922 * m + 0.4505937 * s;
-  let b = 0.0259040 * l + 0.7827718 * m - 0.8086758 * s;
-  [0.2104543 * l + 0.7936178 * m - 0.0040720 * s, a.hypot(b), b.atan2(a).to_degrees()]
 }
 
 /// An OKLCH colour in sRGB, 0..255, its chroma cut to the most that fits: found by halving, so
@@ -1055,6 +1015,20 @@ mod tests {
 
   fn grey([r, g, b, _]: [u8; 4]) -> bool {
     r.abs_diff(g) < 8 && g.abs_diff(b) < 8
+  }
+
+  /// White's contrast on an sRGB colour, 0..255 (WCAG's).
+  fn contrast(c: [f32; 3]) -> f32 {
+    1.05 / (luminance(c) + 0.05)
+  }
+
+  /// An sRGB colour's relative luminance, 0..255 (WCAG's).
+  fn luminance(c: [f32; 3]) -> f32 {
+    let [r, g, b] = c.map(|v| {
+      let v = v / 255.0;
+      if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    });
+    0.2126 * r + 0.7152 * g + 0.0722 * b
   }
 
   #[test]
@@ -1275,6 +1249,16 @@ mod tests {
   fn white_text_reads_on_the_whole_gradient() {
     let worst = SHADES.iter().map(|c| contrast(c.map(|v| v + 0.5))).fold(f32::MAX, f32::min);
     assert!(worst >= 4.5, "{worst:.2}:1");
+  }
+
+  /// The gradient neither glares nor greys: every colour of it about as light and as colourful as
+  /// the rest.
+  #[test]
+  fn the_gradient_is_calm_and_never_grey() {
+    for k in 0..4096 {
+      let [l, c, h] = brand(k as f32 / 4096.0);
+      assert!((0.52..=0.56).contains(&l) && (0.12..=0.19).contains(&c), "{l} {c} {h}");
+    }
   }
 
   /// The dimmed time while transcribing still reads, 3:1 on every colour, the deepest too.
