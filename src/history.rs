@@ -460,18 +460,26 @@ impl Db {
   }
 
   /// Every entry goes, and the pages they were on: nothing of them is left in the file. Returns
-  /// how many there were.
+  /// how many there were; while another connection reads, none goes (an error).
   pub fn delete_all(&self) -> Result<usize> {
+    self.checkpoint()?;
     let n = self.db.execute("DELETE FROM entries;", [])?;
-    self.db.execute_batch("VACUUM;")?;
-    // The old pages leave the WAL only once no other connection reads, which it waits for as long
-    // as the busy timeout: its row says if one still did.
+    let scrubbed = self.db.execute_batch("VACUUM;").map_err(anyhow::Error::from);
+    if let Err(e) = scrubbed.and_then(|()| self.checkpoint()) {
+      warn!("history: deleted, but the old text may stay in its files: {e:#}");
+    }
+
+    Ok(n)
+  }
+
+  /// Empties the WAL into the file, waiting for the readers as long as the busy timeout.
+  fn checkpoint(&self) -> Result<()> {
     let busy: i64 = self.db.query_row("PRAGMA wal_checkpoint(TRUNCATE);", [], |r| r.get(0))?;
     if busy != 0 {
       bail!("the history is being read: try again");
     }
 
-    Ok(n)
+    Ok(())
   }
 }
 
@@ -711,21 +719,17 @@ impl History {
     Ok(Db::open(&file)?.get_total()?.0)
   }
 
+  /// Rows first: a failure leaves the recordings with their entries.
   fn delete_files(home: &Path) -> Result<usize> {
+    let file = home.join(DB_FILE);
+    let n = if file.exists() { Db::open(&file)?.delete_all()? } else { 0 };
     let dir = home.join(RECORDINGS_DIR);
     match fs::remove_dir_all(&dir) {
       Err(e) if e.kind() != ErrorKind::NotFound => {
-        return Err(e).with_context(|| format!("delete {}", dir.display()));
+        Err(e).with_context(|| format!("delete {}", dir.display()))
       }
-      _ => {}
+      _ => Ok(n),
     }
-
-    let file = home.join(DB_FILE);
-    if !file.exists() {
-      return Ok(0);
-    }
-
-    Db::open(&file)?.delete_all()
   }
 
   /// Deletes entries `ids` and their recordings, each file first: the entry whose file cannot be
@@ -967,7 +971,8 @@ mod tests {
     assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0, "nothing on disk");
   }
 
-  /// The saved history goes with its recordings, and nothing of its texts stays in the file.
+  /// The saved history goes with its recordings, and nothing of its texts stays in the file; one
+  /// that can't go keeps both.
   #[test]
   fn deletes_the_saved_history() {
     let dir = TempDir::new("history-delete-saved");
@@ -978,20 +983,22 @@ mod tests {
       add(&h, i * 1_000, "a secret to forget", false);
     }
 
-    drop(h);
+    // Open, its writes still in the WAL.
     assert_eq!(History::count_saved(dir.path()).unwrap(), 3);
     let import = Transferring::begin(dir.path());
     assert_eq!(History::delete_saved(dir.path()).unwrap(), None, "not under an import");
     assert_eq!(entry_ids(dir.path()).len(), 3);
     drop(import);
-    // A reader in the middle of a read: the WAL can't be emptied.
+    // A reader in the middle of a read: the WAL can't be emptied, so nothing goes.
     let reader = Connection::open(dir.path().join(DB_FILE)).unwrap();
     reader.execute_batch("BEGIN;").unwrap();
     reader.query_row("SELECT COUNT(*) FROM entries;", [], |r| r.get::<_, i64>(0)).unwrap();
     let busy = History::delete_saved(dir.path()).unwrap_err();
     assert!(format!("{busy:#}").contains("being read"), "{busy:#}");
+    assert_eq!(History::count_saved(dir.path()).unwrap(), 3, "the rows stay");
+    assert_eq!(wav_count(&dir.path().join(RECORDINGS_DIR)), 3, "the recordings too");
     reader.execute_batch("COMMIT;").unwrap();
-    assert_eq!(History::delete_saved(dir.path()).unwrap(), Some(0), "the rows went before");
+    assert_eq!(History::delete_saved(dir.path()).unwrap(), Some(3));
     assert!(entry_ids(dir.path()).is_empty() && !dir.path().join(RECORDINGS_DIR).exists());
     let bytes = fs::read(dir.path().join(DB_FILE)).unwrap();
     assert!(!bytes.windows(6).any(|w| w == b"secret"), "the text is gone from the file");
