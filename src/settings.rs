@@ -231,6 +231,12 @@ mod tests {
       Settings { microphone: mic, ..Settings::default() }.save(&path).unwrap();
       assert!(fs::read_to_string(&path).unwrap().contains(&format!(r#""microphone": {stored}"#)));
     }
+
+    // The history kept until Wavo quits.
+    let memory = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
+    memory.save(&path).unwrap();
+    assert!(fs::read_to_string(&path).unwrap().contains(r#""history_retention": "until_quit""#));
+    assert_eq!(Settings::load(&path), (memory, None));
   }
 
   #[test]
