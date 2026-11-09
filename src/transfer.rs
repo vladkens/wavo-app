@@ -28,7 +28,7 @@ use zip::read::ZipFile;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::history::{DB_FILE, Db, Entry, RECORDINGS_DIR, Recordings, now_ms};
+use crate::history::{DB_FILE, Db, Entry, RECORDINGS_DIR, Recordings, Transferring, now_ms};
 
 /// The archive's layout; one from a newer Wavo is refused.
 const FORMAT: u32 = 1;
@@ -71,6 +71,8 @@ pub struct Imported {
 /// Writes the history in `home` and its recordings into the archive `file`, replacing it;
 /// `progress` hears the bytes of them written of the total after each file.
 pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> Result<Exported> {
+  // Not deleted under it.
+  let _transferring = Transferring::begin(home);
   let db = home.join(DB_FILE);
   if !db.is_file() {
     bail!("no history in {}", home.display());
@@ -167,6 +169,8 @@ pub fn import(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
   io::copy(&mut db, &mut File::create(&path)?)?;
   drop(db);
 
+  // Not deleted under it, nor in the middle of a delete.
+  let _transferring = Transferring::begin(home);
   let recordings = Recordings::open(home)?;
   let history = Db::open(&home.join(DB_FILE))?;
   let starts: HashMap<i64, Option<String>> =

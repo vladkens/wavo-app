@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, mem};
 
@@ -462,7 +463,13 @@ impl Db {
   pub fn delete_all(&self) -> Result<usize> {
     let n = self.db.execute("DELETE FROM entries;", [])?;
     self.db.execute_batch("VACUUM;")?;
-    self.db.query_row("PRAGMA wal_checkpoint(TRUNCATE);", [], |_| Ok(()))?;
+    // The old pages leave the WAL only once no other connection reads, which it waits for as long
+    // as the busy timeout: its row says if one still did.
+    let busy: i64 = self.db.query_row("PRAGMA wal_checkpoint(TRUNCATE);", [], |r| r.get(0))?;
+    if busy != 0 {
+      bail!("the history is being read: try again");
+    }
+
     Ok(n)
   }
 }
@@ -576,6 +583,48 @@ fn started_at(name: &str) -> Option<i64> {
   file.strip_suffix(".wav")?.split('-').next()?.parse().ok()
 }
 
+// MARK: Transfers
+
+/// The homes whose saved history an export or an import works on now, once for each.
+static TRANSFERS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn transfers() -> MutexGuard<'static, Vec<PathBuf>> {
+  TRANSFERS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// An export or an import of the saved history in a home, while it lives: [without_transfer]
+/// does not run under it, and it waits for one that runs.
+pub struct Transferring(PathBuf);
+
+impl Transferring {
+  pub fn begin(home: &Path) -> Self {
+    transfers().push(home.to_owned());
+    Self(home.to_owned())
+  }
+}
+
+impl Drop for Transferring {
+  fn drop(&mut self) {
+    let mut homes = transfers();
+    if let Some(i) = homes.iter().position(|h| *h == self.0) {
+      homes.swap_remove(i);
+    }
+  }
+}
+
+/// `f`'s result unless an export or an import of the saved history in `home` runs (`None`); no
+/// new one starts while `f` runs.
+pub fn without_transfer<T>(home: &Path, f: impl FnOnce() -> T) -> Option<T> {
+  let homes = transfers();
+  if homes.iter().any(|h| h == home) {
+    return None;
+  }
+
+  let done = f();
+  drop(homes);
+  Some(done)
+}
+
 // MARK: History
 
 /// How long history is kept.
@@ -644,8 +693,13 @@ impl History {
   }
 
   /// Deletes the history saved in `home`, its recordings first, while it is kept in memory and
-  /// nothing writes it. Returns how many entries it had.
-  pub fn delete_saved(home: &Path) -> Result<usize> {
+  /// nothing writes it. Returns how many entries it had; `None` while an export or an import of it
+  /// runs ([Transferring]), which a new one waits for meanwhile.
+  pub fn delete_saved(home: &Path) -> Result<Option<usize>> {
+    without_transfer(home, || Self::delete_files(home)).transpose()
+  }
+
+  fn delete_files(home: &Path) -> Result<usize> {
     let dir = home.join(RECORDINGS_DIR);
     match fs::remove_dir_all(&dir) {
       Err(e) if e.kind() != ErrorKind::NotFound => {
@@ -911,11 +965,22 @@ mod tests {
     }
 
     drop(h);
-    assert_eq!(History::delete_saved(dir.path()).unwrap(), 3);
+    let import = Transferring::begin(dir.path());
+    assert_eq!(History::delete_saved(dir.path()).unwrap(), None, "not under an import");
+    assert_eq!(entry_ids(dir.path()).len(), 3);
+    drop(import);
+    // A reader in the middle of a read: the WAL can't be emptied.
+    let reader = Connection::open(dir.path().join(DB_FILE)).unwrap();
+    reader.execute_batch("BEGIN;").unwrap();
+    reader.query_row("SELECT COUNT(*) FROM entries;", [], |r| r.get::<_, i64>(0)).unwrap();
+    let busy = History::delete_saved(dir.path()).unwrap_err();
+    assert!(format!("{busy:#}").contains("being read"), "{busy:#}");
+    reader.execute_batch("COMMIT;").unwrap();
+    assert_eq!(History::delete_saved(dir.path()).unwrap(), Some(0), "the rows went before");
     assert!(entry_ids(dir.path()).is_empty() && !dir.path().join(RECORDINGS_DIR).exists());
     let bytes = fs::read(dir.path().join(DB_FILE)).unwrap();
     assert!(!bytes.windows(6).any(|w| w == b"secret"), "the text is gone from the file");
-    assert_eq!(History::delete_saved(dir.path()).unwrap(), 0, "nothing left");
+    assert_eq!(History::delete_saved(dir.path()).unwrap(), Some(0), "nothing left");
   }
 
   #[test]
