@@ -1345,17 +1345,29 @@ fn measure(lang: &str, m: &ModelInfo) -> Option<f32> {
 /// A model at least this many times faster than whisper-turbo is fast.
 const FAST: f32 = 3.0;
 
-/// wavo's highest WER: the model makes up more words than were said, so it doesn't work in that
-/// language.
-const FAILS: f32 = 100.0;
+/// The most errors in 100 words (characters where wavo counts those) a model may make in a
+/// language and still be usable in it: with more, a person fixes about every fourth word and
+/// would rather type. Settings › Models never recommends a model above it, and folds those away.
+const USABLE: f32 = 25.0;
+
+/// Whether `m` was measured in `lang` and makes too many errors there to be usable ([USABLE]).
+fn unusable(lang: &str, m: &ModelInfo) -> bool {
+  m.wer(lang).is_some_and(|x| x > USABLE)
+}
+
+/// Whether models were measured in `lang` but none of them is usable there ([USABLE]).
+fn none_usable(lang: &str) -> bool {
+  let measured = hub::MODELS.iter().any(|m| m.wer(lang).is_some());
+  measured && recommended(lang).is_none()
+}
 
 /// The model to recommend for `lang` by wavo's measures: the fast one with the fewest errors, or
 /// the fastest within 10% of it; a slow one only with 1.5 times fewer errors. `None` when none
-/// was measured on it, or none of those works in it ([FAILS]).
+/// was measured on it, or none of those is usable in it ([USABLE]).
 fn recommended(lang: &str) -> Option<&'static ModelInfo> {
   let measured: Vec<(&'static ModelInfo, f32, f32)> = (hub::MODELS.iter())
     .filter(|m| m.punctuated)
-    .filter_map(|m| Some((m, m.wer(lang).filter(|&x| x < FAILS)?, m.speed().unwrap_or(0.0))))
+    .filter_map(|m| Some((m, m.wer(lang).filter(|&x| x <= USABLE)?, m.speed().unwrap_or(0.0))))
     .collect();
   let least = |fast: bool| {
     let them = measured.iter().filter(move |x| (x.2 >= FAST) == fast);
@@ -1446,12 +1458,17 @@ impl Prefs {
   /// Every row is one line of name and one of caption in every state: the list never moves
   /// under the pointer.
   fn models(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    let lang = LANGUAGES[self.model_lang].1;
     if let Some(note) = self.model_note() {
       ui.text(note, fs.caption.color(ui.theme().warning));
     }
 
+    if none_usable(lang) {
+      let note = format!("No model recognizes {} well yet.", language_name(lang));
+      ui.id("no-usable-model").text(note, fs.caption);
+    }
+
     let fs = &FormStyle { caption: fs.caption.line_limit(1), ..*fs };
-    let lang = LANGUAGES[self.model_lang].1;
     let (active, chosen) = (self.active().map(|f| f.0.name), self.chosen());
     let shown = |m: &ModelInfo| {
       let lang = lang.is_empty() || m.langs.contains(&lang);
@@ -1469,16 +1486,17 @@ impl Prefs {
     let mut remote: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| !on_disk(m) && offered(m) && shown(m)).collect();
     remote.sort_by_key(|m| rank(lang, best, m));
-    // The ones not measured under Other models, folded, but one downloading and the one chosen;
-    // all of them while searching or with none measured.
-    let busy = |m: &ModelInfo| self.shell.download_state(m.name).is_some();
-    let (mut remote, mut other): (Vec<&ModelInfo>, Vec<&ModelInfo>) = (remote.into_iter())
-      .partition(|m| measure(lang, m).is_some() || busy(m) || chosen == Some(m.name));
+    // Folded under rows of their own, in rank: those with too many errors, and the ones not
+    // measured unless none is; but one downloading and the one chosen, and none while searching.
     let searching = !self.model_search.trim().is_empty();
-    if searching || !remote.iter().any(|m| measure(lang, m).is_some()) {
-      remote.append(&mut other);
-      remote.sort_by_key(|m| rank(lang, best, m));
-    }
+    let busy = |m: &ModelInfo| self.shell.download_state(m.name).is_some();
+    let kept = |m: &ModelInfo| searching || busy(m) || chosen == Some(m.name);
+    let measured = remote.iter().any(|m| measure(lang, m).is_some());
+    let (remote, poor): (Vec<&ModelInfo>, Vec<&ModelInfo>) =
+      remote.into_iter().partition(|m| kept(m) || !unusable(lang, m));
+    let (remote, other): (Vec<&ModelInfo>, Vec<&ModelInfo>) =
+      remote.into_iter().partition(|m| kept(m) || !measured || measure(lang, m).is_some());
+    let available = remote.len() + other.len() + poor.len();
 
     let fit = |m: &ModelInfo| Fit { lang, best: why(m) };
     let mut acts = vec![];
@@ -1493,12 +1511,8 @@ impl Prefs {
       acts = self.downloaded_list(ui, fs, &downloaded, fit);
     }
 
-    if !remote.is_empty() || !other.is_empty() {
-      let note = model_count(remote.len() + other.len());
-      let more = match lang {
-        "" => format!("{} more, not measured yet", other.len()),
-        _ => format!("{} more, not measured in {}", other.len(), language_name(lang)),
-      };
+    if available > 0 {
+      let note = model_count(available);
       let head = |ui: &mut Ui, s: TextStyle| {
         ui.text("Available", s);
         ui.spacer();
@@ -1509,18 +1523,32 @@ impl Prefs {
           self.remote_row(ui, fs, m, fit(m));
         }
 
+        // A folded row of models, none recommended.
+        let folded =
+          |ui: &mut Ui, id: &str, title: &str, caption: &str, them: &[&'static ModelInfo]| {
+            let row = FormRow::new(title).caption(caption).tile(MORE);
+            ui.id((id, lang)).form_disclosure(fs, row, |ui| {
+              for &m in them {
+                self.remote_row(ui, fs, m, Fit { lang, best: None });
+              }
+            });
+          };
         if !other.is_empty() {
-          let row = FormRow::new("Other models").caption(&more).tile(MORE);
-          ui.id(("other-models", lang)).form_disclosure(fs, row, |ui| {
-            for &m in &other {
-              self.remote_row(ui, fs, m, Fit { lang, best: None });
-            }
-          });
+          let more = match lang {
+            "" => format!("{} more, not measured yet", other.len()),
+            _ => format!("{} more, not measured in {}", other.len(), language_name(lang)),
+          };
+          folded(ui, "other-models", "Other models", &more, &other);
+        }
+
+        if !poor.is_empty() {
+          let title = format!("Too many errors in {}", language_name(lang));
+          folded(ui, "poor-models", &title, &format!("{} more", poor.len()), &poor);
         }
       });
     }
 
-    if downloaded.is_empty() && remote.is_empty() && other.is_empty() {
+    if downloaded.is_empty() && available == 0 {
       ui.text("No model matches.", fs.caption);
     }
 
@@ -4046,6 +4074,64 @@ mod tests {
     assert!(h.rect(Id::of(("card", "whisper-large"))).is_some(), "listed");
   }
 
+  /// Models with too many errors in the language folded under their own row, the others listed,
+  /// the recommended one usable; with none usable, no badge but a note; Russian and English as
+  /// they were.
+  #[test]
+  fn models_with_too_many_errors_fold() {
+    let home = Home::new("window-poor", &["whisper-tiny"]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Models);
+    let lang = |h: &mut Harness<Prefs>, code: &str| {
+      h.app_mut().model_lang = LANGUAGES.iter().position(|l| l.1 == code).unwrap();
+      h.frame();
+    };
+    let card = |h: &Harness<Prefs>, name: &str| h.rect(Id::of(("card", name))).is_some();
+    let note = |h: &Harness<Prefs>| h.text(Id::of("no-usable-model")).map(str::to_owned);
+    let badge = |h: &Harness<Prefs>| h.a11y().contains(r#""Recommended""#);
+
+    // Georgian: every model measured has too many errors.
+    lang(&mut h, "ka");
+    assert_eq!(note(&h).as_deref(), Some("No model recognizes Georgian well yet."));
+    assert!(!badge(&h) && best_for("ka").is_none(), "nothing recommended");
+    assert!(h.rect(Id::of(("poor-models", "ka"))).is_some());
+    assert!(!card(&h, "whisper-turbo") && !card(&h, "whisper-base"), "folded");
+    assert!(card(&h, "whisper-tiny"), "downloaded, shown");
+    assert!(!card(&h, "whisper-large-v3"), "not measured, folded too");
+    assert!(h.rect(Id::of(("other-models", "ka"))).is_some());
+    click(&mut h, Id::of(("poor-models", "ka")));
+    assert!(card(&h, "whisper-turbo") && card(&h, "whisper-base"), "unfolded");
+
+    // Greek: parakeet's two have too many errors, whisper-turbo is usable and recommended.
+    lang(&mut h, "el");
+    let pick = recommended("el").unwrap();
+    assert!(pick.name == "whisper-turbo" && pick.wer("el").unwrap() <= USABLE);
+    assert!(note(&h).is_none() && badge(&h));
+    assert!(card(&h, "whisper-turbo") && !card(&h, "parakeet-v3") && !card(&h, "parakeet-ultra"));
+    assert!(h.rect(Id::of(("poor-models", "el"))).is_some());
+    assert!(unusable("el", hub::lookup("parakeet-v3").unwrap()), "measured above the cutoff");
+
+    // Found by the search, unfolded.
+    h.app_mut().model_search = "parakeet".to_owned();
+    h.frame();
+    assert!(card(&h, "parakeet-v3") && h.rect(Id::of(("poor-models", "el"))).is_none());
+    h.app_mut().model_search.clear();
+
+    // Russian and English: the same pick, no note.
+    for (code, name) in [("ru", "gigaam-v3-e2e-ctc"), ("en", "parakeet-v2")] {
+      lang(&mut h, code);
+      assert_eq!(best_for(code).map(|p| p.0), Some(name), "{code}");
+      assert!(note(&h).is_none() && badge(&h), "{code}");
+      assert!(card(&h, name), "{code}");
+    }
+
+    // Albanian, not measured: whisper-turbo as before, no note.
+    lang(&mut h, "sq");
+    assert!(note(&h).is_none() && h.rect(Id::of(("poor-models", "sq"))).is_none());
+    assert_eq!(best_for("sq").map(|p| p.0), Some("whisper-turbo"));
+  }
+
   /// The recommended model first, the measured ones by their errors, then the rest, those made
   /// for the language alone first.
   #[test]
@@ -4073,8 +4159,7 @@ mod tests {
   }
 
   /// The fast model with the fewest errors, the fastest of those near it; a slow one only when
-  /// far better, as whisper-turbo in Greek; never one that doesn't work, as whisper-tiny in
-  /// Bengali.
+  /// far better, as whisper-turbo in Greek; never one with too many errors, none in Bengali.
   #[test]
   fn the_recommended_model_is_fast_and_accurate() {
     let cases = [
@@ -4083,7 +4168,6 @@ mod tests {
       ("sv", "parakeet-ultra"),
       ("el", "whisper-turbo"),
       ("he", "parakeet-he"),
-      ("bn", "whisper-turbo"),
     ];
     for (lang, name) in cases {
       assert_eq!(recommended(lang).map(|m| m.name), Some(name), "{lang}");
@@ -4100,9 +4184,18 @@ mod tests {
     let sq = best_for("sq").unwrap().1;
     assert_eq!(sq, "No accuracy data for Albanian yet: the best general model");
     assert_eq!(recommended("sq"), None, "none measured");
-    // None in Georgian, where every model measured doesn't work.
-    assert_eq!(pick("ka"), None, "none works");
-    assert!(hub::lookup("whisper-turbo").unwrap().wer("ka").is_some_and(|x| x >= FAILS));
+    // None in Georgian or Bengali, where every model measured has too many errors.
+    for lang in ["ka", "bn"] {
+      assert_eq!(pick(lang), None, "{lang}: none usable");
+      assert!(none_usable(lang), "{lang}");
+      assert!(hub::lookup("whisper-turbo").unwrap().wer(lang).is_some_and(|x| x > USABLE));
+    }
+
+    assert!(!none_usable("sq") && !none_usable("ru") && !none_usable(""));
+    // Never one above the cutoff, in any language.
+    for (_, lang) in LANGUAGES.iter() {
+      assert!(recommended(lang).is_none_or(|m| m.wer(lang).unwrap() <= USABLE), "{lang}");
+    }
   }
 
   /// WER to a decimal under 10 (rounded first); bolts and the speed's words, whisper-turbo the
