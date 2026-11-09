@@ -152,6 +152,9 @@ pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
 /// Adds the dictations of the archive `file` the history in `home` does not have, beside the
 /// running app; `progress` hears how far through the archive its recordings are, in bytes.
 pub fn import(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> Result<Imported> {
+  // Not deleted under it, nor in the middle of a delete: from its start.
+  let _transferring = Transferring::begin(home);
+
   // The archive is checked before the history is opened.
   let reader = File::open(file).with_context(|| format!("open {}", file.display()))?;
   let not_ours = || format!("{} is not an archive of Wavo's Export", file.display());
@@ -169,8 +172,6 @@ pub fn import(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
   io::copy(&mut db, &mut File::create(&path)?)?;
   drop(db);
 
-  // Not deleted under it, nor in the middle of a delete.
-  let _transferring = Transferring::begin(home);
   let recordings = Recordings::open(home)?;
   let history = Db::open(&home.join(DB_FILE))?;
   let starts: HashMap<i64, Option<String>> =
