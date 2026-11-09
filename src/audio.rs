@@ -748,16 +748,16 @@ impl Meter {
 pub struct Recording {
   /// The whole recording, 16 kHz mono, with its VAD scores.
   pub clip: Clip,
-  /// The WAV file holds the whole recording.
+  /// The WAV file holds the whole recording; `false` without one.
   pub saved: bool,
   pub warnings: Vec<String>,
 }
 
 impl Recorder {
-  /// Opens `source` and records into `wav`, a new file.
-  pub fn start(source: &Source, wav: &Path) -> Result<Self> {
+  /// Opens `source` and records into `wav`, a new file, or only into memory.
+  pub fn start(source: &Source, wav: Option<&Path>) -> Result<Self> {
     // The file first: a bad path never opens the microphone.
-    let sink = WavSink::create(wav)?;
+    let sink = wav.map(WavSink::create).transpose()?;
     let (capture, ring) = capture(source)?;
     let processor = Processor::new(capture.channels, capture.rate, sink)?;
     let live = processor.live.clone();
@@ -889,7 +889,7 @@ struct Processor {
   resampler: Resample,
   vad: Vad,
   pcm: Vec<f32>,
-  /// `None` after a write error.
+  /// `None` without a file, or after a write error.
   wav: Option<WavSink>,
   warnings: Vec<String>,
   level: Level,
@@ -897,7 +897,7 @@ struct Processor {
 }
 
 impl Processor {
-  fn new(channels: usize, rate: u32, wav: WavSink) -> Result<Self> {
+  fn new(channels: usize, rate: u32, wav: Option<WavSink>) -> Result<Self> {
     Ok(Self {
       channels,
       mono: Vec::new(),
@@ -905,7 +905,7 @@ impl Processor {
       resampler: Resample::new(rate, SAMPLE_RATE)?,
       vad: Vad::default(),
       pcm: Vec::new(),
-      wav: Some(wav),
+      wav,
       warnings: Vec::new(),
       level: Level::default(),
       live: Arc::default(),
@@ -1683,7 +1683,7 @@ mod tests {
   fn processor_downmixes_resamples_and_saves() {
     let dir = TempDir::new("processor");
     let path = dir.path().join("p.wav");
-    let mut p = Processor::new(2, 48_000, WavSink::create(&path).unwrap()).unwrap();
+    let mut p = Processor::new(2, 48_000, Some(WavSink::create(&path).unwrap())).unwrap();
     let mut stereo: Vec<f32> = sine(48_000, 1.0).iter().flat_map(|&s| [s, s]).collect();
     stereo[1_000] = f32::NAN;
     for chunk in stereo.chunks(1_000) {
@@ -1724,7 +1724,7 @@ mod tests {
     w.finalize().unwrap();
 
     let path = dir.path().join("day/rec.wav");
-    let recorder = Recorder::start(&Source::File(mic), &path).unwrap();
+    let recorder = Recorder::start(&Source::File(mic), Some(&path)).unwrap();
     assert!(recorder.device().contains("mic.wav"), "{}", recorder.device());
     let meter = recorder.meter();
     while meter.level() < 0.3 {
