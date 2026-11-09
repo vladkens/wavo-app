@@ -11,6 +11,7 @@
 //! appearance.
 
 use std::f32::consts::TAU;
+use std::hash::{BuildHasher, Hasher, RandomState};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -61,17 +62,21 @@ const WAVE_STAGGER: Duration = ms(75);
 // tick, so a recording's frames carry both.
 const FLOW_TICK: Duration = METER_TICK;
 
-// The icon's colours drift by as soft clouds: a few wide blobs, each a colour, mixed by
-// nearness, so the pill shows two or three at a time with no edge between them. The colours go
-// round in this long; each cloud is this far ahead of the one before.
-const HUES_PERIOD: f64 = 18.0;
-const HUES_APART: f32 = 0.2;
-// A cloud's reach (a Gaussian's sigma), and how far from the pill's middle they wander: across
-// and up and down, in these periods (seconds), long and unalike, so they never line up the same
-// way twice.
-const CLOUD: f32 = 0.45 * WIDTH;
-const WANDER: (f32, f32) = (0.4 * WIDTH, 0.5 * HEIGHT);
-const CLOUDS: [(f64, f64); 3] = [(23.0, 13.0), (31.0, 17.0), (37.0, 19.0)];
+// The icon's colours drift by as soft clouds: three wide blobs side by side, each a colour, mixed
+// by nearness, so the pill shows three at a time with no edge between them. A dictation takes a
+// few seconds, so it all moves within the first two: the colours go round in this long, each
+// cloud this far along them from the one before, together a good half of them.
+const HUES_PERIOD: f64 = 9.0;
+const HUES_APART: f32 = 0.3;
+// A cloud's reach (a Gaussian's sigma); how far apart they sit, and how far from there they
+// wander: across and up and down, in these periods (seconds), unalike, so they never line up the
+// same way twice.
+const CLOUD: f32 = 0.3 * WIDTH;
+const SPREAD: f32 = WIDTH / 3.0;
+const WANDER: (f32, f32) = (0.2 * WIDTH, 0.5 * HEIGHT);
+const CLOUDS: [(f64, f64); 3] = [(6.1, 4.3), (7.3, 5.3), (8.9, 6.7)];
+// A dictation starts anywhere in this much of the flow, a new place each time the HUD appears.
+const STARTS: u64 = 3_600_000;
 // Between the clouds the colour deepens, this much at most: the clouds' depth.
 const DEEPEN: f32 = 0.25;
 // The icon's colours (assets/icon.png's pixels, from its top left): pink (234, 234), violet
@@ -80,16 +85,18 @@ const DEEPEN: f32 = 0.25;
 // its cyan: the cyan dark enough for white text is a muddy teal.
 const BRAND: [u32; 5] = [0xff50d0, 0x9b42fe, 0x5950fc, 0x1080f7, 0xee3ef5];
 const CONTRAST: f32 = 4.7;
-// Under the gradient, where it thins out at the rounded ends; an error's and a warning's.
-const GROUND: Color = rgb(0x181028);
+// An error's and a warning's.
 const GREY: Color = rgb(0x3a3a3c);
-// A glass pill's edge, seen on any wallpaper and on the gradient: a light line inside, a dark
-// hairline outside.
-const EDGE: Color = alpha([1.0; 4], 0.3);
-const RIM: Color = alpha([0.0, 0.0, 0.0, 1.0], 0.3);
-const HAIR: f32 = 0.5;
-// White text on the gradient: the dark look in either appearance.
-const DARK: Theme = Theme::PLATES_DARK;
+// The edge, a glass pill lit from above: white over the fill a point inside the pill, at its top
+// and its bottom, so the rim is the fill's own colour, lighter, and no dark line, seen on any
+// wallpaper; and a glow down from the top, its strength. An even rim: (0.35, 0.35) and 0.0.
+const RIM: (f32, f32) = (0.5, 0.08);
+const GLOW: f32 = 0.16;
+// The time while transcribing, dimmed: still 3:1 on every colour.
+const DIM: f32 = 0.76;
+// White text on the gradient: the dark look in either appearance, its text white, as the
+// contrast is reckoned for.
+const DARK: Theme = Theme { text: rgb(0xffffff), ..Theme::PLATES_DARK };
 
 const FONT: Font = Font::ui(13.0);
 const TIME: Font = Font::mono(13.0).weight(Weight::Medium);
@@ -258,8 +265,14 @@ pub struct Hud {
   style: HudStyle,
   // The plain style's: the system's appearance.
   theme: Theme,
-  // The gradient's image, the pill's width and the scale it was made for, and when.
+  // The gradient's image, the pill's width and the scale it was made for, and when; the edge's,
+  // for its width and scale.
   field: Option<(ImageId, f32, f32, Duration)>,
+  edge: Option<(ImageId, f32, f32)>,
+  // Where in its flow the gradient is at the clock's zero: a new place, of `seed`'s, each time the
+  // pill appears, which the dictation keeps to its end.
+  start: Duration,
+  seed: Box<dyn FnMut() -> u64>,
   hidden: Box<dyn FnMut()>,
 }
 
@@ -286,6 +299,9 @@ impl Hud {
       style: HudStyle::Gradient,
       theme: Theme::PLATES_LIGHT,
       field: None,
+      edge: None,
+      start: Duration::ZERO,
+      seed: Box::new(|| RandomState::new().build_hasher().finish()),
       hidden: Box::new(hidden),
     }
   }
@@ -315,7 +331,10 @@ impl Hud {
 
   fn enter(&mut self, mode: Mode, now: Duration) {
     match self.mode {
-      Mode::Hidden => self.appeared = now,
+      Mode::Hidden => {
+        self.appeared = now;
+        self.start = Duration::from_millis((self.seed)() % STARTS);
+      }
       // Back at once, no fade-in for a pill still on screen.
       Mode::Closing => self.appeared = now.saturating_sub(APPEAR),
       _ => {}
@@ -447,23 +466,23 @@ impl Hud {
       && !(shown == Mode::Recording && self.text.is_some())
   }
 
-  /// Makes the gradient again when [FLOW_TICK] has passed or the pill's width changed: an image
-  /// is never updated, so the old one goes and the new one takes its id.
+  /// Makes the gradient again when [FLOW_TICK] has passed or the pill's width changed, the edge
+  /// at a new width: an image is never updated, so the old one goes and the new one takes its id.
   fn flow(&mut self, f: &mut Frame) {
-    let (now, width) = (f.now, self.pill(f.now).0);
-    let fresh = self
-      .field
-      .is_some_and(|(_, w, scale, at)| (w, scale) == (width, f.scale) && now < at + FLOW_TICK);
+    let (now, width, scale) = (f.now, self.pill(f.now).0, f.scale);
+    let made = |w, s| (w, s) == (width, scale);
+    if self.style == HudStyle::Gradient && !self.edge.is_some_and(|(_, w, s)| made(w, s)) {
+      let id = renew(f, self.edge.map(|(id, ..)| id), edge(width, scale));
+      self.edge = Some((id, width, scale));
+    }
+
+    let fresh = self.field.is_some_and(|(_, w, s, at)| made(w, s) && now < at + FLOW_TICK);
     if !self.flows() || fresh {
       return;
     }
 
-    let (w, h, px) = field(width, now, f.scale);
-    if let Some((id, ..)) = self.field.take() {
-      f.images().remove(id);
-    }
-
-    self.field = Some((f.images().add(w, h, &px), width, f.scale, now));
+    let id = renew(f, self.field.map(|(id, ..)| id), field(width, now + self.start, scale));
+    self.field = Some((id, width, scale, now));
   }
 
   /// When the next frame is due: `None` for the next refresh, while something moves (a fade, a
@@ -492,36 +511,34 @@ impl Hud {
     let (th, now) = (if plain { &self.theme } else { &DARK }, f.now);
     let (width, pill_alpha, a) = self.pill(now);
     let fade = |c: Color, k: f32| alpha(c, c[3] * pill_alpha * k);
-    let pill = Rect::new((f.size.w - width) / 2.0, MARGIN, width, HEIGHT);
+    // The gradient's pill starts on the pixel grid, where its images, drawn 1:1, start too, so
+    // the grey under the edge meets it.
+    let left = (f.size.w - width) / 2.0;
+    let left = if plain { left } else { (left * f.scale).round() / f.scale };
+    let pill = Rect::new(left, MARGIN, width, HEIGHT);
     let shadow = Rect::new(pill.x, pill.y + 2.0, pill.w, pill.h);
     f.shadow(shadow, HEIGHT / 2.0, 6.0, fade(th.shadow, 1.0));
     let flows = self.flows();
-    let ground = match () {
-      _ if plain => th.menu,
-      _ if flows => GROUND,
-      _ => GREY,
-    };
+    let ground = if plain { th.menu } else { GREY };
     if plain {
       let quad = Quad::new(pill, fade(ground, 1.0)).radius(HEIGHT / 2.0);
       f.quad(quad.border(1.0, fade(th.line, 1.0)));
       f.layer();
       f.push_clip(pill);
     } else {
-      // A hairline just outside the pill, the light edge inside it over the gradient.
-      let out = Rect::new(pill.x - HAIR, pill.y - HAIR, pill.w + 2.0 * HAIR, HEIGHT + 2.0 * HAIR);
-      f.quad(Quad::new(out, [0.0; 4]).radius(HEIGHT / 2.0 + HAIR).border(HAIR, fade(RIM, 1.0)));
-      f.rect(pill, fade(ground, 1.0), HEIGHT / 2.0);
+      // The gradient, else the grey; the edge over either.
+      if !flows {
+        f.rect(pill, fade(ground, 1.0), HEIGHT / 2.0);
+      }
+
       f.push_clip(pill);
-      if let Some((id, w, ..)) = self.field.filter(|_| flows) {
-        // On the pixel grid, drawn 1:1.
-        let s = f.scale;
-        let rect = Rect::new((pill.x * s).round() / s, pill.y, (w * s).ceil() / s, HEIGHT);
+      let field = self.field.filter(|_| flows).map(|(id, w, ..)| (id, w));
+      for (id, w) in [field, self.edge.map(|(id, w, _)| (id, w))].into_iter().flatten() {
+        let rect = Rect::new(pill.x, pill.y, (w * f.scale).ceil() / f.scale, HEIGHT);
         f.image(id, rect, pill_alpha);
       }
 
       f.layer();
-      let edge = Quad::new(pill, [0.0; 4]).radius(HEIGHT / 2.0).border(1.0, fade(EDGE, 1.0));
-      f.quad(edge);
     }
 
     // The contents keep their place as the pill narrows: centred at the recording's width.
@@ -601,7 +618,7 @@ impl Hud {
           Some((done, total)) if total > 1 => {
             time(f, &format!("{}/{total}", (done + 1).min(total)), 0.6 * a)
           }
-          _ => time(f, &clock(self.ended), 0.4 * a),
+          _ => time(f, &clock(self.ended), if plain { 0.4 } else { DIM } * a),
         }
       }
       _ => {}
@@ -646,7 +663,8 @@ impl App for Hud {
         (self.hidden)();
       }
 
-      if let Some((id, ..)) = self.field.take() {
+      let images = [self.field.take().map(|(id, ..)| id), self.edge.take().map(|(id, ..)| id)];
+      for id in images.into_iter().flatten() {
         f.images().remove(id);
       }
 
@@ -715,56 +733,92 @@ fn ease(t: f32) -> f32 {
 
 // MARK: Gradient
 
-/// The gradient of a pill `width` points wide at `now`: straight RGBA rows, a pixel per pixel at
-/// `scale`, drawn 1:1. A pixel's colour is the clouds' (see [CLOUDS]) mixed by nearness, a
-/// Gaussian's weight each: a place among [SHADES], so every pixel is one of the icon's colours,
+/// The gradient of a pill `width` points wide at `t` in its flow: straight RGBA rows, a pixel per
+/// pixel at `scale`, drawn 1:1. A pixel's colour is the clouds' (see [CLOUDS]) mixed by nearness,
+/// a Gaussian's weight each: a place among [SHADES], so every pixel is one of the icon's colours,
 /// never a grey mix of two, and the change from cloud to cloud is as soft as the clouds are wide.
-/// Dithered, so a slow change shows no bands. It thins out to nothing at the pill's edge (a
-/// rounded clip it doesn't have), where [GROUND] and the edge take over.
-fn field(width: f32, now: Duration, scale: f32) -> (usize, usize, Vec<u8>) {
-  let (cols, rows) = ((width * scale).ceil() as usize, (HEIGHT * scale).round() as usize);
+/// Dithered, so a slow change shows no bands. Its edge is the pill's, smoothed as a quad's.
+fn field(width: f32, t: Duration, scale: f32) -> (usize, usize, Vec<u8>) {
   let r = HEIGHT / 2.0;
-  let at = |i: usize| (i as f32 + 0.5) / scale;
   // Of their periods, which they wrap at unseen: f32 keeps its precision over days on.
-  let of = |period: f64| (now.as_secs_f64() % period / period) as f32;
+  let of = |period: f64| (t.as_secs_f64() % period / period) as f32;
   let hues = of(HUES_PERIOD);
   // From the pill's middle, so the colours stay put as it narrows.
   let clouds = CLOUDS.iter().enumerate().map(|(n, &(across, up))| {
     let phase = n as f32 / CLOUDS.len() as f32;
-    let x = width / 2.0 + WANDER.0 * (TAU * (of(across) + phase)).sin();
+    let home = width / 2.0 + (n as f32 - 1.0) * SPREAD;
+    let x = home + WANDER.0 * (TAU * (of(across) + phase)).sin();
     let y = r + WANDER.1 * (TAU * (of(up) + phase)).sin();
     (x, y, hues + n as f32 * HUES_APART)
   });
   let clouds: Vec<_> = clouds.collect();
 
+  pixels(width, scale, |(i, j), (x, y)| {
+    // The clouds' cores, their weights squared, are narrower: the depth.
+    let (mut sum, mut hue, mut core) = (0.0, 0.0, 0.0);
+    for &(cx, cy, h) in &clouds {
+      let w = (-((x - cx).powi(2) + (y - cy).powi(2)) / (2.0 * CLOUD * CLOUD)).exp();
+      (sum, hue, core) = (sum + w, hue + w * h, core + w * w);
+    }
+
+    let shade = SHADES[((hue / sum).rem_euclid(1.0) * SHADES.len() as f32) as usize % SHADES.len()];
+    let deep = 1.0 - DEEPEN * (1.0 - core.min(1.0));
+    // Interleaved gradient noise (Jimenez), half a step either way, still from frame to frame.
+    let noise = (52.982_918 * (0.067_110_56 * i as f32 + 0.005_837_15 * j as f32).fract()).fract();
+    let [red, green, blue] =
+      shade.map(|v| (v * deep + noise - 0.5).round().clamp(0.0, 255.0) as u8);
+    [red, green, blue, 255]
+  })
+}
+
+/// The pill's edge, white over its fill (see [RIM] and [GLOW]), as [field]'s pixels.
+fn edge(width: f32, scale: f32) -> (usize, usize, Vec<u8>) {
+  pixels(width, scale, |_, (x, y)| {
+    // A point wide, its inner side smoothed too.
+    let rim = ((1.0 - inside(width, x, y)) * scale + 0.5).clamp(0.0, 1.0);
+    let rim = rim * lerp(RIM.1, RIM.0, 1.0 - y / HEIGHT);
+    let glow = GLOW * (1.0 - y / (0.4 * HEIGHT)).max(0.0).powi(2);
+    [255, 255, 255, (rim.max(glow) * 255.0).round() as u8]
+  })
+}
+
+/// The straight RGBA rows of an image of a pill `width` points wide, a pixel per pixel at `scale`:
+/// `pixel` of each one's column and row and its middle in points, its alpha cut to the pill as a
+/// quad's edge is, so the two meet with no seam.
+fn pixels(
+  width: f32,
+  scale: f32,
+  mut pixel: impl FnMut((usize, usize), (f32, f32)) -> [u8; 4],
+) -> (usize, usize, Vec<u8>) {
+  let (cols, rows) = ((width * scale).ceil() as usize, (HEIGHT * scale).round() as usize);
+  let at = |i: usize| (i as f32 + 0.5) / scale;
   let mut px = Vec::with_capacity(cols * rows * 4);
   for j in 0..rows {
-    let y = at(j);
     for i in 0..cols {
-      let x = at(i);
-      // The clouds' cores, their weights squared, are narrower: the depth.
-      let (mut sum, mut hue, mut core) = (0.0, 0.0, 0.0);
-      for &(cx, cy, h) in &clouds {
-        let w = (-((x - cx).powi(2) + (y - cy).powi(2)) / (2.0 * CLOUD * CLOUD)).exp();
-        (sum, hue, core) = (sum + w, hue + w * h, core + w * w);
-      }
-
-      let shade =
-        SHADES[((hue / sum).rem_euclid(1.0) * SHADES.len() as f32) as usize % SHADES.len()];
-      let deep = 1.0 - DEEPEN * (1.0 - core.min(1.0));
-      // Interleaved gradient noise (Jimenez), half a step either way, still from frame to frame.
-      let noise =
-        (52.982_918 * (0.067_110_56 * i as f32 + 0.005_837_15 * j as f32).fract()).fract();
-      let [red, green, blue] =
-        shade.map(|v| (v * deep + noise - 0.5).round().clamp(0.0, 255.0) as u8);
-      // Opaque a point inside the pill, the edge's width: the rows along the top and bottom too.
-      let dx = (r - x).max(x - (width - r)).max(0.0);
-      let inside = r - (dx * dx + (y - r) * (y - r)).sqrt();
-      px.extend_from_slice(&[red, green, blue, (inside.clamp(0.0, 1.0) * 255.0) as u8]);
+      let (x, y) = (at(i), at(j));
+      let [red, green, blue, a] = pixel((i, j), (x, y));
+      let cover = (0.5 + inside(width, x, y) * scale).clamp(0.0, 1.0);
+      px.extend_from_slice(&[red, green, blue, (a as f32 * cover).round() as u8]);
     }
   }
 
   (cols, rows, px)
+}
+
+/// How far a point is inside a pill `width` points wide, in points: below 0 outside.
+fn inside(width: f32, x: f32, y: f32) -> f32 {
+  let r = HEIGHT / 2.0;
+  let dx = (r - x).max(x - (width - r)).max(0.0);
+  r - (dx * dx + (y - r) * (y - r)).sqrt()
+}
+
+/// `image` in place of `old`: an image is never updated, so the old one goes, its id taken anew.
+fn renew(f: &mut Frame, old: Option<ImageId>, (w, h, px): (usize, usize, Vec<u8>)) -> ImageId {
+  if let Some(id) = old {
+    f.images().remove(id);
+  }
+
+  f.images().add(w, h, &px)
 }
 
 /// [BRAND] round, from 0 to 1, mixed in OKLCH, 0..255 unrounded for the dither: a lookup per
@@ -793,11 +847,16 @@ static STOPS: LazyLock<Vec<[f32; 3]>> = LazyLock::new(|| {
 
 /// White's contrast on an sRGB colour, 0..255 (WCAG's).
 fn contrast(c: [f32; 3]) -> f32 {
+  1.05 / (luminance(c) + 0.05)
+}
+
+/// An sRGB colour's relative luminance, 0..255 (WCAG's).
+fn luminance(c: [f32; 3]) -> f32 {
   let [r, g, b] = c.map(|v| {
     let v = v / 255.0;
     if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
   });
-  1.05 / (0.2126 * r + 0.7152 * g + 0.0722 * b + 0.05)
+  0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 
 /// [STOPS] round at `t`, 0..1 (the last back to the first), mixed in OKLCH: a Catmull-Rom spline
@@ -978,6 +1037,12 @@ mod tests {
     let config = config(HudPosition::Bottom);
     let mut h = Harness::new(Hud::new(move || count.set(count.get() + 1)), config.size, 2.0);
     h.set_transparent(true);
+    // The gradient's starts, the same in every run.
+    let mut n = 0u64;
+    h.app_mut().seed = Box::new(move || {
+      n += 1;
+      n.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    });
     h.event(Event::Appearance(Appearance::DARK));
     h.app_mut().set_style(style);
     (h, hidden)
@@ -1210,6 +1275,48 @@ mod tests {
   fn white_text_reads_on_the_whole_gradient() {
     let worst = SHADES.iter().map(|c| contrast(c.map(|v| v + 0.5))).fold(f32::MAX, f32::min);
     assert!(worst >= 4.5, "{worst:.2}:1");
+  }
+
+  /// The dimmed time while transcribing still reads, 3:1 on every colour, the deepest too.
+  #[test]
+  fn the_dimmed_time_reads_on_the_whole_gradient() {
+    let worst = SHADES
+      .iter()
+      .flat_map(|&c| [1.0, 1.0 - DEEPEN].map(|deep| c.map(|v| v * deep + 0.5)))
+      .map(|c| (luminance(c.map(|v| lerp(v, 255.0, DIM))) + 0.05) / (luminance(c) + 0.05))
+      .fold(f32::MAX, f32::min);
+    assert!(worst >= 3.0, "{worst:.2}:1");
+  }
+
+  /// Each time the pill appears the gradient starts somewhere new, and carries on from there as
+  /// the dictation transcribes and is done: no jump.
+  #[test]
+  fn a_dictation_starts_the_gradient_anywhere_and_keeps_it() {
+    let (mut h, _) = hud();
+    let seeds = Rc::new(Cell::new(0));
+    let count = seeds.clone();
+    h.app_mut().seed = Box::new(move || {
+      count.set(count.get() + 1);
+      count.get() * 1_234_567
+    });
+    let step = |a: [u8; 4], b: [u8; 4]| (0..3).map(|i| a[i].abs_diff(b[i])).max().unwrap();
+    h.app_mut().show(recording(None));
+    h.wait(ms(500));
+    let mut before = fill(&mut h);
+    for show in [Show::Transcribing(None), Show::Done("420 ms".into())] {
+      h.app_mut().show(show);
+      h.wait(FLOW_TICK);
+      let after = fill(&mut h);
+      assert!(step(before, after) < 16, "{before:?} {after:?}");
+      before = after;
+    }
+
+    assert_eq!(seeds.get(), 1);
+    h.wait(DONE_HOLD + COLLAPSE + ms(100));
+    assert_eq!(h.app().mode(), Mode::Hidden);
+    h.app_mut().show(recording(None));
+    h.wait(ms(500));
+    assert_eq!(seeds.get(), 2, "a new start");
   }
 
   /// A Windows microphone's name in full would run past the pill's rounded end.
