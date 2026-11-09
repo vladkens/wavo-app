@@ -81,7 +81,7 @@ struct App {
   icon: Icon,
   menu: Menu<Action>,
   hotkeys: Hotkeys,
-  hud: (Window<Hud>, HudPosition),
+  hud: HudWindow,
   handle: Handle,
   home: PathBuf,
   hub: Hub,
@@ -116,6 +116,12 @@ struct App {
   /// The installer runs: the app quits once no dictation runs, [QUIT_WAIT] at the latest.
   quitting: bool,
   session: Session,
+}
+
+/// The HUD's window and the screen edge it was opened at.
+struct HudWindow {
+  window: Window<Hud>,
+  position: HudPosition,
 }
 
 /// How long a dictation the installer found running may go on: shipo's installer waits 30 s for
@@ -219,13 +225,12 @@ fn start(
   let tray = Tray::new(Icon::Idle.tray(), &Icon::Idle.description());
   tray.on_open(|_, _| _ = with_app(App::menu_opening));
   tray.on_item(|main, _, action| chosen(main, action));
-  let position = HudPosition::default();
   let mut app = App {
     tray,
     icon: Icon::Idle,
     menu: Menu::default(),
     hotkeys,
-    hud: (open_hud(main, position), position),
+    hud: open_hud(main, HudPosition::default()),
     handle,
     home,
     hub,
@@ -289,9 +294,9 @@ fn may_launch_at_login() -> bool {
   matches!(autostart::state(&INFO), Ok(autostart::State::Enabled))
 }
 
-fn open_hud(main: &mut Main, position: HudPosition) -> Window<Hud> {
+fn open_hud(main: &mut Main, position: HudPosition) -> HudWindow {
   let hidden = || proxy().post(|_| _ = with_app(App::hud_hidden));
-  main.open(&hud::config(position), Hud::new(hidden))
+  HudWindow { window: main.open(&hud::config(position), Hud::new(hidden)), position }
 }
 
 /// The session keeps a recording in progress; nimbo then lets the instance's lock go as the loop
@@ -506,8 +511,7 @@ impl App {
     let status = &update.status;
     let _ = self.hotkeys.set(&update.settings.hotkey); // its error shows in the menu
     self.hotkeys.escape(status.state != Phase::Idle);
-    let position = update.settings.hud_position;
-    let shown = self.hud.0.with(|h| h.mode()).unwrap_or(Mode::Hidden);
+    let shown = self.hud.window.with(|h| h.mode()).unwrap_or(Mode::Hidden);
     let show = match status.state {
       Phase::Recording => {
         let recording = self.update.as_ref().is_some_and(|u| u.status.state == Phase::Recording);
@@ -547,7 +551,7 @@ impl App {
       }
     };
 
-    self.show(main, shown, show, position);
+    self.show(main, shown, show, &update.settings);
     self.keep(update);
   }
 
@@ -567,8 +571,8 @@ impl App {
   /// From hidden only a recording or an error shows, on the screen with the pointer. Never where
   /// the overlay would take the keyboard focus ([Main::overlay_takes_focus]: GNOME on Wayland
   /// without XWayland): the person's window would lose it, and the paste would go into the HUD.
-  /// The tray icon tells the state there too.
-  fn show(&mut self, main: &mut Main, shown: Mode, show: Show, position: HudPosition) {
+  /// The tray icon tells the state there too. The HUD's place and style are the settings'.
+  fn show(&mut self, main: &mut Main, shown: Mode, show: Show, settings: &Settings) {
     if main.overlay_takes_focus() {
       return;
     }
@@ -578,21 +582,25 @@ impl App {
       return;
     }
 
-    if hidden && position != self.hud.1 {
-      self.hud.0.close();
-      self.hud = (open_hud(main, position), position);
+    let position = settings.hud_position;
+    if hidden && position != self.hud.position {
+      self.hud.window.close();
+      self.hud = open_hud(main, position);
     }
 
-    self.hud.0.with(|h| h.show(show));
+    self.hud.window.with(|h| {
+      h.set_style(settings.hud_style);
+      h.show(show);
+    });
     if hidden {
-      self.hud.0.front();
+      self.hud.window.front();
     }
   }
 
   /// The HUD's collapse ended: its window goes, unless it shows again already.
   fn hud_hidden(&mut self) {
-    if self.hud.0.with(|h| h.mode()) == Some(Mode::Hidden) {
-      self.hud.0.hide();
+    if self.hud.window.with(|h| h.mode()) == Some(Mode::Hidden) {
+      self.hud.window.hide();
     }
   }
 

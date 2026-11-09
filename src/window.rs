@@ -32,7 +32,7 @@ use crate::audio::{self, Auto, Choice, Microphone, Playback, Transport};
 use crate::engine;
 use crate::history::{Entry, History, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms};
 use crate::session::{self, NoModel, Request, Status, label};
-use crate::settings::{Activation, HudPosition, Settings, language_name};
+use crate::settings::{Activation, HudPosition, HudStyle, Settings, language_name};
 use crate::transfer::Imported;
 
 // MARK: Window
@@ -808,6 +808,9 @@ const HUDS: [Tag<HudPosition>; 2] = [
   Tag::new(HudPosition::Top, "Top of the screen"),
 ];
 
+const HUD_STYLES: [Tag<HudStyle>; 2] =
+  [Tag::new(HudStyle::Gradient, "Gradient"), Tag::new(HudStyle::Plain, "Plain")];
+
 const UNLOADS: [Tag<Option<u32>>; 7] = [
   Tag::new(None, "Never"),
   Tag::new(Some(0), "Right after each dictation"),
@@ -830,36 +833,14 @@ const RETENTIONS: [Tag<Retention>; 7] = [
 
 impl Prefs {
   fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    // The pop-ups first, then the switches.
+    // The model and where it runs, then the history, then updates.
     ui.form_section(fs, "App", |ui| {
-      ui.form_row(fs, FormRow::new("Show the HUD at"), |ui| {
-        let mut cur = self.settings.hud_position;
-        if ui.id("hud").picker(&mut cur, &HUDS).changed {
-          self.edit(move |s| s.hud_position = cur);
-        }
-      });
-
       let row = FormRow::new(marked("Unload the model", Mark::Info(UNLOAD_HELP), None));
       ui.form_row(fs, row, |ui| {
         let mut cur = self.settings.unload_after_minutes;
         let p = Picker::new(&mut cur).options(&UNLOADS[..1]).divider().options(&UNLOADS[1..]);
         if p.show(ui.id("unload")).changed {
           self.edit(move |s| s.unload_after_minutes = cur);
-        }
-      });
-
-      ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
-        let mut cur = self.settings.history_retention;
-        if ui.id("retention").picker(&mut cur, &RETENTIONS).changed {
-          self.edit(move |s| s.history_retention = cur);
-        }
-      });
-
-      let row = FormRow::new(marked("Show the transcription time", Mark::Info(TOOK_HELP), None));
-      ui.form_row(fs, row, |ui| {
-        let mut on = self.settings.show_transcription_time;
-        if ui.id("took").toggle(&mut on, "").changed {
-          self.edit(move |s| s.show_transcription_time = on);
         }
       });
 
@@ -874,6 +855,13 @@ impl Prefs {
         });
       }
 
+      ui.form_row(fs, FormRow::new("Keep the history"), |ui| {
+        let mut cur = self.settings.history_retention;
+        if ui.id("retention").picker(&mut cur, &RETENTIONS).changed {
+          self.edit(move |s| s.history_retention = cur);
+        }
+      });
+
       // Off and disabled where the app can't update, the setting kept; its ⓘ says why.
       let updates = self.shell.updates();
       let help = if updates { UPDATE_HELP } else { NO_UPDATES };
@@ -883,6 +871,30 @@ impl Prefs {
         let mut on = updates && self.settings.auto_update;
         if ui.id("auto-update").toggle(&mut on, "").changed {
           self.edit(move |s| s.auto_update = on);
+        }
+      });
+    });
+
+    ui.form_section(fs, "HUD", |ui| {
+      ui.form_row(fs, FormRow::new("Show the HUD at"), |ui| {
+        let mut cur = self.settings.hud_position;
+        if ui.id("hud").picker(&mut cur, &HUDS).changed {
+          self.edit(move |s| s.hud_position = cur);
+        }
+      });
+
+      ui.form_row(fs, FormRow::new("HUD style"), |ui| {
+        let mut cur = self.settings.hud_style;
+        if ui.id("hud-style").picker(&mut cur, &HUD_STYLES).changed {
+          self.edit(move |s| s.hud_style = cur);
+        }
+      });
+
+      let row = FormRow::new(marked("Show the transcription time", Mark::Info(TOOK_HELP), None));
+      ui.form_row(fs, row, |ui| {
+        let mut on = self.settings.show_transcription_time;
+        if ui.id("took").toggle(&mut on, "").changed {
+          self.edit(move |s| s.show_transcription_time = on);
         }
       });
     });
@@ -3242,6 +3254,9 @@ mod tests {
     assert_eq!(fake.log().settings.history_retention, Retention::Count(100));
     click(&mut h, Id::of("ane"));
     assert!(!fake.log().settings.neural_engine);
+    click(&mut h, Id::of("hud-style"));
+    click(&mut h, Id::of("hud-style").key(("item", 1)));
+    assert_eq!(fake.log().settings.hud_style, HudStyle::Plain);
 
     // Launch at login, on General, goes to the system, one change at a time; a refusal says why.
     tab(&mut h, Page::General);
