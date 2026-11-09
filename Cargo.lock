@@ -1968,7 +1968,7 @@ dependencies = [
 [[package]]
 name = "wavo"
 version = "0.4.0"
-source = "git+https://github.com/vladkens/wavo?branch=main#0e039c9dc1a0c3deccd43fc416720b570239fcfe"
+source = "git+https://github.com/vladkens/wavo?branch=main#0d2c5dcfdf92e42898a8c8e2b162db818560c20c"
 dependencies = [
  "bytemuck",
  "half",
@@ -2184,7 +2184,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
