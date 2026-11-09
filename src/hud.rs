@@ -6,9 +6,9 @@
 //! collapses to a circle and fades: no "done" state. An error shows a glyph and a short lowercase
 //! reason for a few seconds, the pill widening to fit; while recording, a warning (no sound, no
 //! model, a permission) takes the level's place. Two styles (the settings'): the gradient, dark
-//! in either appearance, the icon's colours (pink, violet, blue, cyan) travelling along the pill
-//! under a dictation and a still grey under an error or a warning; or the plain pill of the
-//! system's appearance.
+//! in either appearance, the icon's colours (pink, violet, blue) drifting by as soft clouds under
+//! a dictation and a still grey under an error or a warning; or the plain pill of the system's
+//! appearance.
 
 use std::f32::consts::TAU;
 use std::sync::LazyLock;
@@ -61,25 +61,33 @@ const WAVE_STAGGER: Duration = ms(75);
 // tick, so a recording's frames carry both.
 const FLOW_TICK: Duration = METER_TICK;
 
-// The icon's colours travel along the pill, left to right: a band of them, pink to cyan and back,
-// this long, a band each period; slanted as on the icon, this far right a point down.
-const BAND: f32 = 2.0 * WIDTH;
-const FLOW_PERIOD: f64 = 5.0;
-const SLANT: f32 = 0.8;
-// A slower ripple the other way bends the band a little: the colours bunch and spread.
-const RIPPLE: f32 = 0.9 * WIDTH;
-const RIPPLE_PERIOD: f64 = 7.0;
-const RIPPLE_DEPTH: f32 = 0.05;
-// The icon's colours (assets/icon.png's pixels, from its top left to its bottom right): pink
-// (234, 234), violet (392, 392), indigo (560, 345), blue (646, 431), cyan (668, 668). Their hue
-// and chroma at one lightness, deep enough for white text on all between (WCAG AA, 4.5:1, with
-// room); one lightness, so the flow changes hue alone and never flickers.
-const BRAND: [u32; 5] = [0xff50d0, 0x9b42fe, 0x5950fc, 0x1080f7, 0x2adcfc];
-const LIGHTNESS: f32 = 0.5;
+// The icon's colours drift by as soft clouds: a few wide blobs, each a colour, mixed by
+// nearness, so the pill shows two or three at a time with no edge between them. The colours go
+// round in this long; each cloud is this far ahead of the one before.
+const HUES_PERIOD: f64 = 18.0;
+const HUES_APART: f32 = 0.2;
+// A cloud's reach (a Gaussian's sigma), and how far from the pill's middle they wander: across
+// and up and down, in these periods (seconds), long and unalike, so they never line up the same
+// way twice.
+const CLOUD: f32 = 0.45 * WIDTH;
+const WANDER: (f32, f32) = (0.4 * WIDTH, 0.5 * HEIGHT);
+const CLOUDS: [(f64, f64); 3] = [(23.0, 13.0), (31.0, 17.0), (37.0, 19.0)];
+// Between the clouds the colour deepens, this much at most: the clouds' depth.
+const DEEPEN: f32 = 0.25;
+// The icon's colours (assets/icon.png's pixels, from its top left): pink (234, 234), violet
+// (392, 392), indigo (560, 345), blue (646, 431), and back to pink by its magenta; each only as
+// much darker as white text needs on it, WCAG AA's 4.5:1 with room, its hue and chroma kept. Not
+// its cyan: the cyan dark enough for white text is a muddy teal.
+const BRAND: [u32; 5] = [0xff50d0, 0x9b42fe, 0x5950fc, 0x1080f7, 0xee3ef5];
+const CONTRAST: f32 = 4.7;
 // Under the gradient, where it thins out at the rounded ends; an error's and a warning's.
 const GROUND: Color = rgb(0x181028);
 const GREY: Color = rgb(0x3a3a3c);
-const EDGE: Color = alpha([1.0; 4], 0.24);
+// A glass pill's edge, seen on any wallpaper and on the gradient: a light line inside, a dark
+// hairline outside.
+const EDGE: Color = alpha([1.0; 4], 0.3);
+const RIM: Color = alpha([0.0, 0.0, 0.0, 1.0], 0.3);
+const HAIR: f32 = 0.5;
 // White text on the gradient: the dark look in either appearance.
 const DARK: Theme = Theme::PLATES_DARK;
 
@@ -450,9 +458,7 @@ impl Hud {
       return;
     }
 
-    // Of their periods, which they wrap at unseen: f32 keeps its precision over days on.
-    let of = |period: f64| (now.as_secs_f64() % period / period) as f32;
-    let (w, h, px) = field(width, of(FLOW_PERIOD), of(RIPPLE_PERIOD), f.scale);
+    let (w, h, px) = field(width, now, f.scale);
     if let Some((id, ..)) = self.field.take() {
       f.images().remove(id);
     }
@@ -501,6 +507,9 @@ impl Hud {
       f.layer();
       f.push_clip(pill);
     } else {
+      // A hairline just outside the pill, the light edge inside it over the gradient.
+      let out = Rect::new(pill.x - HAIR, pill.y - HAIR, pill.w + 2.0 * HAIR, HEIGHT + 2.0 * HAIR);
+      f.quad(Quad::new(out, [0.0; 4]).radius(HEIGHT / 2.0 + HAIR).border(HAIR, fade(RIM, 1.0)));
       f.rect(pill, fade(ground, 1.0), HEIGHT / 2.0);
       f.push_clip(pill);
       if let Some((id, w, ..)) = self.field.filter(|_| flows) {
@@ -510,7 +519,6 @@ impl Hud {
         f.image(id, rect, pill_alpha);
       }
 
-      // The edge over the gradient's soft one.
       f.layer();
       let edge = Quad::new(pill, [0.0; 4]).radius(HEIGHT / 2.0).border(1.0, fade(EDGE, 1.0));
       f.quad(edge);
@@ -707,65 +715,110 @@ fn ease(t: f32) -> f32 {
 
 // MARK: Gradient
 
-/// The gradient of a pill `width` points wide, `flow` and `ripple` into their periods (0..1):
-/// straight RGBA rows, a pixel per pixel at `scale`, drawn 1:1. A row is a strip of [BRAND]'s
-/// band from its slant on, so a pixel is a lookup; it thins out to nothing at the pill's edge (a
+/// The gradient of a pill `width` points wide at `now`: straight RGBA rows, a pixel per pixel at
+/// `scale`, drawn 1:1. A pixel's colour is the clouds' (see [CLOUDS]) mixed by nearness, a
+/// Gaussian's weight each: a place among [SHADES], so every pixel is one of the icon's colours,
+/// never a grey mix of two, and the change from cloud to cloud is as soft as the clouds are wide.
+/// Dithered, so a slow change shows no bands. It thins out to nothing at the pill's edge (a
 /// rounded clip it doesn't have), where [GROUND] and the edge take over.
-fn field(width: f32, flow: f32, ripple: f32, scale: f32) -> (usize, usize, Vec<u8>) {
+fn field(width: f32, now: Duration, scale: f32) -> (usize, usize, Vec<u8>) {
   let (cols, rows) = ((width * scale).ceil() as usize, (HEIGHT * scale).round() as usize);
   let r = HEIGHT / 2.0;
   let at = |i: usize| (i as f32 + 0.5) / scale;
-  let slant = |j: usize| (SLANT * j as f32).round() as usize;
-  // From the pill's middle, so the colours stay put as it narrows; cos makes the band's ends
-  // (pink, cyan) linger and turn back smoothly.
-  let strip: Vec<[u8; 3]> = (0..cols + slant(rows))
-    .map(|k| {
-      let s = at(k) - width / 2.0;
-      let u = s / BAND - flow + RIPPLE_DEPTH * (TAU * (s / RIPPLE + ripple)).sin();
-      SHADES[((0.5 - 0.5 * (TAU * u).cos()) * 1023.0).round() as usize]
-    })
-    .collect();
+  // Of their periods, which they wrap at unseen: f32 keeps its precision over days on.
+  let of = |period: f64| (now.as_secs_f64() % period / period) as f32;
+  let hues = of(HUES_PERIOD);
+  // From the pill's middle, so the colours stay put as it narrows.
+  let clouds = CLOUDS.iter().enumerate().map(|(n, &(across, up))| {
+    let phase = n as f32 / CLOUDS.len() as f32;
+    let x = width / 2.0 + WANDER.0 * (TAU * (of(across) + phase)).sin();
+    let y = r + WANDER.1 * (TAU * (of(up) + phase)).sin();
+    (x, y, hues + n as f32 * HUES_APART)
+  });
+  let clouds: Vec<_> = clouds.collect();
 
   let mut px = Vec::with_capacity(cols * rows * 4);
   for j in 0..rows {
     let y = at(j);
-    for (i, c) in strip[slant(j)..][..cols].iter().enumerate() {
-      // Opaque a point inside the pill, the edge's width: the rows along the top and bottom too.
+    for i in 0..cols {
       let x = at(i);
+      // The clouds' cores, their weights squared, are narrower: the depth.
+      let (mut sum, mut hue, mut core) = (0.0, 0.0, 0.0);
+      for &(cx, cy, h) in &clouds {
+        let w = (-((x - cx).powi(2) + (y - cy).powi(2)) / (2.0 * CLOUD * CLOUD)).exp();
+        (sum, hue, core) = (sum + w, hue + w * h, core + w * w);
+      }
+
+      let shade =
+        SHADES[((hue / sum).rem_euclid(1.0) * SHADES.len() as f32) as usize % SHADES.len()];
+      let deep = 1.0 - DEEPEN * (1.0 - core.min(1.0));
+      // Interleaved gradient noise (Jimenez), half a step either way, still from frame to frame.
+      let noise =
+        (52.982_918 * (0.067_110_56 * i as f32 + 0.005_837_15 * j as f32).fract()).fract();
+      let [red, green, blue] =
+        shade.map(|v| (v * deep + noise - 0.5).round().clamp(0.0, 255.0) as u8);
+      // Opaque a point inside the pill, the edge's width: the rows along the top and bottom too.
       let dx = (r - x).max(x - (width - r)).max(0.0);
       let inside = r - (dx * dx + (y - r) * (y - r)).sqrt();
-      px.extend_from_slice(&[c[0], c[1], c[2], (inside.clamp(0.0, 1.0) * 255.0) as u8]);
+      px.extend_from_slice(&[red, green, blue, (inside.clamp(0.0, 1.0) * 255.0) as u8]);
     }
   }
 
   (cols, rows, px)
 }
 
-/// [BRAND] from 0 to 1, mixed in OKLCH, for a lookup per pixel.
-static SHADES: LazyLock<Vec<[u8; 3]>> = LazyLock::new(|| {
-  let shade = |k| srgb(brand(k as f32 / 1023.0)).map(|v| v.round() as u8);
-  (0..1024).map(shade).collect()
+/// [BRAND] round, from 0 to 1, mixed in OKLCH, 0..255 unrounded for the dither: a lookup per
+/// pixel.
+static SHADES: LazyLock<Vec<[f32; 3]>> =
+  LazyLock::new(|| (0..4096).map(|k| srgb(brand(k as f32 / 4096.0))).collect());
+
+/// [BRAND]'s stops in OKLCH, each darkened only as far as white text needs: [CONTRAST].
+static STOPS: LazyLock<Vec<[f32; 3]>> = LazyLock::new(|| {
+  let darkened = |[l, c, h]: [f32; 3]| {
+    let reads = |l: f32| contrast(srgb([l, c, h])) >= CONTRAST;
+    if reads(l) {
+      return [l, c, h];
+    }
+
+    let (mut lo, mut hi) = (0.0, l);
+    while hi - lo > 1e-4 {
+      let mid = (lo + hi) / 2.0;
+      if reads(mid) { lo = mid } else { hi = mid }
+    }
+
+    [lo, c, h]
+  };
+  BRAND.iter().map(|&c| darkened(oklch(c))).collect()
 });
 
-/// [BRAND] at `t`, 0..1, at [LIGHTNESS], mixed in OKLCH: a Catmull-Rom spline through the
-/// stops' chroma and hue, the hue the short way round, so no grey between two colours and no
-/// crease at a stop.
+/// White's contrast on an sRGB colour, 0..255 (WCAG's).
+fn contrast(c: [f32; 3]) -> f32 {
+  let [r, g, b] = c.map(|v| {
+    let v = v / 255.0;
+    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+  });
+  1.05 / (0.2126 * r + 0.7152 * g + 0.0722 * b + 0.05)
+}
+
+/// [STOPS] round at `t`, 0..1 (the last back to the first), mixed in OKLCH: a Catmull-Rom spline
+/// through their lightness, chroma and hue, the hue the short way round, so no grey between two
+/// colours and no crease at a stop.
 fn brand(t: f32) -> [f32; 3] {
-  let last = BRAND.len() - 1;
-  let at = t.clamp(0.0, 1.0) * last as f32;
-  let i = (at as usize).min(last - 1);
-  let k = at - i as f32;
-  // The stops around the segment, the ends repeated.
-  let mut p = [0, 1, 2, 3].map(|n| oklch(BRAND[(i + n).saturating_sub(1).min(last)]));
-  for n in 1..4 {
-    p[n][2] = p[n - 1][2] + (p[n][2] - p[n - 1][2] + 540.0) % 360.0 - 180.0;
+  let n = STOPS.len();
+  let at = t.rem_euclid(1.0) * n as f32;
+  let (i, k) = (at as usize % n, at.fract());
+  // The stops around the segment.
+  let mut p = [0, 1, 2, 3].map(|m| STOPS[(i + n + m - 1) % n]);
+  for m in 1..4 {
+    p[m][2] = p[m - 1][2] + (p[m][2] - p[m - 1][2] + 540.0) % 360.0 - 180.0;
   }
 
   let spline = |v: [f32; 4]| {
     let (a, b, c) = (v[2] - v[0], 2.0 * v[0] - 5.0 * v[1] + 4.0 * v[2] - v[3], v[3] - v[0]);
     v[1] + 0.5 * k * (a + k * (b + k * (c + 3.0 * (v[1] - v[2]))))
   };
-  [LIGHTNESS, spline(p.map(|c| c[1])).max(0.0), spline(p.map(|c| c[2]))]
+  let [l, c, h] = [0, 1, 2].map(|n| spline(p.map(|c| c[n])));
+  [l, c.max(0.0), h]
 }
 
 /// An sRGB colour (0xrrggbb) in OKLCH: lightness 0..1, chroma, hue in degrees (Björn Ottosson's
@@ -1136,7 +1189,7 @@ mod tests {
     h.app_mut().show(recording(None));
     h.wait(ms(500));
     let before = fill(&mut h);
-    h.wait(FLOW_TICK * 4);
+    h.wait(ms(1000));
     let after = fill(&mut h);
     assert!(!grey(before) && before != after, "flowing: {before:?} {after:?}");
 
@@ -1151,17 +1204,11 @@ mod tests {
     assert!(grey(light) && light[0] > 200, "the light pill: {light:?}");
   }
 
-  /// White reads on every colour of the gradient: WCAG AA's 4.5:1 for the time's text.
+  /// White reads on every colour of the gradient, the dither's half step up included: WCAG AA's
+  /// 4.5:1 for the time's text.
   #[test]
   fn white_text_reads_on_the_whole_gradient() {
-    let luminance = |c: [u8; 3]| {
-      let [r, g, b] = c.map(|v| {
-        let v = f32::from(v) / 255.0;
-        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
-      });
-      0.2126 * r + 0.7152 * g + 0.0722 * b
-    };
-    let worst = SHADES.iter().map(|&c| 1.05 / (luminance(c) + 0.05)).fold(f32::MAX, f32::min);
+    let worst = SHADES.iter().map(|c| contrast(c.map(|v| v + 0.5))).fold(f32::MAX, f32::min);
     assert!(worst >= 4.5, "{worst:.2}:1");
   }
 
