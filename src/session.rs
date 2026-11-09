@@ -10,6 +10,8 @@
 //!   text. Such entries are transcribed by themselves once another model can transcribe: one at a
 //!   time, behind dictations, each by a model that has not tried it yet (`tried_model`).
 //! - A chosen model not on disk gives way to the first one found, with a warning; the choice stays.
+//! - With `clean_text` a dictation is [cleaned](cleanup::clean), and its paste ends with a space
+//!   and [goes on](cleanup::going_on) the sentence a paste into the same target just left open.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,6 +27,7 @@ use tracing::{debug, info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
 use crate::audio::{self, Clip, Meter, Recorder, Source};
+use crate::cleanup;
 use crate::engine::{self, Engine, EngineError, Loader, Wavo};
 use crate::history::{Entry, History, now_ms};
 use crate::mic_start::{SlowStart, Start};
@@ -41,6 +44,8 @@ const TAIL_PAUSE: Duration = Duration::from_millis(120);
 /// breath or a fan's hiss for voice for seconds.
 const TAIL_MAX: Duration = Duration::from_millis(450);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// A paste goes on the sentence the one before it left open, into the same target, only this soon.
+const GOING_ON: Duration = Duration::from_secs(20);
 
 // MARK: Machine
 
@@ -246,6 +251,9 @@ pub trait TextOutput: Send + 'static {
   /// Taken when a recording starts.
   fn target(&mut self) -> Self::Target;
 
+  /// The focus moved from one target to the other.
+  fn moved(from: &Self::Target, to: &Self::Target) -> bool;
+
   /// Pastes `text` into `target`, unless the focus has moved since or pasting there is unsafe. The
   /// clipboard is restored afterwards unless `keep_in_clipboard`.
   fn paste(
@@ -282,6 +290,8 @@ pub struct Config {
   pub loader: Arc<dyn Loader>,
   /// A WAV file played instead of the microphone (`WAVO_FAKE_MIC`).
   pub fake_mic: Option<PathBuf>,
+  /// What the time between pastes is measured by.
+  pub clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 
 impl Config {
@@ -291,6 +301,7 @@ impl Config {
       hub: Hub::new(),
       loader: Arc::new(Wavo),
       fake_mic: audio::fake_mic(),
+      clock: Arc::new(Instant::now),
     }
   }
 }
@@ -465,6 +476,7 @@ impl Session {
       events,
       next_job: 0,
       dictation: None,
+      pasted: None,
       last: None,
       last_warnings: Vec::new(),
       retranscribing: Vec::new(),
@@ -540,9 +552,20 @@ struct Loaded {
 struct Job {
   id: u64,
   model: String,
+  /// wavo's, unless the model is a file of the person's own.
+  info: Option<&'static ModelInfo>,
   language: Option<String>,
   /// The one it runs on, which a model change may have replaced since.
   engine: Engine,
+}
+
+impl Job {
+  /// The language of its text, when known: its model's only one, whatever the setting says, as
+  /// such a model isn't told another, else the one it was told.
+  fn text_language(&self) -> Option<&str> {
+    let only = self.info.and_then(|m| if let [code] = m.langs { Some(*code) } else { None });
+    only.or(self.language.as_deref())
+  }
 }
 
 /// An entry's text before it was transcribed again.
@@ -567,6 +590,15 @@ fn tail_end(stopped: Instant, now: Instant, pause: Duration) -> Instant {
   quiet.clamp(stopped + POST_ROLL, stopped + TAIL_MAX)
 }
 
+/// The last paste, which a next one may go on from.
+struct Pasted<T> {
+  target: T,
+  /// By [Config::clock].
+  at: Instant,
+  /// Its text didn't end its sentence.
+  open: bool,
+}
+
 struct Dictation<T> {
   /// How it ends, as it goes.
   last: Last,
@@ -575,6 +607,8 @@ struct Dictation<T> {
   created_at: i64,
   audio: String,
   started: Instant,
+  /// When it started by [Config::clock], which the last paste's time is measured to.
+  began: Instant,
   /// The tail ([tail_end]) runs from then until the recorder closes.
   stopped: Option<Instant>,
   recorder: Option<Recorder>,
@@ -598,6 +632,7 @@ struct Controller<O: TextOutput> {
   events: Receiver<engine::Event>,
   next_job: u64,
   dictation: Option<Dictation<O::Target>>,
+  pasted: Option<Pasted<O::Target>>,
   last: Option<Last>,
   last_warnings: Vec<String>,
   retranscribing: Vec<Retranscription>,
@@ -894,8 +929,8 @@ impl<O: TextOutput> Controller<O> {
 
   fn next_job(&mut self, model: String, language: Option<String>) -> Job {
     self.next_job += 1;
-    let engine = self.engine.as_ref().unwrap().engine.clone();
-    Job { id: self.next_job, model, language, engine }
+    let Loaded { info, engine, .. } = self.engine.as_ref().unwrap();
+    Job { id: self.next_job, model, info: *info, language, engine: engine.clone() }
   }
 
   fn on_engine(&mut self, event: engine::Event) {
@@ -955,6 +990,7 @@ impl<O: TextOutput> Controller<O> {
       created_at,
       audio,
       started,
+      began: (self.config.clock)(),
       stopped: None,
       warnings: recorder.warning().map(str::to_owned).into_iter().collect(),
       recorder: Some(recorder),
@@ -1075,6 +1111,11 @@ impl<O: TextOutput> Controller<O> {
     let (outcome, text, error) = self.outcome(result);
     let d = self.dictation.as_mut().unwrap();
     let job = d.job.take().unwrap();
+    let text = match self.settings.clean_text {
+      true => cleanup::clean(&text, job.text_language()),
+      false => text,
+    };
+
     match (outcome, d.last.entry) {
       (Outcome::Done, Some(id)) => {
         let language = job.language.as_deref();
@@ -1104,19 +1145,32 @@ impl<O: TextOutput> Controller<O> {
   }
 
   /// As the switches say: pasted where it can be, and on the clipboard when kept, pasted or not.
+  /// With `clean_text` the text ends with a space, and goes on the sentence a paste into the same
+  /// target left open less than [GOING_ON] before the recording started; the clipboard gets it so,
+  /// pasted or not, the last dictation and the history get neither.
   fn deliver(&mut self) {
     let d = self.dictation.as_mut().unwrap();
     let auto_paste = self.settings.auto_paste;
     let keep = self.settings.keep_in_clipboard;
-    let refused = match (&d.target, auto_paste) {
-      (Some(target), true) => {
-        self.output.paste(&d.last.text, target, keep).err().map(|e| e.to_string())
+    let mut text = d.last.text.clone();
+    if self.settings.clean_text {
+      let open = |p: &Pasted<O::Target>| {
+        p.open && d.target.as_ref().is_some_and(|target| !O::moved(&p.target, target))
+      };
+      if self.pasted.as_ref().is_some_and(|p| open(p) && d.began - p.at < GOING_ON) {
+        text = cleanup::going_on(&text);
       }
+
+      text = format!("{} ", text.trim_end());
+    }
+
+    let refused = match (&d.target, auto_paste) {
+      (Some(target), true) => self.output.paste(&text, target, keep).err().map(|e| e.to_string()),
       (None, true) => Some("the app in focus when the dictation started is unknown".into()),
       (_, false) => Some("auto-paste is off".into()),
     };
     let refused = refused.map(|why| match keep {
-      true => match self.output.copy(&d.last.text) {
+      true => match self.output.copy(&text) {
         Ok(()) => format!("{why}; the text is on the clipboard"),
         Err(e) => format!("{why}, and copying failed: {e:#}"),
       },
@@ -1126,6 +1180,14 @@ impl<O: TextOutput> Controller<O> {
     if let Some(why) = &refused {
       info!("dictation {}: not pasted: {why}", d.last.take);
     }
+
+    // A text not pasted, or pasted as written, is none a next paste goes on from.
+    let open = !cleanup::ends_sentence(&d.last.text);
+    let at = (self.config.clock)();
+    self.pasted = match (&refused, d.target.take()) {
+      (None, Some(target)) if self.settings.clean_text => Some(Pasted { target, at, open }),
+      _ => None,
+    };
 
     (d.last.pasted, d.last.not_pasted) = (refused.is_none(), refused);
     if let Some(id) = d.last.entry {
@@ -1574,6 +1636,8 @@ mod tests {
     refuse: Option<NotPasted>,
     /// A Mac account that isn't an administrator, without Accessibility.
     no_paste: bool,
+    /// Dictations stay in the first target.
+    keep_target: bool,
   }
 
   impl FakeOutput {
@@ -1581,11 +1645,12 @@ mod tests {
       self.0.lock().unwrap()
     }
 
-    /// Where the last dictation's "hello there" went; forgets it for the next one.
+    /// Where the last dictation's "hello there" went, with the space a clean text ends with;
+    /// forgets it for the next one.
     fn went(&self) -> Went {
       let mut log = self.log();
       let (pasted, copied) = (mem::take(&mut log.pasted), mem::take(&mut log.copied));
-      let text = "hello there";
+      let text = "hello there ";
       match (&pasted[..], &copied[..]) {
         ([], []) => HistoryOnly,
         ([], [t]) if t == text => Clipboard,
@@ -1600,8 +1665,16 @@ mod tests {
     type Target = u32;
 
     fn target(&mut self) -> u32 {
-      self.log().targets += 1;
-      self.log().targets
+      let mut log = self.log();
+      if !log.keep_target || log.targets == 0 {
+        log.targets += 1;
+      }
+
+      log.targets
+    }
+
+    fn moved(from: &u32, to: &u32) -> bool {
+      from != to
     }
 
     fn paste(&mut self, text: &str, target: &u32, keep: bool) -> Result<(), NotPasted> {
@@ -1635,6 +1708,8 @@ mod tests {
     hub: Hub,
     models: FakeModels,
     output: FakeOutput,
+    /// How far the session's clock runs ahead.
+    ahead: Arc<Mutex<Duration>>,
     handle: Handle,
     first: Update,
     updates: Receiver<Update>,
@@ -1662,11 +1737,14 @@ mod tests {
       }
 
       let models = FakeModels::new(text);
+      let ahead = Arc::new(Mutex::new(Duration::ZERO));
+      let by = ahead.clone();
       let config = Config {
         home: home.path().to_owned(),
         hub: hub.clone(),
         loader: Arc::new(models.clone()),
         fake_mic: Some(mic_path),
+        clock: Arc::new(move || Instant::now() + *by.lock().unwrap()),
       };
 
       let output = FakeOutput::default();
@@ -1675,7 +1753,7 @@ mod tests {
       let session = Session::start(config, output.clone(), observer).unwrap();
       let first = updates.recv_timeout(Duration::from_secs(10)).expect("the first update");
       let handle = session.handle();
-      Self { home, hub, models, output, handle, first, updates, _session: session }
+      Self { home, hub, models, output, ahead, handle, first, updates, _session: session }
     }
 
     fn update_where(&self, what: &str, matches: impl Fn(&Update) -> bool) -> Update {
@@ -1733,6 +1811,11 @@ mod tests {
 
     fn recordings(&self) -> usize {
       wav_count(&self.home.path().join(RECORDINGS_DIR))
+    }
+
+    /// Each paste's text so far.
+    fn pasted(&self) -> Vec<String> {
+      self.output.log().pasted.iter().map(|p| p.0.clone()).collect()
     }
 
     /// The history entry of `last`, which keeps its recording.
@@ -1852,6 +1935,7 @@ mod tests {
         hub: Hub::at(home.path().join("hub")),
         loader: Arc::new(FakeModels::new("")),
         fake_mic: None,
+        clock: Arc::new(Instant::now),
       };
       let output = FakeOutput::default();
       output.log().no_paste = no_paste;
@@ -2190,6 +2274,193 @@ mod tests {
     let mics = (&[][..], &audio::Microphone::Automatic, false);
     let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;
     assert_eq!(items[1].label(), format!("⚠︎ {}", menu::SOFTWARE_GPU), "not cut");
+  }
+
+  // MARK: Clean text
+
+  fn clean() -> Settings {
+    let (model, language) = (Some("parakeet-v3".to_owned()), "ru".to_owned());
+    Settings { clean_text: true, model, language, ..Settings::default() }
+  }
+
+  /// A session with `settings` whose model always answers `text`, its dictations in one target.
+  fn cleaning(name: &str, settings: &Settings, text: &str) -> InProcess {
+    let models = ["parakeet-v3", "parakeet-v2", "gigaam-v3-rnnt"];
+    let s = InProcess::start(name, settings, Some(&loud(20.0)), text, &models);
+    s.output.log().keep_target = true;
+    s
+  }
+
+  /// The paste ends with a space; the last dictation and the history keep the text without it,
+  /// cleaned.
+  #[test]
+  fn a_clean_paste_ends_with_a_space() {
+    let s = cleaning("session-clean", &clean(), "Э-э, мы купили яблоки.");
+    let last = s.dictate(1);
+    assert_eq!(last.text, "Мы купили яблоки.");
+    assert_eq!(s.kept(&last).text, last.text);
+    assert_eq!(s.pasted(), ["Мы купили яблоки. "]);
+  }
+
+  /// A paste after one that left its sentence open goes on with it; after an end mark it keeps its
+  /// capital.
+  #[test]
+  fn a_paste_goes_on_the_sentence_left_open() {
+    let s = cleaning("session-open", &clean(), "Потом домой");
+    let last: Vec<Last> = (1..=2).map(|take| s.dictate(take)).collect();
+    assert_eq!(s.pasted(), ["Потом домой ", "потом домой "]);
+    assert_eq!(s.kept(&last[1]).text, "Потом домой", "kept as written");
+
+    let s = cleaning("session-closed", &clean(), "Потом домой.");
+    s.dictate(1);
+    s.dictate(2);
+    assert_eq!(s.pasted(), ["Потом домой. ", "Потом домой. "]);
+  }
+
+  /// Another target, a paste 20 s ago or a refused one in between: a sentence of its own.
+  #[test]
+  fn a_paste_goes_on_only_right_after_one_into_the_same_target() {
+    /// What comes between, and the take of the dictation after it.
+    type Between = fn(&InProcess) -> Take;
+    let cases: [(&str, Between); 3] = [
+      ("session-open-moved", |s| {
+        s.output.log().keep_target = false;
+        2
+      }),
+      ("session-open-gap", |s| {
+        *s.ahead.lock().unwrap() = GOING_ON;
+        2
+      }),
+      ("session-open-refused", |s| {
+        s.output.log().refuse = Some(NotPasted::FocusChanged);
+        assert!(!s.dictate(2).pasted);
+        s.output.log().refuse = None;
+        3
+      }),
+    ];
+    for (name, between) in cases {
+      let s = cleaning(name, &clean(), "Потом домой");
+      s.dictate(1);
+      s.dictate(between(&s));
+      assert_eq!(s.pasted(), ["Потом домой ", "Потом домой "], "{name}");
+    }
+
+    let s = cleaning("session-open-in-gap", &clean(), "Потом домой");
+    s.dictate(1);
+    *s.ahead.lock().unwrap() = GOING_ON - Duration::from_secs(5);
+    s.dictate(2);
+    assert_eq!(s.pasted(), ["Потом домой ", "потом домой "]);
+  }
+
+  /// The pause is the one before the recording: a long one right after a paste goes on with it.
+  #[test]
+  fn a_long_recording_right_after_a_paste_goes_on() {
+    let s = cleaning("session-open-long", &clean(), "Потом домой");
+    s.dictate(1);
+    s.record(0.3);
+    *s.ahead.lock().unwrap() = GOING_ON * 2;
+    thread::sleep(Duration::from_millis(300));
+    s.press();
+    s.finished(2);
+    assert_eq!(s.pasted(), ["Потом домой ", "потом домой "]);
+  }
+
+  /// The clipboard keeps the text as pasted, and as it would have been when the paste is refused:
+  /// the person pastes it by hand into the same place.
+  #[test]
+  fn the_clipboard_keeps_the_text_as_pasted() {
+    let settings = Settings { keep_in_clipboard: true, ..clean() };
+    let s = cleaning("session-clean-kept", &settings, "Потом домой");
+    s.dictate(1);
+    s.dictate(2);
+    let pasted = |text: &str| (text.to_owned(), 1, true);
+    assert_eq!(s.output.log().pasted, [pasted("Потом домой "), pasted("потом домой ")]);
+
+    s.output.log().refuse = Some(NotPasted::FocusChanged);
+    assert!(!s.dictate(3).pasted);
+    assert_eq!(s.output.log().copied, ["потом домой "]);
+  }
+
+  /// Where nothing is pasted, as without Accessibility, the clipboard gets the text a paste would,
+  /// and a text that wasn't pasted is none to go on from.
+  #[test]
+  fn without_a_paste_the_clipboard_gets_the_clean_text() {
+    for (name, auto_paste) in [("session-clean-no-paste", false), ("session-clean-no-access", true)]
+    {
+      let settings = Settings { auto_paste, keep_in_clipboard: true, ..clean() };
+      let s = cleaning(name, &settings, "Э-э, потом домой");
+      s.output.log().no_paste = true;
+      s.dictate(1);
+      s.dictate(2);
+      assert_eq!(s.output.log().copied, ["Потом домой ", "Потом домой "], "{name}");
+      assert!(s.pasted().is_empty(), "{name}");
+    }
+  }
+
+  /// A paste with the setting off goes on no sentence once it is on: it had no space after it.
+  #[test]
+  fn a_paste_with_the_setting_off_is_none_to_go_on_from() {
+    let settings = Settings { clean_text: false, ..clean() };
+    let s = cleaning("session-open-switched", &settings, "Потом домой");
+    s.dictate(1);
+    s.handle.edit_settings(|s| s.clean_text = true);
+    s.update_where("cleaning on", |u| u.settings.clean_text);
+    s.dictate(2);
+    assert_eq!(s.pasted(), ["Потом домой", "Потом домой "]);
+  }
+
+  /// A word in Latin script or with a capital inside keeps its case.
+  #[test]
+  fn a_latin_word_keeps_its_capital() {
+    for (name, text) in
+      [("session-open-latin", "Python тоже"), ("session-open-iphone", "iPhone тоже")]
+    {
+      let s = cleaning(name, &clean(), text);
+      s.dictate(1);
+      s.dictate(2);
+      assert_eq!(s.pasted(), [format!("{text} "), format!("{text} ")], "{name}");
+    }
+  }
+
+  /// With the setting off the text is pasted as the model wrote it.
+  #[test]
+  fn with_the_setting_off_the_text_is_as_written() {
+    let settings = Settings { clean_text: false, ..clean() };
+    let text = "Э-э, мы пошли";
+    let s = cleaning("session-clean-off", &settings, text);
+    assert_eq!(s.dictate(1).text, text);
+    assert_eq!(s.dictate(2).text, text);
+    assert_eq!(s.pasted(), [text, text]);
+  }
+
+  /// The language is the model's only one, over a setting it isn't told, else the one chosen;
+  /// unknown means no step at all, and so does a language without a table.
+  #[test]
+  fn fillers_go_only_in_a_known_language_with_a_table() {
+    let cases = [
+      ("session-fillers-only-en", "parakeet-v2", "auto", "Um, we went.", "We went."),
+      ("session-fillers-only-ru", "gigaam-v3-rnnt", "", "э-э мы пошли", "мы пошли"),
+      ("session-fillers-chosen", "parakeet-v3", "en", "Um, we went.", "We went."),
+      ("session-fillers-stale-en", "parakeet-v2", "de", "Um, we went.", "We went."),
+      ("session-fillers-stale-ru", "gigaam-v3-rnnt", "en", "Э-э, да", "Да"),
+      ("session-fillers-unknown", "parakeet-v3", "auto", "Um, we went.", "Um, we went."),
+      ("session-fillers-no-table", "parakeet-v3", "de", "Um, wir gehen.", "Um, wir gehen."),
+    ];
+    for (name, model, language, text, want) in cases {
+      let (model, language) = (Some(model.to_owned()), language.to_owned());
+      let s = cleaning(name, &Settings { model, language, ..clean() }, text);
+      assert_eq!(s.dictate(1).text, want, "{name}");
+    }
+  }
+
+  /// Only a dictation is cleaned: transcribing an entry again gives what the model wrote.
+  #[test]
+  fn transcribing_again_keeps_the_fillers() {
+    let raw = "Э-э, мы пошли.";
+    let s = cleaning("session-fillers-again", &clean(), raw);
+    let last = s.dictate(1);
+    assert_eq!(last.text, "Мы пошли.");
+    assert_eq!(s.retranscribed(last.entry.unwrap()).text, raw);
   }
 
   #[test]

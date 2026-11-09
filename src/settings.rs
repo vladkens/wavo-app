@@ -36,6 +36,9 @@ pub struct Settings {
   pub auto_paste: bool,
   /// Leave the text on the clipboard instead of restoring it after the paste.
   pub keep_in_clipboard: bool,
+  /// The text comes without hesitation sounds, and its paste ends with a space and goes on a
+  /// sentence the paste before it left open.
+  pub clean_text: bool,
   /// Free the idle model after this many minutes: 0 right after each dictation, `None` never.
   pub unload_after_minutes: Option<u32>,
   /// Parakeet and GigaAM run on the Neural Engine once prepared for it, else on the GPU.
@@ -95,6 +98,7 @@ impl Default for Settings {
       model: None,
       auto_paste: true,
       keep_in_clipboard: false,
+      clean_text: true,
       unload_after_minutes: Some(15),
       neural_engine: true,
       history_retention: Retention::Unlimited,
