@@ -1264,7 +1264,7 @@ fn unusable(lang: &str, m: &ModelInfo) -> bool {
   m.wer(lang).is_some_and(|x| x > USABLE)
 }
 
-/// Whether models were measured in `lang` but none usable in it ([USABLE]) can be recommended.
+/// Whether models were measured in `lang` but none of them is usable there ([USABLE]).
 fn none_usable(lang: &str) -> bool {
   let measured = hub::MODELS.iter().any(|m| m.wer(lang).is_some());
   measured && recommended(lang).is_none()
@@ -1395,26 +1395,17 @@ impl Prefs {
     let mut remote: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| !on_disk(m) && offered(m) && shown(m)).collect();
     remote.sort_by_key(|m| rank(lang, best, m));
-    // The ones not measured under Other models, and those with too many errors under their own
-    // row, folded, but one downloading and the one chosen; all of them while searching, and the
-    // ones not measured with none measured.
-    let busy = |m: &ModelInfo| self.shell.download_state(m.name).is_some();
-    let kept = |m: &ModelInfo| busy(m) || chosen == Some(m.name);
-    let measured = remote.iter().any(|m| measure(lang, m).is_some());
-    let (remote, mut poor): (Vec<&ModelInfo>, Vec<&ModelInfo>) =
-      remote.into_iter().partition(|m| !unusable(lang, m) || kept(m));
-    let (mut remote, mut other): (Vec<&ModelInfo>, Vec<&ModelInfo>) =
-      remote.into_iter().partition(|m| measure(lang, m).is_some() || kept(m));
+    // Folded under rows of their own, in rank: those with too many errors, and the ones not
+    // measured unless none is; but one downloading and the one chosen, and none while searching.
     let searching = !self.model_search.trim().is_empty();
-    if searching || !measured {
-      remote.append(&mut other);
-    }
-
-    if searching {
-      remote.append(&mut poor);
-    }
-
-    remote.sort_by_key(|m| rank(lang, best, m));
+    let busy = |m: &ModelInfo| self.shell.download_state(m.name).is_some();
+    let kept = |m: &ModelInfo| searching || busy(m) || chosen == Some(m.name);
+    let measured = remote.iter().any(|m| measure(lang, m).is_some());
+    let (remote, poor): (Vec<&ModelInfo>, Vec<&ModelInfo>) =
+      remote.into_iter().partition(|m| kept(m) || !unusable(lang, m));
+    let (remote, other): (Vec<&ModelInfo>, Vec<&ModelInfo>) =
+      remote.into_iter().partition(|m| kept(m) || !measured || measure(lang, m).is_some());
+    let available = remote.len() + other.len() + poor.len();
 
     let fit = |m: &ModelInfo| Fit { lang, best: why(m) };
     let mut acts = vec![];
@@ -1429,12 +1420,8 @@ impl Prefs {
       acts = self.downloaded_list(ui, fs, &downloaded, fit);
     }
 
-    if !remote.is_empty() || !other.is_empty() || !poor.is_empty() {
-      let note = model_count(remote.len() + other.len() + poor.len());
-      let more = match lang {
-        "" => format!("{} more, not measured yet", other.len()),
-        _ => format!("{} more, not measured in {}", other.len(), language_name(lang)),
-      };
+    if available > 0 {
+      let note = model_count(available);
       let head = |ui: &mut Ui, s: TextStyle| {
         ui.text("Available", s);
         ui.spacer();
@@ -1445,29 +1432,32 @@ impl Prefs {
           self.remote_row(ui, fs, m, fit(m));
         }
 
+        // A folded row of models, none recommended.
+        let folded =
+          |ui: &mut Ui, id: &str, title: &str, caption: &str, them: &[&'static ModelInfo]| {
+            let row = FormRow::new(title).caption(caption).tile(MORE);
+            ui.id((id, lang)).form_disclosure(fs, row, |ui| {
+              for &m in them {
+                self.remote_row(ui, fs, m, Fit { lang, best: None });
+              }
+            });
+          };
         if !other.is_empty() {
-          let row = FormRow::new("Other models").caption(&more).tile(MORE);
-          ui.id(("other-models", lang)).form_disclosure(fs, row, |ui| {
-            for &m in &other {
-              self.remote_row(ui, fs, m, Fit { lang, best: None });
-            }
-          });
+          let more = match lang {
+            "" => format!("{} more, not measured yet", other.len()),
+            _ => format!("{} more, not measured in {}", other.len(), language_name(lang)),
+          };
+          folded(ui, "other-models", "Other models", &more, &other);
         }
 
         if !poor.is_empty() {
           let title = format!("Too many errors in {}", language_name(lang));
-          let more = format!("{} more", poor.len());
-          let row = FormRow::new(&title).caption(&more).tile(MORE);
-          ui.id(("poor-models", lang)).form_disclosure(fs, row, |ui| {
-            for &m in &poor {
-              self.remote_row(ui, fs, m, Fit { lang, best: None });
-            }
-          });
+          folded(ui, "poor-models", &title, &format!("{} more", poor.len()), &poor);
         }
       });
     }
 
-    if downloaded.is_empty() && remote.is_empty() && other.is_empty() && poor.is_empty() {
+    if downloaded.is_empty() && available == 0 {
       ui.text("No model matches.", fs.caption);
     }
 
@@ -3854,8 +3844,8 @@ mod tests {
     assert!(note(&h).is_none() && badge(&h));
     assert!(card(&h, "whisper-turbo") && !card(&h, "parakeet-v3") && !card(&h, "parakeet-ultra"));
     assert!(h.rect(Id::of(("poor-models", "el"))).is_some());
-    let unusable_el: Vec<_> = hub::MODELS.iter().filter(|m| unusable("el", m)).collect();
-    assert!(unusable_el.iter().any(|m| m.name == "parakeet-v3"), "measured above the cutoff");
+    assert!(unusable("el", hub::lookup("parakeet-v3").unwrap()), "measured above the cutoff");
+
     // Found by the search, unfolded.
     h.app_mut().model_search = "parakeet".to_owned();
     h.frame();
@@ -3936,7 +3926,7 @@ mod tests {
     }
 
     assert!(!none_usable("sq") && !none_usable("ru") && !none_usable(""));
-    // Under the cutoff in every language there is one for.
+    // Never one above the cutoff, in any language.
     for (_, lang) in LANGUAGES.iter() {
       assert!(recommended(lang).is_none_or(|m| m.wer(lang).unwrap() <= USABLE), "{lang}");
     }
