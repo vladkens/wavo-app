@@ -5,10 +5,11 @@
 //! become a travelling wave, the time freezes (`n/m` for a recording in pieces). Then the pill
 //! collapses to a circle and fades: no "done" state. An error shows a glyph and a short lowercase
 //! reason for a few seconds, the pill widening to fit; while recording, a warning (no sound, no
-//! model, a permission) takes the level's place. The pill is dark in either appearance: the cool
-//! half of the icon's gradient (indigo, violet, electric blue) flowing slowly under a dictation; a
-//! still grey under an error or a warning.
+//! model, a permission) takes the level's place. The pill is dark in either appearance: the
+//! icon's colours (pink, violet, blue, cyan) travelling along it under a dictation; a still grey
+//! under an error or a warning.
 
+use std::f32::consts::TAU;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -54,15 +55,25 @@ const DONE_HOLD: Duration = ms(1000);
 const METER_TICK: Duration = ms(33);
 const WAVE_HALF: Duration = ms(600);
 const WAVE_STAGGER: Duration = ms(75);
-// The gradient is made again this often while it shows, and at every new width.
-const FLOW_TICK: Duration = ms(66);
+// The gradient is made again this often while it shows, and at every new width: at the meter's
+// tick, so a recording's frames carry both.
+const FLOW_TICK: Duration = METER_TICK;
 
-// The gradient's phase per second: a slow flow. Its sines turn whole circles every 40π of
-// phase (×0.8, ×0.55, ×1.3), where it wraps unseen: f32 keeps its precision over days on.
-const FLOW: f32 = 0.25;
-const FLOW_PERIOD: f64 = 40.0 * std::f64::consts::PI;
-// The cool half of the icon's colours (assets/icon.png): deep indigo, violet, electric blue.
-const COOL: [(f32, u32); 4] = [(0.0, 0x1e1470), (0.35, 0x3a1fb4), (0.6, 0x6a2be0), (1.0, 0x1f5cff)];
+// The icon's colours travel along the pill, left to right: a band of them, pink to cyan and back,
+// this long, a band each period; slanted as on the icon, this far right a point down.
+const BAND: f32 = 2.0 * WIDTH;
+const FLOW_PERIOD: f64 = 5.0;
+const SLANT: f32 = 0.8;
+// A slower ripple the other way bends the band a little: the colours bunch and spread.
+const RIPPLE: f32 = 0.9 * WIDTH;
+const RIPPLE_PERIOD: f64 = 7.0;
+const RIPPLE_DEPTH: f32 = 0.05;
+// The icon's colours (assets/icon.png's pixels, from its top left to its bottom right): pink
+// (234, 234), violet (392, 392), indigo (560, 345), blue (646, 431), cyan (668, 668). Their hue
+// and chroma at one lightness, deep enough for white text on all between (WCAG AA, 4.5:1, with
+// room); one lightness, so the flow changes hue alone and never flickers.
+const BRAND: [u32; 5] = [0xff50d0, 0x9b42fe, 0x5950fc, 0x1080f7, 0x2adcfc];
+const LIGHTNESS: f32 = 0.5;
 // Under the gradient, where it thins out at the rounded ends; an error's and a warning's.
 const GROUND: Color = rgb(0x181028);
 const GREY: Color = rgb(0x3a3a3c);
@@ -425,8 +436,9 @@ impl Hud {
       return;
     }
 
-    let phase = (now.as_secs_f64() * f64::from(FLOW) % FLOW_PERIOD) as f32;
-    let (w, h, px) = field(width, phase, f.scale);
+    // Of their periods, which they wrap at unseen: f32 keeps its precision over days on.
+    let of = |period: f64| (now.as_secs_f64() % period / period) as f32;
+    let (w, h, px) = field(width, of(FLOW_PERIOD), of(RIPPLE_PERIOD), f.scale);
     if let Some((id, ..)) = self.field.take() {
       f.images().remove(id);
     }
@@ -658,32 +670,29 @@ fn ease(t: f32) -> f32 {
 
 // MARK: Gradient
 
-/// The gradient of a pill `width` points wide at `phase`: straight RGBA rows, a pixel per pixel
-/// at `scale`, drawn 1:1. A few slow sines pick each pixel's place on [COOL]; it thins out to
-/// nothing at the pill's edge (a rounded clip it doesn't have), where [GROUND] and the edge take
-/// over.
-fn field(width: f32, phase: f32, scale: f32) -> (usize, usize, Vec<u8>) {
+/// The gradient of a pill `width` points wide, `flow` and `ripple` into their periods (0..1):
+/// straight RGBA rows, a pixel per pixel at `scale`, drawn 1:1. A row is a strip of [BRAND]'s
+/// band from its slant on, so a pixel is a lookup; it thins out to nothing at the pill's edge (a
+/// rounded clip it doesn't have), where [GROUND] and the edge take over.
+fn field(width: f32, flow: f32, ripple: f32, scale: f32) -> (usize, usize, Vec<u8>) {
   let (cols, rows) = ((width * scale).ceil() as usize, (HEIGHT * scale).round() as usize);
   let r = HEIGHT / 2.0;
   let at = |i: usize| (i as f32 + 0.5) / scale;
-  // Each sine is of a column's angle plus a row's: sin(a + b) = sin a cos b + cos a sin b, so
-  // only columns and rows take sines, not pixels.
-  let columns: Vec<_> = (0..cols)
-    .map(|i| {
-      let u = at(i) / WIDTH;
-      ((u * 1.9 - 1.25 + phase * 0.8).sin_cos(), (u * 6.3 + phase * 1.3).sin_cos())
+  let slant = |j: usize| (SLANT * j as f32).round() as usize;
+  // From the pill's middle, so the colours stay put as it narrows; cos makes the band's ends
+  // (pink, cyan) linger and turn back smoothly.
+  let strip: Vec<[u8; 3]> = (0..cols + slant(rows))
+    .map(|k| {
+      let s = at(k) - width / 2.0;
+      let u = s / BAND - flow + RIPPLE_DEPTH * (TAU * (s / RIPPLE + ripple)).sin();
+      SHADES[((0.5 - 0.5 * (TAU * u).cos()) * 1023.0).round() as usize]
     })
     .collect();
 
   let mut px = Vec::with_capacity(cols * rows * 4);
   for j in 0..rows {
-    let (y, v) = (at(j), at(j) / HEIGHT);
-    let (sb, cb) = (0.6 * (v * 2.6 + phase * 0.55).sin()).sin_cos();
-    let (sd, cd) = (-v * 3.0).sin_cos();
-    for (i, ((sa, ca), (sc, cc))) in columns.iter().enumerate() {
-      let t = 0.44 + 0.36 * (sa * cb + ca * sb) + 0.16 * (v - 0.5) + 0.07 * (sc * cd + cc * sd);
-      let c = SHADES[((t * 0.92).clamp(0.0, 1.0) * 1023.0).round() as usize];
-
+    let y = at(j);
+    for (i, c) in strip[slant(j)..][..cols].iter().enumerate() {
       // Opaque a point inside the pill, the edge's width: the rows along the top and bottom too.
       let x = at(i);
       let dx = (r - x).max(x - (width - r)).max(0.0);
@@ -695,20 +704,31 @@ fn field(width: f32, phase: f32, scale: f32) -> (usize, usize, Vec<u8>) {
   (cols, rows, px)
 }
 
-/// [COOL] from 0 to 1, mixed in OKLCH, for a lookup per pixel.
+/// [BRAND] from 0 to 1, mixed in OKLCH, for a lookup per pixel.
 static SHADES: LazyLock<Vec<[u8; 3]>> = LazyLock::new(|| {
-  let shade = |k| srgb(cool(k as f32 / 1023.0)).map(|v| v.round() as u8);
+  let shade = |k| srgb(brand(k as f32 / 1023.0)).map(|v| v.round() as u8);
   (0..1024).map(shade).collect()
 });
 
-/// [COOL] at `t`, 0..1, mixed in OKLCH: hue the short way round, so no grey between two colours.
-fn cool(t: f32) -> [f32; 3] {
-  let t = t.clamp(0.0, 1.0);
-  let i = COOL.iter().position(|(at, _)| t <= *at).unwrap_or(COOL.len() - 1).max(1);
-  let ((t0, a), (t1, b)) = (COOL[i - 1], COOL[i]);
-  let ([l0, c0, h0], [l1, c1, h1]) = (oklch(a), oklch(b));
-  let (k, turn) = ((t - t0) / (t1 - t0), (h1 - h0 + 540.0) % 360.0 - 180.0);
-  [lerp(l0, l1, k), lerp(c0, c1, k), h0 + turn * k]
+/// [BRAND] at `t`, 0..1, at [LIGHTNESS], mixed in OKLCH: a Catmull-Rom spline through the
+/// stops' chroma and hue, the hue the short way round, so no grey between two colours and no
+/// crease at a stop.
+fn brand(t: f32) -> [f32; 3] {
+  let last = BRAND.len() - 1;
+  let at = t.clamp(0.0, 1.0) * last as f32;
+  let i = (at as usize).min(last - 1);
+  let k = at - i as f32;
+  // The stops around the segment, the ends repeated.
+  let mut p = [0, 1, 2, 3].map(|n| oklch(BRAND[(i + n).saturating_sub(1).min(last)]));
+  for n in 1..4 {
+    p[n][2] = p[n - 1][2] + (p[n][2] - p[n - 1][2] + 540.0) % 360.0 - 180.0;
+  }
+
+  let spline = |v: [f32; 4]| {
+    let (a, b, c) = (v[2] - v[0], 2.0 * v[0] - 5.0 * v[1] + 4.0 * v[2] - v[3], v[3] - v[0]);
+    v[1] + 0.5 * k * (a + k * (b + k * (c + 3.0 * (v[1] - v[2]))))
+  };
+  [LIGHTNESS, spline(p.map(|c| c[1])).max(0.0), spline(p.map(|c| c[2]))]
 }
 
 /// An sRGB colour (0xrrggbb) in OKLCH: lightness 0..1, chroma, hue in degrees (Björn Ottosson's
@@ -726,28 +746,32 @@ fn oklch(c: u32) -> [f32; 3] {
   [0.2104543 * l + 0.7936178 * m - 0.0040720 * s, a.hypot(b), b.atan2(a).to_degrees()]
 }
 
-/// An OKLCH colour in sRGB, 0..255, its chroma cut until it fits.
-fn srgb([l, mut c, h]: [f32; 3]) -> [f32; 3] {
+/// An OKLCH colour in sRGB, 0..255, its chroma cut to the most that fits: found by halving, so
+/// colours side by side cut alike, without steps.
+fn srgb([l, c, h]: [f32; 3]) -> [f32; 3] {
   let (sin, cos) = h.to_radians().sin_cos();
-  loop {
+  let linear = |c: f32| {
     let (a, b) = (c * cos, c * sin);
     let l_ = (l + 0.3963378 * a + 0.2158038 * b).powi(3);
     let m_ = (l - 0.1055613 * a - 0.0638542 * b).powi(3);
     let s_ = (l - 0.0894842 * a - 1.2914855 * b).powi(3);
-    let rgb = [
+    [
       4.0767417 * l_ - 3.3077116 * m_ + 0.2309699 * s_,
       -1.268438 * l_ + 2.6097574 * m_ - 0.3413194 * s_,
       -0.0041961 * l_ - 0.7034186 * m_ + 1.7076147 * s_,
-    ];
-    if rgb.iter().all(|v| (-0.001..=1.001).contains(v)) || c < 0.001 {
-      return rgb.map(|v| {
-        let v = v.clamp(0.0, 1.0);
-        255.0 * if v <= 0.0031308 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
-      });
-    }
-
-    c *= 0.97;
+    ]
+  };
+  let fits = |c| linear(c).iter().all(|v| (-1e-4..=1.0 + 1e-4).contains(v));
+  let (mut lo, mut hi) = if fits(c) { (c, c) } else { (0.0, c) };
+  while hi - lo > 1e-5 {
+    let mid = (lo + hi) / 2.0;
+    if fits(mid) { lo = mid } else { hi = mid }
   }
+
+  linear(lo).map(|v| {
+    let v = v.clamp(0.0, 1.0);
+    255.0 * if v <= 0.0031308 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
+  })
 }
 
 #[cfg(test)]
@@ -1045,6 +1069,20 @@ mod tests {
         h.shot(&dir.join(format!("hud-{name}.png"))).unwrap();
       }
     }
+  }
+
+  /// White reads on every colour of the gradient: WCAG AA's 4.5:1 for the time's text.
+  #[test]
+  fn white_text_reads_on_the_whole_gradient() {
+    let luminance = |c: [u8; 3]| {
+      let [r, g, b] = c.map(|v| {
+        let v = f32::from(v) / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+      });
+      0.2126 * r + 0.7152 * g + 0.0722 * b
+    };
+    let worst = SHADES.iter().map(|&c| 1.05 / (luminance(c) + 0.05)).fold(f32::MAX, f32::min);
+    assert!(worst >= 4.5, "{worst:.2}:1");
   }
 
   /// A Windows microphone's name in full would run past the pill's rounded end.
