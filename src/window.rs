@@ -1254,13 +1254,17 @@ fn measure(lang: &str, m: &ModelInfo) -> Option<f32> {
 /// A model at least this many times faster than whisper-turbo is fast.
 const FAST: f32 = 3.0;
 
+/// wavo's highest WER: the model makes up more words than were said, so it doesn't work in that
+/// language.
+const FAILS: f32 = 100.0;
+
 /// The model to recommend for `lang` by wavo's measures: the fast one with the fewest errors, or
 /// the fastest within 10% of it; a slow one only with 1.5 times fewer errors. `None` when none
-/// was measured on it.
+/// was measured on it, or none of those works in it ([FAILS]).
 fn recommended(lang: &str) -> Option<&'static ModelInfo> {
   let measured: Vec<(&'static ModelInfo, f32, f32)> = (hub::MODELS.iter())
     .filter(|m| m.punctuated)
-    .filter_map(|m| Some((m, m.wer(lang)?, m.speed().unwrap_or(0.0))))
+    .filter_map(|m| Some((m, m.wer(lang).filter(|&x| x < FAILS)?, m.speed().unwrap_or(0.0))))
     .collect();
   let least = |fast: bool| {
     let them = measured.iter().filter(move |x| (x.2 >= FAST) == fast);
@@ -1300,14 +1304,15 @@ fn figure(x: f32) -> String {
 }
 
 /// The model Settings › Models recommends for `lang` and why: [recommended], else whisper-turbo
-/// where it takes the language, the best general model; [RECOMMENDED] for all languages.
+/// where it takes the language and wasn't measured on it, the best general model; [RECOMMENDED]
+/// for all languages.
 fn best_for(lang: &str) -> Option<(&'static str, String)> {
   let name = language_name(lang);
   match (lang, recommended(lang)) {
     ("", _) => Some((RECOMMENDED, "The default model".into())),
     (_, Some(m)) => Some((m.name, format!("Best balance of accuracy and speed in {name}"))),
     _ => (hub::lookup("whisper-turbo").ok())
-      .filter(|m| m.langs.contains(&lang))
+      .filter(|m| m.langs.contains(&lang) && m.wer(lang).is_none())
       .map(|m| (m.name, format!("No accuracy data for {name} yet: the best general model"))),
   }
 }
@@ -3070,7 +3075,7 @@ mod tests {
       let mut h = fits.harness(&fake, settings);
       h.event(Event::Appearance(appearance));
       tab(&mut h, Page::Models);
-      for code in ["ru", "el", "he", "ka", ""] {
+      for code in ["ru", "el", "he", "ka", "sq", ""] {
         h.app_mut().model_lang = LANGUAGES.iter().position(|l| l.1 == code).unwrap();
         h.frame();
         let name = if code.is_empty() { "all" } else { code };
@@ -3107,9 +3112,9 @@ mod tests {
       h.move_to(r.x + r.w / 2.0, r.y + r.h / 2.0);
       h.wait(Duration::from_millis(400));
       let tip = Id::of(("speed", RECOMMENDED)).key("tip");
-      let text = "7.0× faster than whisper-turbo";
+      let text = "6.7× faster than whisper-turbo";
       assert_eq!(h.text(tip.nth(0)), Some(text));
-      let read = format!("static text \"7.0×\" desc {text:?}");
+      let read = format!("static text \"6.7×\" desc {text:?}");
       assert!(h.a11y().lines().any(|l| l.trim() == read), "{look}: read\n{}", h.a11y());
       if let Some(dir) = &dir {
         h.shot(&dir.join(format!("models-tip-{look}.png"))).unwrap();
@@ -3769,9 +3774,9 @@ mod tests {
     assert!(h.rect(Id::of(("card", "whisper-large-v2"))).is_some(), "the one preparing shown");
     assert!(h.rect(Id::of(("card", "whisper-large"))).is_none(), "folded");
 
-    h.app_mut().model_lang = at("ka");
+    h.app_mut().model_lang = at("sq");
     h.frame();
-    assert!(h.rect(Id::of(("other-models", "ka"))).is_none());
+    assert!(h.rect(Id::of(("other-models", "sq"))).is_none());
     assert!(h.rect(Id::of(("card", "whisper-large"))).is_some(), "listed");
   }
 
@@ -3802,7 +3807,8 @@ mod tests {
   }
 
   /// The fast model with the fewest errors, the fastest of those near it; a slow one only when
-  /// far better, as whisper-turbo in Greek.
+  /// far better, as whisper-turbo in Greek; never one that doesn't work, as whisper-tiny in
+  /// Bengali.
   #[test]
   fn the_recommended_model_is_fast_and_accurate() {
     let cases = [
@@ -3811,6 +3817,7 @@ mod tests {
       ("sv", "parakeet-ultra"),
       ("el", "whisper-turbo"),
       ("he", "parakeet-he"),
+      ("bn", "whisper-turbo"),
     ];
     for (lang, name) in cases {
       assert_eq!(recommended(lang).map(|m| m.name), Some(name), "{lang}");
@@ -3821,12 +3828,15 @@ mod tests {
     // With none measured, whisper-turbo where it takes the language.
     let pick = |lang: &str| best_for(lang).map(|p| p.0);
     assert_eq!(
-      (pick(""), pick("ru"), pick("ka"), pick("xx")),
+      (pick(""), pick("ru"), pick("sq"), pick("xx")),
       (Some(RECOMMENDED), Some("gigaam-v3-e2e-ctc"), Some("whisper-turbo"), None)
     );
-    let ka = best_for("ka").unwrap().1;
-    assert_eq!(ka, "No accuracy data for Georgian yet: the best general model");
-    assert_eq!(recommended("ka"), None, "none measured");
+    let sq = best_for("sq").unwrap().1;
+    assert_eq!(sq, "No accuracy data for Albanian yet: the best general model");
+    assert_eq!(recommended("sq"), None, "none measured");
+    // None in Georgian, where every model measured doesn't work.
+    assert_eq!(pick("ka"), None, "none works");
+    assert!(hub::lookup("whisper-turbo").unwrap().wer("ka").is_some_and(|x| x >= FAILS));
   }
 
   /// WER to a decimal under 10 (rounded first); bolts and the speed's words, whisper-turbo the
@@ -3845,7 +3855,7 @@ mod tests {
     assert_eq!([22.1, 9.96, 8.5, 0.9].map(times), ["22×", "10×", "8.5×", "0.9×"]);
     let speed = |name| speed_text(m(name)).unwrap();
     assert_eq!(speed("gigaam-v3"), "13× faster than whisper-turbo");
-    assert_eq!(speed("parakeet-ultra"), "7.0× faster than whisper-turbo");
+    assert_eq!(speed("parakeet-ultra"), "6.7× faster than whisper-turbo");
     assert_eq!(speed("whisper-turbo"), "The speed baseline (1.0×)");
     assert_eq!(speed("whisper-turbo-he"), "As fast as whisper-turbo");
     assert_eq!(speed("whisper-medium"), "0.9× the speed of whisper-turbo");
