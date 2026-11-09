@@ -540,6 +540,10 @@ const LOGIN_APPROVAL: &str = if cfg!(windows) {
 };
 const KEEP_HELP: &str = "On: the dictated text stays on the clipboard, pasted or not. Off: after \
   a paste the clipboard gets back what it held; with pasting off, the text is only in History.";
+const CLEAN_HELP: &str = "Adds a space after each paste. A paste into the same window less than \
+  20 s after one that ended mid-sentence starts in lower case, unless its first word is in Latin \
+  letters. Hesitation sounds like “э-э” and “um” are left out in Russian and English, when you \
+  choose the language or the model has only one.";
 const CLIPBOARD_NOTE: &str = "Wavo can’t put the clipboard back after a paste: allow it in System \
   Settings › Privacy & Security › Paste from Other Apps.";
 const MICROPHONE_WHY: &str = "Wavo records your voice through it while you hold the shortcut; \
@@ -629,6 +633,14 @@ impl Prefs {
         let mut on = self.settings.keep_in_clipboard;
         if ui.id("keep").toggle(&mut on, "").changed {
           self.edit(move |s| s.keep_in_clipboard = on);
+        }
+      });
+
+      let row = FormRow::new(marked("Clean up the text", Mark::Info(CLEAN_HELP), None));
+      ui.form_row(fs, row, |ui| {
+        let mut on = self.settings.clean_text;
+        if ui.id("clean").toggle(&mut on, "").changed {
+          self.edit(move |s| s.clean_text = on);
         }
       });
     });
@@ -4213,6 +4225,24 @@ mod tests {
 
     click(&mut h, Id::of("download-model"));
     assert_eq!(h.app().page, Page::Models);
+  }
+
+  /// Cleaning the text is on until the person turns it off, and the switch shows what is stored.
+  #[test]
+  fn the_clean_text_switch_shows_what_is_stored() {
+    let home = Home::new("window-clean", &TWO);
+    let fake = Fake::default();
+    let state = |h: &Harness<Prefs>| a11y_line(h, r#"switch "Clean up the text""#).unwrap();
+    let mut h = home.harness(&fake, Settings::default());
+    assert!(state(&h).ends_with("on"), "{}", state(&h));
+    click(&mut h, Id::of("clean"));
+    assert!(!fake.log().settings.clean_text);
+    assert!(state(&h).ends_with("off"), "{}", state(&h));
+    click(&mut h, Id::of("clean"));
+    assert!(fake.log().settings.clean_text);
+
+    let h = home.harness(&fake, Settings { clean_text: false, ..Settings::default() });
+    assert!(state(&h).ends_with("off"), "{}", state(&h));
   }
 
   /// The Output switches show what is stored and take a click; where only an administrator can

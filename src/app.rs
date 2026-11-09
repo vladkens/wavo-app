@@ -1281,6 +1281,15 @@ impl TextOutput for GuiOutput {
     focus::current()
   }
 
+  /// By nimbo's `moved`, not `==`: an app that didn't answer for its window has not moved. An
+  /// unknown target, as on Wayland, is never the same.
+  fn moved(from: &Option<Focused>, to: &Option<Focused>) -> bool {
+    match (from, to) {
+      (Some(from), Some(to)) => from.moved(to),
+      _ => true,
+    }
+  }
+
   /// nimbo's paste, on the main thread (see [nimbo::paste]): refused when the focus moved from
   /// `target` or sits in a password field; `keep` leaves the text on the clipboard.
   fn paste(&mut self, text: &str, target: &Option<Focused>, keep: bool) -> Result<(), NotPasted> {
@@ -1342,6 +1351,16 @@ fn not_pasted(e: paste::NotPasted) -> NotPasted {
 /// The main thread didn't get to the paste in time, or the paste ran out of it.
 fn busy() -> NotPasted {
   NotPasted::Failed("the app was too busy to paste".into())
+}
+
+#[cfg(test)]
+#[test]
+fn a_target_moves_by_what_both_told() {
+  let at = |pid, window| Some(Focused { pid, name: "app".into(), window, secure: Ok(false) });
+  let (here, busy) = (at(7, Ok(None)), at(7, Err("no answer".into())));
+  assert!(!GuiOutput::moved(&here, &busy));
+  assert!(GuiOutput::moved(&here, &at(8, Ok(None))), "another app");
+  assert!(GuiOutput::moved(&None, &None), "Wayland");
 }
 
 #[cfg(all(test, target_os = "macos"))]
