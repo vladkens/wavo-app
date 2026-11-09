@@ -147,7 +147,7 @@ pub trait Shell {
 enum Delete {
   Models(Vec<&'static ModelInfo>),
   Entries(Vec<i64>),
-  /// The saved history, now that it is kept until Wavo quits: Keep leaves it as it is.
+  /// The history saved on disk, Delete All's.
   Saved,
 }
 
@@ -191,6 +191,9 @@ pub struct Prefs {
   /// The downloaded models selected, keyed by their place in wavo's list.
   model_sel: Selection,
   history: HistoryPage,
+  /// How many dictations the history saved on disk has, counted when Advanced shows it; `None`
+  /// once it may have changed.
+  saved: Option<usize>,
 }
 
 impl Prefs {
@@ -225,6 +228,7 @@ impl Prefs {
       model_lang: 0,
       model_sel: Selection::default(),
       history: HistoryPage { db: history, in_memory, ..HistoryPage::default() },
+      saved: None,
     };
     prefs.refresh();
     prefs
@@ -239,6 +243,12 @@ impl Prefs {
     self.status = status.clone();
     if status.in_memory != self.history.in_memory {
       self.history.reopen(&self.home, status.in_memory);
+      self.saved = None;
+    }
+
+    // Also when the saved history went while the one in use is in memory.
+    if history != self.history.revision {
+      self.saved = None;
     }
 
     self.history.revision = history;
@@ -321,9 +331,7 @@ impl Prefs {
   fn confirm(&mut self, ui: &mut Ui) {
     let Some(ask) = &self.ask else { return };
     let mut open = true;
-    let keep = if matches!(ask.delete, Delete::Saved) { "Keep" } else { "Cancel" };
-    let d = Dialog::new(&ask.title).message(&ask.message).button(keep, ButtonRole::Cancel);
-    let d = d.button("Delete", ButtonRole::Destructive);
+    let d = Dialog::new(&ask.title).message(&ask.message).button("Delete", ButtonRole::Destructive);
     let answer = d.show(ui.id(CONFIRM), &mut open);
     if open {
       return;
@@ -813,6 +821,12 @@ const EXPORT_HELP: &str = "The history, its recordings and the settings, into a 
   Import brings it back, here or on another computer.";
 /// Export and Import while the history is kept until Wavo quits.
 const NOT_SAVED: &str = "Off while the history is kept until Wavo quits";
+const DELETE_HELP: &str = "Deletes every dictation saved on disk and its recording. The ones kept \
+  until Wavo quits stay.";
+/// Delete All with no dictation saved on disk.
+const NOTHING_SAVED: &str = "No dictations saved";
+/// Delete All asked for, while the dictation, the export or the import runs.
+const DELETE_WAITS: &str = "Deleted once the dictation, export or import ends";
 
 const UPDATE_HELP: &str = "Wavo looks for a new version at launch and once a day; the menu says \
   when there is one. Off, it looks only when you choose Check for Updates.";
@@ -883,9 +897,6 @@ impl Prefs {
         let p = Picker::new(&mut cur).options(&RETENTIONS).divider().options(&[UNTIL_QUIT]);
         if p.show(ui.id("retention")).changed {
           self.edit(move |s| s.history_retention = cur);
-          if cur.in_memory() {
-            self.ask_delete_saved();
-          }
         }
       });
 
@@ -959,22 +970,47 @@ impl Prefs {
     ui.form_section(fs, "Data", |ui| {
       self.export_row(ui, fs, &show);
       self.import_row(ui, fs);
+      self.delete_row(ui, fs);
     });
   }
 
-  /// The history is kept until Wavo quits from now on: asks once whether the saved one goes too,
-  /// saying how many dictations it has.
-  fn ask_delete_saved(&mut self) {
-    let saved = self.history.db.as_ref().filter(|h| !h.in_memory());
-    let Some(Ok((n, ..))) = saved.map(|h| h.db.get_total()) else { return };
-    let what = match n {
-      0 => return,
-      1 => "1 dictation and its recording are".to_owned(),
-      n => format!("{} dictations and their recordings are", thousands(n)),
+  /// Delete All…, asking first, for the history saved on disk in either mode; off with nothing
+  /// saved. Its caption says when the delete waits for what runs.
+  fn delete_row(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    let n = match self.saved {
+      Some(n) => n,
+      None => *self.saved.insert(self.count_saved()),
     };
-    let message = format!("{what} saved on disk. New dictations won’t be saved either way.");
-    let title = "Delete the saved history?".to_owned();
-    self.ask = Some(Ask { title, message, delete: Delete::Saved });
+    let waits = self.status.warnings.iter().any(|w| w == session::DELETE_WAITS);
+    let caption = match () {
+      _ if waits => Some(DELETE_WAITS.to_owned()),
+      _ if n == 0 => Some(NOTHING_SAVED.to_owned()),
+      _ => None,
+    };
+    let shown = Shown { caption, progress: None, failed: false };
+    let row = FormRow::new(marked("Delete history", Mark::Info(DELETE_HELP), None));
+    let row = row.tile(Icon::TRASH);
+    data_row(ui, fs, Id::of("delete-row"), row, &shown, |ui| {
+      let button = Button::new("Delete All…").role(ButtonRole::Destructive);
+      if button.show(ui.disabled(n == 0).id("delete-all")).clicked {
+        let title = match n {
+          1 => "Delete 1 dictation and its recording?".to_owned(),
+          n => format!("Delete all {} dictations and their recordings?", thousands(n)),
+        };
+        let message = "This can’t be undone.".to_owned();
+        self.ask = Some(Ask { title, message, delete: Delete::Saved });
+      }
+    });
+  }
+
+  /// How many dictations the history saved on disk has: the one read here, or the one left there
+  /// while the history is kept in memory; 0 when it can't be read.
+  fn count_saved(&self) -> usize {
+    let total = match self.history.db.as_ref().filter(|h| !h.in_memory()) {
+      Some(h) => h.db.get_total().map(|t| t.0),
+      None => History::count_saved(&self.home),
+    };
+    total.inspect_err(|e| warn!("the saved history: {e:#}")).unwrap_or(0)
   }
 
   /// Export, the system's save panel in Downloads ([Prefs::event]); then the archive's size with
@@ -1061,7 +1097,7 @@ impl Prefs {
       Request::Delete(_) => "Could not delete the dictation",
       Request::Retranscribe(_) => "Could not transcribe it again",
       Request::Restore(_) => "Could not put the previous text back",
-      Request::DeleteSaved => "Could not delete the saved history",
+      Request::DeleteSaved => "Could not delete the history",
       Request::Unload | Request::Transferred | Request::Close => return,
     };
     self.history.said = Some(format!("{what}: {error}"));
@@ -3062,9 +3098,8 @@ mod tests {
   }
 
   /// Every page in both looks, as high as its content or [SCROLLING] high; with `WAVO_SHOTS` set
-  /// (`make shots`), written there: also Advanced in a build that doesn't update and asking about
-  /// the saved history, History in memory, Models asking before a delete and General at the first
-  /// launch.
+  /// (`make shots`), written there: also Advanced in a build that doesn't update and asking before
+  /// Delete All, History in memory, Models asking before a delete and General at the first launch.
   #[test]
   fn every_page_renders_in_both_looks() {
     let home =
@@ -3164,15 +3199,14 @@ mod tests {
       assert!(h.rect(Id::of(CONFIRM).key("card")).is_some(), "{look}: the dialog");
       shot(&mut h, &format!("models-delete-{look}"));
 
-      // Until Wavo quits asks about the saved history; then History shows this run's.
+      // Delete All asks first; History in memory shows this run's.
       let fake = Fake::default();
       let mut h = home.harness(&fake, Settings::default());
       h.event(Event::Appearance(appearance));
       tab(&mut h, Page::Advanced);
-      click(&mut h, Id::of("retention"));
-      click(&mut h, Id::of("retention").key(("item", 7)));
+      click(&mut h, Id::of("delete-all"));
       assert!(h.rect(Id::of(CONFIRM).key("card")).is_some(), "{look}: the dialog");
-      shot(&mut h, &format!("advanced-until-quit-{look}"));
+      shot(&mut h, &format!("advanced-delete-all-{look}"));
       let settings = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
       let mut h = home.harness(&fake, settings);
       h.event(Event::Appearance(appearance));
@@ -3523,44 +3557,86 @@ mod tests {
     assert_eq!(fake.log().revealed, [file]);
   }
 
-  /// Until Wavo quits, picked with a saved history, asks once whether it goes, saying how many
-  /// dictations it has: Keep leaves it, Delete asks the session; nothing to ask about without
-  /// one. Export and Import are off then.
+  /// Delete All asks first, saying how many dictations the history saved on disk has: Cancel sends
+  /// nothing, Delete asks the session; off with nothing saved; its caption says when it waits. The
+  /// history it deleted empties the History page and the row.
   #[test]
-  fn until_quit_asks_to_delete_the_saved_history() {
-    let home = Home::new("window-until-quit", &TWO);
+  fn delete_all_asks_first() {
+    let empty = Home::new("window-delete-all-empty", &TWO);
+    let fake = Fake::default();
+    let mut h = empty.harness(&fake, Settings::default());
+    tab(&mut h, Page::Advanced);
+    let button = |h: &Harness<Prefs>| a11y_line(h, "button \"Delete All…\"").unwrap_or_default();
+    let caption =
+      |h: &Harness<Prefs>| h.text(Id::of("delete-row").key("caption")).map(str::to_owned);
+    assert!(button(&h).contains("disabled"), "{}", button(&h));
+    assert_eq!(caption(&h).as_deref(), Some(NOTHING_SAVED));
+    click(&mut h, Id::of("delete-all"));
+    assert!(h.app().ask.is_none(), "nothing to delete");
+
+    let home = Home::new("window-delete-all", &TWO);
     home.dictations(&[("Let's move the design review.", 3), ("Send the invoice to Anna.", 2)]);
     for (answer, requests) in [("cancel", vec![]), ("action", vec![Request::DeleteSaved])] {
       let fake = Fake::default();
       let mut h = home.harness(&fake, Settings::default());
       tab(&mut h, Page::Advanced);
-      click(&mut h, Id::of("retention"));
-      click(&mut h, Id::of("retention").key(("item", 7)));
-      assert_eq!(fake.log().settings.history_retention, Retention::UntilQuit);
+      assert!(!button(&h).contains("disabled") && caption(&h).is_none(), "{}", button(&h));
+      click(&mut h, Id::of("delete-all"));
       let ask = h.app().ask.as_ref().map(|a| (a.title.as_str(), a.message.as_str()));
-      let message = "2 dictations and their recordings are saved on disk. New dictations won’t be \
-        saved either way.";
-      assert_eq!(ask, Some(("Delete the saved history?", message)));
-      assert!(h.rect(Id::of(CONFIRM).key("card")).is_some(), "the dialog");
+      let title = "Delete all 2 dictations and their recordings?";
+      assert_eq!(ask, Some((title, "This can’t be undone.")));
       h.wait(Duration::from_millis(200));
       click(&mut h, Id::of(CONFIRM).key(answer));
       assert_eq!(fake.log().requests, requests, "{answer}");
-
-      for row in ["export-row", "import-row"] {
-        assert_eq!(h.text(Id::of(row).key("caption")), Some(NOT_SAVED), "{row}");
-      }
-
-      click(&mut h, Id::of("export"));
-      assert!(h.file_dialog(None).is_none(), "export is off");
     }
 
-    let empty = Home::new("window-until-quit-empty", &TWO);
+    // The session waits for what runs, then deletes: the page and the row hear of it.
+    let waits = Status { warnings: vec![session::DELETE_WAITS.into()], ..Status::default() };
+    h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::History);
+    assert_eq!(h.app().history.entries.len(), 2);
+    tab(&mut h, Page::Advanced);
+    h.app_mut().update(&Settings::default(), &waits, 0);
+    h.frame();
+    assert_eq!(caption(&h).as_deref(), Some(DELETE_WAITS));
+    assert_eq!(History::delete_saved(home.dir.path()).unwrap(), Some(2));
+    h.app_mut().update(&Settings::default(), &Status::default(), 1);
+    h.frame();
+    assert!(button(&h).contains("disabled") && caption(&h).as_deref() == Some(NOTHING_SAVED));
+    tab(&mut h, Page::History);
+    assert!(h.app().history.entries.is_empty() && h.text(Id::of("history-total")).is_none());
+  }
+
+  /// Until Wavo quits asks nothing and deletes nothing: the saved history stays, which Delete All
+  /// counts and deletes, not the one in memory. Export and Import are off then.
+  #[test]
+  fn until_quit_leaves_the_saved_history() {
+    let home = Home::new("window-until-quit", &TWO);
+    home.dictations(&[("Let's move the design review.", 3), ("Send the invoice to Anna.", 2)]);
+    let memory = History::open_memory(home.dir.path()).unwrap();
+    add_dictations(&memory, &[("Kept in memory.", 1)]);
     let fake = Fake::default();
-    let mut h = empty.harness(&fake, Settings::default());
+    let mut h = home.harness(&fake, Settings::default());
     tab(&mut h, Page::Advanced);
     click(&mut h, Id::of("retention"));
     click(&mut h, Id::of("retention").key(("item", 7)));
-    assert!(h.app().ask.is_none(), "nothing saved to ask about");
+    assert_eq!(fake.log().settings.history_retention, Retention::UntilQuit);
+    assert!(h.app().ask.is_none() && fake.log().requests.is_empty(), "nothing asked");
+    assert_eq!(crate::testing::entry_ids(home.dir.path()).len(), 2, "nothing deleted");
+
+    let status = Status { in_memory: true, ..Status::default() };
+    let settings = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
+    h.app_mut().update(&settings, &status, 0);
+    h.frame();
+    for row in ["export-row", "import-row"] {
+      assert_eq!(h.text(Id::of(row).key("caption")), Some(NOT_SAVED), "{row}");
+    }
+
+    click(&mut h, Id::of("export"));
+    assert!(h.file_dialog(None).is_none(), "export is off");
+    click(&mut h, Id::of("delete-all"));
+    let title = h.app().ask.as_ref().map(|a| a.title.clone());
+    assert_eq!(title.as_deref(), Some("Delete all 2 dictations and their recordings?"));
   }
 
   /// In memory the page shows the session's dictations, without recordings; back on disk, the

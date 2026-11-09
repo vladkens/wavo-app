@@ -15,8 +15,10 @@
 //! - Kept until Wavo quits ([Retention::UntilQuit]), the history is in memory: a dictation is
 //!   recorded into memory only, and its entry is kept only for its text, as no recording is there
 //!   to transcribe again. A switch takes the other history once no dictation runs, so the next one
-//!   goes there; the one in memory is dropped then, and the saved one is left as it is unless the
-//!   person asked to delete it ([Request::DeleteSaved]).
+//!   goes there; the one in memory is dropped then, and the saved one is left as it is.
+//! - The saved history goes only when the person asks ([Request::DeleteSaved]), the one in use or
+//!   the one left on disk, once no dictation nor a transcription again runs: none of them writes
+//!   into it meanwhile.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -52,8 +54,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// While the history in memory could not open: dictations are kept nowhere, the saved one being
 /// what the person turned off.
 const NOT_IN_MEMORY: &str = "couldn’t stop saving the history: dictations aren’t kept, see the log";
-/// A delete of the saved history waits for its export or import to end.
-const DELETE_WAITS: &str = "the saved history is deleted once its export or import ends";
+/// A delete of the saved history waits for the dictation, the export or the import to end.
+pub const DELETE_WAITS: &str =
+  "the saved history is deleted once the dictation, export or import ends";
 /// While the saved history could not open: the one in memory goes on.
 const NOT_SAVED: &str = "couldn’t open the saved history: dictations are kept until Wavo quits";
 /// A paste goes on the sentence the one before it left open, into the same target, only this soon.
@@ -445,8 +448,8 @@ pub enum Request {
   /// An export or an import ended: the update after it carries the history's change, and a
   /// delete of the saved history that waited for it runs.
   Transferred,
-  /// Delete the history saved on disk, the history being kept until Wavo quits: once no
-  /// dictation runs, nor an export or an import of it.
+  /// Delete the history saved on disk, in use or left there while the history is kept until Wavo
+  /// quits: once no dictation nor a transcription again runs, nor an export or an import of it.
   DeleteSaved,
   /// The app quits for an update: no dictation runs, as the session stands after what was sent
   /// before it, and none starts from then on; an error while one runs, which ends as usual.
@@ -501,6 +504,7 @@ impl Session {
       originals: BTreeMap::new(),
       untried: false,
       delete_saved: false,
+      saved_deletes: 0,
       switch_failed: None,
       closed: false,
       model_path: None,
@@ -662,6 +666,9 @@ struct Controller<O: TextOutput> {
   untried: bool,
   /// The saved history goes once nothing runs ([Request::DeleteSaved]).
   delete_saved: bool,
+  /// How many times it went: the update's history revision moves with it, so a window counts it
+  /// again also while the history in use is the one in memory.
+  saved_deletes: u64,
   /// The retention whose history could not be opened: the one in use stays.
   switch_failed: Option<Retention>,
   /// The app quits for an update ([Request::Close]): no dictation starts.
@@ -711,12 +718,14 @@ impl<O: TextOutput> Controller<O> {
       }
 
       self.switch_history();
+      self.delete_saved_history();
       self.transcribe_untried();
       self.publish();
     }
 
     // A delete of the saved history that waited: once more, else the log says it did not happen.
     self.switch_history();
+    self.delete_saved_history();
     if self.delete_saved {
       warn!("history: quit before the saved history could be deleted: it stays on disk");
     }
@@ -735,7 +744,7 @@ impl<O: TextOutput> Controller<O> {
       r.seconds = 0.0;
     }
 
-    let key = (key, self.settings.clone(), self.history.db.changes());
+    let key = (key, self.settings.clone(), self.history.db.changes() + self.saved_deletes);
     if self.published.as_ref() == Some(&key) {
       return;
     }
@@ -819,14 +828,6 @@ impl<O: TextOutput> Controller<O> {
       }
       Request::Transferred => Ok(()),
       Request::DeleteSaved => {
-        if !self.settings.history_retention.in_memory() {
-          bail!("the history is saved again");
-        }
-
-        if self.switch_failed.is_some() {
-          bail!("the history could not switch: see the log");
-        }
-
         self.delete_saved = true;
         Ok(())
       }
@@ -1461,8 +1462,7 @@ impl<O: TextOutput> Controller<O> {
     }
   }
 
-  /// The history where the settings keep it, once no dictation runs; then the saved one goes if
-  /// the person asked.
+  /// The history where the settings keep it, once no dictation runs.
   fn switch_history(&mut self) {
     if self.dictation.is_some() {
       return;
@@ -1480,31 +1480,33 @@ impl<O: TextOutput> Controller<O> {
         }
       }
     }
+  }
 
-    if !self.delete_saved {
+  /// The saved history goes, as the person asked ([Request::DeleteSaved]), once no dictation nor a
+  /// transcription again runs, so that none adds or fills an entry in it meanwhile, nor an export
+  /// or an import of it. In use, what this run knows of its entries goes with them.
+  fn delete_saved_history(&mut self) {
+    if !self.delete_saved || self.dictation.is_some() || !self.retranscribing.is_empty() {
       return;
     }
 
-    if !self.settings.history_retention.in_memory() {
-      self.delete_saved = false;
-      return info!("history: the saved history stays: it is saved again");
-    }
-
-    let deleted = match self.history.in_memory() {
-      true => History::delete_saved(&self.config.home),
-      false => Err(anyhow!("the history could not switch: see the log")),
-    };
-    match deleted {
-      // Once the export or the import ends: the session hears of an import's.
-      Ok(None) => debug!("history: the saved history waits for its export or import"),
-      Ok(Some(n)) => {
-        self.delete_saved = false;
-        info!("history: the saved history deleted, {n} entries");
-      }
+    match History::delete_saved(&self.config.home) {
+      // Once the export or the import ends: the session hears of it (Request::Transferred).
+      Ok(None) => return debug!("history: the saved history waits for its export or import"),
+      Ok(Some(n)) => info!("history: the saved history deleted, {n} entries"),
       Err(e) => {
-        self.delete_saved = false;
         warn!("history: delete the saved history: {e:#}");
         self.error = Some(format!("could not delete the saved history: {e:#}"));
+      }
+    }
+
+    self.delete_saved = false;
+    self.saved_deletes += 1;
+    if !self.history.in_memory() {
+      self.originals.clear();
+      self.untried = false;
+      if self.last.as_ref().is_some_and(|l| l.entry.is_some()) {
+        self.last = None;
       }
     }
   }
@@ -2435,44 +2437,89 @@ mod tests {
     assert!(!s.home.path().join(RECORDINGS_DIR).exists(), "no recordings");
   }
 
-  /// A switch to memory leaves the saved history as it is and adds nothing to it, until the person
-  /// asks to delete it; back on disk, the dictations in memory are dropped and new ones saved.
+  /// A switch to memory asks nothing of the saved history: it stays as it is, and nothing is added
+  /// to it; back on disk, the dictations in memory are dropped and new ones saved.
   #[test]
   fn switching_to_memory_and_back() {
     let pcm = loud(10.0);
     let s =
       InProcess::start("session-switch", &Settings::default(), Some(&pcm), "hi", &["parakeet-v3"]);
     let saved = s.add_entry(1_000, "saved before", &loud(1.0));
-    let refused = s.handle.request(Request::DeleteSaved).unwrap_err();
-    assert!(refused.contains("saved again"), "{refused}");
 
     s.handle.edit_settings(|s| s.history_retention = Retention::UntilQuit);
     s.update_where("in memory", |u| u.status.in_memory);
     let last = s.dictate(1);
-    assert_eq!((entry_ids(s.home.path()), s.recordings()), (vec![saved], 1), "nothing new saved");
+    assert_eq!((entry_ids(s.home.path()), s.recordings()), (vec![saved], 1), "left as it is");
     let memory = History::open_memory(s.home.path()).unwrap();
     assert!(memory.db.get_entry(last.entry.unwrap()).unwrap().is_some());
-
-    // An export that runs: the delete waits for its end, which the session hears of, and says so.
-    let export = Transferring::begin(s.home.path());
-    s.handle.request(Request::DeleteSaved).unwrap();
-    let waits = |u: &Update| u.status.warnings.iter().any(|w| w == DELETE_WAITS);
-    s.update_where("the delete waits", waits);
-    assert_eq!(entry_ids(s.home.path()), [saved], "not under the export");
-    drop(export);
-    s.handle.request(Request::Transferred).unwrap();
-    let recordings = s.home.path().join(RECORDINGS_DIR);
-    poll("deleted", Duration::from_secs(10), || {
-      (entry_ids(s.home.path()).is_empty() && !recordings.exists()).then_some(())
-    });
-    s.update_where("no more waiting", |u| !waits(u));
 
     s.handle.edit_settings(|s| s.history_retention = Retention::Unlimited);
     s.update_where("saved", |u| !u.status.in_memory);
     assert!(memory.db.get_page("", 100).unwrap().is_empty(), "the ones in memory are dropped");
     let last = s.dictate(2);
-    assert_eq!(entry_ids(s.home.path()), [last.entry.unwrap()]);
-    assert_eq!(s.recordings(), 1);
+    assert_eq!(entry_ids(s.home.path()), [saved, last.entry.unwrap()]);
+    assert_eq!(s.recordings(), 2);
+  }
+
+  /// Kept until Wavo quits, the saved history left on disk goes once its export ends, which the
+  /// session hears of, and says so meanwhile; the dictations in memory stay.
+  #[test]
+  fn deleting_the_saved_history_in_memory() {
+    let settings = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
+    let pcm = loud(10.0);
+    let s =
+      InProcess::start("session-delete-memory", &settings, Some(&pcm), "hi", &["parakeet-v3"]);
+    let saved = s.add_entry(1_000, "saved before", &loud(1.0));
+    let last = s.dictate(1);
+
+    let export = Transferring::begin(s.home.path());
+    s.handle.request(Request::DeleteSaved).unwrap();
+    let waits = |u: &Update| u.status.warnings.iter().any(|w| w == DELETE_WAITS);
+    let waiting = s.update_where("the delete waits", waits);
+    assert_eq!((entry_ids(s.home.path()), s.recordings()), (vec![saved], 1), "not under it");
+    drop(export);
+    s.handle.request(Request::Transferred).unwrap();
+    let done = s.update_where("deleted", |u| !waits(u));
+    assert!(done.history != waiting.history, "a window counts it again");
+    assert!(entry_ids(s.home.path()).is_empty());
+    assert!(!s.home.path().join(RECORDINGS_DIR).exists());
+    let memory = History::open_memory(s.home.path()).unwrap();
+    let kept: Vec<i64> = memory.db.get_page("", 100).unwrap().iter().map(|e| e.id).collect();
+    assert_eq!((kept, done.status.in_memory), (vec![last.entry.unwrap()], true));
+    assert_eq!(done.status.last.map(|l| l.text), Some("hi".into()), "its text stays");
+  }
+
+  /// Saved, the history in use goes once the dictation that runs ends: its entry with the others,
+  /// whole, and its text; nothing of the texts stays in the files; the next one is saved again.
+  #[test]
+  fn deleting_the_history_in_use_waits_for_the_dictation() {
+    let pcm = loud(10.0);
+    let secret = "a secret to forget";
+    let settings = Settings::default();
+    let s =
+      InProcess::start("session-delete-saved", &settings, Some(&pcm), secret, &["parakeet-v3"]);
+    let first = s.dictate(1);
+    assert_eq!(entry_ids(s.home.path()), [first.entry.unwrap()]);
+
+    s.record(0.3);
+    s.handle.request(Request::DeleteSaved).unwrap();
+    let waits = |u: &Update| u.status.warnings.iter().any(|w| w == DELETE_WAITS);
+    s.update_where("the delete waits", waits);
+    thread::sleep(Duration::from_millis(300));
+    s.press();
+    let done = s.update_where("deleted", |u| u.status.state == Phase::Idle && !waits(u));
+    assert_eq!(s.pasted().len(), 2, "the dictation ended as usual");
+    assert!(done.status.last.is_none(), "its text went with its entry");
+    assert!(entry_ids(s.home.path()).is_empty());
+    assert!(!s.home.path().join(RECORDINGS_DIR).exists(), "the recordings");
+    assert!(s.history().db.get_page("", menu::RECENT).unwrap().is_empty(), "Recent");
+    for file in [DB_FILE.to_owned(), format!("{DB_FILE}-wal")] {
+      let bytes = fs::read(s.home.path().join(&file)).unwrap_or_default();
+      assert!(!bytes.windows(6).any(|w| w == b"secret"), "{file}: the text is gone");
+    }
+
+    let last = s.dictate(3);
+    assert_eq!((entry_ids(s.home.path()), s.recordings()), (vec![last.entry.unwrap()], 1));
   }
 
   /// Switched to memory during a dictation: it is kept nowhere, its recording goes.
@@ -2527,8 +2574,6 @@ mod tests {
     let failed =
       s.update_where("the warning", |u| u.status.warnings.iter().any(|w| w == NOT_SAVED));
     assert!(failed.status.in_memory);
-    let refused = s.handle.request(Request::DeleteSaved).unwrap_err();
-    assert!(refused.contains("saved again"), "{refused}");
 
     fs::remove_file(&db).unwrap();
     s.handle.edit_settings(|s| s.history_retention = Retention::Count(100));

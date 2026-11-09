@@ -13,7 +13,8 @@
 //!   recording) become entries without text if they have speech, else they go.
 //! - Kept until Wavo quits ([`Retention::UntilQuit`]), the history is the same database in memory,
 //!   the last [IN_MEMORY] dictations without their recordings: nothing of a dictation is written to
-//!   disk, and the history saved before stays as it is, unless the person deletes it.
+//!   disk, and the history saved before stays as it is, unless the person deletes it
+//!   ([`History::delete_saved`]).
 
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -692,11 +693,22 @@ impl History {
     self.recordings.as_ref().map_or(Ok(()), |r| r.remove(name))
   }
 
-  /// Deletes the history saved in `home`, its recordings first, while it is kept in memory and
-  /// nothing writes it. Returns how many entries it had; `None` while an export or an import of it
-  /// runs ([Transferring]), which a new one waits for meanwhile.
+  /// Deletes the history saved in `home`, its recordings first, while nothing writes it: the one
+  /// in use or the one left on disk while the history is kept in memory. Returns how many entries
+  /// it had; `None` while an export or an import of it runs ([Transferring]), which a new one waits
+  /// for meanwhile.
   pub fn delete_saved(home: &Path) -> Result<Option<usize>> {
     without_transfer(home, || Self::delete_files(home)).transpose()
+  }
+
+  /// How many entries the history saved in `home` has; 0 without one, which this does not create.
+  pub fn count_saved(home: &Path) -> Result<usize> {
+    let file = home.join(DB_FILE);
+    if !file.exists() {
+      return Ok(0);
+    }
+
+    Ok(Db::open(&file)?.get_total()?.0)
   }
 
   fn delete_files(home: &Path) -> Result<usize> {
@@ -959,12 +971,15 @@ mod tests {
   #[test]
   fn deletes_the_saved_history() {
     let dir = TempDir::new("history-delete-saved");
+    assert_eq!(History::count_saved(dir.path()).unwrap(), 0);
+    assert!(!dir.path().join(DB_FILE).exists(), "not created by the count");
     let h = History::open(dir.path()).unwrap();
     for i in 0..3 {
       add(&h, i * 1_000, "a secret to forget", false);
     }
 
     drop(h);
+    assert_eq!(History::count_saved(dir.path()).unwrap(), 3);
     let import = Transferring::begin(dir.path());
     assert_eq!(History::delete_saved(dir.path()).unwrap(), None, "not under an import");
     assert_eq!(entry_ids(dir.path()).len(), 3);
@@ -980,6 +995,7 @@ mod tests {
     assert!(entry_ids(dir.path()).is_empty() && !dir.path().join(RECORDINGS_DIR).exists());
     let bytes = fs::read(dir.path().join(DB_FILE)).unwrap();
     assert!(!bytes.windows(6).any(|w| w == b"secret"), "the text is gone from the file");
+    assert_eq!(History::count_saved(dir.path()).unwrap(), 0);
     assert_eq!(History::delete_saved(dir.path()).unwrap(), Some(0), "nothing left");
   }
 
