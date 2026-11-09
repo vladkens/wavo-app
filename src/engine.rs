@@ -204,8 +204,17 @@ pub struct Status {
 pub enum Event {
   /// [`Engine::status`] changed.
   Changed,
-  /// The text of job `id`.
-  Done(u64, Result<String, EngineError>),
+  /// The text of job `id`, and the model it ran on, unless it never ran.
+  Done(u64, Result<String, EngineError>, Option<Ran>),
+}
+
+/// The model a job ran on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ran {
+  /// [`Status::device`]
+  pub device: String,
+  /// Which of the engine's loads: 1 for its first model, and on with each one after it.
+  pub load: u64,
 }
 
 /// Dropping it, and its clones, lets the thread finish the queued jobs, then it drops the model
@@ -262,6 +271,7 @@ impl Engine {
         events,
         status: shared,
         model: None,
+        loads: 0,
         stand_in: false,
         pending: None,
         queue: VecDeque::new(),
@@ -307,6 +317,11 @@ impl Engine {
     self.status.lock().unwrap().clone()
   }
 
+  /// A clone of this engine, the same thread.
+  pub fn same(&self, other: &Engine) -> bool {
+    Arc::ptr_eq(&self.status, &other.status)
+  }
+
   fn send(&self, msg: Msg) {
     let _ = self.tx.send(msg);
   }
@@ -322,6 +337,8 @@ struct Worker {
   events: Sender<Event>,
   status: Arc<Mutex<Status>>,
   model: Option<Model>,
+  /// Models installed so far, the model's [Ran::load].
+  loads: u64,
   /// The model is the GPU's, standing in while the Neural Engine's loads.
   stand_in: bool,
   /// The Neural Engine's model loading on its thread.
@@ -398,7 +415,7 @@ impl Worker {
       Msg::Cancel(id) => match self.queue.iter().position(|j| j.id == id) {
         Some(i) => {
           self.queue.remove(i);
-          self.done(id, Err(EngineError::Cancelled));
+          self.done(id, Err(EngineError::Cancelled), None);
         }
         None => self.cancelled.push(id),
       },
@@ -512,7 +529,7 @@ impl Worker {
       warn!("engine: {w}");
     }
 
-    (self.model, self.stand_in) = (Some(model), stand_in);
+    (self.model, self.stand_in, self.loads) = (Some(model), stand_in, self.loads + 1);
     let software_gpu = warning.is_some();
     self.set(|s| {
       (s.phase, s.device, s.software_gpu, s.load_error) =
@@ -522,11 +539,11 @@ impl Worker {
 
   fn run_job(&mut self, job: Job) {
     if let Err(e) = self.load() {
-      return self.done(job.id, Err(EngineError::Load(e)));
+      return self.done(job.id, Err(EngineError::Load(e)), None);
     }
 
     let model = self.model.take().unwrap();
-    let device = model.device();
+    let ran = Ran { device: model.device(), load: self.loads };
     self.set(|s| s.phase = Phase::Running);
     let started = Instant::now();
     let mut yielded = false;
@@ -549,7 +566,7 @@ impl Worker {
     }));
 
     let (id, took) = (job.id, started.elapsed());
-    info!("job {id} ran on {device} in {took:.2?}, {} samples", job.pcm.len());
+    info!("job {id} ran on {} in {took:.2?}, {} samples", ran.device, job.pcm.len());
     self.model = Some(model);
     self.set(|s| (s.phase, s.progress) = (Phase::Idle, None));
     // After a panic or a lost GPU device the model may not work again.
@@ -586,7 +603,7 @@ impl Worker {
       Err(panic) => Err(EngineError::Failed(format!("panicked: {}", panic_message(&*panic)))),
     };
 
-    self.done(job.id, result);
+    self.done(job.id, result, Some(ran));
   }
 
   /// The model goes, and a Neural Engine load still going on ends with its thread.
@@ -599,8 +616,8 @@ impl Worker {
     self.set(|s| (s.phase, s.device, s.software_gpu) = (Phase::Stopped, None, false));
   }
 
-  fn done(&self, id: u64, result: Result<String, EngineError>) {
-    let _ = self.events.send(Event::Done(id, result));
+  fn done(&self, id: u64, result: Result<String, EngineError>, ran: Option<Ran>) {
+    let _ = self.events.send(Event::Done(id, result, ran));
   }
 
   fn set(&self, edit: impl FnOnce(&mut Status)) {
@@ -669,9 +686,15 @@ mod tests {
     }
 
     fn done(&self) -> (u64, Result<String, EngineError>) {
+      let (id, result, _) = self.done_on();
+      (id, result)
+    }
+
+    /// Also the model it ran on.
+    fn done_on(&self) -> (u64, Result<String, EngineError>, Option<Ran>) {
       loop {
         match self.events.recv_timeout(Duration::from_secs(10)).expect("a job done") {
-          Event::Done(id, result) => return (id, result),
+          Event::Done(id, result, ran) => return (id, result, ran),
           Event::Changed => {}
         }
       }
@@ -701,6 +724,29 @@ mod tests {
     assert!(runs.iter().all(|&n| n <= 10 * SECOND), "{runs:?}");
     let idle = Status { phase: Phase::Idle, device: Some("fake".into()), ..Status::default() };
     assert_eq!(f.engine.status(), idle);
+  }
+
+  /// Each model loaded counts as the next load; a job that never ran tells none.
+  #[test]
+  fn a_job_done_says_which_load_ran_it() {
+    let models = FakeModels::new("text");
+    let f = Fake::start("engine-ran", &models, None);
+    let job = |id| {
+      f.engine.transcribe(id, vec![0.0; SECOND], None, false);
+      f.done_on()
+    };
+    let ran = |load| Some(Ran { device: "fake".into(), load });
+    assert_eq!(job(1), (1, Ok("text".into()), ran(1)));
+    assert_eq!(job(2), (2, Ok("text".into()), ran(1)), "the same model");
+
+    f.engine.unload();
+    f.wait(Phase::Stopped);
+    assert_eq!(job(3), (3, Ok("text".into()), ran(2)));
+
+    f.engine.unload();
+    f.wait(Phase::Stopped);
+    fs::write(f.dir.path().join("model.gguf"), b"BROKEN").unwrap();
+    assert!(matches!(job(4), (4, Err(EngineError::Load(_)), None)));
   }
 
   #[test]
@@ -871,7 +917,7 @@ mod tests {
       let started = Instant::now();
       engine.transcribe(id as u64, f.input().pcm, lang.map(str::to_owned), false);
       let text = loop {
-        if let Event::Done(_, result) = events.recv().unwrap() {
+        if let Event::Done(_, result, _) = events.recv().unwrap() {
           break result.unwrap();
         }
       };
