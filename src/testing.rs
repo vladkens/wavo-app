@@ -172,6 +172,9 @@ pub struct FakeModels {
   ane_load: Arc<Mutex<Duration>>,
   /// Whether each job ran on a model loaded for the Neural Engine, in order.
   jobs_on_ane: Arc<Mutex<Vec<bool>>>,
+  /// Calls of [Loader::prepare]; once `prepare_works`, each ends prepared, its `done` called.
+  prepares: Arc<AtomicUsize>,
+  prepare_works: Arc<AtomicBool>,
   /// The device's warning of the models loaded from now on.
   warning: Arc<Mutex<Option<String>>>,
   gate: Arc<Mutex<Option<Receiver<()>>>>,
@@ -192,6 +195,8 @@ impl FakeModels {
       ane_ready: false,
       ane_load: Arc::default(),
       jobs_on_ane: Arc::default(),
+      prepares: Arc::default(),
+      prepare_works: Arc::default(),
       warning: Arc::default(),
       gate: Arc::default(),
     }
@@ -241,6 +246,15 @@ impl FakeModels {
     self.ane_loads.lock().unwrap().clone()
   }
 
+  pub fn prepares(&self) -> usize {
+    self.prepares.load(Ordering::SeqCst)
+  }
+
+  /// A prepare from now on ends prepared, as wavo's once it loaded and marked the file.
+  pub fn prepare_works(&self) {
+    self.prepare_works.store(true, Ordering::SeqCst);
+  }
+
   /// The models loaded from now on run on a device that warns, as a GPU emulated on the CPU does.
   pub fn warns(&self, warning: &str) {
     *self.warning.lock().unwrap() = Some(warning.to_owned());
@@ -278,6 +292,13 @@ impl Loader for FakeModels {
 
   fn ane_ready(&self, _path: &Path) -> bool {
     self.ane_ready
+  }
+
+  fn prepare(&self, _path: &Path, done: Box<dyn FnOnce() + Send>) {
+    self.prepares.fetch_add(1, Ordering::SeqCst);
+    if self.prepare_works.load(Ordering::SeqCst) {
+      done();
+    }
   }
 }
 

@@ -547,6 +547,8 @@ struct Loaded {
   info: Option<&'static ModelInfo>,
   path: PathBuf,
   engine: Engine,
+  /// Its last job ran on the GPU: [Controller::heal] asked for a prepare then.
+  on_gpu: bool,
 }
 
 struct Job {
@@ -888,7 +890,8 @@ impl<O: TextOutput> Controller<O> {
   }
 
   /// The model found, prepared for the Neural Engine ahead of its first dictation, as the app
-  /// starts or another model is found: a new app binary compiles it again once.
+  /// starts or another model is found, and after a job on the GPU ([Controller::heal]): a new app
+  /// binary compiles it again once.
   fn prepare(&self) {
     let Some(path) = &self.model_path else { return };
     if !self.settings.neural_engine {
@@ -921,7 +924,7 @@ impl<O: TextOutput> Controller<O> {
       let (loader, ane) = (self.config.loader.clone(), self.settings.neural_engine);
       let (unload_after, events) = (self.settings.unload_after(), self.events_tx.clone());
       let engine = Engine::start(loader, path.clone(), ane, unload_after, events);
-      Loaded { name, info, path, engine }
+      Loaded { name, info, path, engine, on_gpu: false }
     });
 
     Ok(loaded)
@@ -936,12 +939,27 @@ impl<O: TextOutput> Controller<O> {
   fn on_engine(&mut self, event: engine::Event) {
     let engine::Event::Done(id, result) = event else { return };
     if self.dictation.as_ref().and_then(|d| d.job.as_ref()).is_some_and(|j| j.id == id) {
-      return self.on_transcribed(result);
-    }
-
-    if let Some(at) = self.retranscribing.iter().position(|r| r.job.id == id) {
+      self.on_transcribed(result);
+    } else if let Some(at) = self.retranscribing.iter().position(|r| r.job.id == id) {
       let r = self.retranscribing.remove(at);
       self.on_retranscribed(r, result);
+    }
+
+    self.heal();
+  }
+
+  /// A job ran on the GPU with the Neural Engine on: the model is prepared again, after the text
+  /// went out. Its mark of this app binary may have gone stale (another build of the app, an OS
+  /// update), and then every load goes to the GPU; the prepare loads and marks it (~0.1 s), and
+  /// [Msg::Prepared] moves the next job to the Neural Engine. Asked once until a job runs there
+  /// again: a prepare that fails is not tried after every job.
+  fn heal(&mut self) {
+    let Some(loaded) = self.engine.as_mut() else { return };
+    let Some(device) = loaded.engine.status().device else { return };
+    let on_gpu = !device.contains("Neural Engine");
+    let asked = mem::replace(&mut loaded.on_gpu, on_gpu);
+    if on_gpu && !asked {
+      self.prepare();
     }
   }
 
@@ -2274,6 +2292,31 @@ mod tests {
     let mics = (&[][..], &audio::Microphone::Automatic, false);
     let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;
     assert_eq!(items[1].label(), format!("⚠︎ {}", menu::SOFTWARE_GPU), "not cut");
+  }
+
+  /// A job on the GPU with the Neural Engine on prepares the model again, as when the app binary's
+  /// mark went stale: a prepare that fails is not tried after every job; one that works moves the
+  /// next job to a fresh engine.
+  #[test]
+  fn a_job_on_the_gpu_prepares_the_model_again() {
+    let s = hello("session-heal-fails");
+    assert_eq!(s.models.prepares(), 1, "as the app starts");
+    s.dictate(1);
+    assert_eq!(s.models.prepares(), 2);
+    s.dictate(2);
+    assert_eq!((s.models.prepares(), s.models.loads()), (2, 1), "once");
+
+    let s = hello("session-heal");
+    s.models.prepare_works();
+    s.dictate(1);
+    s.dictate(2);
+    assert_eq!((s.models.prepares(), s.models.loads()), (3, 2), "each engine once");
+
+    let settings = Settings { neural_engine: false, ..Settings::default() };
+    let s =
+      InProcess::start("session-heal-off", &settings, Some(&loud(10.0)), "hi", &["parakeet-v3"]);
+    s.dictate(1);
+    assert_eq!(s.models.prepares(), 0, "the Neural Engine is off");
   }
 
   // MARK: Clean text
