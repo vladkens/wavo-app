@@ -52,6 +52,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// While the history in memory could not open: dictations are kept nowhere, the saved one being
 /// what the person turned off.
 const NOT_IN_MEMORY: &str = "couldn’t stop saving the history: dictations aren’t kept, see the log";
+/// A delete of the saved history waits for its export or import to end.
+const DELETE_WAITS: &str = "the saved history is deleted once its export or import ends";
 /// While the saved history could not open: the one in memory goes on.
 const NOT_SAVED: &str = "couldn’t open the saved history: dictations are kept until Wavo quits";
 /// A paste goes on the sentence the one before it left open, into the same target, only this soon.
@@ -440,8 +442,9 @@ pub enum Request {
   Delete(Vec<i64>),
   /// Free the model's memory, after the job in progress.
   Unload,
-  /// An import added dictations: the update after it carries the history's change.
-  Imported,
+  /// An export or an import ended: the update after it carries the history's change, and a
+  /// delete of the saved history that waited for it runs.
+  Transferred,
   /// Delete the history saved on disk, the history being kept until Wavo quits: once no
   /// dictation runs, nor an export or an import of it.
   DeleteSaved,
@@ -712,6 +715,12 @@ impl<O: TextOutput> Controller<O> {
       self.publish();
     }
 
+    // A delete of the saved history that waited: once more, else the log says it did not happen.
+    self.switch_history();
+    if self.delete_saved {
+      warn!("history: quit before the saved history could be deleted: it stays on disk");
+    }
+
     // Quit in the middle of a transcription: the entry is not tried, the next start takes it.
     let dictation = self.dictation.as_ref().filter(|d| d.job.is_some()).and_then(|d| d.last.entry);
     for id in dictation.into_iter().chain(self.retranscribing.iter().map(|r| r.entry)) {
@@ -808,7 +817,7 @@ impl<O: TextOutput> Controller<O> {
 
         Ok(())
       }
-      Request::Imported => Ok(()),
+      Request::Transferred => Ok(()),
       Request::DeleteSaved => {
         if !self.settings.history_retention.in_memory() {
           bail!("the history is saved again");
@@ -1548,6 +1557,10 @@ impl<O: TextOutput> Controller<O> {
       self.settings_warning.iter().chain(&self.model_fallback).cloned().collect();
     warnings.extend(d.map_or(&self.last_warnings, |d| &d.warnings).iter().cloned());
     warnings.extend(self.slow_start.warning());
+    if self.delete_saved {
+      warnings.push(DELETE_WAITS.to_owned());
+    }
+
     if let Some(r) = self.switch_failed {
       warnings.push(if r.in_memory() { NOT_IN_MEMORY } else { NOT_SAVED }.to_owned());
     }
@@ -2440,17 +2453,19 @@ mod tests {
     let memory = History::open_memory(s.home.path()).unwrap();
     assert!(memory.db.get_entry(last.entry.unwrap()).unwrap().is_some());
 
-    // An import that runs: the delete waits for its end, which the session hears of.
-    let import = Transferring::begin(s.home.path());
+    // An export that runs: the delete waits for its end, which the session hears of, and says so.
+    let export = Transferring::begin(s.home.path());
     s.handle.request(Request::DeleteSaved).unwrap();
-    s.handle.request(Request::Imported).unwrap();
-    assert_eq!(entry_ids(s.home.path()), [saved], "not under the import");
-    drop(import);
-    s.handle.request(Request::Imported).unwrap();
+    let waits = |u: &Update| u.status.warnings.iter().any(|w| w == DELETE_WAITS);
+    s.update_where("the delete waits", waits);
+    assert_eq!(entry_ids(s.home.path()), [saved], "not under the export");
+    drop(export);
+    s.handle.request(Request::Transferred).unwrap();
     let recordings = s.home.path().join(RECORDINGS_DIR);
     poll("deleted", Duration::from_secs(10), || {
       (entry_ids(s.home.path()).is_empty() && !recordings.exists()).then_some(())
     });
+    s.update_where("no more waiting", |u| !waits(u));
 
     s.handle.edit_settings(|s| s.history_retention = Retention::Unlimited);
     s.update_where("saved", |u| !u.status.in_memory);

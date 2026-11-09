@@ -1062,7 +1062,7 @@ impl Prefs {
       Request::Retranscribe(_) => "Could not transcribe it again",
       Request::Restore(_) => "Could not put the previous text back",
       Request::DeleteSaved => "Could not delete the saved history",
-      Request::Unload | Request::Imported | Request::Close => return,
+      Request::Unload | Request::Transferred | Request::Close => return,
     };
     self.history.said = Some(format!("{what}: {error}"));
   }

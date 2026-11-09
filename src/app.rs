@@ -1182,7 +1182,7 @@ impl window::Shell for AppShell {
       return;
     }
 
-    let (home, state) = (self.home.clone(), self.export.clone());
+    let (home, handle, state) = (self.home.clone(), self.handle.clone(), self.export.clone());
     spawn("export", move || {
       let _awake = nimbo::activity::begin("Exporting the history");
       user_initiated();
@@ -1199,6 +1199,11 @@ impl window::Shell for AppShell {
         }
       };
       *state.lock().unwrap() = Some(end);
+      // A delete of the saved history may wait for it.
+      if let Err(e) = handle.request(Request::Transferred) {
+        warn!("export: {e}");
+      }
+
       with_window(|_| ());
     });
   }
@@ -1231,7 +1236,7 @@ impl window::Shell for AppShell {
         }
       };
       *state.lock().unwrap() = Some(end);
-      if let Err(e) = handle.request(Request::Imported) {
+      if let Err(e) = handle.request(Request::Transferred) {
         warn!("import: {e}");
       }
 
