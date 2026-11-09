@@ -44,6 +44,7 @@ pub struct Settings {
   /// Launch at login.
   pub autostart: bool,
   pub hud_position: HudPosition,
+  pub hud_style: HudStyle,
   /// After each dictation the HUD says how long the text took: a debugging aid.
   pub show_transcription_time: bool,
   /// Wayland's GlobalShortcuts portal took the hotkey once: later launches bind it without a click
@@ -73,6 +74,16 @@ pub enum HudPosition {
   Top,
 }
 
+/// The HUD's pill under a dictation: the icon's colours flowing, or the plain pill of the system's
+/// appearance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HudStyle {
+  #[default]
+  Gradient,
+  Plain,
+}
+
 impl Default for Settings {
   fn default() -> Self {
     Self {
@@ -89,6 +100,7 @@ impl Default for Settings {
       history_retention: Retention::Unlimited,
       autostart: false,
       hud_position: HudPosition::Bottom,
+      hud_style: HudStyle::Gradient,
       show_transcription_time: false,
       hotkey_portal: false,
       auto_update: true,
@@ -195,10 +207,12 @@ mod tests {
       unload_after_minutes: None,
       history_retention: Retention::Count(500),
       hud_position: HudPosition::Top,
+      hud_style: HudStyle::Plain,
       ..Settings::default()
     };
     settings.save(&path).unwrap();
     assert_eq!(Settings::load(&path), (settings, None));
+    assert!(fs::read_to_string(&path).unwrap().contains(r#""hud_style": "plain""#));
     assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1, "no temporary file left");
 
     // An older file: missing fields are the defaults, a retired one is dropped.

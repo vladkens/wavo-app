@@ -5,9 +5,10 @@
 //! become a travelling wave, the time freezes (`n/m` for a recording in pieces). Then the pill
 //! collapses to a circle and fades: no "done" state. An error shows a glyph and a short lowercase
 //! reason for a few seconds, the pill widening to fit; while recording, a warning (no sound, no
-//! model, a permission) takes the level's place. The pill is dark in either appearance: the
-//! icon's colours (pink, violet, blue, cyan) travelling along it under a dictation; a still grey
-//! under an error or a warning.
+//! model, a permission) takes the level's place. Two styles (the settings'): the gradient, dark
+//! in either appearance, the icon's colours (pink, violet, blue, cyan) travelling along the pill
+//! under a dictation and a still grey under an error or a warning; or the plain pill of the
+//! system's appearance.
 
 use std::f32::consts::TAU;
 use std::sync::LazyLock;
@@ -15,12 +16,13 @@ use std::time::Duration;
 
 use nimbo::ui::widgets::icon;
 use nimbo::{
-  Anchor, App, Color, Config, Font, Frame, Icon, ImageId, Quad, Rect, Theme, Ui, Weight, alpha, rgb,
+  Anchor, App, Color, Config, Cx, Event, Font, Frame, Icon, ImageId, Quad, Rect, Theme, Ui, Weight,
+  alpha, rgb,
 };
 
 use crate::audio::Meter;
 use crate::session::{NoModel, Outcome, Status};
-use crate::settings::HudPosition;
+use crate::settings::{HudPosition, HudStyle};
 
 // Points.
 const WIDTH: f32 = 176.0;
@@ -79,7 +81,7 @@ const GROUND: Color = rgb(0x181028);
 const GREY: Color = rgb(0x3a3a3c);
 const EDGE: Color = alpha([1.0; 4], 0.24);
 // White text on the gradient: the dark look in either appearance.
-const THEME: Theme = Theme::PLATES_DARK;
+const DARK: Theme = Theme::PLATES_DARK;
 
 const FONT: Font = Font::ui(13.0);
 const TIME: Font = Font::mono(13.0).weight(Weight::Medium);
@@ -245,6 +247,9 @@ pub struct Hud {
   warning: Option<String>,
   silent: bool,
   pending: Vec<Show>,
+  style: HudStyle,
+  // The plain style's: the system's appearance.
+  theme: Theme,
   // The gradient's image, the pill's width and the scale it was made for, and when.
   field: Option<(ImageId, f32, f32, Duration)>,
   hidden: Box<dyn FnMut()>,
@@ -270,6 +275,8 @@ impl Hud {
       warning: None,
       silent: false,
       pending: Vec::new(),
+      style: HudStyle::Gradient,
+      theme: Theme::PLATES_LIGHT,
       field: None,
       hidden: Box::new(hidden),
     }
@@ -277,6 +284,11 @@ impl Hud {
 
   pub fn show(&mut self, show: Show) {
     self.pending.push(show);
+  }
+
+  /// The settings' style, from the next frame.
+  pub fn set_style(&mut self, style: HudStyle) {
+    self.style = style;
   }
 
   /// What it shows, or will at its next frame.
@@ -419,10 +431,12 @@ impl Hud {
     if self.mode == Mode::Closing { self.from } else { self.mode }
   }
 
-  /// The gradient under a dictation, not under an error or a warning.
+  /// The gradient under a dictation, not under an error or a warning; never in the plain style.
   fn flows(&self) -> bool {
     let shown = self.shown();
-    shown != Mode::Error && !(shown == Mode::Recording && self.text.is_some())
+    self.style == HudStyle::Gradient
+      && shown != Mode::Error
+      && !(shown == Mode::Recording && self.text.is_some())
   }
 
   /// Makes the gradient again when [FLOW_TICK] has passed or the pill's width changed: an image
@@ -468,33 +482,50 @@ impl Hud {
   }
 
   fn draw(&self, f: &mut Frame) {
-    let (th, now) = (&THEME, f.now);
+    let plain = self.style == HudStyle::Plain;
+    let (th, now) = (if plain { &self.theme } else { &DARK }, f.now);
     let (width, pill_alpha, a) = self.pill(now);
     let fade = |c: Color, k: f32| alpha(c, c[3] * pill_alpha * k);
     let pill = Rect::new((f.size.w - width) / 2.0, MARGIN, width, HEIGHT);
     let shadow = Rect::new(pill.x, pill.y + 2.0, pill.w, pill.h);
     f.shadow(shadow, HEIGHT / 2.0, 6.0, fade(th.shadow, 1.0));
     let flows = self.flows();
-    let ground = if flows { GROUND } else { GREY };
-    f.rect(pill, fade(ground, 1.0), HEIGHT / 2.0);
-    f.push_clip(pill);
-    if let Some((id, w, ..)) = self.field.filter(|_| flows) {
-      // On the pixel grid, drawn 1:1.
-      let s = f.scale;
-      let rect = Rect::new((pill.x * s).round() / s, pill.y, (w * s).ceil() / s, HEIGHT);
-      f.image(id, rect, pill_alpha);
-    }
+    let ground = match () {
+      _ if plain => th.menu,
+      _ if flows => GROUND,
+      _ => GREY,
+    };
+    if plain {
+      let quad = Quad::new(pill, fade(ground, 1.0)).radius(HEIGHT / 2.0);
+      f.quad(quad.border(1.0, fade(th.line, 1.0)));
+      f.layer();
+      f.push_clip(pill);
+    } else {
+      f.rect(pill, fade(ground, 1.0), HEIGHT / 2.0);
+      f.push_clip(pill);
+      if let Some((id, w, ..)) = self.field.filter(|_| flows) {
+        // On the pixel grid, drawn 1:1.
+        let s = f.scale;
+        let rect = Rect::new((pill.x * s).round() / s, pill.y, (w * s).ceil() / s, HEIGHT);
+        f.image(id, rect, pill_alpha);
+      }
 
-    // The edge over the gradient's soft one.
-    f.layer();
-    let edge = Quad::new(pill, [0.0; 4]).radius(HEIGHT / 2.0).border(1.0, fade(EDGE, 1.0));
-    f.quad(edge);
+      // The edge over the gradient's soft one.
+      f.layer();
+      let edge = Quad::new(pill, [0.0; 4]).radius(HEIGHT / 2.0).border(1.0, fade(EDGE, 1.0));
+      f.quad(edge);
+    }
 
     // The contents keep their place as the pill narrows: centred at the recording's width.
     let x = (f.size.w - width.max(WIDTH)) / 2.0;
     let mid = pill.y + HEIGHT / 2.0;
     let baseline = |f: &mut Frame, font| mid + (f.metrics(font).cap_height / 2.0).round();
     let dot = |f: &mut Frame, k: f32| {
+      if plain {
+        let rect = Rect::new(x + PAD, mid - DOT / 2.0, DOT, DOT);
+        return f.rect(rect, fade(th.danger, k), DOT / 2.0);
+      }
+
       let side = DOT + 2.0 * RING;
       let rect = Rect::new(x + PAD - RING, mid - side / 2.0, side, side);
       let ring = fade(alpha([1.0; 4], 0.9), k);
@@ -515,14 +546,14 @@ impl Hud {
 
     let t = now.saturating_sub(self.since);
     match (self.shown(), &self.text) {
-      // The reason centred in the room right of the glyph.
+      // The reason centred in the room right of the glyph; in the plain style against it.
       (Mode::Recording | Mode::Error, Some(text)) => {
         let glyph = Rect::new(x + PAD, mid - GLYPH / 2.0, GLYPH, GLYPH);
         icon::draw(f, TRIANGLE, glyph, fade(th.warning, a));
         icon::draw(f, MARK.stroke(2.2), glyph, fade(ground, a));
         // Never left of its place: a pill still widening to fit the reason has less room.
         let room = width.max(WIDTH) - REASON_X - PAD;
-        let gap = ((room - f.measure(text, FONT)) / 2.0).max(0.0);
+        let gap = if plain { 0.0 } else { ((room - f.measure(text, FONT)) / 2.0).max(0.0) };
         let y = baseline(f, FONT);
         f.text(x + REASON_X + gap, y, text, FONT, fade(th.text, a));
       }
@@ -573,6 +604,12 @@ impl Hud {
 }
 
 impl App for Hud {
+  fn event(&mut self, _cx: &mut Cx, ev: &Event) -> bool {
+    let Event::Appearance(a) = ev else { return false };
+    self.theme = Theme::system(*a);
+    true
+  }
+
   /// Asks for the next frame when nothing moves: the HUD paints only what changed.
   fn view<'a>(&'a mut self, ui: &mut Ui<'a>) {
     if let Some(at) = self.due(ui.now()) {
@@ -780,7 +817,7 @@ mod tests {
   use std::path::PathBuf;
   use std::rc::Rc;
 
-  use nimbo::Harness;
+  use nimbo::{Appearance, Harness};
 
   use super::*;
   use crate::session::{Last, NotPasted};
@@ -878,12 +915,28 @@ mod tests {
 
   /// The HUD in the harness, transparent as an overlay is, and how often it asked to be hidden.
   fn hud() -> (Harness<Hud>, Rc<Cell<u32>>) {
+    styled(HudStyle::Gradient)
+  }
+
+  /// [hud] in `style`, the system dark.
+  fn styled(style: HudStyle) -> (Harness<Hud>, Rc<Cell<u32>>) {
     let hidden = Rc::new(Cell::new(0));
     let count = hidden.clone();
     let config = config(HudPosition::Bottom);
     let mut h = Harness::new(Hud::new(move || count.set(count.get() + 1)), config.size, 2.0);
     h.set_transparent(true);
+    h.event(Event::Appearance(Appearance::DARK));
+    h.app_mut().set_style(style);
     (h, hidden)
+  }
+
+  /// The pill's colour near its top in the middle, where no content is.
+  fn fill(h: &mut Harness<Hud>) -> [u8; 4] {
+    h.render().pixel(config(HudPosition::Bottom).size.w / 2.0, MARGIN + 3.0)
+  }
+
+  fn grey([r, g, b, _]: [u8; 4]) -> bool {
+    r.abs_diff(g) < 8 && g.abs_diff(b) < 8
   }
 
   #[test]
@@ -1032,43 +1085,70 @@ mod tests {
     assert_eq!(over, None, "text over the glyph mid-resize, the pill from {left}");
   }
 
-  /// Every state draws on the gradient or the grey, transparent around the pill; with
-  /// `WAVO_SHOTS` set (`make shots`), written there.
+  /// Every state draws on the gradient or the grey, or in the plain style on the system's pill,
+  /// transparent around the pill; with `WAVO_SHOTS` set (`make shots`), written there: `hud-*.png`
+  /// and `hud-plain-*.png`.
   #[test]
   fn every_state_renders() {
-    let states = [
-      ("recording", vec![recording(None)]),
-      ("transcribing", vec![recording(None), Show::Transcribing(None)]),
-      ("done", vec![Show::Done("420 ms".into())]),
-      ("error", vec![Show::Error(refused(NotPasted::SecureField))]),
-      ("error-short", vec![Show::Error(crashed())]),
-      ("error-long", vec![Show::Error(too_busy())]),
-      ("warning", vec![recording(Some(&no_model(false)))]),
-    ];
+    let states = || {
+      [
+        ("recording", vec![recording(None)]),
+        ("transcribing", vec![recording(None), Show::Transcribing(None)]),
+        ("done", vec![Show::Done("420 ms".into())]),
+        ("error", vec![Show::Error(refused(NotPasted::SecureField))]),
+        ("error-short", vec![Show::Error(crashed())]),
+        ("error-long", vec![Show::Error(too_busy())]),
+        ("warning", vec![recording(Some(&no_model(false)))]),
+      ]
+    };
     let dir = std::env::var_os("WAVO_SHOTS").map(PathBuf::from);
-    for (name, shows) in states {
-      let (mut h, _) = hud();
-      // A clock far enough on for the recording's seconds.
-      h.advance(ms(60_000));
-      for show in shows {
-        h.app_mut().show(show);
-        h.wait(ms(500));
-      }
+    for (style, prefix) in [(HudStyle::Gradient, "hud"), (HudStyle::Plain, "hud-plain")] {
+      for (name, shows) in states() {
+        let (mut h, _) = styled(style);
+        // A clock far enough on for the recording's seconds.
+        h.advance(ms(60_000));
+        for show in shows {
+          h.app_mut().show(show);
+          h.wait(ms(500));
+        }
 
-      h.app_mut().levels =
-        std::array::from_fn(|i| 0.002 * (1.0 + (i as f32 * 1.7).sin()) * i as f32);
-      h.redraw();
-      let img = h.render();
-      let mid = MARGIN + HEIGHT / 2.0;
-      let [r, g, b, a] = img.pixel(config(HudPosition::Bottom).size.w / 2.0, MARGIN + 3.0);
-      assert!(a == 255 && img.pixel(1.0, mid)[3] == 0, "{name}: {r} {g} {b} {a}");
-      let grey = r.abs_diff(g) < 8 && g.abs_diff(b) < 8;
-      assert_eq!(grey, name.starts_with("error") || name == "warning", "{name}: {r} {g} {b}");
-      if let Some(dir) = &dir {
-        std::fs::create_dir_all(dir).unwrap();
-        h.shot(&dir.join(format!("hud-{name}.png"))).unwrap();
+        h.app_mut().levels =
+          std::array::from_fn(|i| 0.002 * (1.0 + (i as f32 * 1.7).sin()) * i as f32);
+        let px = fill(&mut h);
+        let img = h.render();
+        let around = img.pixel(1.0, MARGIN + HEIGHT / 2.0)[3];
+        assert!(px[3] == 255 && around == 0, "{prefix}-{name}: {px:?}");
+        let still = style == HudStyle::Plain || name.starts_with("error") || name == "warning";
+        assert_eq!(grey(px), still, "{prefix}-{name}: {px:?}");
+        if let Some(dir) = &dir {
+          std::fs::create_dir_all(dir).unwrap();
+          h.shot(&dir.join(format!("{prefix}-{name}.png"))).unwrap();
+        }
       }
     }
+  }
+
+  /// The setting's style: the gradient flowing, or the plain pill of the system's appearance,
+  /// light or dark, which paints only at the meter's ticks too; the switch shows at once.
+  #[test]
+  fn the_style_is_the_settings() {
+    let (mut h, _) = hud();
+    h.app_mut().show(recording(None));
+    h.wait(ms(500));
+    let before = fill(&mut h);
+    h.wait(FLOW_TICK * 4);
+    let after = fill(&mut h);
+    assert!(!grey(before) && before != after, "flowing: {before:?} {after:?}");
+
+    h.app_mut().set_style(HudStyle::Plain);
+    let dark = fill(&mut h);
+    assert!(grey(dark) && dark[0] < 80, "the dark pill: {dark:?}");
+    h.wait(ms(300));
+    assert_eq!(fill(&mut h), dark, "still");
+    assert!((28..=32).contains(&h.wait(ms(1000))));
+    h.event(Event::Appearance(Appearance::LIGHT));
+    let light = fill(&mut h);
+    assert!(grey(light) && light[0] > 200, "the light pill: {light:?}");
   }
 
   /// White reads on every colour of the gradient: WCAG AA's 4.5:1 for the time's text.

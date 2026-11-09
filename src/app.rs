@@ -506,7 +506,6 @@ impl App {
     let status = &update.status;
     let _ = self.hotkeys.set(&update.settings.hotkey); // its error shows in the menu
     self.hotkeys.escape(status.state != Phase::Idle);
-    let position = update.settings.hud_position;
     let shown = self.hud.0.with(|h| h.mode()).unwrap_or(Mode::Hidden);
     let show = match status.state {
       Phase::Recording => {
@@ -547,7 +546,7 @@ impl App {
       }
     };
 
-    self.show(main, shown, show, position);
+    self.show(main, shown, show, &update.settings);
     self.keep(update);
   }
 
@@ -567,8 +566,8 @@ impl App {
   /// From hidden only a recording or an error shows, on the screen with the pointer. Never where
   /// the overlay would take the keyboard focus ([Main::overlay_takes_focus]: GNOME on Wayland
   /// without XWayland): the person's window would lose it, and the paste would go into the HUD.
-  /// The tray icon tells the state there too.
-  fn show(&mut self, main: &mut Main, shown: Mode, show: Show, position: HudPosition) {
+  /// The tray icon tells the state there too. The HUD's place and style are the settings'.
+  fn show(&mut self, main: &mut Main, shown: Mode, show: Show, settings: &Settings) {
     if main.overlay_takes_focus() {
       return;
     }
@@ -578,12 +577,16 @@ impl App {
       return;
     }
 
+    let position = settings.hud_position;
     if hidden && position != self.hud.1 {
       self.hud.0.close();
       self.hud = (open_hud(main, position), position);
     }
 
-    self.hud.0.with(|h| h.show(show));
+    self.hud.0.with(|h| {
+      h.set_style(settings.hud_style);
+      h.show(show);
+    });
     if hidden {
       self.hud.0.front();
     }

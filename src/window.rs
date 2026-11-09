@@ -32,7 +32,7 @@ use crate::audio::{self, Auto, Choice, Microphone, Playback, Transport};
 use crate::engine;
 use crate::history::{Entry, History, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms};
 use crate::session::{self, NoModel, Request, Status, label};
-use crate::settings::{Activation, HudPosition, Settings, language_name};
+use crate::settings::{Activation, HudPosition, HudStyle, Settings, language_name};
 use crate::transfer::Imported;
 
 // MARK: Window
@@ -796,6 +796,9 @@ const HUDS: [Tag<HudPosition>; 2] = [
   Tag::new(HudPosition::Top, "Top of the screen"),
 ];
 
+const HUD_STYLES: [Tag<HudStyle>; 2] =
+  [Tag::new(HudStyle::Gradient, "Gradient"), Tag::new(HudStyle::Plain, "Plain")];
+
 const UNLOADS: [Tag<Option<u32>>; 7] = [
   Tag::new(None, "Never"),
   Tag::new(Some(0), "Right after each dictation"),
@@ -824,6 +827,13 @@ impl Prefs {
         let mut cur = self.settings.hud_position;
         if ui.id("hud").picker(&mut cur, &HUDS).changed {
           self.edit(move |s| s.hud_position = cur);
+        }
+      });
+
+      ui.form_row(fs, FormRow::new("HUD style"), |ui| {
+        let mut cur = self.settings.hud_style;
+        if ui.id("hud-style").picker(&mut cur, &HUD_STYLES).changed {
+          self.edit(move |s| s.hud_style = cur);
         }
       });
 
@@ -3230,6 +3240,9 @@ mod tests {
     assert_eq!(fake.log().settings.history_retention, Retention::Count(100));
     click(&mut h, Id::of("ane"));
     assert!(!fake.log().settings.neural_engine);
+    click(&mut h, Id::of("hud-style"));
+    click(&mut h, Id::of("hud-style").key(("item", 1)));
+    assert_eq!(fake.log().settings.hud_style, HudStyle::Plain);
 
     // Launch at login, on General, goes to the system, one change at a time; a refusal says why.
     tab(&mut h, Page::General);
