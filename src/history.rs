@@ -11,8 +11,12 @@
 //! - [`History::recover`] runs on start: entries a crash left busy are not any more, entries
 //!   without text whose recording is gone go, and recordings without an entry (the app died while
 //!   recording) become entries without text if they have speech, else they go.
+//! - Kept until Wavo quits ([`Retention::UntilQuit`]), the history is the same database in memory,
+//!   the last [IN_MEMORY] dictations without their recordings: nothing of a dictation is written to
+//!   disk, and the history saved before stays as it is, unless the person deletes it.
 
 use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -20,7 +24,7 @@ use std::{fs, mem};
 
 use anyhow::{Context, Result, bail};
 use rusqlite::functions::FunctionFlags;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -28,6 +32,9 @@ use crate::audio::{Clip, read_wav};
 
 pub const DB_FILE: &str = "history.db";
 pub const RECORDINGS_DIR: &str = "recordings";
+/// The dictations the history keeps until Wavo quits: the menu's Recent and a session's worth to
+/// copy from on the History page; texts only, a few KB.
+pub const IN_MEMORY: u32 = 20;
 
 // MARK: Time and text
 
@@ -240,11 +247,29 @@ impl Db {
   /// Opens (creating, migrating) the database at `path`.
   pub fn open(path: &Path) -> Result<Self> {
     let db = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
-    // The session, the history window and an export use it at once.
-    db.busy_timeout(Duration::from_secs(2))?;
     db.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
-    migrate(&db).with_context(|| format!("migrate {}", path.display()))?;
+    Self::prepare(db).with_context(|| format!("migrate {}", path.display()))
+  }
+
+  /// The history of `home` kept in memory: SQLite's memdb, which the connections of this process
+  /// that open it share (the session's, the window's), gone with the last of them.
+  pub fn open_memory(home: &Path) -> Result<Self> {
+    let mut hasher = DefaultHasher::new();
+    home.hash(&mut hasher);
+    let uri = format!("file:/wavo-history-{:016x}?vfs=memdb", hasher.finish());
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+      | OpenFlags::SQLITE_OPEN_CREATE
+      | OpenFlags::SQLITE_OPEN_URI
+      | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let db = Connection::open_with_flags(&uri, flags).with_context(|| format!("open {uri}"))?;
+    Self::prepare(db).with_context(|| format!("migrate {uri}"))
+  }
+
+  fn prepare(db: Connection) -> Result<Self> {
+    // The session, the history window and an export use it at once.
+    db.busy_timeout(Duration::from_secs(2))?;
+    migrate(&db)?;
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
     db.create_scalar_function("wavo_fold", 1, flags, |ctx| Ok(fold(&ctx.get::<String>(0)?)))?;
     Ok(Self { db })
@@ -431,6 +456,15 @@ impl Db {
   pub fn delete_entries(&self, ids: &[i64]) -> Result<()> {
     self.update_all("DELETE FROM entries WHERE id = ?1;", ids)
   }
+
+  /// Every entry goes, and the pages they were on: nothing of them is left in the file. Returns
+  /// how many there were.
+  pub fn delete_all(&self) -> Result<usize> {
+    let n = self.db.execute("DELETE FROM entries;", [])?;
+    self.db.execute_batch("VACUUM;")?;
+    self.db.query_row("PRAGMA wal_checkpoint(TRUNCATE);", [], |_| Ok(()))?;
+    Ok(n)
+  }
 }
 
 // MARK: Recordings
@@ -559,24 +593,73 @@ pub enum Retention {
   Weeks2,
   #[serde(rename = "3mo")]
   Months3,
+  /// The last [IN_MEMORY] entries, in memory only: none is written to disk.
+  #[serde(rename = "until_quit")]
+  UntilQuit,
+}
+
+impl Retention {
+  pub fn in_memory(self) -> bool {
+    self == Self::UntilQuit
+  }
 }
 
 pub struct History {
   pub db: Db,
-  pub recordings: Recordings,
+  /// `None` in memory: no recordings are kept.
+  pub recordings: Option<Recordings>,
 }
 
 impl History {
+  /// The history saved in `home`.
   pub fn open(home: &Path) -> Result<Self> {
     let recordings = Recordings::open(home)?;
     let db = Db::open(&home.join(DB_FILE))?;
-    Ok(Self { db, recordings })
+    Ok(Self { db, recordings: Some(recordings) })
+  }
+
+  /// The history of `home` kept until Wavo quits ([Db::open_memory]).
+  pub fn open_memory(home: &Path) -> Result<Self> {
+    Ok(Self { db: Db::open_memory(home)?, recordings: None })
+  }
+
+  /// The one in memory, or the saved one.
+  pub fn open_as(home: &Path, in_memory: bool) -> Result<Self> {
+    if in_memory { Self::open_memory(home) } else { Self::open(home) }
+  }
+
+  pub fn in_memory(&self) -> bool {
+    self.recordings.is_none()
   }
 
   /// The entry's recording, if it has one still on disk.
   pub fn audio_file(&self, entry: &Entry) -> Option<PathBuf> {
     let name = entry.audio_path.as_deref()?;
-    self.recordings.path(name).filter(|p| p.is_file())
+    self.recordings.as_ref()?.path(name).filter(|p| p.is_file())
+  }
+
+  /// Deletes the recording `name`; in memory there is none.
+  pub fn remove_recording(&self, name: &str) -> Result<()> {
+    self.recordings.as_ref().map_or(Ok(()), |r| r.remove(name))
+  }
+
+  /// Deletes the history saved in `home`, its recordings first, while it is kept in memory and
+  /// nothing writes it. Returns how many entries it had.
+  pub fn delete_saved(home: &Path) -> Result<usize> {
+    let dir = home.join(RECORDINGS_DIR);
+    match fs::remove_dir_all(&dir) {
+      Err(e) if e.kind() != ErrorKind::NotFound => {
+        return Err(e).with_context(|| format!("delete {}", dir.display()));
+      }
+      _ => {}
+    }
+
+    let file = home.join(DB_FILE);
+    if !file.exists() {
+      return Ok(0);
+    }
+
+    Db::open(&file)?.delete_all()
   }
 
   /// Deletes entries `ids` and their recordings, each file first: the entry whose file cannot be
@@ -586,7 +669,7 @@ impl History {
     for &id in ids {
       let Some(entry) = self.db.get_entry(id)? else { continue };
       if let Some(name) = &entry.audio_path
-        && let Err(e) = self.recordings.remove(name)
+        && let Err(e) = self.remove_recording(name)
       {
         self.db.delete_entries(&found)?;
         return Err(e);
@@ -600,11 +683,14 @@ impl History {
   }
 
   /// Applies `retention` at `now` (Unix ms); entries without text stay when `spare`, and do not
-  /// count: their audio is all there is of them. Returns how many entries were removed.
+  /// count: their audio is all there is of them. Returns how many entries were removed. In memory
+  /// the last [IN_MEMORY] stay whatever it says; the saved history is left alone by
+  /// [Retention::UntilQuit].
   pub fn cleanup(&self, retention: Retention, now: i64, spare: bool) -> Result<usize> {
     let days = |n: i64| now - n * 24 * 60 * 60 * 1000;
+    let retention = if self.in_memory() { Retention::Count(IN_MEMORY) } else { retention };
     let doomed = match retention {
-      Retention::Unlimited => return Ok(0),
+      Retention::Unlimited | Retention::UntilQuit => return Ok(0),
       Retention::Count(n) => self.db.get_beyond_newest(n.max(1), spare)?,
       Retention::Days3 => self.db.get_created_before(days(3), spare)?,
       Retention::Weeks2 => self.db.get_created_before(days(14), spare)?,
@@ -614,7 +700,7 @@ impl History {
     let mut removed = Vec::new();
     for e in doomed {
       // An entry whose file cannot be deleted stays, to be tried again next time.
-      match e.audio_path.as_deref().map(|name| self.recordings.remove(name)) {
+      match e.audio_path.as_deref().map(|name| self.remove_recording(name)) {
         Some(Err(err)) => warn!("{err:#}; its history entry stays"),
         _ => removed.push(e.id),
       }
@@ -627,6 +713,7 @@ impl History {
   /// Fixes up what a crash left behind (see the module docs); `now` stamps recordings whose start
   /// is unknown.
   pub fn recover(&self, now: i64) -> Result<()> {
+    let Some(recordings) = &self.recordings else { return Ok(()) };
     let interrupted = self.db.mark_interrupted()?;
     let entries = self.db.get_entries()?;
     let gone: Vec<i64> = (entries.iter())
@@ -636,13 +723,13 @@ impl History {
     self.db.delete_entries(&gone)?;
 
     let known: HashSet<&str> = entries.iter().filter_map(|e| e.audio_path.as_deref()).collect();
-    let mut orphans = self.recordings.list()?;
+    let mut orphans = recordings.list()?;
     orphans.retain(|name| !known.contains(name.as_str()));
     orphans.sort();
 
     let mut adopted = Vec::new();
     for name in &orphans {
-      let clip = read_wav(&self.recordings.dir.join(name)).map(Clip::analyze);
+      let clip = read_wav(&recordings.dir.join(name)).map(Clip::analyze);
       match clip {
         Ok(clip) if clip.has_speech() => adopted.push(Entry {
           created_at: started_at(name).unwrap_or(now),
@@ -650,7 +737,7 @@ impl History {
           audio_path: Some(name.clone()),
           ..Entry::default()
         }),
-        _ => self.recordings.remove(name).unwrap_or_else(|e| warn!("{e:#}")),
+        _ => recordings.remove(name).unwrap_or_else(|e| warn!("{e:#}")),
       }
     }
 
@@ -676,7 +763,7 @@ mod tests {
 
   /// An entry with `text` and a recording, `age` ms before [NOW].
   fn add(h: &History, age: i64, text: &str, busy: bool) -> (i64, PathBuf) {
-    let (name, path) = h.recordings.new_file(NOW - age);
+    let (name, path) = h.recordings.as_ref().unwrap().new_file(NOW - age);
     write_wav(&path, &[0.1; 1_600]);
     let entry = Entry {
       created_at: NOW - age,
@@ -765,13 +852,14 @@ mod tests {
     fs::remove_file(gone_wav).unwrap();
 
     // Killed while recording: no finalize, the header written with the samples.
-    let (name, path) = h.recordings.new_file(NOW + 5);
+    let r = h.recordings.as_ref().unwrap();
+    let (name, path) = r.new_file(NOW + 5);
     let mut sink = WavSink::create(&path).unwrap();
     sink.write(&tone(1.5, 0.5)).unwrap();
     mem::forget(sink);
-    let (_, silent) = h.recordings.new_file(NOW + 6);
+    let (_, silent) = r.new_file(NOW + 6);
     write_wav(&silent, &[0.0; 16_000]);
-    let (_, broken) = h.recordings.new_file(NOW + 7);
+    let (_, broken) = r.new_file(NOW + 7);
     fs::write(&broken, b"RIFF....WAVE").unwrap();
 
     h.recover(NOW + 10).unwrap();
@@ -781,6 +869,53 @@ mod tests {
     assert_eq!((adopted.audio_path.as_deref(), adopted.created_at), (Some(name.as_str()), NOW + 5));
     assert_eq!(adopted.duration_ms, 1_500);
     assert!(!silent.exists() && !broken.exists());
+  }
+
+  /// In memory: the last [IN_MEMORY] whatever the retention says, nothing on disk, and the
+  /// connections of the process share it; the saved history is left alone.
+  #[test]
+  fn in_memory_keeps_the_last_ones() {
+    let dir = TempDir::new("history-memory");
+    let saved = History::open(dir.path()).unwrap();
+    let (kept, wav) = add(&saved, 0, "saved", false);
+    let h = History::open_memory(dir.path()).unwrap();
+    let other = History::open_memory(dir.path()).unwrap();
+    let before = other.db.changes();
+    let entries: Vec<Entry> = (0..25)
+      .map(|i| Entry { created_at: NOW + i, text: format!("text {i}"), ..Entry::default() })
+      .collect();
+    h.db.insert(&entries).unwrap();
+    assert_ne!(other.db.changes(), before, "another connection hears of it");
+
+    assert_eq!(h.cleanup(Retention::Unlimited, NOW, false).unwrap(), 5);
+    let page = other.db.get_page("", 100).unwrap();
+    let texts: Vec<&str> = page.iter().map(|e| e.text.as_str()).collect();
+    assert_eq!((texts.len(), texts[0], texts[19]), (20, "text 24", "text 5"));
+    assert!(h.in_memory() && h.audio_file(&page[0]).is_none());
+    assert_eq!(saved.cleanup(Retention::UntilQuit, NOW, false).unwrap(), 0);
+    assert_eq!((entry_ids(dir.path()), wav.exists()), (vec![kept], true));
+
+    // Another home has its own.
+    let elsewhere = TempDir::new("history-memory-other");
+    assert!(History::open_memory(elsewhere.path()).unwrap().db.get_page("", 1).unwrap().is_empty());
+    assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0, "nothing on disk");
+  }
+
+  /// The saved history goes with its recordings, and nothing of its texts stays in the file.
+  #[test]
+  fn deletes_the_saved_history() {
+    let dir = TempDir::new("history-delete-saved");
+    let h = History::open(dir.path()).unwrap();
+    for i in 0..3 {
+      add(&h, i * 1_000, "a secret to forget", false);
+    }
+
+    drop(h);
+    assert_eq!(History::delete_saved(dir.path()).unwrap(), 3);
+    assert!(entry_ids(dir.path()).is_empty() && !dir.path().join(RECORDINGS_DIR).exists());
+    let bytes = fs::read(dir.path().join(DB_FILE)).unwrap();
+    assert!(!bytes.windows(6).any(|w| w == b"secret"), "the text is gone from the file");
+    assert_eq!(History::delete_saved(dir.path()).unwrap(), 0, "nothing left");
   }
 
   #[test]

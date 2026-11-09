@@ -28,7 +28,7 @@ use zip::read::ZipFile;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::history::{DB_FILE, Db, Entry, History, RECORDINGS_DIR, Recordings, now_ms};
+use crate::history::{DB_FILE, Db, Entry, RECORDINGS_DIR, Recordings, now_ms};
 
 /// The archive's layout; one from a newer Wavo is refused.
 const FORMAT: u32 = 1;
@@ -167,17 +167,18 @@ pub fn import(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
   io::copy(&mut db, &mut File::create(&path)?)?;
   drop(db);
 
-  let history = History::open(home)?;
+  let recordings = Recordings::open(home)?;
+  let history = Db::open(&home.join(DB_FILE))?;
   let starts: HashMap<i64, Option<String>> =
-    history.db.get_entries()?.into_iter().map(|e| (e.created_at, e.audio_path)).collect();
-  let on_disk: HashSet<String> = history.recordings.list()?.into_iter().collect();
+    history.get_entries()?.into_iter().map(|e| (e.created_at, e.audio_path)).collect();
+  let on_disk: HashSet<String> = recordings.list()?.into_iter().collect();
   let plan = Plan::new(&starts, &on_disk, Db::open(&path)?.get_entries()?);
   let mut done = Imported { entries: plan.entries, added: plan.new.len(), ..Imported::default() };
 
   // In the archive's order, read front to back. Nothing fails between adding the entries and
   // marking them idle.
   let (prefix, len) = (format!("{RECORDINGS_DIR}/"), fs::metadata(file)?.len());
-  let (ids, mut copies) = plan.add(&history, &starts)?;
+  let (ids, mut copies) = plan.add(&history, &recordings, &starts)?;
   for i in 0..archive.len() {
     let dst = match archive.name_for_index(i) {
       Some(Ok(name)) => name.strip_prefix(&prefix).and_then(|rec| copies.remove(rec)),
@@ -201,7 +202,7 @@ pub fn import(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
   }
 
   done.failed += copies.len(); // named by the entries, not in the archive
-  history.db.mark_idle_entries(&ids)?;
+  history.mark_idle_entries(&ids)?;
   Ok(done)
 }
 
@@ -246,7 +247,8 @@ impl Plan {
   /// by their names in the archive, with the paths they go to.
   fn add(
     self,
-    h: &History,
+    db: &Db,
+    recordings: &Recordings,
     starts: &HashMap<i64, Option<String>>,
   ) -> Result<(Vec<i64>, HashMap<String, PathBuf>)> {
     // Names the entries hold whose files are not there yet (an import cut short) are taken too.
@@ -255,7 +257,7 @@ impl Plan {
     let mut entries = Vec::with_capacity(self.new.len());
     for (mut e, audio) in self.new {
       if let Some(audio) = audio {
-        let (name, path) = h.recordings.new_file_besides(e.created_at, &taken);
+        let (name, path) = recordings.new_file_besides(e.created_at, &taken);
         taken.insert(name.clone());
         e.audio_path = Some(name);
         copies.insert(audio, path);
@@ -264,9 +266,9 @@ impl Plan {
       entries.push(e);
     }
 
-    let ids = h.db.insert(&entries)?;
+    let ids = db.insert(&entries)?;
     for (audio, name) in self.missing {
-      copies.extend(h.recordings.path(&name).map(|path| (audio, path)));
+      copies.extend(recordings.path(&name).map(|path| (audio, path)));
     }
 
     Ok((ids, copies))
@@ -333,6 +335,7 @@ mod tests {
   use nimbo::instance::{Claim, claim_in};
 
   use super::*;
+  use crate::history::History;
   use crate::testing::{TempDir, entry_ids, tone, wav_count, write_wav};
 
   /// 2026-10-09 00:00 UTC.
@@ -340,7 +343,7 @@ mod tests {
 
   /// An entry recorded `at` with `text`, and a recording of `seconds` if any; its path.
   fn add(h: &History, at: i64, text: &str, seconds: Option<f64>) -> PathBuf {
-    let (name, path) = h.recordings.new_file(at);
+    let (name, path) = h.recordings.as_ref().unwrap().new_file(at);
     let audio_path = seconds.map(|_| name);
     let entry = Entry { created_at: at, audio_path, text: text.into(), ..Entry::default() };
     h.db.insert(&[entry]).unwrap();

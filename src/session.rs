@@ -12,6 +12,11 @@
 //! - A chosen model not on disk gives way to the first one found, with a warning; the choice stays.
 //! - With `clean_text` a dictation is [cleaned](cleanup::clean), and its paste ends with a space
 //!   and [goes on](cleanup::going_on) the sentence a paste into the same target just left open.
+//! - Kept until Wavo quits ([Retention::UntilQuit]), the history is in memory: a dictation is
+//!   recorded into memory only, and its entry is kept only for its text, as no recording is there
+//!   to transcribe again. A switch takes the other history once no dictation runs, so the next one
+//!   goes there; the one in memory is dropped then, and the saved one is left as it is unless the
+//!   person asked to delete it ([Request::DeleteSaved]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,7 +34,7 @@ use wavo::hub::{self, Hub, ModelInfo};
 use crate::audio::{self, Clip, Meter, Recorder, Source};
 use crate::cleanup;
 use crate::engine::{self, Engine, EngineError, Loader, Wavo};
-use crate::history::{Entry, History, now_ms};
+use crate::history::{Entry, History, Retention, now_ms};
 use crate::mic_start::{SlowStart, Start};
 use crate::settings::{self, Activation, Settings, language_name};
 
@@ -324,6 +329,8 @@ pub struct Status {
   pub warnings: Vec<String>,
   /// Why no model can transcribe now: recordings are kept for later.
   pub no_model: Option<NoModel>,
+  /// The history in use is the one in memory, kept until Wavo quits.
+  pub in_memory: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -430,6 +437,9 @@ pub enum Request {
   Unload,
   /// An import added dictations: the update after it carries the history's change.
   Imported,
+  /// Delete the history saved on disk, the history being kept until Wavo quits: once no
+  /// dictation runs.
+  DeleteSaved,
   /// The app quits for an update: no dictation runs, as the session stands after what was sent
   /// before it, and none starts from then on; an error while one runs, which ends as usual.
   Close,
@@ -461,7 +471,7 @@ impl Session {
       warn!("{w}");
     }
 
-    let history = History::open(&config.home)?;
+    let history = History::open_as(&config.home, settings.history_retention.in_memory())?;
     let (tx, rx) = unbounded();
     let (events_tx, events) = unbounded();
     let controller = Controller {
@@ -482,6 +492,8 @@ impl Session {
       retranscribing: Vec::new(),
       originals: BTreeMap::new(),
       untried: false,
+      delete_saved: false,
+      switch_failed: None,
       closed: false,
       model_path: None,
       model_error: None,
@@ -605,7 +617,8 @@ struct Dictation<T> {
   target: Option<T>,
   /// Unix ms.
   created_at: i64,
-  audio: String,
+  /// Its recording's name; `None` in memory.
+  audio: Option<String>,
   started: Instant,
   /// When it started by [Config::clock], which the last paste's time is measured to.
   began: Instant,
@@ -639,6 +652,10 @@ struct Controller<O: TextOutput> {
   originals: BTreeMap<i64, Original>,
   /// Entries without text may wait for the model now found.
   untried: bool,
+  /// The saved history goes once nothing runs ([Request::DeleteSaved]).
+  delete_saved: bool,
+  /// The retention whose history could not be opened: the one in use stays.
+  switch_failed: Option<Retention>,
   /// The app quits for an update ([Request::Close]): no dictation starts.
   closed: bool,
   /// The model [`Controller::check_model`] last found.
@@ -685,6 +702,7 @@ impl<O: TextOutput> Controller<O> {
         recv(events) -> event => self.on_engine(event.unwrap()),
       }
 
+      self.switch_history();
       self.transcribe_untried();
       self.publish();
     }
@@ -786,6 +804,14 @@ impl<O: TextOutput> Controller<O> {
         Ok(())
       }
       Request::Imported => Ok(()),
+      Request::DeleteSaved => {
+        if !self.settings.history_retention.in_memory() {
+          bail!("the history is saved again");
+        }
+
+        self.delete_saved = true;
+        Ok(())
+      }
       Request::Close => {
         if self.dictation.is_some() {
           bail!("a dictation runs");
@@ -969,16 +995,19 @@ impl<O: TextOutput> Controller<O> {
   fn start_recording(&mut self, take: Take) {
     let started = Instant::now();
     let created_at = now_ms();
-    let (audio, wav) = self.history.recordings.new_file(created_at);
+    let file = self.history.recordings.as_ref().map(|r| r.new_file(created_at));
     let source = Source::new(self.config.fake_mic.clone(), self.settings.microphone.clone());
-    let recorder = match Recorder::start(&source, &wav) {
+    let recorder = match Recorder::start(&source, file.as_ref().map(|(_, wav)| wav.as_path())) {
       Ok(recorder) => recorder,
       Err(e) => {
         let error = format!("could not start recording: {e:#}");
         warn!("dictation {take}: {error}");
         self.error = Some(error);
         // Its day folder goes if nothing else is in it.
-        let _ = self.history.recordings.remove(&audio);
+        if let Some((audio, _)) = &file {
+          let _ = self.history.remove_recording(audio);
+        }
+
         return self.feed(Input::RecordingFailed { take });
       }
     };
@@ -988,7 +1017,7 @@ impl<O: TextOutput> Controller<O> {
       last: Last { take, ..Last::default() },
       target: None,
       created_at,
-      audio,
+      audio: file.map(|(audio, _)| audio),
       started,
       began: (self.config.clock)(),
       stopped: None,
@@ -1070,7 +1099,8 @@ impl<O: TextOutput> Controller<O> {
       return self.end(Outcome::NoSpeech, None);
     };
 
-    if !rec.saved {
+    let file = d.audio.is_some();
+    if file && !rec.saved {
       // Transcribed and pasted all the same, but no entry keeps a broken file.
       warn!("dictation {take}: its recording could not be saved: no entry");
       self.discard();
@@ -1078,7 +1108,12 @@ impl<O: TextOutput> Controller<O> {
 
     let language = self.settings.engine_language();
     let model = self.engine().map(|l| l.name.clone());
-    let entry = if rec.saved { self.add_entry(model.as_deref().ok()) } else { None };
+    // In memory an entry is kept for its text only: none comes without a model.
+    let entry = match (file, &model) {
+      (true, _) if rec.saved => self.add_entry(model.as_deref().ok()),
+      (false, Ok(model)) => self.add_entry(Some(model)),
+      _ => None,
+    };
     self.dictation.as_mut().unwrap().last.entry = entry;
     let model = match model {
       Ok(model) => model,
@@ -1096,7 +1131,7 @@ impl<O: TextOutput> Controller<O> {
     let entry = Entry {
       created_at: d.created_at,
       duration_ms: d.duration_ms,
-      audio_path: Some(d.audio.clone()),
+      audio_path: d.audio.clone(),
       tried_model: model.map(str::to_owned),
       busy: model.is_some(),
       ..Entry::default()
@@ -1120,6 +1155,11 @@ impl<O: TextOutput> Controller<O> {
       (Outcome::Done, Some(id)) => {
         let language = job.language.as_deref();
         log_history(self.history.db.update_text(id, &text, Some(&job.model), language));
+      }
+      // In memory, without a recording, nothing transcribes it again.
+      (_, Some(id)) if self.history.in_memory() => {
+        log_history(self.history.db.delete_entries(&[id]));
+        d.last.entry = None;
       }
       // The model did not load: it tried nothing, and takes the entry by itself once it does.
       (Outcome::NoModel, Some(id)) => {
@@ -1230,7 +1270,9 @@ impl<O: TextOutput> Controller<O> {
   /// Nothing of the dictation is kept: its entry, if it has one, and its recording go.
   fn discard(&mut self) {
     let d = self.dictation.as_mut().unwrap();
-    if let Err(e) = self.history.recordings.remove(&d.audio) {
+    if let Some(audio) = &d.audio
+      && let Err(e) = self.history.remove_recording(audio)
+    {
       warn!("dictation {}: {e:#}", d.last.take);
     }
 
@@ -1393,6 +1435,63 @@ impl<O: TextOutput> Controller<O> {
     }
   }
 
+  /// The history where the settings keep it, once no dictation runs; then the saved one goes if
+  /// the person asked.
+  fn switch_history(&mut self) {
+    if self.dictation.is_some() {
+      return;
+    }
+
+    let retention = self.settings.history_retention;
+    if retention.in_memory() != self.history.in_memory() && self.switch_failed != Some(retention) {
+      match History::open_as(&self.config.home, retention.in_memory()) {
+        Ok(history) => self.use_history(history),
+        Err(e) => {
+          warn!("history: {e:#}");
+          self.error = Some(format!("could not open the history: {e:#}"));
+          // Not tried again until the next change.
+          self.switch_failed = Some(retention);
+        }
+      }
+    }
+
+    if mem::take(&mut self.delete_saved) && self.history.in_memory() {
+      match History::delete_saved(&self.config.home) {
+        Ok(n) => info!("history: the saved history deleted, {n} entries"),
+        Err(e) => {
+          warn!("history: delete the saved history: {e:#}");
+          self.error = Some(format!("could not delete the saved history: {e:#}"));
+        }
+      }
+    }
+  }
+
+  /// `history` in place of the one in use: transcriptions again stop, to be taken up by
+  /// themselves, and a switch to the saved one drops the one in memory.
+  fn use_history(&mut self, history: History) {
+    for r in mem::take(&mut self.retranscribing) {
+      r.job.engine.cancel(r.job.id);
+      log_history(self.history.db.mark_untried(r.entry));
+    }
+
+    let old = mem::replace(&mut self.history, history);
+    if old.in_memory() {
+      log_history(old.db.delete_all().map(drop));
+    }
+
+    // Its ids are the other history's.
+    self.originals.clear();
+    if let Some(last) = &mut self.last {
+      last.entry = None;
+    }
+
+    let kept = if self.history.in_memory() { "in memory until Wavo quits" } else { "on disk" };
+    info!("history: kept {kept}");
+    self.switch_failed = None;
+    self.untried = true;
+    self.cleanup();
+  }
+
   fn status(&self) -> Status {
     let d = self.dictation.as_ref();
     let mut warnings: Vec<String> =
@@ -1424,6 +1523,7 @@ impl<O: TextOutput> Controller<O> {
       error: self.error.clone(),
       warnings,
       no_model: self.no_model(),
+      in_memory: self.history.in_memory(),
     }
   }
 }
@@ -1466,9 +1566,11 @@ mod tests {
 
   use super::*;
   use crate::audio::SAMPLE_RATE;
-  use crate::history::{RECORDINGS_DIR, Retention};
+  use crate::history::{DB_FILE, RECORDINGS_DIR};
   use crate::menu;
-  use crate::testing::{FakeModels, TempDir, download, poll, tone, wav_count, write_wav};
+  use crate::testing::{
+    FakeModels, TempDir, download, entry_ids, poll, tone, wav_count, write_wav,
+  };
   use crate::window::Pick;
 
   // MARK: Machine
@@ -1834,7 +1936,7 @@ mod tests {
     fn add_entry(&self, age_ms: i64, text: &str, pcm: &[f32]) -> i64 {
       let history = self.history();
       let created_at = now_ms() - age_ms;
-      let (name, path) = history.recordings.new_file(created_at);
+      let (name, path) = history.recordings.as_ref().unwrap().new_file(created_at);
       write_wav(&path, pcm);
       let duration_ms = pcm.len() as i64 * 1000 / i64::from(SAMPLE_RATE);
       let text = text.to_owned();
@@ -2238,6 +2340,63 @@ mod tests {
     drop(gate);
     s.handle.request(Request::Delete(vec![ids[0], ids[1]])).unwrap();
     assert_eq!((s.entry(ids[0]), s.entry(ids[1])), (None, None));
+    assert_eq!(s.recordings(), 1);
+  }
+
+  /// Kept until Wavo quits: a dictation is transcribed, pasted and in the history in memory, and
+  /// nothing of it is on disk; one without a model leaves nothing.
+  #[test]
+  fn in_memory_a_dictation_writes_nothing() {
+    let settings = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
+    let pcm = loud(10.0);
+    let s =
+      InProcess::start("session-memory", &settings, Some(&pcm), "hello there", &["parakeet-v3"]);
+    assert!(s.first.status.in_memory);
+    let last = s.dictate(1);
+    assert_eq!((last.outcome, s.pasted()), (Outcome::Done, vec!["hello there ".to_owned()]));
+    let memory = History::open_memory(s.home.path()).unwrap();
+    let entry = memory.db.get_entry(last.entry.expect("an entry")).unwrap().unwrap();
+    assert_eq!((entry.text.as_str(), entry.audio_path, entry.busy), ("hello there", None, false));
+    assert!(!s.home.path().join(DB_FILE).exists(), "no database");
+    assert!(!s.home.path().join(RECORDINGS_DIR).exists(), "no recordings");
+
+    let s = InProcess::start("session-memory-no-model", &settings, Some(&pcm), "", &[]);
+    let last = s.dictate(1);
+    assert_eq!((last.outcome, last.entry), (Outcome::NoModel, None));
+    let memory = History::open_memory(s.home.path()).unwrap();
+    assert!(memory.db.get_page("", 100).unwrap().is_empty());
+    assert!(!s.home.path().join(RECORDINGS_DIR).exists(), "no recordings");
+  }
+
+  /// A switch to memory leaves the saved history as it is and adds nothing to it, until the person
+  /// asks to delete it; back on disk, the dictations in memory are dropped and new ones saved.
+  #[test]
+  fn switching_to_memory_and_back() {
+    let pcm = loud(10.0);
+    let s =
+      InProcess::start("session-switch", &Settings::default(), Some(&pcm), "hi", &["parakeet-v3"]);
+    let saved = s.add_entry(1_000, "saved before", &loud(1.0));
+    let refused = s.handle.request(Request::DeleteSaved).unwrap_err();
+    assert!(refused.contains("saved again"), "{refused}");
+
+    s.handle.edit_settings(|s| s.history_retention = Retention::UntilQuit);
+    s.update_where("in memory", |u| u.status.in_memory);
+    let last = s.dictate(1);
+    assert_eq!((entry_ids(s.home.path()), s.recordings()), (vec![saved], 1), "nothing new saved");
+    let memory = History::open_memory(s.home.path()).unwrap();
+    assert!(memory.db.get_entry(last.entry.unwrap()).unwrap().is_some());
+
+    s.handle.request(Request::DeleteSaved).unwrap();
+    let recordings = s.home.path().join(RECORDINGS_DIR);
+    poll("deleted", Duration::from_secs(10), || {
+      (entry_ids(s.home.path()).is_empty() && !recordings.exists()).then_some(())
+    });
+
+    s.handle.edit_settings(|s| s.history_retention = Retention::Unlimited);
+    s.update_where("saved", |u| !u.status.in_memory);
+    assert!(memory.db.get_page("", 100).unwrap().is_empty(), "the ones in memory are dropped");
+    let last = s.dictate(2);
+    assert_eq!(entry_ids(s.home.path()), [last.entry.unwrap()]);
     assert_eq!(s.recordings(), 1);
   }
 

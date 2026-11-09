@@ -97,8 +97,10 @@ struct App {
   lid_closed: bool,
   recent: Vec<Entry>,
   /// What the menu's Recent and the window read: one connection on the main thread, besides the
-  /// session's.
+  /// session's, to the history it uses.
   history: Option<Rc<History>>,
+  /// The session's history is the one in memory: this one too, unless it could not open.
+  in_memory: bool,
   accessibility: bool,
   // The hotkey listener may start: everywhere but where it asks the person
   // ([nimbo::hotkey::start_asks]) before they chose the menu's Allow the Hotkey… once.
@@ -194,8 +196,11 @@ fn start(
   });
   let session = Session::start(config, GuiOutput, observer)?;
   let handle = session.handle();
+  // The session has not told its settings yet: they are read from the file.
+  let saved = Settings::load(&home.join(settings::FILE)).0;
   // After the session's: it creates and migrates the history.
-  let history = History::open(&home).inspect_err(|e| warn!("the history: {e:#}")).ok().map(Rc::new);
+  let in_memory = saved.history_retention.in_memory();
+  let history = open_history(&home, in_memory);
   let hotkeys = {
     let handle = handle.clone();
     Hotkeys::new(move |edge| handle.input(edge.into()))
@@ -220,8 +225,6 @@ fn start(
     });
   }
 
-  // The session has not told its settings yet: they are read from the file.
-  let saved = Settings::load(&home.join(settings::FILE)).0;
   let tray = Tray::new(Icon::Idle.tray(), &Icon::Idle.description());
   tray.on_open(|_, _| _ = with_app(App::menu_opening));
   tray.on_item(|main, _, action| chosen(main, action));
@@ -245,6 +248,7 @@ fn start(
     lid_closed: audio::lid_closed(),
     recent: Vec::new(),
     history,
+    in_memory,
     accessibility: false,
     may_listen: !nimbo::hotkey::start_asks() || saved.hotkey_portal,
     microphone: permissions::microphone(),
@@ -497,8 +501,20 @@ fn with_window(f: impl FnOnce(&mut Prefs) + Send + 'static) {
   });
 }
 
+/// The history saved in `home`, or the one in memory; `None` when it could not open.
+fn open_history(home: &Path, in_memory: bool) -> Option<Rc<History>> {
+  History::open_as(home, in_memory).inspect_err(|e| warn!("the history: {e:#}")).ok().map(Rc::new)
+}
+
 impl App {
   fn on_update(&mut self, main: &mut Main, update: Update) {
+    // The session took the other history: the menu reads it from now on, the window too.
+    if update.status.in_memory != self.in_memory {
+      self.in_memory = update.status.in_memory;
+      self.history = open_history(&self.home, self.in_memory);
+      self.recent.clear();
+    }
+
     // The latest update when it runs: a retry must not put the window back to an older one.
     if self.window.is_some() {
       with_window(|prefs| {
