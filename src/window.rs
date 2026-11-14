@@ -1002,7 +1002,8 @@ impl Prefs {
 const TOOK_HELP: &str = "After each dictation the HUD shows for a second how long the text took after \
   the stop.";
 const LIVE_HELP: &str = "The HUD shows the words as you speak, recognized again every half second. \
-  The text pasted is still recognized from the whole recording after the stop.";
+  The text pasted is still recognized from the whole recording after the stop. On by default on a \
+  Mac or with a discrete GPU: an integrated one is kept busy while you speak.";
 const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle this long. The next \
   dictation loads it again, which takes a moment.";
 const ANE_HELP: &str = "Models marked ANE run on the Neural Engine: as fast as on the GPU at a \
@@ -1058,7 +1059,7 @@ const RETENTIONS: [Tag<Retention>; 7] = [
 
 impl Prefs {
   fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    // The model and where it runs, then the history, then updates.
+    // The model and where it runs, then updates.
     ui.form_section(fs, "App", |ui| {
       let row = FormRow::new(marked("Unload the model", Mark::Info(UNLOAD_HELP), None));
       ui.form_row(fs, row, |ui| {
@@ -1079,19 +1080,6 @@ impl Prefs {
           }
         });
       }
-
-      let help = format!(
-        "Until Wavo quits: the last {IN_MEMORY} dictations stay in memory for History and the \
-        menu, without their audio, and nothing is saved to disk."
-      );
-      let row = FormRow::new(marked("Keep the history", Mark::Info(&help), None));
-      ui.form_row(fs, row, |ui| {
-        let mut cur = self.settings.history_retention;
-        let p = Picker::new(&mut cur).options(&RETENTIONS).divider().options(&[UNTIL_QUIT]);
-        if p.show(ui.id("retention")).changed {
-          self.edit(move |s| s.history_retention = cur);
-        }
-      });
 
       // Off and disabled where the app can't update, the setting kept; its ⓘ says why.
       let updates = self.shell.updates();
@@ -1138,60 +1126,84 @@ impl Prefs {
       });
     });
 
-    let models = self.hub.root().to_owned();
-    let recordings = self.home.join(RECORDINGS_DIR);
-    let folders = [
-      (
-        "Model folder",
-        &models,
-        "The downloaded models, in the Hugging Face cache, which other apps \
-        that use Hugging Face models share. Deleting a model on Models frees its space.",
-      ),
-      (
-        "Recordings",
-        &recordings,
-        "The audio of every dictation in the history, a folder a day. \
-        A dictation deleted from the history takes its recording with it.",
-      ),
-    ];
-    let show = format!("Show in {}", open::file_manager());
-    ui.form_section(fs, "Files", |ui| {
-      for (name, dir, what) in folders {
-        let help = format!("{what}\n\n{}", paths::display(dir));
-        let row = FormRow::new(marked(name, Mark::Info(&help), None)).tile(Icon::FOLDER);
-        ui.form_row(fs, row, |ui| {
-          let ui = ui.help(&paths::display(dir)).disabled(!dir.is_dir());
-          if ui.id(("reveal", name)).button(&show).clicked {
-            self.shell.reveal(dir);
-          }
-        });
-      }
-    });
+    // How long it is kept, what is saved, then the folders.
+    ui.form_section(fs, "History", |ui| {
+      let help = format!(
+        "Until Wavo quits: the last {IN_MEMORY} dictations stay in memory for History and the \
+        menu, without their audio, and nothing is saved to disk."
+      );
+      let row = FormRow::new(marked("Keep the history", Mark::Info(&help), None));
+      ui.form_row(fs, row, |ui| {
+        let mut cur = self.settings.history_retention;
+        let p = Picker::new(&mut cur).options(&RETENTIONS).divider().options(&[UNTIL_QUIT]);
+        if p.show(ui.id("retention")).changed {
+          self.edit(move |s| s.history_retention = cur);
+        }
+      });
 
-    ui.form_section(fs, "Data", |ui| {
-      self.export_row(ui, fs, &show);
-      self.import_row(ui, fs);
-      self.delete_row(ui, fs);
+      let show = format!("Show in {}", open::file_manager());
+      self.saved_row(ui, fs, &show);
+      self.folders_row(ui, fs, &show);
     });
   }
 
-  /// Delete All…, asking first, for the history saved on disk in either mode; off with nothing
-  /// saved. Its caption says when the delete waits for what runs.
-  fn delete_row(&mut self, ui: &mut Ui, fs: &FormStyle) {
+  /// Export…, Import… and Delete All… for the history saved on disk: the export with the system's
+  /// save panel in Downloads ([Prefs::event]), then the archive's size with Show in Finder; the
+  /// import with its open panel, then what it added; the delete asking first. Under the row what
+  /// runs or ended: Export and Import are off while the history is kept until Wavo quits, Delete
+  /// All with nothing saved, and it says when the delete waits for what runs.
+  fn saved_row(&mut self, ui: &mut Ui, fs: &FormStyle, show: &str) {
+    let export = self.shell.export_state();
+    let import = self.shell.import_state();
+    let ended = |(_, size): &(PathBuf, u64)| format!("Exported · {}", size_text(*size));
+    let exported = shown(&export, "export", "Copying the history…", ended);
+    let imported = shown(&import, "import", "Reading the archive…", imported_text);
+    let (exporting, importing) = (exported.progress.is_some(), imported.progress.is_some());
+    let progress = exported.progress.or(imported.progress);
+    let off = self.settings.history_retention.in_memory();
     let n = match self.saved {
       Some(n) => n,
       None => *self.saved.insert(self.count_saved()),
     };
-    let waits = self.status.warnings.iter().any(|w| w == session::DELETE_WAITS);
-    let caption = match () {
-      _ if waits => Some(DELETE_WAITS.to_owned()),
-      _ if n == 0 => Some(NOTHING_SAVED.to_owned()),
-      _ => None,
+
+    let not_saved = off && progress.is_none();
+    let mut captions = match not_saved {
+      true => vec![NOT_SAVED.to_owned()],
+      false => [exported.caption, imported.caption].into_iter().flatten().collect(),
     };
-    let shown = Shown { caption, progress: None, failed: false };
-    let row = FormRow::new(marked("Delete history", Mark::Info(DELETE_HELP), None));
-    let row = row.tile(Icon::TRASH);
-    data_row(ui, fs, Id::of("delete-row"), row, &shown, |ui| {
+    let waits = self.status.warnings.iter().any(|w| w == session::DELETE_WAITS);
+    match () {
+      _ if waits => captions.push(DELETE_WAITS.to_owned()),
+      _ if n == 0 => captions.push(NOTHING_SAVED.to_owned()),
+      _ => {}
+    }
+
+    let failed = !not_saved && (exported.failed || imported.failed);
+    let caption = (!captions.is_empty()).then(|| captions.join(" · "));
+    let shown = Shown { caption, progress, failed };
+    let help =
+      format!("Export… {EXPORT_HELP}\n\nImport… {IMPORT_HELP}\n\nDelete All… {DELETE_HELP}");
+    let row = FormRow::new(marked("Saved history", Mark::Info(&help), None));
+    data_row(ui, fs, Id::of("saved-row"), row, &shown, |ui| {
+      if let Some(Transfer::Done((file, _))) = &export
+        && ui.disabled(!file.is_file()).id("export-show").button(show).clicked
+      {
+        self.shell.reveal(file);
+      }
+
+      if ui.disabled(exporting || off).id("export").button("Export…").clicked {
+        let name = export_name(now_ms());
+        let panel = FileDialog::save("Export").name(&name).types(&["zip"]);
+        ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
+        self.panel = Some(Panel::Export);
+      }
+
+      if ui.disabled(importing || off).id("import").button("Import…").clicked {
+        let panel = FileDialog::open("Import").types(&["zip"]);
+        ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
+        self.panel = Some(Panel::Import);
+      }
+
       let button = Button::new("Delete All…").role(ButtonRole::Destructive);
       if button.show(ui.disabled(n == 0).id("delete-all")).clicked {
         let title = match n {
@@ -1204,6 +1216,29 @@ impl Prefs {
     });
   }
 
+  /// The model folder and the recordings' in the file manager, each button's tooltip its path.
+  fn folders_row(&mut self, ui: &mut Ui, fs: &FormStyle, show: &str) {
+    let models = self.hub.root().to_owned();
+    let recordings = self.home.join(RECORDINGS_DIR);
+    let help = format!(
+      "Models: the downloaded models, in the Hugging Face cache, which other apps that use \
+      Hugging Face models share. Deleting a model on Models frees its space.\n{}\n\nRecordings: \
+      the audio of every dictation in the history, a folder a day. A dictation deleted from the \
+      history takes its recording with it.\n{}",
+      paths::display(&models),
+      paths::display(&recordings),
+    );
+    let row = FormRow::new(marked(show, Mark::Info(&help), None));
+    ui.form_row(fs, row, |ui| {
+      for (name, dir) in [("Models", &models), ("Recordings", &recordings)] {
+        let ui = ui.help(&paths::display(dir)).disabled(!dir.is_dir());
+        if ui.id(("reveal", name)).button(name).clicked {
+          self.shell.reveal(dir);
+        }
+      }
+    });
+  }
+
   /// How many dictations the history saved on disk has: the one read here, or the one left there
   /// while the history is kept in memory; 0 when it can't be read.
   fn count_saved(&self) -> usize {
@@ -1212,58 +1247,6 @@ impl Prefs {
       None => History::count_saved(&self.home),
     };
     total.inspect_err(|e| warn!("the saved history: {e:#}")).unwrap_or(0)
-  }
-
-  /// Export, the system's save panel in Downloads ([Prefs::event]); then the archive's size with
-  /// Show in Finder. Off in memory, as Import.
-  fn export_row(&mut self, ui: &mut Ui, fs: &FormStyle, show: &str) {
-    let state = self.shell.export_state();
-    let ended = |(_, size): &(PathBuf, u64)| format!("Exported · {}", size_text(*size));
-    let mut shown = shown(&state, "export", "Copying the history…", ended);
-    let running = shown.progress.is_some();
-    let off = self.not_saved(&mut shown);
-    let row = FormRow::new(marked("Export history", Mark::Info(EXPORT_HELP), None)).tile(Icon::DOC);
-    data_row(ui, fs, Id::of("export-row"), row, &shown, |ui| {
-      if let Some(Transfer::Done((file, _))) = &state
-        && ui.disabled(!file.is_file()).id("export-show").button(show).clicked
-      {
-        self.shell.reveal(file);
-      }
-
-      if ui.disabled(running || off).id("export").button("Export…").clicked {
-        let name = export_name(now_ms());
-        let panel = FileDialog::save("Export").name(&name).types(&["zip"]);
-        ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
-        self.panel = Some(Panel::Export);
-      }
-    });
-  }
-
-  /// Import…, the system's open panel in Downloads ([Prefs::event]); then what it added.
-  fn import_row(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    let state = self.shell.import_state();
-    let mut shown = shown(&state, "import", "Reading the archive…", imported_text);
-    let running = shown.progress.is_some();
-    let off = self.not_saved(&mut shown);
-    let row = FormRow::new(marked("Import history", Mark::Info(IMPORT_HELP), None));
-    let row = row.tile(Icon::DOWNLOAD);
-    data_row(ui, fs, Id::of("import-row"), row, &shown, |ui| {
-      if ui.disabled(running || off).id("import").button("Import…").clicked {
-        let panel = FileDialog::open("Import").types(&["zip"]);
-        ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
-        self.panel = Some(Panel::Import);
-      }
-    });
-  }
-
-  /// The history is kept until Wavo quits: a Data row says it is off, unless it runs.
-  fn not_saved(&self, shown: &mut Shown) -> bool {
-    let off = self.settings.history_retention.in_memory();
-    if off && shown.progress.is_none() {
-      (shown.caption, shown.failed) = (Some(NOT_SAVED.into()), false);
-    }
-
-    off
   }
 
   /// The switch shows the change at once and stays disabled until the system answers
@@ -1556,6 +1539,15 @@ fn unusable(lang: &str, m: &ModelInfo) -> bool {
   m.wer(lang).is_some_and(|x| x > USABLE)
 }
 
+/// Whether `m`, which writes lowercase without punctuation, counts in `lang`: it is usable there
+/// and no model with punctuation is, or the best of those makes twice its errors, as in Kazakh,
+/// Kyrgyz and Uzbek. A text to fix beats none; where a good one punctuates, it stays hidden.
+fn plain_fits(lang: &str, m: &ModelInfo) -> bool {
+  let Some(wer) = m.wer(lang).filter(|&x| x <= USABLE) else { return false };
+  let punctuated = hub::MODELS.iter().filter(|m| m.punctuated).filter_map(|m| m.wer(lang));
+  punctuated.min_by(f32::total_cmp).is_none_or(|best| best > USABLE || best >= wer * 2.0)
+}
+
 /// Whether models were measured in `lang` but none of them is usable there ([USABLE]).
 fn none_usable(lang: &str) -> bool {
   let measured = hub::MODELS.iter().any(|m| m.wer(lang).is_some());
@@ -1567,7 +1559,7 @@ fn none_usable(lang: &str) -> bool {
 /// was measured on it, or none of those is usable in it ([USABLE]).
 fn recommended(lang: &str) -> Option<&'static ModelInfo> {
   let measured: Vec<(&'static ModelInfo, f32, f32)> = (hub::MODELS.iter())
-    .filter(|m| m.punctuated)
+    .filter(|m| m.punctuated || plain_fits(lang, m))
     .filter_map(|m| Some((m, m.wer(lang).filter(|&x| x <= USABLE)?, m.speed().unwrap_or(0.0))))
     .collect();
   let least = |fast: bool| {
@@ -1614,6 +1606,9 @@ fn best_for(lang: &str) -> Option<(&'static str, String)> {
   let name = language_name(lang);
   match (lang, recommended(lang)) {
     ("", _) => Some((RECOMMENDED, "The default model".into())),
+    (_, Some(m)) if !m.punctuated => {
+      Some((m.name, format!("The fewest errors in {name}, but lowercase without punctuation")))
+    }
     (_, Some(m)) => Some((m.name, format!("Best balance of accuracy and speed in {name}"))),
     _ => (hub::lookup("whisper-turbo").ok())
       .filter(|m| m.langs.contains(&lang) && m.wer(lang).is_none())
@@ -1683,8 +1678,13 @@ impl Prefs {
       hub::MODELS.iter().filter(|m| on_disk(m) && shown(m)).collect();
     // The ones dictations go to first, then as the rest.
     downloaded.sort_by_key(|m| (!self.dictates(m), rank(lang, best, m)));
-    // Lowercase without punctuation only to delete, but the one chosen, to download it again.
-    let offered = |m: &ModelInfo| m.punctuated || chosen == Some(m.name);
+    // Lowercase without punctuation only to delete, but the one chosen, to download it again,
+    // and one for a language that has nothing better ([plain_fits]).
+    let plain = |m: &ModelInfo| match lang {
+      "" => m.langs.iter().any(|l| plain_fits(l, m)),
+      _ => plain_fits(lang, m),
+    };
+    let offered = |m: &ModelInfo| m.punctuated || chosen == Some(m.name) || plain(m);
     let mut remote: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| !on_disk(m) && offered(m) && shown(m)).collect();
     remote.sort_by_key(|m| rank(lang, best, m));
@@ -2055,8 +2055,8 @@ fn model_row<'a>(m: &'a ModelInfo, fit: Fit<'a>) -> FormRow<'a> {
 }
 
 /// Model row `row`'s caption ([FormRow::caption]) in its style `s`: its WER in the [Fit]'s
-/// language, dotted, what it means on hover, else its languages; the size; with `ane` ANE,
-/// dotted, what it is on hover.
+/// language, dotted, what it means on hover, else its languages; "no punctuation" for one
+/// without; the size; with `ane` ANE, dotted, what it is on hover.
 fn model_caption(ui: &mut Ui, s: TextStyle, row: Id, m: &ModelInfo, fit: Fit, ane: bool) {
   // One line, each piece ending in "…" where the row is short.
   let s = s.line_limit(1);
@@ -2067,6 +2067,10 @@ fn model_caption(ui: &mut Ui, s: TextStyle, row: Id, m: &ModelInfo, fit: Fit, an
         .help(errors_per(fit.lang))
         .text(wer, s.underline(LinePattern::Dot)),
       None => ui.text(m.languages, s),
+    }
+
+    if !m.punctuated {
+      ui.text(" · no punctuation", s);
     }
 
     ui.text(format!(" · {}{}", size_text(m.size), if ane { " · " } else { "" }), s);
@@ -3578,7 +3582,7 @@ mod tests {
       let mut h = fits.harness(&fake, settings);
       h.event(Event::Appearance(appearance));
       tab(&mut h, Page::Models);
-      for code in ["ru", "el", "he", "ka", "sq", ""] {
+      for code in ["ru", "kk", "el", "he", "ka", "sq", ""] {
         h.app_mut().model_lang = LANGUAGES.iter().position(|l| l.1 == code).unwrap();
         h.frame();
         let name = if code.is_empty() { "all" } else { code };
@@ -3765,8 +3769,9 @@ mod tests {
     click(&mut h, Id::of("hud-style"));
     click(&mut h, Id::of("hud-style").key(("item", 1)));
     assert_eq!(fake.log().settings.hud_style, HudStyle::Plain);
+    let live = fake.log().settings.live_preview;
     click(&mut h, Id::of("live"));
-    assert!(fake.log().settings.live_preview);
+    assert_eq!(fake.log().settings.live_preview, !live);
 
     // Launch at login, on General, goes to the system, one change at a time; a refusal says why.
     tab(&mut h, Page::General);
@@ -3952,7 +3957,7 @@ mod tests {
     tab(&mut h, Page::Advanced);
     let button = |h: &Harness<Prefs>| a11y_line(h, "button \"Delete All…\"").unwrap_or_default();
     let caption =
-      |h: &Harness<Prefs>| h.text(Id::of("delete-row").key("caption")).map(str::to_owned);
+      |h: &Harness<Prefs>| h.text(Id::of("saved-row").key("caption")).map(str::to_owned);
     assert!(button(&h).contains("disabled"), "{}", button(&h));
     assert_eq!(caption(&h).as_deref(), Some(NOTHING_SAVED));
     click(&mut h, Id::of("delete-all"));
@@ -4012,9 +4017,7 @@ mod tests {
     let settings = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
     h.app_mut().update(&settings, &status, 0);
     h.frame();
-    for row in ["export-row", "import-row"] {
-      assert_eq!(h.text(Id::of(row).key("caption")), Some(NOT_SAVED), "{row}");
-    }
+    assert_eq!(h.text(Id::of("saved-row").key("caption")), Some(NOT_SAVED));
 
     click(&mut h, Id::of("export"));
     assert!(h.file_dialog(None).is_none(), "export is off");
@@ -4323,7 +4326,8 @@ mod tests {
   }
 
   /// The model chosen, gone from disk, shows to download it again, without punctuation too and
-  /// whatever the search; the other ones without punctuation don't.
+  /// whatever the search; the other ones without punctuation don't, but for a language with
+  /// nothing better.
   #[test]
   fn a_chosen_model_gone_shows_to_download_again() {
     let home = Home::new("window-gone", &["parakeet-v3"]);
@@ -4339,6 +4343,7 @@ mod tests {
     search(&mut h, "gigaam");
     assert!(h.rect(Id::of(("download", "gigaam-v3-ctc"))).is_some(), "to download again");
     assert!(shown(&h, "gigaam-v3") && !shown(&h, "gigaam-v3-rnnt"), "without punctuation");
+    assert!(shown(&h, "gigaam-multilingual"), "nothing better in Kazakh");
     search(&mut h, "whisper");
     assert!(shown(&h, "gigaam-v3-ctc") && shown(&h, "parakeet-v3"), "whatever the search");
   }
@@ -4495,8 +4500,8 @@ mod tests {
       models.into_iter().map(|m| m.name).collect::<Vec<_>>()
     };
     assert_eq!(order("he")[..3], ["parakeet-he", "whisper-turbo-he", "whisper-turbo"]);
-    let en = ["parakeet-v2", RECOMMENDED, "whisper-large-v3", "breeze-asr-25", "whisper-turbo"];
-    assert_eq!(order("en")[..6], [&en[..], &["whisper-large-v2"]].concat());
+    let en = ["parakeet-v2", RECOMMENDED, "whisper-large-v3", "breeze-asr-25", "parakeet-uk"];
+    assert_eq!(order("en")[..6], [&en[..], &["whisper-turbo"]].concat());
     let ru = ["gigaam-v3-e2e-ctc", "whisper-large-v3", "gigaam-v3", "whisper-turbo", RECOMMENDED];
     assert_eq!(order("ru")[..5], ru);
 
@@ -4550,7 +4555,7 @@ mod tests {
   }
 
   /// WER to a decimal under 10 (rounded first); bolts and the speed's words, whisper-turbo the
-  /// baseline; never an unpunctuated model recommended.
+  /// baseline; an unpunctuated model recommended only where nothing better is.
   #[test]
   fn models_say_their_errors_and_speed() {
     let m = |name: &str| hub::lookup(name).unwrap();
@@ -4559,7 +4564,9 @@ mod tests {
     assert_eq!(wer_text("", m("parakeet-ultra")), None, "all languages");
     assert_eq!([9.94, 9.96, 31.6].map(figure), ["9.9", "10", "32"]);
     for (_, lang) in LANGUAGES.iter() {
-      assert!(recommended(lang).is_none_or(|m| m.punctuated), "{lang}");
+      let plain = recommended(lang).filter(|m| !m.punctuated).map(|m| m.name);
+      let only = ["kk", "ky", "uz"].contains(lang);
+      assert_eq!(plain, only.then_some("gigaam-multilingual"), "{lang}");
     }
 
     assert_eq!([22.1, 9.96, 8.5, 0.9].map(times), ["22×", "10×", "8.5×", "0.9×"]);
