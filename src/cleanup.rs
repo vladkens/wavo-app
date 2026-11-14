@@ -1,15 +1,17 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! What changes in a dictated text on its way to the person: hesitation sounds go, and a text that
-//! goes on a sentence the paste before it left open starts in lower case (`ends_sentence`,
-//! `going_on`). A filler left in is the cheap mistake and a real word removed the expensive one,
-//! so whatever is in doubt stays as it is.
+//! What changes in a dictated text on its way to the person: hesitation sounds go, Russian numbers
+//! in words become digits ([numbers]), and a text that goes on a sentence the paste before it left
+//! open starts in lower case (`ends_sentence`, `going_on`). A filler left in is the cheap mistake
+//! and a real word removed the expensive one, so whatever is in doubt stays as it is.
+
+use crate::numbers;
 
 /// The hesitation sounds of a language, in lower case. Not one list for all: `um` is a German and
 /// Portuguese word, `мм` a unit. No bare `э`: it is a letter, an initial and a building's name; no
 /// `эм` for the same reason: `буква эм`, `Эм Ватсон`.
 const FILLERS: [(&str, &[&str]); 2] = [
-  ("ru", &["ээ", "э-э", "э-э-э", "ммм", "хм"]),
+  ("ru", &["ээ", "э-э", "э-э-э", "ммм", "хм", "хмм"]),
   ("en", &["uh", "uhh", "um", "umm", "uhm", "er", "erm", "hmm", "hm", "mmm"]),
 ];
 
@@ -28,9 +30,14 @@ fn is_mark(c: char) -> bool {
 /// known: only a language with a table changes.
 pub fn clean(text: &str, language: Option<&str>) -> String {
   let language = language.map(str::to_lowercase);
-  match FILLERS.iter().find(|(code, _)| Some(*code) == language.as_deref()) {
+  let text = match FILLERS.iter().find(|(code, _)| Some(*code) == language.as_deref()) {
     Some((_, fillers)) => without_fillers(text, fillers),
     None => text.to_owned(),
+  };
+
+  match language.as_deref() {
+    Some("ru") => numbers::digits(&text),
+    _ => text,
   }
 }
 
@@ -112,7 +119,7 @@ fn without_fillers(text: &str, fillers: &[&str]) -> String {
 }
 
 /// The words of `text`, each with the whitespace before it.
-fn words(text: &str) -> impl Iterator<Item = (&str, &str)> {
+pub fn words(text: &str) -> impl Iterator<Item = (&str, &str)> {
   let mut rest = text;
   std::iter::from_fn(move || {
     let word = rest.trim_start();
@@ -391,6 +398,16 @@ mod tests {
     }
 
     assert_eq!(en("Um, uh, hmm?"), "Um, uh, hmm?");
+  }
+
+  /// English models write digits themselves, and a word like `one` is more often no number.
+  #[test]
+  fn numbers_go_in_digits_in_russian_only() {
+    assert_eq!(ru("Хмм... в семьдесят шестом э-э году"), "В 76-м году");
+    assert_eq!(ru("Первая строка\nдвадцать пять\n"), "Первая строка\n25\n");
+    assert_eq!(en("twenty five"), "twenty five");
+    assert_eq!(clean("семьдесят шестой", Some("en")), "семьдесят шестой");
+    assert_eq!(clean("семьдесят шестой", None), "семьдесят шестой");
   }
 
   #[test]
