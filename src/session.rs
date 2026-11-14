@@ -2357,7 +2357,9 @@ mod tests {
     assert!(s.finished(1).preview.is_none());
     assert_eq!(s.pasted(), ["hello there "]);
 
-    let s = hello("session-no-live");
+    let off = Settings { live_preview: false, ..Settings::default() };
+    let s =
+      InProcess::start("session-no-live", &off, Some(&loud(10.0)), "hello there", &["parakeet-v3"]);
     s.record(0.3);
     thread::sleep(live::STEP * 2);
     s.press();

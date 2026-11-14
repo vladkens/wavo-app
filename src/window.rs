@@ -3748,7 +3748,7 @@ mod tests {
     click(&mut h, Id::of("hud-style").key(("item", 1)));
     assert_eq!(fake.log().settings.hud_style, HudStyle::Plain);
     click(&mut h, Id::of("live"));
-    assert!(fake.log().settings.live_preview);
+    assert!(!fake.log().settings.live_preview);
 
     // Launch at login, on General, goes to the system, one change at a time; a refusal says why.
     tab(&mut h, Page::General);

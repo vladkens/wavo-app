@@ -114,7 +114,7 @@ impl Default for Settings {
       autostart: false,
       hud_position: HudPosition::Bottom,
       hud_style: HudStyle::Gradient,
-      live_preview: false,
+      live_preview: true,
       show_transcription_time: false,
       hotkey_portal: false,
       auto_update: true,
