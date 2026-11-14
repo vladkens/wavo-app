@@ -6,7 +6,7 @@
 //! shell keeps current ([Prefs::update]), and reaches the app only through [Shell]: tests run it
 //! in nimbo's harness with a fake one.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -20,8 +20,8 @@ use nimbo::system::Change;
 use nimbo::ui::Role;
 use nimbo::ui::widgets::icon;
 use nimbo::{
-  Align, Answer, App, Button, ButtonRole, ButtonStyle, Config, ControlSize, Cx, Dialog, Event,
-  FileDialog, Font, FormRow, FormStyle, Frame, Hotkey, Icon, Id, Item, LinePattern, List,
+  Align, Answer, App, Button, ButtonLook, ButtonRole, ButtonStyle, Config, ControlSize, Cx, Dialog,
+  Event, FileDialog, Font, FormRow, FormStyle, Frame, Hotkey, Icon, Id, Item, LinePattern, List,
   ListStyle, Menu, Picker, Rect, Response, Section, Selection, Style, TabItem, Tag, TextStyle,
   Tone, Ui, Weight, grow, open, paths, px,
 };
@@ -33,7 +33,7 @@ use crate::history::{
   Entry, History, IN_MEMORY, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms,
 };
 use crate::session::{self, NoModel, Request, Status, label};
-use crate::settings::{Activation, HudPosition, HudStyle, Settings, language_name};
+use crate::settings::{Activation, HudPosition, HudStyle, KEYBOARD, Settings, language_name};
 use crate::transfer::Imported;
 use crate::{engine, mic_start};
 
@@ -106,6 +106,12 @@ pub trait Shell {
     false
   }
 
+  /// The keyboard layouts the person can switch to that type a language: its code and the
+  /// layout's name (`ru`, `Russian – PC`); none where the system doesn't tell.
+  fn keyboard_layouts(&self) -> Vec<(String, String)> {
+    Vec::new()
+  }
+
   fn access(&self) -> Access;
   /// The system's prompt while it can still ask ([Prefs::access_changed]), else its pane.
   fn allow(&self, _pane: Pane) {}
@@ -176,6 +182,8 @@ pub struct Prefs {
   devices: Vec<audio::Device>,
   /// A laptop's lid is closed: its built-in microphone hears nothing ([audio::automatic]).
   lid_closed: bool,
+  /// [Shell::keyboard_layouts].
+  layouts: Vec<(String, String)>,
   found: Vec<Found>,
   pick: Pick,
   access: Access,
@@ -217,6 +225,7 @@ impl Prefs {
       home: home.to_owned(),
       devices: Vec::new(),
       lid_closed: false,
+      layouts: Vec::new(),
       found: Vec::new(),
       pick: Pick::default(),
       access,
@@ -258,6 +267,7 @@ impl Prefs {
   pub fn refresh(&mut self) {
     self.devices = self.shell.devices();
     self.lid_closed = self.shell.lid_closed();
+    self.layouts = self.shell.keyboard_layouts();
     self.access = self.shell.access();
     self.login.state = self.shell.autostart();
     self.models_changed();
@@ -305,7 +315,14 @@ impl Prefs {
 
   /// The model stays on disk: it transcribes now, or is [busy](Self::busy).
   fn in_use(&self, m: &ModelInfo) -> bool {
-    self.active().is_some_and(|f| f.0.name == m.name) || self.busy(m)
+    self.dictates(m) || self.busy(m)
+  }
+
+  /// Dictations go to the model: it is the Model, or a keyboard layout's language's.
+  fn dictates(&self, m: &ModelInfo) -> bool {
+    let keyboard = self.settings.follows_keyboard().then_some(&self.settings.keyboard_models);
+    let row = keyboard.is_some_and(|rows| rows.values().any(|v| model_name(v) == Some(m.name)));
+    self.active().is_some_and(|f| f.0.name == m.name) || row
   }
 
   /// Some model transcribes: the chosen one, or the first downloaded in its place.
@@ -317,7 +334,7 @@ impl Prefs {
   fn model_note(&self) -> Option<String> {
     if let Some(chosen) = self.pick.gone() {
       return Some(match self.active() {
-        Some(f) => format!("{chosen} is not on disk: {} transcribes instead.", f.0.full_name),
+        Some(f) => format!("{chosen} is not on disk: {} transcribes instead.", f.0.name),
         None => format!("{chosen} is not on disk: download it again in Models, or pick another."),
       });
     }
@@ -378,7 +395,7 @@ impl Prefs {
 impl App for Prefs {
   fn view(&mut self, ui: &mut Ui) {
     // The title bar is part of the window's content.
-    let bar = ui.titlebar().map_or(0.0, |(h, _)| h);
+    let bar = ui.titlebar().map_or(0.0, |b| b.height);
     match self.page.scrolls() {
       true => ui.set_window_size(WIDTH, SCROLLING + bar),
       false => ui.fit_window_height(WIDTH, 200.0, 800.0),
@@ -449,6 +466,10 @@ impl App for Prefs {
         self.lid_closed = self.shell.lid_closed();
         true
       }
+      Event::System(Change::InputSource) => {
+        let layouts = self.shell.keyboard_layouts();
+        std::mem::replace(&mut self.layouts, layouts) != self.layouts
+      }
       Event::FileDialog(answer) => {
         match (self.panel.take(), answer) {
           // GNOME's save panel adds no extension: Import's *.zip would not show it.
@@ -472,6 +493,25 @@ const MIC_WIDTH: f32 = 320.0;
 fn pick(ui: &mut Ui, id: &str, labels: &[String], at: usize, lines: &[usize]) -> Option<usize> {
   let mut cur = at;
   picker(&mut cur, labels.iter().map(String::as_str), lines).show(ui.id(id)).changed.then_some(cur)
+}
+
+/// The languages of keyboard `layouts` ([Shell::keyboard_layouts]) by name, each with its
+/// layouts' names: `("ru", "Russian – PC")`.
+fn keyboard_languages(layouts: &[(String, String)]) -> Vec<(String, String)> {
+  let mut by: BTreeMap<String, (String, Vec<&str>)> = BTreeMap::new();
+  for (lang, layout) in layouts {
+    let entry = by.entry(language_name(lang)).or_insert_with(|| (lang.clone(), Vec::new()));
+    if !entry.1.contains(&layout.as_str()) {
+      entry.1.push(layout);
+    }
+  }
+
+  by.into_values().map(|(lang, names)| (lang, names.join(", "))).collect()
+}
+
+/// wavo's name for a model choice, `None` for a file of the person's own.
+fn model_name(choice: &str) -> Option<&'static str> {
+  hub::lookup(choice).ok().map(|m| m.name)
 }
 
 /// A picker of `labels` by their place, a divider after each of `lines`.
@@ -564,6 +604,17 @@ const LOGIN_APPROVAL: &str = if cfg!(windows) {
 };
 const KEEP_HELP: &str = "On: the dictated text stays on the clipboard, pasted or not. Off: after \
   a paste the clipboard gets back what it held; with pasting off, the text is only in History.";
+const AUTO_HELP: &str = "The model tells the language of each dictation by itself. Short \
+  phrases, an accent or two languages mixed can mislead it: choose the language you speak, or \
+  Keyboard layout to follow the layout you type with.";
+const MODEL_KEYBOARD_HELP: &str = "With Keyboard layout, each language under Language goes to \
+  the model chosen there. This one takes a language set to it, one no model knows, and a layout \
+  of any other language.";
+/// How far a keyboard language sits in from the Language row's name.
+const KEYBOARD_INDENT: f32 = 16.0;
+const KEYBOARD_HELP: &str = "Each dictation is in the language of the keyboard layout in use when \
+  it ends, with the model chosen for that language below. Switch the layout while you speak and \
+  the whole dictation follows it; the HUD shows the language.";
 const CLEAN_HELP: &str = "Adds a space after each paste. A paste into the same window less than \
   20 s after one that ended mid-sentence starts in lower case, unless its first word is in Latin \
   letters. Hesitation sounds like “э-э” and “um” are left out in Russian and English, when you \
@@ -591,7 +642,8 @@ const ACTIVATIONS: [Tag<Activation>; 3] = [
 impl Prefs {
   fn general(&mut self, ui: &mut Ui, fs: &FormStyle) {
     self.permissions(ui, fs);
-    // By what matters most: the microphone, the model and its language, then the shortcut.
+    // By what a dictation needs: the microphone, the model, how the key records and the key; then
+    // the language, which may open into one row per keyboard layout.
     ui.form_section(fs, "Dictation", |ui| {
       let (devices, saved) = (&self.devices, &self.settings.microphone);
       let (mics, at) = microphones(devices, saved, self.lid_closed);
@@ -616,7 +668,7 @@ impl Prefs {
         }
       });
 
-      self.model_rows(ui, fs);
+      self.model_row(ui, fs);
       let note = match (self.access.secure_input, self.settings.hotkey == "fn") {
         (true, _) => Some(SECURE_INPUT_NOTE),
         (false, true) => Some(FN_NOTE),
@@ -630,7 +682,6 @@ impl Prefs {
         None => Mark::None,
       };
 
-      ui.form_row(fs, FormRow::new(marked("Shortcut", mark, None)), |ui| self.shortcut(ui));
       let row = FormRow::new(marked("Activation", Mark::Info(ACTIVATION_HELP), None));
       ui.form_row(fs, row, |ui| {
         let mut cur = self.settings.activation;
@@ -638,6 +689,8 @@ impl Prefs {
           self.edit(move |s| s.activation = cur);
         }
       });
+      ui.form_row(fs, FormRow::new(marked("Shortcut", mark, None)), |ui| self.shortcut(ui));
+      self.language_row(ui, fs);
     });
 
     ui.form_section(fs, "Output", |ui| {
@@ -740,7 +793,7 @@ impl Prefs {
 
   /// The downloaded models, the chosen one when it is none of them, then "Download more…".
   fn model_choices(&self) -> (Vec<String>, usize) {
-    let mut items: Vec<String> = self.found.iter().map(|f| f.0.full_name.to_owned()).collect();
+    let mut items: Vec<String> = self.found.iter().map(|f| f.0.name.to_owned()).collect();
     let mut at = self.pick.active.unwrap_or_default();
     let other = match &self.pick.other {
       Some((name, true)) => Some(name.clone()),
@@ -756,13 +809,23 @@ impl Prefs {
     (items, at)
   }
 
-  /// The language choices: auto, then the languages the model in use is meant for.
+  /// The language choices: auto, the keyboard layout's where the system tells it, then the
+  /// languages the model in use is meant for.
   fn languages(&self) -> (Vec<(String, String)>, usize) {
     let codes = self.active().map_or(&[][..], |f| f.0.langs);
     let mut langs: Vec<(String, String)> =
       codes.iter().map(|c| (language_name(c), (*c).to_owned())).collect();
     langs.sort();
     langs.insert(0, ("Auto-detect".to_owned(), "auto".to_owned()));
+    let keyboard = self.settings.follows_keyboard();
+    if keyboard || !self.layouts.is_empty() {
+      langs.insert(1, ("Keyboard layout".to_owned(), KEYBOARD.to_owned()));
+    }
+
+    if keyboard {
+      return (langs, 1);
+    }
+
     let Some(current) = self.settings.engine_language() else { return (langs, 0) };
 
     if let Some(i) = langs.iter().position(|(_, c)| c.eq_ignore_ascii_case(&current)) {
@@ -774,12 +837,14 @@ impl Prefs {
     (langs, at)
   }
 
-  /// The model and language rows; with no model downloaded, the way to download one.
-  fn model_rows(&mut self, ui: &mut Ui, fs: &FormStyle) {
+  /// The model row; with no model downloaded, the way to download one.
+  fn model_row(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let (labels, at) = self.model_choices();
     let note = self.model_note();
-    let mark = note.as_deref().map_or(Mark::None, Mark::Info);
-    let row = FormRow::new(marked("Model", mark, None));
+    let keyboard = self.settings.follows_keyboard().then_some(MODEL_KEYBOARD_HELP);
+    let mark = note.as_deref().or(keyboard).map_or(Mark::None, Mark::Info);
+    let name = if keyboard.is_some() { "Default model" } else { "Model" };
+    let row = FormRow::new(marked(name, mark, Some(Id::of("model-row").key("info"))));
 
     let none = self.found.is_empty() && self.pick.other.is_none();
     let mut picked = None;
@@ -800,15 +865,131 @@ impl Prefs {
       Some(i) if i < self.found.len() => self.use_model(self.found[i].0.name),
       _ => {}
     }
+  }
 
+  /// The language, last of the dictation's rows: with Keyboard layout, its languages under it.
+  fn language_row(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let (langs, at) = self.languages();
     let labels: Vec<String> = langs.iter().map(|l| l.0.clone()).collect();
-    ui.form_row(fs, FormRow::new("Language"), |ui| {
-      if let Some(i) = pick(ui, "lang", &labels, at, &[0]) {
-        let code = langs[i].1.clone();
-        self.edit(move |s| s.language = code.clone());
+    let head = langs.iter().position(|l| l.1 == KEYBOARD).unwrap_or(0);
+    let keyboard = self.settings.follows_keyboard();
+    let auto = self.auto_help();
+    let mark = match () {
+      _ if keyboard => Mark::Info(KEYBOARD_HELP),
+      _ if self.settings.engine_language().is_none() => Mark::Info(&auto),
+      _ => Mark::None,
+    };
+    let label = marked("Language", mark, Some(Id::of("lang-row").key("info")));
+    // With Keyboard layout, its languages under it in the same row, each with its model.
+    let rows = if keyboard { keyboard_languages(&self.layouts) } else { Vec::new() };
+    let choices: Vec<_> = rows.iter().map(|(lang, _)| self.keyboard_choices(lang)).collect();
+    let mut row = FormRow::new(label);
+    let mut chosen = None;
+    if !rows.is_empty() {
+      let (label_style, chosen, rows, choices) = (fs.label, &mut chosen, &rows, &choices);
+      row = row.footer(move |ui: &mut Ui, s: TextStyle| {
+        let list = Style::new().w(grow()).gap(4.0).pads([2.0, 0.0, 0.0, KEYBOARD_INDENT]);
+        ui.col(list, |ui| {
+          for (i, ((lang, layouts), (labels, _, at))) in rows.iter().zip(choices).enumerate() {
+            let line = Style::new().w(grow()).gap(6.0).align(Align::Start, Align::Center);
+            ui.row(line, |ui| {
+              ui.text(language_name(lang), label_style.line_limit(1));
+              // The label's size, dimmed: one baseline with the name.
+              ui.text(layouts.as_str(), label_style.color(s.color).line_limit(1));
+              ui.el(Style::new().w(grow()));
+              let id = format!("keyboard-{lang}");
+              if let Some(p) = pick(ui, &id, labels, *at, &[0, labels.len() - 2]) {
+                *chosen = Some((i, p));
+              }
+            });
+          }
+        });
+      });
+    }
+
+    let mut picked = None;
+    ui.form_row(fs, row, |ui| picked = pick(ui, "lang", &labels, at, &[head]));
+    if let Some(i) = picked {
+      let code = langs[i].1.clone();
+      // Keyboard layout starts each language on its best model downloaded.
+      let mut rows = self.settings.keyboard_models.clone();
+      if code == KEYBOARD {
+        for (lang, _) in keyboard_languages(&self.layouts) {
+          if let Some(m) = self.best_for(&lang).filter(|_| !rows.contains_key(&lang)) {
+            rows.insert(lang, m.to_owned());
+          }
+        }
       }
-    });
+
+      self.edit(move |s| (s.language, s.keyboard_models) = (code.clone(), rows.clone()));
+    }
+
+    let Some((i, p)) = chosen else { return };
+    let ((lang, _), (labels, models, _)) = (&rows[i], &choices[i]);
+    let lang = lang.clone();
+    if p == 0 {
+      info!("settings: {lang} goes to the default model");
+      self.edit(move |s| _ = s.keyboard_models.remove(&lang));
+    } else if p + 1 == labels.len() {
+      self.model_lang = LANGUAGES.iter().position(|l| l.1 == lang).unwrap_or_default();
+      self.page = Page::Models;
+    } else if let Some(&model) = models.get(p - 1) {
+      info!("settings: {lang} goes to {model}");
+      self.edit(move |s| _ = s.keyboard_models.insert(lang.clone(), model.to_owned()));
+    }
+  }
+
+  /// What Auto-detect does with the model in use: one of one language always takes its own.
+  fn auto_help(&self) -> String {
+    match self.active().map(|f| f.0) {
+      Some(m) if let [code] = m.langs => {
+        let lang = language_name(code);
+        format!("{} knows {lang} only, so every dictation is in {lang}.", m.name)
+      }
+      _ => AUTO_HELP.to_owned(),
+    }
+  }
+
+  /// The downloaded models that know `lang`, as Models orders them in it: the recommended one
+  /// first, then by fewest errors.
+  fn models_for(&self, lang: &str) -> Vec<&'static ModelInfo> {
+    let best = recommended(lang).map(|m| m.name);
+    let mut models: Vec<&'static ModelInfo> =
+      self.found.iter().map(|f| f.0).filter(|m| m.langs.contains(&lang)).collect();
+    models.sort_by_key(|m| rank(lang, best, m));
+    models
+  }
+
+  /// The model a keyboard layout's language starts on: the best downloaded for it.
+  fn best_for(&self, lang: &str) -> Option<&'static str> {
+    self.models_for(lang).first().map(|m| m.name)
+  }
+
+  /// A keyboard language's choices: the default model (the Model's: none of the language's own),
+  /// the downloaded models that know `lang`, best first, the one chosen when it is not on disk,
+  /// and Download more…; the models' names, and the choice in use.
+  fn keyboard_choices(&self, lang: &str) -> (Vec<String>, Vec<&'static str>, usize) {
+    let models = self.models_for(lang);
+    let default = match (self.active(), &self.pick.other) {
+      (_, Some((name, _))) => name.clone(),
+      (Some(f), None) => f.0.name.to_owned(),
+      (None, None) => "none".to_owned(),
+    };
+    let mut labels = vec![format!("{default} (default)")];
+    labels.extend(models.iter().map(|m| m.name.to_owned()));
+    let at = match self.settings.keyboard_models.get(lang) {
+      None => 0,
+      Some(c) => match models.iter().position(|m| model_name(c) == Some(m.name)) {
+        Some(i) => i + 1,
+        None => {
+          labels.push(format!("{} (not on disk)", label(c)));
+          labels.len() - 1
+        }
+      },
+    };
+
+    labels.push("Download more…".into());
+    (labels, models.iter().map(|m| m.name).collect(), at)
   }
 }
 
@@ -1486,7 +1667,8 @@ impl Prefs {
     let why = |m: &ModelInfo| pick.as_ref().filter(|p| p.0 == m.name).map(|p| p.1.as_str());
     let mut downloaded: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| on_disk(m) && shown(m)).collect();
-    downloaded.sort_by_key(|m| rank(lang, best, m));
+    // The ones dictations go to first, then as the rest.
+    downloaded.sort_by_key(|m| (!self.dictates(m), rank(lang, best, m)));
     // Lowercase without punctuation only to delete, but the one chosen, to download it again.
     let offered = |m: &ModelInfo| m.punctuated || chosen == Some(m.name);
     let mut remote: Vec<&'static ModelInfo> =
@@ -1624,7 +1806,7 @@ impl Prefs {
     let (title, mut message) = match &models[..] {
       [] => return,
       [m] => (
-        format!("Delete {}?", m.full_name),
+        format!("Delete {}?", m.name),
         format!("It frees {size} in the Hugging Face cache. You can download it again."),
       ),
       _ => (
@@ -1654,7 +1836,7 @@ impl Prefs {
     self.shell.has_neural_engine() && m.neural_engine()
   }
 
-  /// Its [Fit], Use (or "✓ In use") and the bin in [actions], ↗: the model to ask about deleting.
+  /// Its [Fit], Use (or In use) and the bin in [actions], ↗: the model to ask about deleting.
   fn downloaded_row(
     &mut self,
     ui: &mut Ui,
@@ -1670,16 +1852,20 @@ impl Prefs {
     ui.with_id(id).form_row(fs, model_row(m, fit).caption(caption), |ui| {
       fit.show(ui, m);
       let slot = actions(ui, fs.gap);
+      // Use and In use as wide, both centred in one column: the rows line up.
+      let w = use_w(ui).ceil();
+      let column = Style::new().w(px(w)).align(Align::Center, Align::Center);
       ui.row(slot, |ui| {
-        if in_use {
-          ui.row(Style::new().gap(4.0).align(Align::Start, Align::Center), |ui| {
-            ui.icon(Icon::CHECK.stroke(2.2), 14.0, t.accent);
+        ui.row(column, |ui| {
+          if in_use {
             let s = t.label().color(t.accent).font(t.font.weight(Weight::Medium)).nowrap();
             ui.text("In use", s);
-          });
-        } else {
-          used = ui.id(("use", m.name)).button("Use").clicked;
-        }
+          } else {
+            let b = t.button(ButtonStyle::Bordered);
+            let look = ButtonLook { frame: b.frame.w(px(w)), ..b };
+            used = Button::new("Use").look(look).show(ui.id(("use", m.name))).clicked;
+          }
+        });
 
         // The one in use stays, and the one a dictation goes on with after a switch.
         let busy = !in_use && self.busy(m);
@@ -1767,18 +1953,27 @@ impl Prefs {
   }
 }
 
-/// The slot of a model row's buttons but ↗, as wide as the widest it holds ("✓ In use" and the
-/// bin, Use and the bin, Download, Retry) in this theme's fonts: the bolts before it line up on
-/// every row.
+/// The slot of a model row's buttons but ↗, as wide as the widest it holds (the column of Use
+/// and In use and the bin, Download, Retry) in this theme's fonts: the bolts before it line up
+/// on every row.
 fn actions(ui: &mut Ui, gap: f32) -> Style {
   let t = ui.theme();
   let b = t.button(ButtonStyle::Bordered);
   let (h, pad) = (b.frame.min[0], b.frame.pad[1] + b.frame.pad[3]);
+  let column = use_w(ui).ceil();
   let mut button = |s: &str| (ui.measure(s, b.text) + pad).max(h);
-  let wide = [button("Use") + gap + h, button("Download"), button("Retry")];
-  let in_use = 14.0 + 4.0 + ui.measure("In use", t.label().font(t.font.weight(Weight::Medium)));
-  let w = wide.into_iter().fold(in_use + gap + h, f32::max);
+  let wide = [button("Download"), button("Retry")];
+  let w = wide.into_iter().fold(column + gap + h, f32::max);
   Style::new().w(px(w.ceil())).gap(gap).align(Align::End, Align::Center)
+}
+
+/// The column of Use and In use: as wide as the wider.
+fn use_w(ui: &mut Ui) -> f32 {
+  let t = ui.theme();
+  let b = t.button(ButtonStyle::Bordered);
+  let button = (ui.measure("Use", b.text) + b.frame.pad[1] + b.frame.pad[3]).max(b.frame.min[0]);
+  let in_use = ui.measure("In use", t.label().font(t.font.weight(Weight::Medium)));
+  in_use.max(button)
 }
 
 /// Three dots, the tile of Other models.
@@ -2764,7 +2959,7 @@ impl Prefs {
     ui.col(head, |ui| {
       // 128 px: 64 points at 2x.
       let icon = nimbo::Png::new(crate::ICON).side(128);
-      ui.png_image(icon, Style::new().w(px(64.0)).h(px(64.0)));
+      ui.image(icon, Style::new().w(px(64.0)).h(px(64.0)));
       ui.el(Style::new().h(px(10.0)));
       let title = TextStyle::new(Font { size: 20.0, ..t.bold }, t.text).line_limit(1);
       ui.text(crate::INFO.name, title);
@@ -2813,6 +3008,7 @@ mod tests {
   use std::cell::{RefCell, RefMut};
   use std::rc::Rc;
 
+  use nimbo::harness::mac_titlebar;
   use nimbo::{
     Appearance, Event, Harness, Modifiers, MouseButton, NamedKey, Os, Phase, Point, Size,
   };
@@ -2832,6 +3028,7 @@ mod tests {
     /// Times the devices were read.
     looks: usize,
     lid_closed: bool,
+    layouts: Vec<(String, String)>,
     /// All allowed unless set.
     access: Option<Access>,
     allowed: Vec<Pane>,
@@ -2892,6 +3089,10 @@ mod tests {
 
     fn lid_closed(&self) -> bool {
       self.log().lid_closed
+    }
+
+    fn keyboard_layouts(&self) -> Vec<(String, String)> {
+      self.log().layouts.clone()
     }
 
     fn access(&self) -> Access {
@@ -3009,8 +3210,8 @@ mod tests {
       let prefs = Prefs::new(shell, settings, self.hub.clone(), self.dir.path(), history);
       let cfg = config(Page::General);
       let mut h = Harness::new(prefs, cfg.size, 2.0);
-      // As high as macOS 26's, as nimbo's own shots draw it.
-      h.set_titlebar(Some((32.0, cfg.title)));
+      // macOS 26's, as nimbo's own shots draw it.
+      h.set_titlebar(Some(mac_titlebar(cfg.title, false)));
       h.event(Event::Appearance(Appearance::LIGHT));
       h.frame();
       h.frame();
@@ -3136,6 +3337,84 @@ mod tests {
     assert_eq!(with_zip(&dir.path().join("backup")), dir.path().join("backup 2.zip"));
   }
 
+  /// A Mac's layouts: two of English, one of Russian.
+  fn layouts() -> Vec<(String, String)> {
+    let pairs = [("en", "U.S."), ("ru", "Russian – PC"), ("en", "ABC")];
+    pairs.iter().map(|(l, n)| ((*l).to_owned(), (*n).to_owned())).collect()
+  }
+
+  /// Auto-detect with a model of one language says that language is every dictation's.
+  #[test]
+  fn auto_detect_says_what_a_model_of_one_language_does() {
+    let home = Home::new("window-auto", &["parakeet-v2"]);
+    let mut h = home.harness(&Fake::default(), Settings::default());
+    let want = "parakeet-v2 knows English only, so every dictation is in English.";
+    assert_eq!(tip(&mut h, "lang-row"), want);
+  }
+
+  /// Keyboard layout is a Language where the system tells the layouts. Chosen, it starts each of
+  /// their languages on its best model downloaded, listed in the Language row by name: the
+  /// default model, the models that know it as Models orders them, and Download more…, which
+  /// opens Models in that language. A language's model is in use: Models won't delete it. One
+  /// without a model of its own shows the default.
+  #[test]
+  fn a_language_per_keyboard_layout() {
+    let home = Home::new("window-keyboard", &["parakeet-v3", "parakeet-v2", "gigaam-v3"]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    assert_eq!(tip(&mut h, "lang-row"), AUTO_HELP);
+    click(&mut h, Id::of("lang"));
+    let item = |i: usize| Id::of("lang").key(("item", i));
+    let items = |h: &Harness<Prefs>| (0..).take_while(|&i| h.rect(item(i)).is_some()).count();
+    let without = items(&h);
+    h.key(NamedKey::Escape, Modifiers::empty());
+    h.frame();
+
+    fake.log().layouts = layouts();
+    assert!(h.event(Event::System(Change::InputSource)));
+    h.frame();
+    click(&mut h, Id::of("lang"));
+    assert_eq!(items(&h), without + 1, "Keyboard layout is offered");
+    click(&mut h, item(1));
+    let rows = |m: &[(&str, &str)]| m.iter().map(|(l, m)| ((*l).into(), (*m).into())).collect();
+    let started: BTreeMap<String, String> = rows(&[("en", "parakeet-v2"), ("ru", "gigaam-v3")]);
+    assert_eq!(fake.log().settings.language, KEYBOARD);
+    assert_eq!(fake.log().settings.keyboard_models, started);
+    assert_eq!(tip(&mut h, "lang-row"), KEYBOARD_HELP);
+    assert_eq!(tip(&mut h, "model-row"), MODEL_KEYBOARD_HELP);
+
+    let (en, ru) = (Id::of("keyboard-en"), Id::of("keyboard-ru"));
+    assert!(h.rect(en).unwrap().y < h.rect(ru).unwrap().y, "English, then Russian");
+    let named = vec![("en".into(), "U.S., ABC".into()), ("ru".into(), "Russian – PC".into())];
+    assert_eq!(keyboard_languages(&layouts()), named);
+
+    click(&mut h, ru);
+    click(&mut h, ru.key(("item", 2)));
+    let moved: BTreeMap<String, String> = rows(&[("en", "parakeet-v2"), ("ru", "parakeet-v3")]);
+    assert_eq!(fake.log().settings.keyboard_models, moved);
+    assert!(h.app().in_use(hub::lookup("parakeet-v2").unwrap()));
+
+    click(&mut h, ru);
+    click(&mut h, ru.key(("item", 0)));
+    let default: BTreeMap<String, String> = rows(&[("en", "parakeet-v2")]);
+    assert_eq!(fake.log().settings.keyboard_models, default, "the default model");
+
+    click(&mut h, ru);
+    click(&mut h, ru.key(("item", 3)));
+    assert_eq!(h.app().page, Page::Models);
+    assert_eq!(LANGUAGES[h.app().model_lang].1, "ru");
+
+    let alone = Settings {
+      language: KEYBOARD.into(),
+      model: Some("parakeet-v2".into()),
+      ..Settings::default()
+    };
+    let h = home.harness(&fake, alone);
+    let (labels, models, at) = h.app().keyboard_choices("ru");
+    assert_eq!(models, ["gigaam-v3", "parakeet-v3"]);
+    assert_eq!((at, labels[at].as_str()), (0, "parakeet-v2 (default)"));
+  }
+
   /// Every page in both looks, as high as its content or [SCROLLING] high; with `WAVO_SHOTS` set
   /// (`make shots`), written there: also Advanced in a build that doesn't update and asking before
   /// Delete All, History in memory, Models asking before a delete and General at the first launch.
@@ -3214,6 +3493,20 @@ mod tests {
         let ground = h.render().pixel(4.0, 100.0);
         assert_eq!(ground[0] < 100, appearance.scheme.is_dark(), "{name} {look}: {ground:?}");
       }
+
+      // Language by the keyboard layout, Russian to its own model.
+      let keyboard = Fake::default();
+      keyboard.log().layouts = layouts();
+      let rows = BTreeMap::from([("ru".to_owned(), "gigaam-v3".to_owned())]);
+      let settings = Settings {
+        language: KEYBOARD.into(),
+        model: Some("parakeet-v3".into()),
+        keyboard_models: rows,
+        ..Settings::default()
+      };
+      let mut k = home.harness(&keyboard, settings);
+      k.event(Event::Appearance(appearance));
+      shot(&mut k, &format!("general-keyboard-{look}"));
 
       fake.log().updates = false;
       tab(&mut h, Page::Advanced);
@@ -3905,7 +4198,7 @@ mod tests {
     h.frame();
     h.frame();
     let ask = h.app().ask.as_ref().map(|a| a.title.clone());
-    assert_eq!(ask, Some(format!("Delete {}?", hub::lookup(m).unwrap().full_name)));
+    assert_eq!(ask, Some(format!("Delete {}?", hub::lookup(m).unwrap().name)));
   }
 
   /// A dictation's row is as high as a model's: both a line over a caption, padded alike.

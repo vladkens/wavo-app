@@ -344,9 +344,7 @@ fn microphones(
 fn models(found: &[Found], pick: &Pick) -> (String, Menu<Action>) {
   let only = pick.other.is_none();
   let mut items: Vec<Item<Action>> = (found.iter().enumerate())
-    .map(|(i, (m, _))| {
-      Item::toggle(Action::Model(m.name), m.full_name, only && pick.active == Some(i))
-    })
+    .map(|(i, (m, _))| Item::toggle(Action::Model(m.name), m.name, only && pick.active == Some(i)))
     .collect();
   let other = pick.other.as_ref().map(|(name, there)| match there {
     true => name.clone(),
@@ -354,7 +352,7 @@ fn models(found: &[Found], pick: &Pick) -> (String, Menu<Action>) {
   });
   let title = match (&other, pick.active) {
     (Some(other), _) => other.clone(),
-    (None, Some(i)) => found[i].0.full_name.to_owned(),
+    (None, Some(i)) => found[i].0.name.to_owned(),
     (None, None) => "No Model".to_owned(),
   };
   if let Some(other) = other {

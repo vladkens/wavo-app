@@ -3,6 +3,7 @@
 //! `settings.json` in the data home: a missing file or field is the default; a file that does not
 //! parse is copied to `settings.json.bad` and the defaults are used.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
@@ -16,6 +17,8 @@ use crate::audio::Microphone;
 use crate::history::Retention;
 
 pub const FILE: &str = "settings.json";
+/// [Settings::language] that follows the keyboard layout: its language, its row's model.
+pub const KEYBOARD: &str = "keyboard";
 // Option-Space on macOS, as dictation apps there have it; Ctrl+Alt+Space elsewhere, where Alt+Space
 // opens a window's menu.
 const DEFAULT_HOTKEY: &str =
@@ -29,10 +32,13 @@ pub struct Settings {
   pub hotkey: String,
   pub activation: Activation,
   pub microphone: Microphone,
-  /// A language code, or `auto` for the model to detect it.
+  /// A language code, `auto` for the model to detect it, or [KEYBOARD].
   pub language: String,
   /// A model name or a GGUF file path; `None` is the first model found.
   pub model: Option<String>,
+  /// With [KEYBOARD], the model of a layout's language (`ru`: `gigaam-v3`); a language without
+  /// one is `model`'s.
+  pub keyboard_models: BTreeMap<String, String>,
   pub auto_paste: bool,
   /// Leave the text on the clipboard instead of restoring it after the paste.
   pub keep_in_clipboard: bool,
@@ -96,6 +102,7 @@ impl Default for Settings {
       microphone: Microphone::Automatic,
       language: "auto".into(),
       model: None,
+      keyboard_models: BTreeMap::new(),
       auto_paste: true,
       keep_in_clipboard: false,
       clean_text: true,
@@ -166,10 +173,28 @@ impl Settings {
     self.auto_paste && !self.keep_in_clipboard
   }
 
-  /// The language for the engine; `None` (empty or `auto`) leaves it to the model.
+  /// The language chosen for the engine; `None` (empty, `auto` or [KEYBOARD]) leaves it to the
+  /// model, or to the layout.
   pub fn engine_language(&self) -> Option<String> {
     let code = self.language.trim();
-    (!code.is_empty() && !code.eq_ignore_ascii_case("auto")).then(|| code.to_owned())
+    let chosen = !code.is_empty() && !code.eq_ignore_ascii_case("auto") && code != KEYBOARD;
+    chosen.then(|| code.to_owned())
+  }
+
+  pub fn follows_keyboard(&self) -> bool {
+    self.language == KEYBOARD
+  }
+
+  /// The model choice and the language of a dictation while the keyboard layout's language is
+  /// `keyboard`: with [KEYBOARD] its row's model, else `model`, asked in that language (detected
+  /// for a layout without one); otherwise the ones chosen.
+  pub fn route(&self, keyboard: Option<&str>) -> (Option<String>, Option<String>) {
+    if !self.follows_keyboard() {
+      return (self.model.clone(), self.engine_language());
+    }
+
+    let model = keyboard.and_then(|k| self.keyboard_models.get(k)).or(self.model.as_ref());
+    (model.cloned(), keyboard.map(str::to_owned))
   }
 
   pub fn unload_after(&self) -> Option<Duration> {
@@ -237,6 +262,26 @@ mod tests {
     memory.save(&path).unwrap();
     assert!(fs::read_to_string(&path).unwrap().contains(r#""history_retention": "until_quit""#));
     assert_eq!(Settings::load(&path), (memory, None));
+  }
+
+  /// The layout's row, else the model, in the layout's language; any other choice as chosen,
+  /// whatever the layout.
+  #[test]
+  fn a_dictation_routes_by_the_keyboard_layout() {
+    let rows = BTreeMap::from([("ru".to_owned(), "gigaam-v3".to_owned())]);
+    let model = Some("parakeet-v3".to_owned());
+    let keyboard =
+      Settings { language: KEYBOARD.into(), model, keyboard_models: rows, ..Settings::default() };
+    let some = |s: &str| Some(s.to_owned());
+    assert_eq!(keyboard.route(Some("ru")), (some("gigaam-v3"), some("ru")));
+    assert_eq!(keyboard.route(Some("en")), (some("parakeet-v3"), some("en")));
+    assert_eq!(keyboard.route(None), (some("parakeet-v3"), None), "a layout without a language");
+    assert_eq!(keyboard.engine_language(), None);
+
+    let fixed = Settings { language: "de".into(), ..keyboard.clone() };
+    assert_eq!(fixed.route(Some("ru")), (some("parakeet-v3"), some("de")));
+    let auto = Settings { language: "auto".into(), ..keyboard };
+    assert_eq!(auto.route(Some("ru")), (some("parakeet-v3"), None));
   }
 
   #[test]

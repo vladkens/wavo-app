@@ -1,7 +1,8 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! The HUD: one pill in an overlay at the bottom or top of the screen with the pointer, over every
-//! app, never focused. Recording: a red dot, the level as bars, the time. Transcribing: the bars
+//! app, never focused. Recording: a red dot, the level as bars, the time, and after it the
+//! dictation's language when it follows the keyboard layout (`RU`). Transcribing: the bars
 //! become a travelling wave, the time freezes (`n/m` for a recording in pieces). Then the pill
 //! collapses to a circle and fades: no "done" state. An error shows a glyph and a short lowercase
 //! reason for a few seconds, the pill widening to fit; while recording, a warning (no sound, no
@@ -46,6 +47,11 @@ const WAVE_LOW: f32 = 3.0;
 const WAVE_HIGH: f32 = 9.0;
 // The white ring around the red dot, for the gradient under it.
 const RING: f32 = 1.2;
+// The language's chip after the time, and the room the pill widens by for it.
+const CHIP_W: f32 = 24.0;
+const CHIP_H: f32 = 17.0;
+const CHIP_GAP: f32 = 2.0;
+const CHIP_ROOM: f32 = CHIP_W + CHIP_GAP;
 
 const APPEAR: Duration = ms(100);
 // The level's bars become the wave.
@@ -107,6 +113,9 @@ const DIM: f32 = 0.76;
 const DARK: Theme = Theme { text: rgb(0xffffff), ..Theme::PLATES_DARK };
 
 const FONT: Font = Font::ui(13.0);
+const CHIP: Font = Font::ui(11.0).weight(Weight::Semibold);
+// The chip's code on its white in the gradient's style: the icon's violet, deep.
+const CHIP_TEXT: Color = rgb(0x3b2a78);
 const TIME: Font = Font::mono(13.0).weight(Weight::Medium);
 // A triangle with an exclamation mark cut out of it.
 const TRIANGLE: Icon =
@@ -230,6 +239,8 @@ pub enum Show {
     device: String,
     seconds: f64,
     warning: Option<String>,
+    /// The keyboard layout's (`ru`), when the dictation follows it.
+    language: Option<String>,
   },
   Transcribing(Option<(usize, usize)>),
   Error(String),
@@ -269,6 +280,8 @@ pub struct Hud {
   device: String,
   warning: Option<String>,
   silent: bool,
+  // The dictation's language, when it follows the keyboard layout.
+  language: Option<String>,
   pending: Vec<Show>,
   style: HudStyle,
   // The plain style's: the system's appearance.
@@ -303,6 +316,7 @@ impl Hud {
       device: String::new(),
       warning: None,
       silent: false,
+      language: None,
       pending: Vec::new(),
       style: HudStyle::Gradient,
       theme: Theme::PLATES_LIGHT,
@@ -351,6 +365,11 @@ impl Hud {
     (self.mode, self.since) = (mode, now);
   }
 
+  /// The width of a dictation's pill: the language's chip widens it.
+  fn base(&self) -> f32 {
+    WIDTH + if self.language.is_some() { CHIP_ROOM } else { 0.0 }
+  }
+
   fn width_at(&self, now: Duration) -> f32 {
     let (from, to, since) = self.width;
     lerp(from, to, eased(now.saturating_sub(since), RESIZE))
@@ -367,12 +386,16 @@ impl Hud {
     }
 
     match show {
-      Show::Recording { meter, device, seconds, warning } => {
-        if self.mode != Mode::Recording {
+      Show::Recording { meter, device, seconds, warning, language } => {
+        let new = self.mode != Mode::Recording;
+        self.language = language;
+        if new {
           self.enter(Mode::Recording, now);
           self.started = now.saturating_sub(Duration::from_secs_f64(seconds));
           (self.levels, self.ticked, self.text) = ([0.0; BARS], now, None);
-          self.width = (WIDTH, WIDTH, now);
+          self.width = (self.base(), self.base(), now);
+        } else if self.text.is_none() && self.width.1 != self.base() {
+          self.resize(self.base(), now);
         }
 
         (self.meter, self.device, self.warning) = (meter, device, warning);
@@ -384,10 +407,11 @@ impl Hud {
           self.ended = now;
           self.enter(Mode::Transcribing, now);
           self.text = None;
-          self.resize(WIDTH, now);
+          self.resize(self.base(), now);
         }
       }
       Show::Error(reason) => {
+        self.language = None;
         let reason = fit(f, reason);
         let to = reason_width(f.measure(&reason, FONT));
         let from = if self.mode == Mode::Hidden { to } else { self.width_at(now) };
@@ -396,6 +420,7 @@ impl Hud {
         self.width = (from, to, now);
       }
       Show::Done(took) => {
+        self.language = None;
         let from = if self.mode == Mode::Hidden { WIDTH } else { self.width_at(now) };
         self.enter(Mode::Done, now);
         self.text = Some(took);
@@ -429,7 +454,7 @@ impl Hud {
       return;
     }
 
-    let to = warning.as_ref().map_or(WIDTH, |w| reason_width(f.measure(w, FONT)));
+    let to = warning.as_ref().map_or(self.base(), |w| reason_width(f.measure(w, FONT)));
     self.resize(to, f.now);
     self.text = warning;
   }
@@ -549,28 +574,43 @@ impl Hud {
       f.layer();
     }
 
-    // The contents keep their place as the pill narrows: centred at the recording's width.
+    // The contents keep their place as the pill narrows: centred at the recording's width, a
+    // dictation's at its own, the language's chip after the time.
     let x = (f.size.w - width.max(WIDTH)) / 2.0;
+    let xd = (f.size.w - width.max(self.base())) / 2.0;
     let mid = pill.y + HEIGHT / 2.0;
     let baseline = |f: &mut Frame, font| mid + (f.metrics(font).cap_height / 2.0).round();
     let dot = |f: &mut Frame, k: f32| {
       if plain {
-        let rect = Rect::new(x + PAD, mid - DOT / 2.0, DOT, DOT);
+        let rect = Rect::new(xd + PAD, mid - DOT / 2.0, DOT, DOT);
         return f.rect(rect, fade(th.danger, k), DOT / 2.0);
       }
 
       let side = DOT + 2.0 * RING;
-      let rect = Rect::new(x + PAD - RING, mid - side / 2.0, side, side);
+      let rect = Rect::new(xd + PAD - RING, mid - side / 2.0, side, side);
       let ring = fade(alpha([1.0; 4], 0.9), k);
       f.quad(Quad::new(rect, fade(th.danger, k)).radius(side / 2.0).border(RING, ring));
     };
+    // White with the code in violet on the gradient; the plain pill's text colour, its code in the
+    // pill's.
+    let chip = |f: &mut Frame, k: f32| {
+      let Some(language) = &self.language else { return };
+      let rect = Rect::new(xd + WIDTH - PAD + CHIP_GAP, mid - CHIP_H / 2.0, CHIP_W, CHIP_H);
+      let (fill, ink) = if plain { (th.text, th.menu) } else { ([1.0; 4], CHIP_TEXT) };
+      f.rect(rect, fade(fill, k), 4.0);
+      let code = language.to_uppercase();
+      let at = rect.x + (rect.w - f.measure(&code, CHIP)) / 2.0;
+      let y = baseline(f, CHIP);
+      f.text(at, y, &code, CHIP, fade(ink, k));
+    };
     let bar = |f: &mut Frame, i: usize, height: f32, k: f32| {
-      let rect = Rect::new(x + BARS_X + i as f32 * BAR_STEP, mid - height / 2.0, BAR_WIDTH, height);
+      let rect =
+        Rect::new(xd + BARS_X + i as f32 * BAR_STEP, mid - height / 2.0, BAR_WIDTH, height);
       f.rect(rect, fade(th.text, k), BAR_WIDTH / 2.0);
     };
     let time = |f: &mut Frame, text: &str, k: f32| {
       let y = baseline(f, TIME);
-      f.text(x + TIME_X, y, text, TIME, fade(th.text, k));
+      f.text(xd + TIME_X, y, text, TIME, fade(th.text, k));
     };
     let clock = |end: Duration| {
       let secs = end.saturating_sub(self.started).as_secs();
@@ -600,6 +640,7 @@ impl Hud {
       }
       (Mode::Recording, None) => {
         dot(f, a);
+        chip(f, a);
         for (i, level) in self.levels.iter().enumerate() {
           bar(f, i, bar_height(*level), a);
         }
@@ -613,6 +654,7 @@ impl Hud {
           dot(f, a * (1.0 - settle));
         }
 
+        chip(f, a);
         for (i, level) in self.levels.iter().enumerate() {
           let height = match self.mode {
             _ if settle < 1.0 => lerp(bar_height(*level), WAVE_LOW, settle),
@@ -962,7 +1004,13 @@ mod tests {
 
   fn recording(warning: Option<&str>) -> Show {
     let warning = warning.map(str::to_owned);
-    Show::Recording { meter: None, device: "Mic".into(), seconds: 7.0, warning }
+    Show::Recording { meter: None, device: "Mic".into(), seconds: 7.0, warning, language: None }
+  }
+
+  /// A recording that follows the keyboard layout, now in `language`.
+  fn speaking(language: &str) -> Show {
+    let language = Some(language.to_owned());
+    Show::Recording { meter: None, device: "Mic".into(), seconds: 7.0, warning: None, language }
   }
 
   /// What the HUD says of a dictation that ended as `last`, made by [after] as in the app.
@@ -1034,8 +1082,13 @@ mod tests {
   #[test]
   fn a_dictation_records_transcribes_and_collapses() {
     let (mut h, hidden) = hud();
-    let recording =
-      Show::Recording { meter: None, device: "Mic".into(), seconds: 3.0, warning: None };
+    let recording = Show::Recording {
+      meter: None,
+      device: "Mic".into(),
+      seconds: 3.0,
+      warning: None,
+      language: None,
+    };
     h.app_mut().show(recording);
     assert_eq!(h.app().mode(), Mode::Recording, "as soon as it is asked");
     h.wait(ms(500));
@@ -1053,6 +1106,34 @@ mod tests {
     h.wait(COLLAPSE + ms(100));
     assert_eq!((h.app().mode(), hidden.get()), (Mode::Hidden, 1));
     assert!(!h.needs_frame(), "no frames once hidden");
+  }
+
+  /// A dictation that follows the keyboard layout: its language's chip after the time, white, in
+  /// a pill that widens for it, the dot where it was; a change of language changes the code and
+  /// nothing moves; the dictation's end goes back to the narrow pill.
+  #[test]
+  fn the_language_shows_after_the_time() {
+    let (mut h, _) = hud();
+    h.app_mut().show(speaking("ru"));
+    h.wait(ms(500));
+    assert_eq!(h.app().width.1, WIDTH + CHIP_ROOM);
+    let size = config(HudPosition::Bottom).size;
+    let (left, mid) = ((size.w - WIDTH - CHIP_ROOM) / 2.0, MARGIN + HEIGHT / 2.0);
+    let [r, g, _, _] = h.render().pixel(left + PAD + DOT / 2.0, mid);
+    assert!(r > 200 && g < 100, "the red dot where it was: {r} {g}");
+    let [r, g, b, _] =
+      h.render().pixel(left + WIDTH - PAD + CHIP_GAP + 1.5, mid - CHIP_H / 2.0 + 1.5);
+    assert!(r > 230 && g > 230 && b > 230, "the chip's white: {r} {g} {b}");
+
+    h.app_mut().show(speaking("en"));
+    h.wait(ms(500));
+    assert_eq!((h.app().language.as_deref(), h.app().width.1), (Some("en"), WIDTH + CHIP_ROOM));
+    h.app_mut().show(Show::Transcribing(None));
+    h.wait(ms(500));
+    assert_eq!(h.app().width.1, WIDTH + CHIP_ROOM, "the chip stays while transcribing");
+    h.app_mut().show(Show::Done("420 ms".into()));
+    h.wait(ms(500));
+    assert_eq!((h.app().language.as_deref(), h.app().width.1), (None, WIDTH));
   }
 
   /// With the setting, a dictation's time to text shows instead of the plain collapse; an error
@@ -1124,7 +1205,14 @@ mod tests {
     let meter = Meter::default();
     let warning = Some("download a model".to_owned());
     let device = "Default Audio Device".to_owned();
-    h.app_mut().show(Show::Recording { meter: Some(meter.clone()), device, seconds: 1.0, warning });
+    let shown = Some(meter.clone());
+    h.app_mut().show(Show::Recording {
+      meter: shown,
+      device,
+      seconds: 1.0,
+      warning,
+      language: None,
+    });
     h.wait(ms(300));
     assert_eq!(h.app().text.as_deref(), Some("download a model"));
     meter.set_silent(true);
@@ -1185,7 +1273,9 @@ mod tests {
     let states = || {
       [
         ("recording", vec![recording(None)]),
+        ("recording-language", vec![speaking("ru")]),
         ("transcribing", vec![recording(None), Show::Transcribing(None)]),
+        ("transcribing-language", vec![speaking("en"), Show::Transcribing(None)]),
         ("done", vec![Show::Done("420 ms".into())]),
         ("error", vec![Show::Error(refused(NotPasted::SecureField))]),
         ("error-short", vec![Show::Error(crashed())]),

@@ -329,6 +329,9 @@ pub struct Status {
   pub last: Option<Last>,
   /// The entry of the dictation in progress, recording or transcribing.
   pub current: Option<i64>,
+  /// With [settings::KEYBOARD], the language of the dictation in progress: the layout's while it
+  /// records, then the one it is transcribed in; `None` for a layout without one.
+  pub language: Option<String>,
   /// Entries being transcribed again.
   pub retranscribing: Vec<i64>,
   /// Entries transcribed again in this run, whose first text a restore puts back.
@@ -463,6 +466,8 @@ enum Msg {
   CheckModel,
   /// A microphone came or went ([SlowStart::inputs_changed]).
   InputsChanged,
+  /// The keyboard layout's language now ([Handle::keyboard]).
+  Keyboard(Option<String>),
   /// The model at this path is prepared for the Neural Engine now.
   Prepared(PathBuf),
   Quit,
@@ -512,6 +517,7 @@ impl Session {
       model_path: None,
       model_error: None,
       model_fallback: None,
+      keyboard: None,
       error: None,
       settings_warning: warning,
       slow_start: SlowStart::default(),
@@ -556,6 +562,13 @@ impl Handle {
   /// A microphone came or went: one unplugged starts fast once plugged in again.
   pub fn inputs_changed(&self) {
     let _ = self.0.send(Msg::InputsChanged);
+  }
+
+  /// The keyboard layout's language (`ru`), at the start and on every change; `None` for a layout
+  /// without one. With [settings::KEYBOARD] a dictation goes by the one told last when its
+  /// recording closes.
+  pub fn keyboard(&self, language: Option<String>) {
+    let _ = self.0.send(Msg::Keyboard(language));
   }
 
   pub fn request(&self, request: Request) -> Result<(), String> {
@@ -687,6 +700,8 @@ struct Controller<O: TextOutput> {
   model_error: Option<NoModel>,
   /// The warning of a chosen model not on disk while another one transcribes.
   model_fallback: Option<String>,
+  /// The keyboard layout's language, as the app told it last.
+  keyboard: Option<String>,
   error: Option<String>,
   settings_warning: Option<String>,
   slow_start: SlowStart,
@@ -792,6 +807,21 @@ impl<O: TextOutput> Controller<O> {
         self.prepare();
       }
       Msg::InputsChanged => self.slow_start.inputs_changed(&audio::devices()),
+      Msg::Keyboard(language) => {
+        let before = self.route().0;
+        self.keyboard = language;
+        if self.route().0 == before {
+          return;
+        }
+
+        let _ = self.check_model();
+        self.prepare();
+        // A recording loads the model it now goes to while the person speaks.
+        let recording = self.dictation.as_ref().is_some_and(|d| d.prewarmed && d.job.is_none());
+        if recording && let Ok(loaded) = self.engine() {
+          loaded.engine.prewarm();
+        }
+      }
       Msg::Prepared(path) => {
         // Loaded on the GPU meanwhile: the next job loads it on the Neural Engine, in ~0.1 s.
         let on_gpu = |l: &Loaded| {
@@ -886,7 +916,9 @@ impl<O: TextOutput> Controller<O> {
     }
 
     self.machine.activation = self.settings.activation;
-    if old.model != self.settings.model
+    let keyboard = self.keyboard.as_deref();
+    let model_changed = old.route(keyboard).0 != self.settings.route(keyboard).0;
+    if model_changed
       || old.unload_after_minutes != self.settings.unload_after_minutes
       || old.neural_engine != self.settings.neural_engine
     {
@@ -894,11 +926,11 @@ impl<O: TextOutput> Controller<O> {
       self.engine = None;
     }
 
-    if old.model != self.settings.model {
+    if model_changed {
       let _ = self.check_model();
     }
 
-    if old.model != self.settings.model || old.neural_engine != self.settings.neural_engine {
+    if model_changed || old.neural_engine != self.settings.neural_engine {
       self.prepare();
     }
 
@@ -911,10 +943,16 @@ impl<O: TextOutput> Controller<O> {
 
   // MARK: Models
 
+  /// The model choice and the language for a dictation now: by the keyboard layout's language
+  /// with [settings::KEYBOARD].
+  fn route(&self) -> (Option<String>, Option<String>) {
+    self.settings.route(self.keyboard.as_deref())
+  }
+
   /// The model to transcribe with, from the files on disk and the choice, without loading it, and
   /// wavo's info on it; or why there is none.
   fn check_model(&mut self) -> Result<(PathBuf, Option<&'static ModelInfo>), NoModel> {
-    let chosen = self.settings.model.clone();
+    let chosen = self.route().0;
     if let Some(chosen) = &chosen
       && let Ok(path) = self.config.hub.resolve(chosen)
     {
@@ -925,7 +963,7 @@ impl<O: TextOutput> Controller<O> {
     let error = match (self.config.hub.downloaded().into_iter().next(), chosen) {
       (Some((info, path)), chosen) => {
         let note = chosen
-          .map(|c| format!("{} is not on disk: {} transcribes instead", label(&c), info.full_name));
+          .map(|c| format!("{} is not on disk: {} transcribes instead", label(&c), info.name));
         (self.model_error, self.model_fallback) = (None, note);
         return Ok((self.found_model(path), Some(info)));
       }
@@ -1171,7 +1209,7 @@ impl<O: TextOutput> Controller<O> {
       self.discard();
     }
 
-    let language = self.settings.engine_language();
+    let language = self.route().1;
     let model = self.engine().map(|l| l.name.clone());
     // In memory an entry is kept for its text only: none comes without a model.
     let entry = match (file, &model) {
@@ -1395,7 +1433,7 @@ impl<O: TextOutput> Controller<O> {
       return self.delete(&[id]);
     };
 
-    let language = self.settings.engine_language();
+    let language = self.route().1;
     let model = self.engine()?.name.clone();
     // Marked tried before it runs: a crash or a failure is not tried again by the same model.
     self.history.db.mark_busy(id, &model)?;
@@ -1626,6 +1664,10 @@ impl<O: TextOutput> Controller<O> {
       engine,
       last: self.last.clone(),
       current: d.and_then(|d| d.last.entry),
+      language: d.filter(|_| self.settings.follows_keyboard()).and_then(|d| match &d.job {
+        Some(job) => job.language.clone(),
+        None => self.keyboard.clone(),
+      }),
       retranscribing: self.retranscribing.iter().map(|r| r.entry).collect(),
       restorable: self.originals.keys().copied().collect(),
       error: self.error.clone(),
@@ -1648,10 +1690,10 @@ fn file_stem(path: &Path) -> String {
 }
 
 /// What a model choice (wavo's name, or a file's path) is called, also once its file is gone:
-/// wavo's full name (`parakeet-tdt-0.6b-v3`), else the file's name without `.gguf`.
+/// wavo's short name (`parakeet-v3`), as Models shows it, else the file's name without `.gguf`.
 pub fn label(choice: &str) -> String {
   if let Ok(info) = hub::lookup(choice) {
-    return info.full_name.into();
+    return info.name.into();
   }
 
   let file = Path::new(choice).file_name().and_then(|f| f.to_str()).unwrap_or(choice);
@@ -1659,13 +1701,13 @@ pub fn label(choice: &str) -> String {
 }
 
 fn loaded_label(info: Option<&ModelInfo>, name: &str) -> String {
-  info.map_or_else(|| name.to_owned(), |m| m.full_name.to_owned())
+  info.map_or_else(|| name.to_owned(), |m| m.name.to_owned())
 }
 
-/// `parakeet-tdt-0.6b-v2 understands English only`, for a model meant for one language.
+/// `parakeet-v2 understands English only`, for a model meant for one language.
 fn understands_only(info: &ModelInfo) -> Option<String> {
   let [code] = info.langs else { return None };
-  Some(format!("{} understands {} only", info.full_name, language_name(code)))
+  Some(format!("{} understands {} only", info.name, language_name(code)))
 }
 
 #[cfg(test)]
@@ -2897,11 +2939,83 @@ mod tests {
 
   #[test]
   fn models_are_labelled_and_a_model_for_one_language_says_which() {
-    assert_eq!(label("parakeet-v3"), "parakeet-tdt-0.6b-v3");
+    assert_eq!(label("parakeet-v3"), "parakeet-v3");
     assert_eq!(label("/models/broken.gguf"), "broken");
     let note = |name| understands_only(hub::lookup(name).unwrap());
-    let v2 = "parakeet-tdt-0.6b-v2 understands English only";
+    let v2 = "parakeet-v2 understands English only";
     assert_eq!(note("parakeet-v2").as_deref(), Some(v2));
     assert_eq!(note("parakeet-v3"), None);
+  }
+
+  // MARK: Keyboard layout
+
+  /// The file stem an entry keeps for wavo's model `name`.
+  fn stem(name: &str) -> String {
+    file_stem(Path::new(&hub::lookup(name).unwrap().file()))
+  }
+
+  /// With Keyboard layout each dictation goes to its layout's model, asked in its language, which
+  /// its entry keeps and the status shows; a switch while recording moves the whole recording and
+  /// the shown language; a language without a row, or a layout without one, takes the Model's.
+  #[test]
+  fn dictations_follow_the_keyboard_layout() {
+    let rows = BTreeMap::from([("ru".to_owned(), "gigaam-v3".to_owned())]);
+    let settings = Settings {
+      language: settings::KEYBOARD.into(),
+      model: Some("parakeet-v3".into()),
+      keyboard_models: rows,
+      ..Settings::default()
+    };
+    let models = ["gigaam-v3", "parakeet-v3"];
+    let s = InProcess::start("session-keyboard", &settings, Some(&loud(10.0)), "привет", &models);
+    let dictated = |take| {
+      let entry = s.kept(&s.dictate(take));
+      (entry.model.unwrap(), entry.language)
+    };
+    let some = |s: &str| Some(s.to_owned());
+
+    s.handle.keyboard(some("ru"));
+    assert_eq!(dictated(1), (stem("gigaam-v3"), some("ru")));
+    s.handle.keyboard(some("en"));
+    assert_eq!(dictated(2), (stem("parakeet-v3"), some("en")));
+
+    s.press();
+    let recording = s.update_where("recording", |u| u.status.state == Phase::Recording);
+    assert_eq!(recording.status.language, some("en"));
+    let meter = recording.meter.unwrap();
+    poll("the level", Duration::from_secs(10), || (meter.level() > 0.3).then_some(()));
+    s.handle.keyboard(some("ru"));
+    s.update_where("the new layout's language", |u| u.status.language == some("ru"));
+    thread::sleep(Duration::from_millis(300));
+    s.press();
+    let entry = s.kept(&s.finished(3).last.unwrap());
+    assert_eq!((entry.model.unwrap(), entry.language), (stem("gigaam-v3"), some("ru")));
+
+    s.handle.keyboard(None);
+    assert_eq!(dictated(4), (stem("parakeet-v3"), None), "a layout without a language");
+  }
+
+  /// Any other Language: the layout changes nothing, and the status shows no language.
+  #[test]
+  fn other_languages_ignore_the_keyboard_layout() {
+    let rows = BTreeMap::from([("ru".to_owned(), "gigaam-v3".to_owned())]);
+    let settings = Settings {
+      language: "en".into(),
+      model: Some("parakeet-v3".into()),
+      keyboard_models: rows,
+      ..Settings::default()
+    };
+    let models = ["gigaam-v3", "parakeet-v3"];
+    let s = InProcess::start("session-no-keyboard", &settings, Some(&loud(10.0)), "hi", &models);
+    s.handle.keyboard(Some("ru".into()));
+    s.press();
+    let recording = s.update_where("recording", |u| u.status.state == Phase::Recording);
+    assert_eq!(recording.status.language, None);
+    let meter = recording.meter.unwrap();
+    poll("the level", Duration::from_secs(10), || (meter.level() > 0.3).then_some(()));
+    thread::sleep(Duration::from_millis(300));
+    s.press();
+    let entry = s.kept(&s.finished(1).last.unwrap());
+    assert_eq!((entry.model.unwrap(), entry.language), (stem("parakeet-v3"), Some("en".into())));
   }
 }
