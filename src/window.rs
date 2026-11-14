@@ -999,6 +999,8 @@ impl Prefs {
 
 const TOOK_HELP: &str = "After each dictation the HUD shows for a second how long the text took after \
   the stop.";
+const LIVE_HELP: &str = "The HUD shows the words as you speak, recognized again every half second. \
+  The text pasted is still recognized from the whole recording after the stop.";
 const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle this long. The next \
   dictation loads it again, which takes a moment.";
 const ANE_HELP: &str = "Models marked ANE run on the Neural Engine: as fast as on the GPU at a \
@@ -1114,6 +1116,14 @@ impl Prefs {
         let mut cur = self.settings.hud_style;
         if ui.id("hud-style").picker(&mut cur, &HUD_STYLES).changed {
           self.edit(move |s| s.hud_style = cur);
+        }
+      });
+
+      let row = FormRow::new(marked("Show the text while speaking", Mark::Info(LIVE_HELP), None));
+      ui.form_row(fs, row, |ui| {
+        let mut on = self.settings.live_preview;
+        if ui.id("live").toggle(&mut on, "").changed {
+          self.edit(move |s| s.live_preview = on);
         }
       });
 
@@ -3753,6 +3763,8 @@ mod tests {
     click(&mut h, Id::of("hud-style"));
     click(&mut h, Id::of("hud-style").key(("item", 1)));
     assert_eq!(fake.log().settings.hud_style, HudStyle::Plain);
+    click(&mut h, Id::of("live"));
+    assert!(fake.log().settings.live_preview);
 
     // Launch at login, on General, goes to the system, one change at a time; a refusal says why.
     tab(&mut h, Page::General);

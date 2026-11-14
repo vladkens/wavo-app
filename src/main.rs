@@ -12,6 +12,7 @@ mod cli;
 mod engine;
 mod history;
 mod hud;
+mod live;
 mod menu;
 mod mic_start;
 mod session;
