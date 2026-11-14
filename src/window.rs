@@ -1058,7 +1058,7 @@ const RETENTIONS: [Tag<Retention>; 7] = [
 
 impl Prefs {
   fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    // The model and where it runs, then the history, then updates.
+    // The model and where it runs, then updates.
     ui.form_section(fs, "App", |ui| {
       let row = FormRow::new(marked("Unload the model", Mark::Info(UNLOAD_HELP), None));
       ui.form_row(fs, row, |ui| {
@@ -1079,19 +1079,6 @@ impl Prefs {
           }
         });
       }
-
-      let help = format!(
-        "Until Wavo quits: the last {IN_MEMORY} dictations stay in memory for History and the \
-        menu, without their audio, and nothing is saved to disk."
-      );
-      let row = FormRow::new(marked("Keep the history", Mark::Info(&help), None));
-      ui.form_row(fs, row, |ui| {
-        let mut cur = self.settings.history_retention;
-        let p = Picker::new(&mut cur).options(&RETENTIONS).divider().options(&[UNTIL_QUIT]);
-        if p.show(ui.id("retention")).changed {
-          self.edit(move |s| s.history_retention = cur);
-        }
-      });
 
       // Off and disabled where the app can't update, the setting kept; its ⓘ says why.
       let updates = self.shell.updates();
@@ -1138,60 +1125,84 @@ impl Prefs {
       });
     });
 
-    let models = self.hub.root().to_owned();
-    let recordings = self.home.join(RECORDINGS_DIR);
-    let folders = [
-      (
-        "Model folder",
-        &models,
-        "The downloaded models, in the Hugging Face cache, which other apps \
-        that use Hugging Face models share. Deleting a model on Models frees its space.",
-      ),
-      (
-        "Recordings",
-        &recordings,
-        "The audio of every dictation in the history, a folder a day. \
-        A dictation deleted from the history takes its recording with it.",
-      ),
-    ];
-    let show = format!("Show in {}", open::file_manager());
-    ui.form_section(fs, "Files", |ui| {
-      for (name, dir, what) in folders {
-        let help = format!("{what}\n\n{}", paths::display(dir));
-        let row = FormRow::new(marked(name, Mark::Info(&help), None)).tile(Icon::FOLDER);
-        ui.form_row(fs, row, |ui| {
-          let ui = ui.help(&paths::display(dir)).disabled(!dir.is_dir());
-          if ui.id(("reveal", name)).button(&show).clicked {
-            self.shell.reveal(dir);
-          }
-        });
-      }
-    });
+    // How long it is kept, what is saved, then the folders.
+    ui.form_section(fs, "History", |ui| {
+      let help = format!(
+        "Until Wavo quits: the last {IN_MEMORY} dictations stay in memory for History and the \
+        menu, without their audio, and nothing is saved to disk."
+      );
+      let row = FormRow::new(marked("Keep the history", Mark::Info(&help), None));
+      ui.form_row(fs, row, |ui| {
+        let mut cur = self.settings.history_retention;
+        let p = Picker::new(&mut cur).options(&RETENTIONS).divider().options(&[UNTIL_QUIT]);
+        if p.show(ui.id("retention")).changed {
+          self.edit(move |s| s.history_retention = cur);
+        }
+      });
 
-    ui.form_section(fs, "Data", |ui| {
-      self.export_row(ui, fs, &show);
-      self.import_row(ui, fs);
-      self.delete_row(ui, fs);
+      let show = format!("Show in {}", open::file_manager());
+      self.saved_row(ui, fs, &show);
+      self.folders_row(ui, fs, &show);
     });
   }
 
-  /// Delete All…, asking first, for the history saved on disk in either mode; off with nothing
-  /// saved. Its caption says when the delete waits for what runs.
-  fn delete_row(&mut self, ui: &mut Ui, fs: &FormStyle) {
+  /// Export…, Import… and Delete All… for the history saved on disk: the export with the system's
+  /// save panel in Downloads ([Prefs::event]), then the archive's size with Show in Finder; the
+  /// import with its open panel, then what it added; the delete asking first. Under the row what
+  /// runs or ended: Export and Import are off while the history is kept until Wavo quits, Delete
+  /// All with nothing saved, and it says when the delete waits for what runs.
+  fn saved_row(&mut self, ui: &mut Ui, fs: &FormStyle, show: &str) {
+    let export = self.shell.export_state();
+    let import = self.shell.import_state();
+    let ended = |(_, size): &(PathBuf, u64)| format!("Exported · {}", size_text(*size));
+    let exported = shown(&export, "export", "Copying the history…", ended);
+    let imported = shown(&import, "import", "Reading the archive…", imported_text);
+    let (exporting, importing) = (exported.progress.is_some(), imported.progress.is_some());
+    let progress = exported.progress.or(imported.progress);
+    let off = self.settings.history_retention.in_memory();
     let n = match self.saved {
       Some(n) => n,
       None => *self.saved.insert(self.count_saved()),
     };
-    let waits = self.status.warnings.iter().any(|w| w == session::DELETE_WAITS);
-    let caption = match () {
-      _ if waits => Some(DELETE_WAITS.to_owned()),
-      _ if n == 0 => Some(NOTHING_SAVED.to_owned()),
-      _ => None,
+
+    let not_saved = off && progress.is_none();
+    let mut captions = match not_saved {
+      true => vec![NOT_SAVED.to_owned()],
+      false => [exported.caption, imported.caption].into_iter().flatten().collect(),
     };
-    let shown = Shown { caption, progress: None, failed: false };
-    let row = FormRow::new(marked("Delete history", Mark::Info(DELETE_HELP), None));
-    let row = row.tile(Icon::TRASH);
-    data_row(ui, fs, Id::of("delete-row"), row, &shown, |ui| {
+    let waits = self.status.warnings.iter().any(|w| w == session::DELETE_WAITS);
+    match () {
+      _ if waits => captions.push(DELETE_WAITS.to_owned()),
+      _ if n == 0 => captions.push(NOTHING_SAVED.to_owned()),
+      _ => {}
+    }
+
+    let failed = !not_saved && (exported.failed || imported.failed);
+    let caption = (!captions.is_empty()).then(|| captions.join(" · "));
+    let shown = Shown { caption, progress, failed };
+    let help =
+      format!("Export… {EXPORT_HELP}\n\nImport… {IMPORT_HELP}\n\nDelete All… {DELETE_HELP}");
+    let row = FormRow::new(marked("Saved history", Mark::Info(&help), None));
+    data_row(ui, fs, Id::of("saved-row"), row, &shown, |ui| {
+      if let Some(Transfer::Done((file, _))) = &export
+        && ui.disabled(!file.is_file()).id("export-show").button(show).clicked
+      {
+        self.shell.reveal(file);
+      }
+
+      if ui.disabled(exporting || off).id("export").button("Export…").clicked {
+        let name = export_name(now_ms());
+        let panel = FileDialog::save("Export").name(&name).types(&["zip"]);
+        ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
+        self.panel = Some(Panel::Export);
+      }
+
+      if ui.disabled(importing || off).id("import").button("Import…").clicked {
+        let panel = FileDialog::open("Import").types(&["zip"]);
+        ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
+        self.panel = Some(Panel::Import);
+      }
+
       let button = Button::new("Delete All…").role(ButtonRole::Destructive);
       if button.show(ui.disabled(n == 0).id("delete-all")).clicked {
         let title = match n {
@@ -1204,6 +1215,29 @@ impl Prefs {
     });
   }
 
+  /// The model folder and the recordings' in the file manager, each button's tooltip its path.
+  fn folders_row(&mut self, ui: &mut Ui, fs: &FormStyle, show: &str) {
+    let models = self.hub.root().to_owned();
+    let recordings = self.home.join(RECORDINGS_DIR);
+    let help = format!(
+      "Models: the downloaded models, in the Hugging Face cache, which other apps that use \
+      Hugging Face models share. Deleting a model on Models frees its space.\n{}\n\nRecordings: \
+      the audio of every dictation in the history, a folder a day. A dictation deleted from the \
+      history takes its recording with it.\n{}",
+      paths::display(&models),
+      paths::display(&recordings),
+    );
+    let row = FormRow::new(marked(show, Mark::Info(&help), None));
+    ui.form_row(fs, row, |ui| {
+      for (name, dir) in [("Models", &models), ("Recordings", &recordings)] {
+        let ui = ui.help(&paths::display(dir)).disabled(!dir.is_dir());
+        if ui.id(("reveal", name)).button(name).clicked {
+          self.shell.reveal(dir);
+        }
+      }
+    });
+  }
+
   /// How many dictations the history saved on disk has: the one read here, or the one left there
   /// while the history is kept in memory; 0 when it can't be read.
   fn count_saved(&self) -> usize {
@@ -1212,58 +1246,6 @@ impl Prefs {
       None => History::count_saved(&self.home),
     };
     total.inspect_err(|e| warn!("the saved history: {e:#}")).unwrap_or(0)
-  }
-
-  /// Export, the system's save panel in Downloads ([Prefs::event]); then the archive's size with
-  /// Show in Finder. Off in memory, as Import.
-  fn export_row(&mut self, ui: &mut Ui, fs: &FormStyle, show: &str) {
-    let state = self.shell.export_state();
-    let ended = |(_, size): &(PathBuf, u64)| format!("Exported · {}", size_text(*size));
-    let mut shown = shown(&state, "export", "Copying the history…", ended);
-    let running = shown.progress.is_some();
-    let off = self.not_saved(&mut shown);
-    let row = FormRow::new(marked("Export history", Mark::Info(EXPORT_HELP), None)).tile(Icon::DOC);
-    data_row(ui, fs, Id::of("export-row"), row, &shown, |ui| {
-      if let Some(Transfer::Done((file, _))) = &state
-        && ui.disabled(!file.is_file()).id("export-show").button(show).clicked
-      {
-        self.shell.reveal(file);
-      }
-
-      if ui.disabled(running || off).id("export").button("Export…").clicked {
-        let name = export_name(now_ms());
-        let panel = FileDialog::save("Export").name(&name).types(&["zip"]);
-        ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
-        self.panel = Some(Panel::Export);
-      }
-    });
-  }
-
-  /// Import…, the system's open panel in Downloads ([Prefs::event]); then what it added.
-  fn import_row(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    let state = self.shell.import_state();
-    let mut shown = shown(&state, "import", "Reading the archive…", imported_text);
-    let running = shown.progress.is_some();
-    let off = self.not_saved(&mut shown);
-    let row = FormRow::new(marked("Import history", Mark::Info(IMPORT_HELP), None));
-    let row = row.tile(Icon::DOWNLOAD);
-    data_row(ui, fs, Id::of("import-row"), row, &shown, |ui| {
-      if ui.disabled(running || off).id("import").button("Import…").clicked {
-        let panel = FileDialog::open("Import").types(&["zip"]);
-        ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
-        self.panel = Some(Panel::Import);
-      }
-    });
-  }
-
-  /// The history is kept until Wavo quits: a Data row says it is off, unless it runs.
-  fn not_saved(&self, shown: &mut Shown) -> bool {
-    let off = self.settings.history_retention.in_memory();
-    if off && shown.progress.is_none() {
-      (shown.caption, shown.failed) = (Some(NOT_SAVED.into()), false);
-    }
-
-    off
   }
 
   /// The switch shows the change at once and stays disabled until the system answers
@@ -3952,7 +3934,7 @@ mod tests {
     tab(&mut h, Page::Advanced);
     let button = |h: &Harness<Prefs>| a11y_line(h, "button \"Delete All…\"").unwrap_or_default();
     let caption =
-      |h: &Harness<Prefs>| h.text(Id::of("delete-row").key("caption")).map(str::to_owned);
+      |h: &Harness<Prefs>| h.text(Id::of("saved-row").key("caption")).map(str::to_owned);
     assert!(button(&h).contains("disabled"), "{}", button(&h));
     assert_eq!(caption(&h).as_deref(), Some(NOTHING_SAVED));
     click(&mut h, Id::of("delete-all"));
@@ -4012,9 +3994,7 @@ mod tests {
     let settings = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
     h.app_mut().update(&settings, &status, 0);
     h.frame();
-    for row in ["export-row", "import-row"] {
-      assert_eq!(h.text(Id::of(row).key("caption")), Some(NOT_SAVED), "{row}");
-    }
+    assert_eq!(h.text(Id::of("saved-row").key("caption")), Some(NOT_SAVED));
 
     click(&mut h, Id::of("export"));
     assert!(h.file_dialog(None).is_none(), "export is off");
