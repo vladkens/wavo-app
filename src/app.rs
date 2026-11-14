@@ -205,14 +205,22 @@ fn start(
   let history = open_history(&home, in_memory);
   let hotkeys = {
     let handle = handle.clone();
-    Hotkeys::new(move |edge| handle.input(edge.into()))
+    Hotkeys::new(move |edge| {
+      handle.input(edge.into());
+      // The layout as the key goes down and up, ahead of its change, which nimbo tells once a
+      // burst of them ends: a switch just before the release decides the recording.
+      proxy().post(|_| _ = with_app(App::tell_keyboard));
+    })
   };
 
   // `open` shows the settings (the reopen hook below) and `quit` quits: nimbo's.
   let toggle = handle.clone();
   main.serve(instance, move |_, cmd| match cmd.name.as_str() {
     instance::OPEN | instance::QUIT => {}
-    "toggle" => toggle.input(session::Input::Toggle),
+    "toggle" => {
+      _ = with_app(App::tell_keyboard);
+      toggle.input(session::Input::Toggle);
+    }
     other => warn!("unknown command {other:?}"),
   })?;
 
@@ -528,7 +536,7 @@ impl App {
   /// The keyboard layout's language, for a dictation that follows it.
   fn tell_keyboard(&mut self) {
     let language = input_source::current().and_then(|s| s.language);
-    self.handle.keyboard(language);
+    self.handle.keyboard(language.map(settings::model_language));
   }
 
   fn on_update(&mut self, main: &mut Main, update: Update) {
@@ -1102,7 +1110,7 @@ impl window::Shell for AppShell {
 
   fn keyboard_layouts(&self) -> Vec<(String, String)> {
     let sources = input_source::enabled().into_iter();
-    sources.filter_map(|s| Some((s.language?, s.name))).collect()
+    sources.filter_map(|s| Some((settings::model_language(s.language?), s.name))).collect()
   }
 
   fn download(&self, model: &'static ModelInfo) {

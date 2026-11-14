@@ -814,6 +814,9 @@ impl<O: TextOutput> Controller<O> {
           return;
         }
 
+        // As a change of the Model: its thread finishes its jobs, then drops the model, and its
+        // load error goes with it.
+        self.engine = None;
         let _ = self.check_model();
         self.prepare();
         // A recording loads the model it now goes to while the person speaks.
@@ -2993,6 +2996,26 @@ mod tests {
 
     s.handle.keyboard(None);
     assert_eq!(dictated(4), (stem("parakeet-v3"), None), "a layout without a language");
+  }
+
+  /// A switch of layout away from a model that failed to load takes its error away.
+  #[test]
+  fn a_switch_of_layout_drops_the_last_models_load_error() {
+    let rows = BTreeMap::from([("ru".to_owned(), Some("gigaam-v3".to_owned()))]);
+    let settings = Settings {
+      language: settings::KEYBOARD.into(),
+      model: Some("parakeet-v3".into()),
+      keyboard_models: rows,
+      ..Settings::default()
+    };
+    let models = ["gigaam-v3", "parakeet-v3"];
+    let s = InProcess::start("session-keyboard-error", &settings, Some(&loud(10.0)), "hi", &models);
+    fs::write(download(&s.hub, "gigaam-v3"), b"BROKEN").unwrap();
+    s.handle.keyboard(Some("ru".into()));
+    assert_eq!(s.dictate(1).outcome, Outcome::NoModel);
+    s.handle.keyboard(Some("en".into()));
+    s.update_where("no load error", |u| u.status.no_model.is_none());
+    assert_eq!(s.dictate(2).outcome, Outcome::Done);
   }
 
   /// Any other Language: the layout changes nothing, and the status shows no language.

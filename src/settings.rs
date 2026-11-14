@@ -214,6 +214,12 @@ pub fn language_name(code: &str) -> String {
   language.map_or_else(|| code.to_owned(), |l| l.to_name().to_owned())
 }
 
+/// The code wavo's models list a language under, from a language tag's (`ru`): Whisper's `jw` for
+/// Javanese's `jv`.
+pub fn model_language(code: String) -> String {
+  if code == "jv" { "jw".to_owned() } else { code }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -306,5 +312,11 @@ mod tests {
     for code in wavo::hub::MODELS.iter().flat_map(|m| m.langs) {
       assert_ne!(language_name(code), *code, "{code} has no name");
     }
+
+    // A layout's Javanese is the models' `jw`; the rest as they are.
+    assert_eq!(
+      (model_language("jv".into()), model_language("ru".into())),
+      ("jw".into(), "ru".into())
+    );
   }
 }
