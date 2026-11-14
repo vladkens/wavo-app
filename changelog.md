@@ -1,3 +1,20 @@
+## v0.3.0 – 2026-11-14
+
+### Features
+
+- Added "Keyboard layout" to Language: each dictation is in the language of the layout in use, with its own model per language, on macOS, Windows, and Linux under GNOME and Plasma (#69)
+- Added "Show the text while speaking" in Advanced → HUD: the HUD shows the words as you speak, so a wrong word or language is seen before the stop (#70)
+- Added parakeet-uk, a model for Ukrainian and English, with wavo 0.5 (#72)
+- Added Russian numbers in digits to "Clean up the text": "семьдесят шестой" becomes "76-й", "два миллиона триста тысяч" becomes "2300000", and "1 000" becomes "1000" (#71)
+
+### Fixes
+
+- Fixed the "Microphone is slow to start" warning staying after the microphone was unplugged or another one was chosen (#68)
+
+**Full Changelog**: https://github.com/vladkens/wavo-app/compare/v0.2.0...v0.3.0
+
+---
+
 ## v0.2.0 – 2026-11-09
 
 ### Features

@@ -4495,8 +4495,8 @@ mod tests {
       models.into_iter().map(|m| m.name).collect::<Vec<_>>()
     };
     assert_eq!(order("he")[..3], ["parakeet-he", "whisper-turbo-he", "whisper-turbo"]);
-    let en = ["parakeet-v2", RECOMMENDED, "whisper-large-v3", "breeze-asr-25", "whisper-turbo"];
-    assert_eq!(order("en")[..6], [&en[..], &["whisper-large-v2"]].concat());
+    let en = ["parakeet-v2", RECOMMENDED, "whisper-large-v3", "breeze-asr-25", "parakeet-uk"];
+    assert_eq!(order("en")[..6], [&en[..], &["whisper-turbo"]].concat());
     let ru = ["gigaam-v3-e2e-ctc", "whisper-large-v3", "gigaam-v3", "whisper-turbo", RECOMMENDED];
     assert_eq!(order("ru")[..5], ru);
 
