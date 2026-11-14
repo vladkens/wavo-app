@@ -1539,6 +1539,15 @@ fn unusable(lang: &str, m: &ModelInfo) -> bool {
   m.wer(lang).is_some_and(|x| x > USABLE)
 }
 
+/// Whether `m`, which writes lowercase without punctuation, counts in `lang`: it is usable there
+/// and no model with punctuation is, or the best of those makes twice its errors, as in Kazakh,
+/// Kyrgyz and Uzbek. A text to fix beats none; where a good one punctuates, it stays hidden.
+fn plain_fits(lang: &str, m: &ModelInfo) -> bool {
+  let Some(wer) = m.wer(lang).filter(|&x| x <= USABLE) else { return false };
+  let punctuated = hub::MODELS.iter().filter(|m| m.punctuated).filter_map(|m| m.wer(lang));
+  punctuated.min_by(f32::total_cmp).is_none_or(|best| best > USABLE || best >= wer * 2.0)
+}
+
 /// Whether models were measured in `lang` but none of them is usable there ([USABLE]).
 fn none_usable(lang: &str) -> bool {
   let measured = hub::MODELS.iter().any(|m| m.wer(lang).is_some());
@@ -1550,7 +1559,7 @@ fn none_usable(lang: &str) -> bool {
 /// was measured on it, or none of those is usable in it ([USABLE]).
 fn recommended(lang: &str) -> Option<&'static ModelInfo> {
   let measured: Vec<(&'static ModelInfo, f32, f32)> = (hub::MODELS.iter())
-    .filter(|m| m.punctuated)
+    .filter(|m| m.punctuated || plain_fits(lang, m))
     .filter_map(|m| Some((m, m.wer(lang).filter(|&x| x <= USABLE)?, m.speed().unwrap_or(0.0))))
     .collect();
   let least = |fast: bool| {
@@ -1597,6 +1606,9 @@ fn best_for(lang: &str) -> Option<(&'static str, String)> {
   let name = language_name(lang);
   match (lang, recommended(lang)) {
     ("", _) => Some((RECOMMENDED, "The default model".into())),
+    (_, Some(m)) if !m.punctuated => {
+      Some((m.name, format!("The fewest errors in {name}, but lowercase without punctuation")))
+    }
     (_, Some(m)) => Some((m.name, format!("Best balance of accuracy and speed in {name}"))),
     _ => (hub::lookup("whisper-turbo").ok())
       .filter(|m| m.langs.contains(&lang) && m.wer(lang).is_none())
@@ -1666,8 +1678,13 @@ impl Prefs {
       hub::MODELS.iter().filter(|m| on_disk(m) && shown(m)).collect();
     // The ones dictations go to first, then as the rest.
     downloaded.sort_by_key(|m| (!self.dictates(m), rank(lang, best, m)));
-    // Lowercase without punctuation only to delete, but the one chosen, to download it again.
-    let offered = |m: &ModelInfo| m.punctuated || chosen == Some(m.name);
+    // Lowercase without punctuation only to delete, but the one chosen, to download it again,
+    // and one for a language that has nothing better ([plain_fits]).
+    let plain = |m: &ModelInfo| match lang {
+      "" => m.langs.iter().any(|l| plain_fits(l, m)),
+      _ => plain_fits(lang, m),
+    };
+    let offered = |m: &ModelInfo| m.punctuated || chosen == Some(m.name) || plain(m);
     let mut remote: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| !on_disk(m) && offered(m) && shown(m)).collect();
     remote.sort_by_key(|m| rank(lang, best, m));
@@ -2038,8 +2055,8 @@ fn model_row<'a>(m: &'a ModelInfo, fit: Fit<'a>) -> FormRow<'a> {
 }
 
 /// Model row `row`'s caption ([FormRow::caption]) in its style `s`: its WER in the [Fit]'s
-/// language, dotted, what it means on hover, else its languages; the size; with `ane` ANE,
-/// dotted, what it is on hover.
+/// language, dotted, what it means on hover, else its languages; "no punctuation" for one
+/// without; the size; with `ane` ANE, dotted, what it is on hover.
 fn model_caption(ui: &mut Ui, s: TextStyle, row: Id, m: &ModelInfo, fit: Fit, ane: bool) {
   // One line, each piece ending in "…" where the row is short.
   let s = s.line_limit(1);
@@ -2050,6 +2067,10 @@ fn model_caption(ui: &mut Ui, s: TextStyle, row: Id, m: &ModelInfo, fit: Fit, an
         .help(errors_per(fit.lang))
         .text(wer, s.underline(LinePattern::Dot)),
       None => ui.text(m.languages, s),
+    }
+
+    if !m.punctuated {
+      ui.text(" · no punctuation", s);
     }
 
     ui.text(format!(" · {}{}", size_text(m.size), if ane { " · " } else { "" }), s);
@@ -3561,7 +3582,7 @@ mod tests {
       let mut h = fits.harness(&fake, settings);
       h.event(Event::Appearance(appearance));
       tab(&mut h, Page::Models);
-      for code in ["ru", "el", "he", "ka", "sq", ""] {
+      for code in ["ru", "kk", "el", "he", "ka", "sq", ""] {
         h.app_mut().model_lang = LANGUAGES.iter().position(|l| l.1 == code).unwrap();
         h.frame();
         let name = if code.is_empty() { "all" } else { code };
@@ -4305,7 +4326,8 @@ mod tests {
   }
 
   /// The model chosen, gone from disk, shows to download it again, without punctuation too and
-  /// whatever the search; the other ones without punctuation don't.
+  /// whatever the search; the other ones without punctuation don't, but for a language with
+  /// nothing better.
   #[test]
   fn a_chosen_model_gone_shows_to_download_again() {
     let home = Home::new("window-gone", &["parakeet-v3"]);
@@ -4321,6 +4343,7 @@ mod tests {
     search(&mut h, "gigaam");
     assert!(h.rect(Id::of(("download", "gigaam-v3-ctc"))).is_some(), "to download again");
     assert!(shown(&h, "gigaam-v3") && !shown(&h, "gigaam-v3-rnnt"), "without punctuation");
+    assert!(shown(&h, "gigaam-multilingual"), "nothing better in Kazakh");
     search(&mut h, "whisper");
     assert!(shown(&h, "gigaam-v3-ctc") && shown(&h, "parakeet-v3"), "whatever the search");
   }
@@ -4532,7 +4555,7 @@ mod tests {
   }
 
   /// WER to a decimal under 10 (rounded first); bolts and the speed's words, whisper-turbo the
-  /// baseline; never an unpunctuated model recommended.
+  /// baseline; an unpunctuated model recommended only where nothing better is.
   #[test]
   fn models_say_their_errors_and_speed() {
     let m = |name: &str| hub::lookup(name).unwrap();
@@ -4541,7 +4564,9 @@ mod tests {
     assert_eq!(wer_text("", m("parakeet-ultra")), None, "all languages");
     assert_eq!([9.94, 9.96, 31.6].map(figure), ["9.9", "10", "32"]);
     for (_, lang) in LANGUAGES.iter() {
-      assert!(recommended(lang).is_none_or(|m| m.punctuated), "{lang}");
+      let plain = recommended(lang).filter(|m| !m.punctuated).map(|m| m.name);
+      let only = ["kk", "ky", "uz"].contains(lang);
+      assert_eq!(plain, only.then_some("gigaam-multilingual"), "{lang}");
     }
 
     assert_eq!([22.1, 9.96, 8.5, 0.9].map(times), ["22×", "10×", "8.5×", "0.9×"]);
