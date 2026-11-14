@@ -15,6 +15,7 @@ mod hud;
 mod live;
 mod menu;
 mod mic_start;
+mod numbers;
 mod session;
 mod settings;
 #[cfg(test)]

@@ -619,7 +619,8 @@ const KEYBOARD_HELP: &str = "Each dictation is in the language of the keyboard l
 const CLEAN_HELP: &str = "Adds a space after each paste. A paste into the same window less than \
   20 s after one that ended mid-sentence starts in lower case, unless its first word is in Latin \
   letters. Hesitation sounds like “э-э” and “um” are left out in Russian and English, when you \
-  choose the language or the model has only one.";
+  choose the language or the model has only one. In Russian, a number of more than one word, or \
+  from 11 to 19, is written in digits: “семьдесят шестой” becomes “76-й”.";
 const CLIPBOARD_NOTE: &str = "Wavo can’t put the clipboard back after a paste: allow it in System \
   Settings › Privacy & Security › Paste from Other Apps.";
 const MICROPHONE_WHY: &str = "Wavo records your voice through it while you hold the shortcut; \
