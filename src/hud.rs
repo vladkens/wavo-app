@@ -519,15 +519,16 @@ impl Hud {
   /// brightens; the pill opens, grows
   /// or shrinks to its lines, up to [LINES], and scrolls to its last.
   fn say(&mut self, f: &mut Frame, text: Option<&live::Text>) {
-    let now = f.now;
+    let (now, space, width) = (f.now, f.measure(" ", FONT), WIDE - 2.0 * TEXT_PAD);
     let said = text.map_or_else(Vec::new, |t| {
       let fixed = t.fixed.split_whitespace().map(|w| (w, false));
-      fixed.chain(t.tail.split_whitespace().map(|w| (w, true))).collect::<Vec<_>>()
+      let words = fixed.chain(t.tail.split_whitespace().map(|w| (w, true))).collect::<Vec<_>>();
+      let broken = |(w, tail)| pieces(f, w, width).into_iter().map(move |p| (p, tail));
+      words.into_iter().flat_map(broken).collect::<Vec<_>>()
     });
     let (had, wait) = (self.words.len(), if self.words.is_empty() { FIRST_WAIT } else { ms(0) });
     let gap = WORD_GAP.min(CATCH_UP / said.len().saturating_sub(had).max(1) as u32);
     self.words.truncate(said.len());
-    let (space, width) = (f.measure(" ", FONT), WIDE - 2.0 * TEXT_PAD);
     let (mut line, mut x) = (0, 0.0);
     for (i, (text, tail)) in said.iter().copied().enumerate() {
       let w = f.measure(text, FONT);
@@ -1063,6 +1064,22 @@ fn inside(size: Size, x: f32, y: f32) -> f32 {
   let qx = (x - size.w / 2.0).abs() - (size.w / 2.0 - r);
   let qy = (y - size.h / 2.0).abs() - (size.h / 2.0 - r);
   r - qx.max(0.0).hypot(qy.max(0.0)) - qx.max(qy).min(0.0)
+}
+
+/// `word` in pieces that fit a line `width` wide, the most characters each: Chinese or Japanese
+/// has no spaces, its sentence one word.
+fn pieces<'a>(f: &mut Frame, mut word: &'a str, width: f32) -> Vec<&'a str> {
+  let mut pieces = Vec::new();
+  while f.measure(word, FONT) > width {
+    let ends: Vec<usize> = word.char_indices().skip(1).map(|(i, _)| i).collect();
+    let fit = ends.partition_point(|&end| f.measure(&word[..end], FONT) <= width);
+    let end = ends.get(fit.max(1) - 1).copied().unwrap_or(word.len());
+    pieces.push(&word[..end]);
+    word = &word[end..];
+  }
+
+  pieces.push(word);
+  pieces
 }
 
 /// The corners' radius of a pill `height` tall: round ends, less round as it opens for a line.
@@ -1739,6 +1756,18 @@ mod tests {
     let many = words(&h);
     let (from, to) = (many[4].3, many.last().unwrap().3);
     assert!(to - from < CATCH_UP, "{:?}", to - from);
+  }
+
+  /// Words without spaces (Chinese, Japanese) break where a line ends: each piece a line.
+  #[test]
+  fn text_without_spaces_breaks_at_the_line() {
+    let (mut h, _) = placed(HudStyle::Gradient, HudPosition::Bottom, true);
+    h.app_mut().show(saying("", &"汉字".repeat(60)));
+    h.wait(ms(10));
+    let hud = h.app();
+    assert!(hud.lines > 1 && hud.words.len() == hud.lines, "{} in {}", hud.words.len(), hud.lines);
+    assert!(hud.words.iter().enumerate().all(|(i, w)| w.x == 0.0 && w.line == i));
+    assert_eq!(hud.words.iter().map(|w| w.text.as_str()).collect::<String>(), "汉字".repeat(60));
   }
 
   /// The live text, bottom and top, in both styles, the plain one light and dark: what it said

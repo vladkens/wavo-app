@@ -818,19 +818,24 @@ impl<O: TextOutput> Controller<O> {
       }
       Msg::InputsChanged => self.slow_start.inputs_changed(&audio::devices()),
       Msg::Keyboard(language) => {
-        let before = self.route().0;
+        let before = self.route();
         self.keyboard = language;
-        if self.route().0 == before {
+        if self.route() == before {
           return;
         }
 
-        // As a change of the Model: its thread finishes its jobs, then drops the model, and its
-        // load error goes with it. A preview starts over in the new language.
-        self.engine = None;
+        // A preview starts over in the new language, with the same model too.
         if let Some((p, next)) = self.dictation.as_mut().and_then(|d| d.preview.as_mut()) {
           (*p, *next) = (Preview::default(), Instant::now());
         }
 
+        if self.route().0 == before.0 {
+          return;
+        }
+
+        // As a change of the Model: its thread finishes its jobs, then drops the model, and its
+        // load error goes with it.
+        self.engine = None;
         let _ = self.check_model();
         self.prepare();
         // A recording loads the model it now goes to while the person speaks.
@@ -1164,12 +1169,18 @@ impl<O: TextOutput> Controller<O> {
   }
 
   /// The live preview's step: the recording since its fixed pieces to the engine, while the
-  /// person speaks and no step runs.
+  /// person speaks and no step runs. A model dropped meanwhile (prepared for the Neural Engine,
+  /// another chosen) is loaded again, as the dictation's job would.
   fn preview(&mut self) {
+    let Some((_, next)) = self.dictation.as_mut().and_then(|d| d.preview.as_mut()) else { return };
+    *next = Instant::now() + live::STEP;
+    if self.engine.is_none() && self.engine().is_err() {
+      return;
+    }
+
     let language = self.route().1;
     let Some(d) = self.dictation.as_mut() else { return };
-    let (Some(recorder), Some((p, next))) = (&d.recorder, &mut d.preview) else { return };
-    *next = Instant::now() + live::STEP;
+    let (Some(recorder), Some((p, _))) = (&d.recorder, &mut d.preview) else { return };
     let after = recorder.meter().since(p.from());
     let Some(Loaded { engine, .. }) = &self.engine else { return };
     self.next_job += 1;
@@ -2346,6 +2357,39 @@ mod tests {
       u.status.state == Phase::Idle
     };
     s.update_where("the end of the dictation", none);
+  }
+
+  /// A switch of layout starts the preview over, with the same model too; a model dropped while
+  /// recording (another chosen, prepared for the Neural Engine) loads again for the next step.
+  #[test]
+  fn the_live_preview_goes_on_after_a_switch() {
+    let settings = Settings {
+      language: settings::KEYBOARD.into(),
+      model: Some("parakeet-v3".into()),
+      live_preview: true,
+      ..Settings::default()
+    };
+    let models = ["gigaam-v3", "parakeet-v3"];
+    let s =
+      InProcess::start("session-live-switch", &settings, Some(&loud(10.0)), "hi there", &models);
+    let shown = |fixed: &'static str| {
+      move |u: &Update| {
+        u.status.preview.as_ref().is_some_and(|p| p.fixed == fixed && !p.tail.is_empty())
+      }
+    };
+    s.handle.keyboard(Some("en".into()));
+    s.press();
+    s.update_where("two steps alike", shown("hi"));
+    s.handle.keyboard(Some("ru".into()));
+    s.update_where("over in Russian", shown(""));
+    s.update_where("two steps alike again", shown("hi"));
+
+    s.handle.edit_settings(|s| s.model = Some("gigaam-v3".into()));
+    s.handle.keyboard(Some("en".into()));
+    s.update_where("over with the new model", shown(""));
+    s.update_where("its next step", shown("hi"));
+    s.press();
+    assert_eq!(s.finished(1).last.unwrap().outcome, Outcome::Done);
   }
 
   #[test]
