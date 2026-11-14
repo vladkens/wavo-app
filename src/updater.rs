@@ -327,7 +327,7 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
   let page = Style::new().grow().pads([20.0, 20.0, 16.0, 20.0]).gap(12.0).bg(t.bg);
   ui.col(page, |ui| {
     ui.row(Style::new().w(grow()).gap(16.0), |ui| {
-      ui.png_image(ICON, Style::new().w(px(64.0)).h(px(64.0)));
+      ui.image(ICON, Style::new().w(px(64.0)).h(px(64.0)));
       ui.col(Style::new().w(grow()).gap(6.0), |ui| {
         ui.text(title, TextStyle::new(t.bold, t.text).line_limit(1));
         if !text.is_empty() {
