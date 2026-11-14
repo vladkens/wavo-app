@@ -1002,7 +1002,8 @@ impl Prefs {
 const TOOK_HELP: &str = "After each dictation the HUD shows for a second how long the text took after \
   the stop.";
 const LIVE_HELP: &str = "The HUD shows the words as you speak, recognized again every half second. \
-  The text pasted is still recognized from the whole recording after the stop.";
+  The text pasted is still recognized from the whole recording after the stop. On by default on a \
+  Mac or with a discrete GPU: an integrated one is kept busy while you speak.";
 const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle this long. The next \
   dictation loads it again, which takes a moment.";
 const ANE_HELP: &str = "Models marked ANE run on the Neural Engine: as fast as on the GPU at a \
@@ -3747,8 +3748,9 @@ mod tests {
     click(&mut h, Id::of("hud-style"));
     click(&mut h, Id::of("hud-style").key(("item", 1)));
     assert_eq!(fake.log().settings.hud_style, HudStyle::Plain);
+    let live = fake.log().settings.live_preview;
     click(&mut h, Id::of("live"));
-    assert!(!fake.log().settings.live_preview);
+    assert_eq!(fake.log().settings.live_preview, !live);
 
     // Launch at login, on General, goes to the system, one change at a time; a refusal says why.
     tab(&mut h, Page::General);

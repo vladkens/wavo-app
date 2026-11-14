@@ -3,7 +3,7 @@
 ### Features
 
 - Added "Keyboard layout" to Language: each dictation is in the language of the layout in use, with its own model per language, on macOS, Windows, and Linux under GNOME and Plasma (#69)
-- Added "Show the text while speaking" in Advanced → HUD, on by default: the HUD shows the words as you speak, so a wrong word or language is seen before the stop (#70)
+- Added "Show the text while speaking" in Advanced → HUD, on by default on a Mac or with a discrete GPU: the HUD shows the words as you speak, so a wrong word or language is seen before the stop; on a slow GPU it waits as long as each pass took (#70)
 - Added parakeet-uk, a model for Ukrainian and English, with wavo 0.5 (#72)
 - Added Russian numbers in digits to "Clean up the text": "семьдесят шестой" becomes "76-й", "два миллиона триста тысяч" becomes "2300000", and "1 000" becomes "1000" (#71)
 

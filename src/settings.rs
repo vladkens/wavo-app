@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -95,6 +96,18 @@ pub enum HudStyle {
   Plain,
 }
 
+/// The text while speaking is on by default where the model keeps up with it: on a Mac, or with a
+/// discrete GPU; an integrated or software one would be busy all the time while speaking. Probed
+/// once: wavo reads the adapters' info only, in milliseconds.
+fn live_default() -> bool {
+  static FAST: OnceLock<bool> = OnceLock::new();
+  *FAST.get_or_init(|| {
+    cfg!(target_os = "macos")
+      || wavo::devices()
+        .is_ok_and(|d| d.first().is_some_and(|d| d.kind == wavo::DeviceKind::DiscreteGpu))
+  })
+}
+
 impl Default for Settings {
   fn default() -> Self {
     Self {
@@ -114,7 +127,7 @@ impl Default for Settings {
       autostart: false,
       hud_position: HudPosition::Bottom,
       hud_style: HudStyle::Gradient,
-      live_preview: true,
+      live_preview: live_default(),
       show_transcription_time: false,
       hotkey_portal: false,
       auto_update: true,

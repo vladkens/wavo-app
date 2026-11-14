@@ -666,6 +666,8 @@ struct Dictation<T> {
   prewarmed: bool,
   /// With [Settings::live_preview]: the text so far, and when it asks the engine next.
   preview: Option<(Preview, Instant)>,
+  /// When the preview's last job went to the engine.
+  asked: Instant,
   job: Option<Job>,
   duration_ms: i64,
   warnings: Vec<String>,
@@ -1153,6 +1155,7 @@ impl<O: TextOutput> Controller<O> {
       recorder: Some(recorder),
       prewarmed: false,
       preview: self.settings.live_preview.then(|| (Preview::default(), started + live::STEP)),
+      asked: started,
       job: None,
       duration_ms: 0,
     });
@@ -1194,6 +1197,7 @@ impl<O: TextOutput> Controller<O> {
     let Some(Loaded { engine, .. }) = &self.engine else { return };
     self.next_job += 1;
     if let Some(pcm) = p.next(self.next_job, after) {
+      d.asked = Instant::now();
       engine.preview(self.next_job, pcm, language);
     }
   }
@@ -1201,7 +1205,8 @@ impl<O: TextOutput> Controller<O> {
   fn on_preview(&mut self, id: u64, result: Result<String, EngineError>) {
     let clean = self.settings.clean_text;
     let language = self.route().1;
-    let Some((p, next)) = self.dictation.as_mut().and_then(|d| d.preview.as_mut()) else { return };
+    let Some(d) = self.dictation.as_mut() else { return };
+    let Some((p, next)) = d.preview.as_mut() else { return };
     let before = p.from();
     let result = result.map(|text| match clean {
       true => cleanup::clean(&text, language.as_deref()),
@@ -1209,9 +1214,14 @@ impl<O: TextOutput> Controller<O> {
     });
 
     // The tail after a fixed piece at once: its words would wait a step.
+    let now = Instant::now();
     if p.done(id, result) && p.fixed_since(before) {
-      *next = Instant::now();
+      *next = now;
     }
+
+    // A slow engine rests as long as the job took: the preview keeps it busy half the time at
+    // most, and the dictation's job waits less for one at the stop.
+    *next = (*next).max(now + now.duration_since(d.asked));
   }
 
   fn stop_recording(&mut self) {
