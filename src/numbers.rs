@@ -203,7 +203,7 @@ pub fn digits(text: &str) -> String {
 }
 
 /// `text` with the spaces GigaAM writes between a number's thousands taken out: `2 300 000 ₽` is
-/// `2300000 ₽`; groups with more digits after them (a phone's) and a fraction's stay.
+/// `2300000 ₽`; groups with more digits around them (a phone's) and a fraction's stay.
 fn ungroup(text: &str) -> String {
   let chunks: Vec<(&str, &str)> = words(text).collect();
   let spaces = |s: &str| s.chars().all(|c| matches!(c, ' ' | '\u{a0}' | '\u{202f}'));
@@ -215,7 +215,8 @@ fn ungroup(text: &str) -> String {
     let core = lead.trim_start_matches(|c: char| !c.is_alphanumeric() && !"+,.".contains(c));
     let mut end = i + 1;
     let mut last = "";
-    if digits(core) && core.len() <= 3 {
+    let after = i > 0 && spaces(space) && chunks[i - 1].1.ends_with(|c: char| c.is_ascii_digit());
+    if digits(core) && core.len() <= 3 && !after {
       while let Some(&(gap, group)) = chunks.get(end) {
         let three = group.get(..3).is_some_and(digits) && !digits(group.get(3..4).unwrap_or(""));
         if !spaces(gap) || !three {
@@ -460,6 +461,7 @@ mod tests {
       ("(150\u{a0}200), 1 000-й", "(150200), 1000-й"),
       ("Код 734 1, 0,5 075 звёзд", "Код 734 1, 0,5 075 звёзд"),
       ("+7 900 123 45 67, 8 900 123 45 67", "+7 900 123 45 67, 8 900 123 45 67"),
+      ("+7 495 12 34 567", "+7 495 12 34 567"),
       ("10 000\n500 штук", "10000\n500 штук"),
       ("по 2 1000", "по 2 1000"),
     ];
