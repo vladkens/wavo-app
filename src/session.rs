@@ -824,11 +824,7 @@ impl<O: TextOutput> Controller<O> {
           return;
         }
 
-        // A preview starts over in the new language, with the same model too.
-        if let Some((p, next)) = self.dictation.as_mut().and_then(|d| d.preview.as_mut()) {
-          (*p, *next) = (Preview::default(), Instant::now());
-        }
-
+        self.restart_preview();
         if self.route().0 == before.0 {
           return;
         }
@@ -939,7 +935,12 @@ impl<O: TextOutput> Controller<O> {
 
     self.machine.activation = self.settings.activation;
     let keyboard = self.keyboard.as_deref();
-    let model_changed = old.route(keyboard).0 != self.settings.route(keyboard).0;
+    let (was, route) = (old.route(keyboard), self.settings.route(keyboard));
+    let model_changed = was.0 != route.0;
+    if was != route {
+      self.restart_preview();
+    }
+
     if model_changed
       || old.unload_after_minutes != self.settings.unload_after_minutes
       || old.neural_engine != self.settings.neural_engine
@@ -1166,6 +1167,14 @@ impl<O: TextOutput> Controller<O> {
     }
 
     self.dictation.as_mut().unwrap().prewarmed = true;
+  }
+
+  /// The preview starts over in another model or language, with the same model too: the words
+  /// and pieces are the other one's, and a job of it still running is not its own any more.
+  fn restart_preview(&mut self) {
+    if let Some((p, next)) = self.dictation.as_mut().and_then(|d| d.preview.as_mut()) {
+      (*p, *next) = (Preview::default(), Instant::now());
+    }
   }
 
   /// The live preview's step: the recording since its fixed pieces to the engine, while the
@@ -2359,8 +2368,8 @@ mod tests {
     s.update_where("the end of the dictation", none);
   }
 
-  /// A switch of layout starts the preview over, with the same model too; a model dropped while
-  /// recording (another chosen, prepared for the Neural Engine) loads again for the next step.
+  /// A switch of layout starts the preview over, with the same model too, and so does another
+  /// model chosen while recording, which loads for the next step.
   #[test]
   fn the_live_preview_goes_on_after_a_switch() {
     let settings = Settings {
@@ -2385,7 +2394,6 @@ mod tests {
     s.update_where("two steps alike again", shown("hi"));
 
     s.handle.edit_settings(|s| s.model = Some("gigaam-v3".into()));
-    s.handle.keyboard(Some("en".into()));
     s.update_where("over with the new model", shown(""));
     s.update_where("its next step", shown("hi"));
     s.press();

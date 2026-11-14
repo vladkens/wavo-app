@@ -624,7 +624,8 @@ impl App {
   /// the overlay would take the keyboard focus ([Main::overlay_takes_focus]: GNOME on Wayland
   /// without XWayland): the person's window would lose it, and the paste would go into the HUD.
   /// The tray icon tells the state there too. The HUD's place, style and room for the live text
-  /// are the settings'.
+  /// are the settings': a window of other ones opens anew when it shows from hidden or a new
+  /// recording starts, not in one.
   fn show(&mut self, main: &mut Main, shown: Mode, show: Show, settings: &Settings) {
     if main.overlay_takes_focus() {
       return;
@@ -636,7 +637,9 @@ impl App {
     }
 
     let (position, live) = (settings.hud_position, settings.live_preview);
-    if hidden && (position, live) != (self.hud.position, self.hud.live) {
+    let starts = hidden || (matches!(show, Show::Recording { .. }) && shown != Mode::Recording);
+    let reopen = starts && (position, live) != (self.hud.position, self.hud.live);
+    if reopen {
       self.hud.window.close();
       self.hud = open_hud(main, position, live);
     }
@@ -645,7 +648,7 @@ impl App {
       h.set_style(settings.hud_style);
       h.show(show);
     });
-    if hidden {
+    if hidden || reopen {
       self.hud.window.front();
     }
   }
