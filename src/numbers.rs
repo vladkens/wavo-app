@@ -7,6 +7,7 @@
 //! words (`один из`, `в сотый раз`, `минут десять`), but for 11–19, which no phrase has; two
 //! numbers in a row stay, which a time or a count may be (`восемнадцать сорок`, `пять шесть`); a
 //! scale with nothing after it stays a word, in its case (`на 88 тысячах`).
+//! The thousands GigaAM parts with spaces join: `1 000` is `1000`.
 
 use crate::cleanup::words;
 
@@ -165,8 +166,10 @@ const BARE: [&str; 3] = ["тысяча", "миллион", "миллиард"];
 
 const VOWELS: &str = "аеиоуыэюя";
 
-/// `text` with its Russian numbers of more than one word, and those of 11–19, in digits.
+/// `text` with its Russian numbers of more than one word, and those of 11–19, in digits, and
+/// the thousands of a number in digits not parted by spaces.
 pub fn digits(text: &str) -> String {
+  let text = &ungroup(text);
   let chunks: Vec<(&str, &str)> = words(text).collect();
   let mut out = String::with_capacity(text.len());
   let mut i = 0;
@@ -193,6 +196,48 @@ pub fn digits(text: &str) -> String {
       }
     }
 
+    i = end;
+  }
+
+  out + &text[text.trim_end().len()..]
+}
+
+/// `text` with the spaces GigaAM writes between a number's thousands taken out: `2 300 000 ₽` is
+/// `2300000 ₽`; groups with more digits after them (a phone's) and a fraction's stay.
+fn ungroup(text: &str) -> String {
+  let chunks: Vec<(&str, &str)> = words(text).collect();
+  let spaces = |s: &str| s.chars().all(|c| matches!(c, ' ' | '\u{a0}' | '\u{202f}'));
+  let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+  let mut out = String::with_capacity(text.len());
+  let mut i = 0;
+  while i < chunks.len() {
+    let (space, lead) = chunks[i];
+    let core = lead.trim_start_matches(|c: char| !c.is_alphanumeric() && !"+,.".contains(c));
+    let mut end = i + 1;
+    let mut last = "";
+    if digits(core) && core.len() <= 3 {
+      while let Some(&(gap, group)) = chunks.get(end) {
+        let three = group.get(..3).is_some_and(digits) && !digits(group.get(3..4).unwrap_or(""));
+        if !spaces(gap) || !three {
+          break;
+        }
+
+        (end, last) = (end + 1, group);
+        if group.len() > 3 {
+          break;
+        }
+      }
+    }
+
+    let row = chunks
+      .get(end)
+      .is_some_and(|(gap, c)| spaces(gap) && c.starts_with(|c: char| c.is_ascii_digit()));
+    if end == i + 1 || (last.len() == 3 && row) {
+      end = i + 1;
+    }
+
+    out.push_str(space);
+    chunks[i..end].iter().for_each(|(_, chunk)| out.push_str(chunk));
     i = end;
   }
 
@@ -248,8 +293,9 @@ fn number(chunks: &[(&str, &str)]) -> Option<String> {
   let ending = words.last().unwrap();
   let written = match &ending.ordinal {
     Some(suffix) => format!("{}-{suffix}", total + group),
-    // A scale with nothing after it stays a word: `25 тысяч`, `на 88 тысячах`.
-    None if ending.kind == Kind::Scale => {
+    // A scale with nothing after it stays a word: `25 тысяч`, `на 88 тысячах`; but for one
+    // after a larger scale: `2300000`, not `2300 тысяч`.
+    None if ending.kind == Kind::Scale && total / scale < 1000 => {
       let word = core.trim_start_matches(|c: char| !c.is_alphanumeric());
       format!("{} {word}", total / scale)
     }
@@ -327,6 +373,7 @@ mod tests {
       ("двадцать пять тысяч", "25 тысяч"),
       ("на восьмидесяти восьми тысячах", "на 88 тысячах"),
       ("три миллиона", "3 миллиона"),
+      ("два миллиона триста тысяч рублей", "2300000 рублей"),
       ("тысяча двести", "1200"),
       ("двести двадцать одной", "221"),
       ("пятьюстами двадцатью", "520"),
@@ -405,6 +452,22 @@ mod tests {
     }
   }
 
+  #[test]
+  fn thousands_in_digits_join() {
+    let cases = [
+      ("На счету 2 300 000 ₽.", "На счету 2300000 ₽."),
+      ("примерно 1 101 строчка", "примерно 1101 строчка"),
+      ("(150\u{a0}200), 1 000-й", "(150200), 1000-й"),
+      ("Код 734 1, 0,5 075 звёзд", "Код 734 1, 0,5 075 звёзд"),
+      ("+7 900 123 45 67, 8 900 123 45 67", "+7 900 123 45 67, 8 900 123 45 67"),
+      ("10 000\n500 штук", "10000\n500 штук"),
+      ("по 2 1000", "по 2 1000"),
+    ];
+    for (said, written) in cases {
+      assert_eq!(digits(said), written);
+    }
+  }
+
   /// A number partly in digits stays: its words alone would make another one.
   #[test]
   fn a_number_with_digits_in_it_stays() {
@@ -434,7 +497,7 @@ mod tests {
   #[test]
   fn other_words_stay() {
     for said in
-      ["пятно", "сотня", "пятерка", "семьюдесятью-восемью", "76-й", "1 756", "трёхсотлетие", ""]
+      ["пятно", "сотня", "пятерка", "семьюдесятью-восемью", "76-й", "1756", "трёхсотлетие", ""]
     {
       assert_eq!(digits(said), said);
     }
