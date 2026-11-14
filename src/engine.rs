@@ -238,6 +238,8 @@ struct Job {
   pcm: Vec<f32>,
   language: Option<String>,
   background: bool,
+  /// A live preview's: after dictations, before the background, and silent in the status.
+  preview: bool,
 }
 
 /// A prewarmed model waits this long for its job even with a shorter `unload_after`: the
@@ -305,7 +307,14 @@ impl Engine {
 
   /// `background` jobs go after dictations, and yield to one after their piece in progress.
   pub fn transcribe(&self, id: u64, pcm: Vec<f32>, language: Option<String>, background: bool) {
-    self.send(Msg::Job(Job { id, pcm, language, background }));
+    self.send(Msg::Job(Job { id, pcm, language, background, preview: false }));
+  }
+
+  /// The text of a recording so far, for its live preview: it goes after dictations and before
+  /// background jobs, a newer one takes the place of one still queued (told cancelled), and it
+  /// moves neither the status's phase nor its progress.
+  pub fn preview(&self, id: u64, pcm: Vec<f32>, language: Option<String>) {
+    self.send(Msg::Job(Job { id, pcm, language, background: false, preview: true }));
   }
 
   /// A running job stops after its piece in progress.
@@ -375,7 +384,8 @@ impl Worker {
         }
       }
 
-      let at = self.queue.iter().position(|j| !j.background).unwrap_or(0);
+      let first = |preview| self.queue.iter().position(|j| !j.background && j.preview == preview);
+      let at = first(false).or_else(|| first(true)).unwrap_or(0);
       if let Some(job) = self.queue.remove(at) {
         return Some(job);
       }
@@ -409,7 +419,14 @@ impl Worker {
       Msg::Release => self.hold = false,
       Msg::Unload => self.unload = true,
       Msg::Job(job) => {
-        self.hold &= job.background;
+        self.hold &= job.background || job.preview;
+        if job.preview
+          && let Some(i) = self.queue.iter().position(|j| j.preview)
+        {
+          let old = self.queue.remove(i).unwrap();
+          self.done(old.id, Err(EngineError::Cancelled), None);
+        }
+
         self.queue.push_back(job);
       }
       Msg::Cancel(id) => match self.queue.iter().position(|j| j.id == id) {
@@ -544,12 +561,18 @@ impl Worker {
 
     let model = self.model.take().unwrap();
     let ran = Ran { device: model.device(), load: self.loads };
-    self.set(|s| s.phase = Phase::Running);
+    if !job.preview {
+      self.set(|s| s.phase = Phase::Running);
+    }
+
     let started = Instant::now();
     let mut yielded = false;
     let run = panic::catch_unwind(AssertUnwindSafe(|| {
       model.transcribe(&job.pcm, job.language.as_deref(), &mut |index, count| {
-        self.set(|s| s.progress = Some((index + 1, count)));
+        if !job.preview {
+          self.set(|s| s.progress = Some((index + 1, count)));
+        }
+
         while let Ok(msg) = self.rx.try_recv() {
           self.on_msg(msg);
         }
@@ -566,9 +589,16 @@ impl Worker {
     }));
 
     let (id, took) = (job.id, started.elapsed());
-    info!("job {id} ran on {} in {took:.2?}, {} samples", ran.device, job.pcm.len());
+    match job.preview {
+      true => debug!("preview {id} ran on {} in {took:.2?}, {} samples", ran.device, job.pcm.len()),
+      false => info!("job {id} ran on {} in {took:.2?}, {} samples", ran.device, job.pcm.len()),
+    }
+
     self.model = Some(model);
-    self.set(|s| (s.phase, s.progress) = (Phase::Idle, None));
+    if !job.preview {
+      self.set(|s| (s.phase, s.progress) = (Phase::Idle, None));
+    }
+
     // After a panic or a lost GPU device the model may not work again.
     let error = match &run {
       Ok(Err(e)) => e.downcast_ref::<wavo::Error>(),
@@ -817,6 +847,33 @@ mod tests {
     drop(gate);
     assert_eq!(f.done(), (4, Err(EngineError::Cancelled)));
     assert_eq!(models.runs().len(), 6, "the rest never ran");
+  }
+
+  /// A preview goes after dictations and before background jobs, a newer one takes a queued
+  /// one's place, and a preview's run leaves the status's phase alone.
+  #[test]
+  fn previews_go_between_dictations_and_the_background_and_the_newest_wins() {
+    let models = FakeModels::new("text");
+    let f = Fake::start("engine-preview", &models, None);
+    assert_eq!(f.run(1, 1000), Ok("text".into()));
+    let gate = models.hold();
+    f.engine.transcribe(2, vec![0.0; 2000], None, false);
+    f.wait(Phase::Running);
+    f.engine.transcribe(3, vec![0.0; 3000], None, true);
+    f.engine.preview(4, vec![0.0; 4000], None);
+    f.engine.preview(5, vec![0.0; 5000], None);
+    f.engine.transcribe(6, vec![0.0; 6000], None, false);
+    drop(gate);
+    assert_eq!(f.done(), (4, Err(EngineError::Cancelled)), "replaced while queued");
+    let order: Vec<u64> = (0..4).map(|_| f.done().0).collect();
+    assert_eq!(order, [2, 6, 5, 3]);
+    assert_eq!(&models.runs()[1..], [2000, 6000, 5000, 3000]);
+
+    let changed = || std::iter::from_fn(|| f.events.try_recv().ok()).count();
+    changed();
+    f.engine.preview(7, vec![0.0; 1000], None);
+    assert_eq!(f.done(), (7, Ok("text".into())));
+    assert_eq!(changed(), 0, "no status change for a preview");
   }
 
   /// With an unload right away a prewarmed model still waits for its job; a release ends that.

@@ -6,6 +6,7 @@
 
 use std::fs::{self, File};
 use std::io::BufWriter;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -714,6 +715,8 @@ struct Live {
   silent: AtomicBool,
   /// VAD frames since the last that was not the tail's pause ([TAIL_QUIET]).
   pause: AtomicU32,
+  /// The recording so far, its whole frames: the live preview reads it while it records.
+  sofar: Mutex<Clip>,
 }
 
 /// The recording's level and whether the microphone sends any sound, for another thread.
@@ -735,6 +738,14 @@ impl Meter {
   pub fn pause(&self) -> Duration {
     let frames = self.0.pause.load(Ordering::Relaxed);
     Duration::from_millis(u64::from(frames) * FRAME as u64 * 1000 / u64::from(SAMPLE_RATE))
+  }
+
+  /// The recording so far from VAD frame `frame` on ([FRAME]s of 16 kHz mono), its scores with it:
+  /// empty once the recording stopped.
+  pub fn since(&self, frame: usize) -> Clip {
+    let sofar = self.0.sofar.lock().unwrap();
+    let frame = frame.min(sofar.scores.len());
+    Clip { pcm: sofar.pcm[frame * FRAME..].to_vec(), scores: sofar.scores[frame..].to_vec() }
   }
 
   /// A test's microphone going silent or sounding again.
@@ -888,7 +899,8 @@ struct Processor {
   out: Vec<f32>,
   resampler: Resample,
   vad: Vad,
-  pcm: Vec<f32>,
+  /// The samples of a partial VAD frame, not in [Live::sofar] yet.
+  pending: Vec<f32>,
   /// `None` without a file, or after a write error.
   wav: Option<WavSink>,
   warnings: Vec<String>,
@@ -904,7 +916,7 @@ impl Processor {
       out: Vec::new(),
       resampler: Resample::new(rate, SAMPLE_RATE)?,
       vad: Vad::default(),
-      pcm: Vec::new(),
+      pending: Vec::new(),
       wav,
       warnings: Vec::new(),
       level: Level::default(),
@@ -933,7 +945,13 @@ impl Processor {
     self.live.silent.store(self.level.faint >= NO_SOUND, Ordering::Relaxed);
     self.vad.push(&self.out);
     self.live.pause.store(self.vad.pause as u32, Ordering::Relaxed);
-    self.pcm.extend_from_slice(&self.out);
+    // Whole frames only, so the scores stay in step with the audio.
+    self.pending.extend_from_slice(&self.out);
+    let mut sofar = self.live.sofar.lock().unwrap();
+    let had = sofar.scores.len();
+    sofar.scores.extend_from_slice(&self.vad.scores[had..]);
+    let whole = (sofar.scores.len() - had) * FRAME;
+    sofar.pcm.extend(self.pending.drain(..whole));
   }
 
   fn finish(mut self) -> Recording {
@@ -948,7 +966,9 @@ impl Processor {
       done => done.is_some(),
     };
 
-    let clip = Clip { scores: self.vad.finish(), pcm: self.pcm };
+    let mut pcm = mem::take(&mut *self.live.sofar.lock().unwrap()).pcm;
+    pcm.append(&mut self.pending);
+    let clip = Clip { scores: self.vad.finish(), pcm };
     Recording { clip, saved, warnings: self.warnings }
   }
 }
@@ -1088,6 +1108,12 @@ const EDGE_MS: usize = 300;
 /// kept on each side.
 const LONG_PAUSE_MS: usize = 1000;
 const KEPT_PAUSE_MS: usize = 300;
+/// The live preview fixes a piece's text at a pause this long, the piece at least [MIN_PIECE_MS]
+/// long; past [MAX_PIECE_MS] it takes the longest gap in the speech there is: the piece stays
+/// within every model's window, and the text it fixes is never decoded again.
+const FIX_PAUSE_MS: usize = 300;
+const MIN_PIECE_MS: usize = 2000;
+const MAX_PIECE_MS: usize = 10_000;
 
 /// Frames in `ms`, rounded down.
 const fn frames(ms: usize) -> usize {
@@ -1199,6 +1225,50 @@ impl Clip {
 
   pub fn has_speech(&self) -> bool {
     self.voiced_frames() >= frames(MIN_SPEECH_MS)
+  }
+
+  /// Where the live preview ends a piece of the recording so far and fixes its text, a frame: the
+  /// middle of the last pause of [FIX_PAUSE_MS] or more after [MIN_PIECE_MS] that speech follows;
+  /// without one past [MAX_PIECE_MS], the middle of the longest run of frames that aren't speech
+  /// after [MIN_PIECE_MS], else there.
+  pub fn piece_end(&self) -> Option<usize> {
+    let (min, n) = (frames(MIN_PIECE_MS), self.scores.len());
+    let runs = |below: f32| {
+      let mut runs = Vec::new();
+      let mut start = None;
+      for i in min..n {
+        match (self.scores[i] < below, start) {
+          (true, None) => start = Some(i),
+          (false, Some(a)) => {
+            runs.push(a..i);
+            start = None;
+          }
+          _ => {}
+        }
+      }
+
+      runs
+    };
+
+    let paused = runs(PAUSE).into_iter().rev().find(|r| r.len() >= frames(FIX_PAUSE_MS));
+    if let Some(r) = paused {
+      return Some(r.start + r.len() / 2);
+    }
+
+    if n < frames(MAX_PIECE_MS) {
+      return None;
+    }
+
+    let gap = runs(VOICED).into_iter().max_by_key(|r| r.len());
+    Some(gap.map_or(frames(MAX_PIECE_MS), |r| r.start + r.len() / 2))
+  }
+
+  /// The clip before frame `frame`, and the one from it on.
+  pub fn split_at(mut self, frame: usize) -> (Clip, Clip) {
+    let frame = frame.min(self.scores.len());
+    let pcm = self.pcm.split_off((frame * FRAME).min(self.pcm.len()));
+    let scores = self.scores.split_off(frame);
+    (self, Clip { pcm, scores })
   }
 
   /// What the engine gets: `None` without speech, else the clip with silent edges trimmed to

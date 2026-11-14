@@ -37,6 +37,7 @@ use crate::audio::{self, Clip, Meter, Recorder, Source};
 use crate::cleanup;
 use crate::engine::{self, Engine, EngineError, Loader, Wavo};
 use crate::history::{self, Entry, History, Retention, now_ms};
+use crate::live::{self, Preview};
 use crate::mic_start::{SlowStart, Start};
 use crate::settings::{self, Activation, Settings, language_name};
 
@@ -332,6 +333,8 @@ pub struct Status {
   /// With [settings::KEYBOARD], the language of the dictation in progress: the layout's while it
   /// records, then the one it is transcribed in; `None` for a layout without one.
   pub language: Option<String>,
+  /// With [Settings::live_preview], what the dictation in progress said so far, until its text.
+  pub preview: Option<live::Text>,
   /// Entries being transcribed again.
   pub retranscribing: Vec<i64>,
   /// Entries transcribed again in this run, whose first text a restore puts back.
@@ -661,6 +664,8 @@ struct Dictation<T> {
   recorder: Option<Recorder>,
   /// The engine loads the model for it.
   prewarmed: bool,
+  /// With [Settings::live_preview]: the text so far, and when it asks the engine next.
+  preview: Option<(Preview, Instant)>,
   job: Option<Job>,
   duration_ms: i64,
   warnings: Vec<String>,
@@ -730,6 +735,10 @@ impl<O: TextOutput> Controller<O> {
         Some((r, Some(stopped))) => at(tail_end(stopped, Instant::now(), r.meter().pause())),
         _ => never(),
       };
+      let preview = match (recorder, self.dictation.as_ref().and_then(|d| d.preview.as_ref())) {
+        (Some((_, None)), Some((p, next))) if p.job().is_none() => at(*next),
+        _ => never(),
+      };
 
       select! {
         recv(rx) -> msg => match msg {
@@ -738,6 +747,7 @@ impl<O: TextOutput> Controller<O> {
         },
         recv(failures) -> failure => self.on_mic_failure(failure.unwrap_or_default()),
         recv(tail) -> _ => self.on_tail(),
+        recv(preview) -> _ => self.preview(),
         recv(events) -> event => self.on_engine(event.unwrap()),
       }
 
@@ -815,8 +825,12 @@ impl<O: TextOutput> Controller<O> {
         }
 
         // As a change of the Model: its thread finishes its jobs, then drops the model, and its
-        // load error goes with it.
+        // load error goes with it. A preview starts over in the new language.
         self.engine = None;
+        if let Some((p, next)) = self.dictation.as_mut().and_then(|d| d.preview.as_mut()) {
+          (*p, *next) = (Preview::default(), Instant::now());
+        }
+
         let _ = self.check_model();
         self.prepare();
         // A recording loads the model it now goes to while the person speaks.
@@ -1038,6 +1052,12 @@ impl<O: TextOutput> Controller<O> {
 
   fn on_engine(&mut self, event: engine::Event) {
     let engine::Event::Done(id, result, ran) = event else { return };
+    if let Some((p, _)) = self.dictation.as_mut().and_then(|d| d.preview.as_mut())
+      && p.job() == Some(id)
+    {
+      return self.on_preview(id, result);
+    }
+
     let dictation = self.dictation.as_ref().and_then(|d| d.job.as_ref()).filter(|j| j.id == id);
     let retranscription = self.retranscribing.iter().map(|r| &r.job).find(|j| j.id == id);
     // A job of an engine replaced since tells nothing of the one now.
@@ -1126,6 +1146,7 @@ impl<O: TextOutput> Controller<O> {
       warnings: recorder.warning().map(str::to_owned).into_iter().collect(),
       recorder: Some(recorder),
       prewarmed: false,
+      preview: self.settings.live_preview.then(|| (Preview::default(), started + live::STEP)),
       job: None,
       duration_ms: 0,
     });
@@ -1140,6 +1161,37 @@ impl<O: TextOutput> Controller<O> {
     }
 
     self.dictation.as_mut().unwrap().prewarmed = true;
+  }
+
+  /// The live preview's step: the recording since its fixed pieces to the engine, while the
+  /// person speaks and no step runs.
+  fn preview(&mut self) {
+    let language = self.route().1;
+    let Some(d) = self.dictation.as_mut() else { return };
+    let (Some(recorder), Some((p, next))) = (&d.recorder, &mut d.preview) else { return };
+    *next = Instant::now() + live::STEP;
+    let after = recorder.meter().since(p.from());
+    let Some(Loaded { engine, .. }) = &self.engine else { return };
+    self.next_job += 1;
+    if let Some(pcm) = p.next(self.next_job, after) {
+      engine.preview(self.next_job, pcm, language);
+    }
+  }
+
+  fn on_preview(&mut self, id: u64, result: Result<String, EngineError>) {
+    let clean = self.settings.clean_text;
+    let language = self.route().1;
+    let Some((p, next)) = self.dictation.as_mut().and_then(|d| d.preview.as_mut()) else { return };
+    let before = p.from();
+    let result = result.map(|text| match clean {
+      true => cleanup::clean(&text, language.as_deref()),
+      false => text,
+    });
+
+    // The tail after a fixed piece at once: its words would wait a step.
+    if p.done(id, result) && p.fixed_since(before) {
+      *next = Instant::now();
+    }
   }
 
   fn stop_recording(&mut self) {
@@ -1180,6 +1232,11 @@ impl<O: TextOutput> Controller<O> {
     let d = self.dictation.as_mut().unwrap();
     let take = d.last.take;
     let recorder = d.recorder.take().unwrap();
+    let preview = d.preview.as_ref().and_then(|(p, _)| p.job());
+    if let (Some(id), Some(loaded)) = (preview, &self.engine) {
+      loaded.engine.cancel(id);
+    }
+
     self.slow_start.note(take, Start::of(&recorder, false));
     let rec = match recorder.stop() {
       Ok(rec) => rec,
@@ -1671,6 +1728,7 @@ impl<O: TextOutput> Controller<O> {
         Some(job) => job.language.clone(),
         None => self.keyboard.clone(),
       }),
+      preview: d.and_then(|d| d.preview.as_ref()).map(|(p, _)| p.text.clone()),
       retranscribing: self.retranscribing.iter().map(|r| r.entry).collect(),
       restorable: self.originals.keys().copied().collect(),
       error: self.error.clone(),
@@ -2261,6 +2319,33 @@ mod tests {
     drop(gate);
     assert_eq!(s.dictate(3).text, "hello there");
     assert_eq!((s.recordings(), s.models.loads(), s.output.log().pasted.len()), (1, 1, 1));
+  }
+
+  /// With the setting, the text so far comes with the recording, the engine's every step; the
+  /// text pasted is still the whole recording's, and the preview goes with the dictation. Without
+  /// it, none.
+  #[test]
+  fn the_live_preview_comes_while_recording() {
+    let live = Settings { live_preview: true, ..Settings::default() };
+    let s =
+      InProcess::start("session-live", &live, Some(&loud(10.0)), "hello there", &["parakeet-v3"]);
+    s.record(0.3);
+    let said = |u: &Update| u.status.preview.as_ref().is_some_and(|p| !p.tail.is_empty());
+    let shown = s.update_where("the text so far", said).status.preview.unwrap();
+    assert_eq!(shown.tail.to_lowercase(), "hello there", "{shown:?}");
+    s.press();
+    assert!(s.finished(1).preview.is_none());
+    assert_eq!(s.pasted(), ["hello there "]);
+
+    let s = hello("session-no-live");
+    s.record(0.3);
+    thread::sleep(live::STEP * 2);
+    s.press();
+    let none = |u: &Update| {
+      assert!(u.status.preview.is_none());
+      u.status.state == Phase::Idle
+    };
+    s.update_where("the end of the dictation", none);
   }
 
   #[test]

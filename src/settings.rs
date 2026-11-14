@@ -54,6 +54,8 @@ pub struct Settings {
   pub autostart: bool,
   pub hud_position: HudPosition,
   pub hud_style: HudStyle,
+  /// The HUD shows the text while the person speaks ([crate::live]).
+  pub live_preview: bool,
   /// After each dictation the HUD says how long the text took: a debugging aid.
   pub show_transcription_time: bool,
   /// Wayland's GlobalShortcuts portal took the hotkey once: later launches bind it without a click
@@ -112,6 +114,7 @@ impl Default for Settings {
       autostart: false,
       hud_position: HudPosition::Bottom,
       hud_style: HudStyle::Gradient,
+      live_preview: false,
       show_transcription_time: false,
       hotkey_portal: false,
       auto_update: true,

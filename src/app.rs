@@ -122,10 +122,11 @@ struct App {
   session: Session,
 }
 
-/// The HUD's window and the screen edge it was opened at.
+/// The HUD's window, the screen edge it was opened at and whether it has room for the live text.
 struct HudWindow {
   window: Window<Hud>,
   position: HudPosition,
+  live: bool,
 }
 
 /// How long a dictation the installer found running may go on: shipo's installer waits 30 s for
@@ -243,7 +244,7 @@ fn start(
     icon: Icon::Idle,
     menu: Menu::default(),
     hotkeys,
-    hud: open_hud(main, HudPosition::default()),
+    hud: open_hud(main, HudPosition::default(), false),
     handle,
     home,
     hub,
@@ -324,9 +325,10 @@ fn may_launch_at_login() -> bool {
   matches!(autostart::state(&INFO), Ok(autostart::State::Enabled))
 }
 
-fn open_hud(main: &mut Main, position: HudPosition) -> HudWindow {
+fn open_hud(main: &mut Main, position: HudPosition, live: bool) -> HudWindow {
   let hidden = || proxy().post(|_| _ = with_app(App::hud_hidden));
-  HudWindow { window: main.open(&hud::config(position), Hud::new(hidden)), position }
+  let window = main.open(&hud::config(position, live), Hud::new(position, hidden));
+  HudWindow { window, position, live }
 }
 
 /// The session keeps a recording in progress; nimbo then lets the instance's lock go as the loop
@@ -584,6 +586,7 @@ impl App {
           seconds: r.map_or(0.0, |r| r.seconds),
           warning: hint,
           language: status.language.clone(),
+          text: status.preview.clone(),
         }
       }
       Phase::Transcribing => Show::Transcribing(status.engine.progress),
@@ -620,7 +623,8 @@ impl App {
   /// From hidden only a recording or an error shows, on the screen with the pointer. Never where
   /// the overlay would take the keyboard focus ([Main::overlay_takes_focus]: GNOME on Wayland
   /// without XWayland): the person's window would lose it, and the paste would go into the HUD.
-  /// The tray icon tells the state there too. The HUD's place and style are the settings'.
+  /// The tray icon tells the state there too. The HUD's place, style and room for the live text
+  /// are the settings'.
   fn show(&mut self, main: &mut Main, shown: Mode, show: Show, settings: &Settings) {
     if main.overlay_takes_focus() {
       return;
@@ -631,10 +635,10 @@ impl App {
       return;
     }
 
-    let position = settings.hud_position;
-    if hidden && position != self.hud.position {
+    let (position, live) = (settings.hud_position, settings.live_preview);
+    if hidden && (position, live) != (self.hud.position, self.hud.live) {
       self.hud.window.close();
-      self.hud = open_hud(main, position);
+      self.hud = open_hud(main, position, live);
     }
 
     self.hud.window.with(|h| {
