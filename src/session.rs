@@ -2959,7 +2959,7 @@ mod tests {
   /// the shown language; a language without a row, or a layout without one, takes the Model's.
   #[test]
   fn dictations_follow_the_keyboard_layout() {
-    let rows = BTreeMap::from([("ru".to_owned(), "gigaam-v3".to_owned())]);
+    let rows = BTreeMap::from([("ru".to_owned(), Some("gigaam-v3".to_owned()))]);
     let settings = Settings {
       language: settings::KEYBOARD.into(),
       model: Some("parakeet-v3".into()),
@@ -2998,7 +2998,7 @@ mod tests {
   /// Any other Language: the layout changes nothing, and the status shows no language.
   #[test]
   fn other_languages_ignore_the_keyboard_layout() {
-    let rows = BTreeMap::from([("ru".to_owned(), "gigaam-v3".to_owned())]);
+    let rows = BTreeMap::from([("ru".to_owned(), Some("gigaam-v3".to_owned()))]);
     let settings = Settings {
       language: "en".into(),
       model: Some("parakeet-v3".into()),

@@ -36,9 +36,9 @@ pub struct Settings {
   pub language: String,
   /// A model name or a GGUF file path; `None` is the first model found.
   pub model: Option<String>,
-  /// With [KEYBOARD], the model of a layout's language (`ru`: `gigaam-v3`); a language without
-  /// one is `model`'s.
-  pub keyboard_models: BTreeMap<String, String>,
+  /// With [KEYBOARD], the model of a layout's language (`ru`: `gigaam-v3`), `None` for `model`,
+  /// picked as the default; a language without an entry is `model`'s too.
+  pub keyboard_models: BTreeMap<String, Option<String>>,
   pub auto_paste: bool,
   /// Leave the text on the clipboard instead of restoring it after the paste.
   pub keep_in_clipboard: bool,
@@ -193,7 +193,8 @@ impl Settings {
       return (self.model.clone(), self.engine_language());
     }
 
-    let model = keyboard.and_then(|k| self.keyboard_models.get(k)).or(self.model.as_ref());
+    let row = keyboard.and_then(|k| self.keyboard_models.get(k)).and_then(Option::as_ref);
+    let model = row.or(self.model.as_ref());
     (model.cloned(), keyboard.map(str::to_owned))
   }
 
@@ -268,13 +269,15 @@ mod tests {
   /// whatever the layout.
   #[test]
   fn a_dictation_routes_by_the_keyboard_layout() {
-    let rows = BTreeMap::from([("ru".to_owned(), "gigaam-v3".to_owned())]);
+    let rows =
+      BTreeMap::from([("ru".to_owned(), Some("gigaam-v3".to_owned())), ("de".into(), None)]);
     let model = Some("parakeet-v3".to_owned());
     let keyboard =
       Settings { language: KEYBOARD.into(), model, keyboard_models: rows, ..Settings::default() };
     let some = |s: &str| Some(s.to_owned());
     assert_eq!(keyboard.route(Some("ru")), (some("gigaam-v3"), some("ru")));
     assert_eq!(keyboard.route(Some("en")), (some("parakeet-v3"), some("en")));
+    assert_eq!(keyboard.route(Some("de")), (some("parakeet-v3"), some("de")), "the default picked");
     assert_eq!(keyboard.route(None), (some("parakeet-v3"), None), "a layout without a language");
     assert_eq!(keyboard.engine_language(), None);
 

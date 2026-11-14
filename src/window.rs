@@ -321,7 +321,8 @@ impl Prefs {
   /// Dictations go to the model: it is the Model, or a keyboard layout's language's.
   fn dictates(&self, m: &ModelInfo) -> bool {
     let keyboard = self.settings.follows_keyboard().then_some(&self.settings.keyboard_models);
-    let row = keyboard.is_some_and(|rows| rows.values().any(|v| model_name(v) == Some(m.name)));
+    let row =
+      keyboard.is_some_and(|rows| rows.values().flatten().any(|v| model_name(v) == Some(m.name)));
     self.active().is_some_and(|f| f.0.name == m.name) || row
   }
 
@@ -911,12 +912,13 @@ impl Prefs {
     ui.form_row(fs, row, |ui| picked = pick(ui, "lang", &labels, at, &[head]));
     if let Some(i) = picked {
       let code = langs[i].1.clone();
-      // Keyboard layout starts each language on its best model downloaded.
+      // Keyboard layout starts a language not seen before on its best model downloaded; one the
+      // person set, the default too, keeps it.
       let mut rows = self.settings.keyboard_models.clone();
       if code == KEYBOARD {
         for (lang, _) in keyboard_languages(&self.layouts) {
           if let Some(m) = self.best_for(&lang).filter(|_| !rows.contains_key(&lang)) {
-            rows.insert(lang, m.to_owned());
+            rows.insert(lang, Some(m.to_owned()));
           }
         }
       }
@@ -929,13 +931,13 @@ impl Prefs {
     let lang = lang.clone();
     if p == 0 {
       info!("settings: {lang} goes to the default model");
-      self.edit(move |s| _ = s.keyboard_models.remove(&lang));
+      self.edit(move |s| _ = s.keyboard_models.insert(lang.clone(), None));
     } else if p + 1 == labels.len() {
       self.model_lang = LANGUAGES.iter().position(|l| l.1 == lang).unwrap_or_default();
       self.page = Page::Models;
     } else if let Some(&model) = models.get(p - 1) {
       info!("settings: {lang} goes to {model}");
-      self.edit(move |s| _ = s.keyboard_models.insert(lang.clone(), model.to_owned()));
+      self.edit(move |s| _ = s.keyboard_models.insert(lang.clone(), Some(model.to_owned())));
     }
   }
 
@@ -977,7 +979,7 @@ impl Prefs {
     };
     let mut labels = vec![format!("{default} (default)")];
     labels.extend(models.iter().map(|m| m.name.to_owned()));
-    let at = match self.settings.keyboard_models.get(lang) {
+    let at = match self.settings.keyboard_models.get(lang).and_then(Option::as_ref) {
       None => 0,
       Some(c) => match models.iter().position(|m| model_name(c) == Some(m.name)) {
         Some(i) => i + 1,
@@ -3376,8 +3378,11 @@ mod tests {
     click(&mut h, Id::of("lang"));
     assert_eq!(items(&h), without + 1, "Keyboard layout is offered");
     click(&mut h, item(1));
-    let rows = |m: &[(&str, &str)]| m.iter().map(|(l, m)| ((*l).into(), (*m).into())).collect();
-    let started: BTreeMap<String, String> = rows(&[("en", "parakeet-v2"), ("ru", "gigaam-v3")]);
+    type Rows = BTreeMap<String, Option<String>>;
+    let rows = |m: &[(&str, Option<&str>)]| {
+      m.iter().map(|(l, m)| ((*l).into(), m.map(Into::into))).collect()
+    };
+    let started: Rows = rows(&[("en", Some("parakeet-v2")), ("ru", Some("gigaam-v3"))]);
     assert_eq!(fake.log().settings.language, KEYBOARD);
     assert_eq!(fake.log().settings.keyboard_models, started);
     assert_eq!(tip(&mut h, "lang-row"), KEYBOARD_HELP);
@@ -3390,14 +3395,23 @@ mod tests {
 
     click(&mut h, ru);
     click(&mut h, ru.key(("item", 2)));
-    let moved: BTreeMap<String, String> = rows(&[("en", "parakeet-v2"), ("ru", "parakeet-v3")]);
+    let moved: Rows = rows(&[("en", Some("parakeet-v2")), ("ru", Some("parakeet-v3"))]);
     assert_eq!(fake.log().settings.keyboard_models, moved);
     assert!(h.app().in_use(hub::lookup("parakeet-v2").unwrap()));
 
     click(&mut h, ru);
     click(&mut h, ru.key(("item", 0)));
-    let default: BTreeMap<String, String> = rows(&[("en", "parakeet-v2")]);
+    let default: Rows = rows(&[("en", Some("parakeet-v2")), ("ru", None)]);
     assert_eq!(fake.log().settings.keyboard_models, default, "the default model");
+
+    // Auto-detect and back: each language keeps what the person set, the default too.
+    click(&mut h, Id::of("lang"));
+    click(&mut h, item(0));
+    assert_eq!(fake.log().settings.language, "auto");
+    click(&mut h, Id::of("lang"));
+    click(&mut h, item(1));
+    assert_eq!(fake.log().settings.language, KEYBOARD);
+    assert_eq!(fake.log().settings.keyboard_models, default, "kept");
 
     click(&mut h, ru);
     click(&mut h, ru.key(("item", 3)));
@@ -3497,7 +3511,7 @@ mod tests {
       // Language by the keyboard layout, Russian to its own model.
       let keyboard = Fake::default();
       keyboard.log().layouts = layouts();
-      let rows = BTreeMap::from([("ru".to_owned(), "gigaam-v3".to_owned())]);
+      let rows = BTreeMap::from([("ru".to_owned(), Some("gigaam-v3".to_owned()))]);
       let settings = Settings {
         language: KEYBOARD.into(),
         model: Some("parakeet-v3".into()),
