@@ -1418,10 +1418,11 @@ fn share(done: u64, total: u64) -> (f32, String) {
 
 /// A progress bar, moving without a share, and its text, as high as a caption's line.
 fn progress_line(ui: &mut Ui, fs: &FormStyle, k: Option<f32>, text: &str) {
-  let line = Style::new().w(grow()).h(px(ui.line_height(fs.caption))).gap(8.0);
+  // Its text ends in "…" where the row is short: the controls after it keep their place.
+  let line = Style::new().w(grow()).h(px(ui.line_height(fs.caption))).gap(8.0).clip();
   ui.row(line.align(Align::Start, Align::Center), |ui| {
-    ui.col(Style::new().w(px(120.0)), |ui| ui.progress(k));
-    ui.text(text, fs.caption.nowrap());
+    ui.col(Style::new().w(px(96.0)), |ui| ui.progress(k));
+    ui.text(text, fs.caption.line_limit(1));
   });
 }
 
@@ -4346,6 +4347,21 @@ mod tests {
     assert!(shown(&h, "gigaam-multilingual"), "nothing better in Kazakh");
     search(&mut h, "whisper");
     assert!(shown(&h, "gigaam-v3-ctc") && shown(&h, "parakeet-v3"), "whatever the search");
+  }
+
+  /// A download's progress, however long, leaves its row's speed in line with the others'.
+  #[test]
+  fn a_download_keeps_the_speeds_in_line() {
+    let home = Home::new("window-download-line", &["gigaam-v3"]);
+    let fake = Fake::default();
+    let running = Download::Running { done: 481_000_000, total: 730_000_000, rate: Some(10.4e6) };
+    fake.log().states.insert("parakeet-v2", running);
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Models);
+    h.app_mut().model_lang = LANGUAGES.iter().position(|l| l.1 == "en").unwrap();
+    h.frame();
+    let x = |name: &str| h.rect(Id::of(("speed", name))).unwrap().x;
+    assert_eq!(x("parakeet-v2"), x("whisper-turbo"));
   }
 
   /// A WER's hover says what it counts: characters in a language written without spaces.
