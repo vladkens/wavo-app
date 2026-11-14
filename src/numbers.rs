@@ -160,6 +160,9 @@ const ENDINGS: [&str; 24] = [
 const THIRD: [&str; 12] =
   ["ий", "ьего", "ьему", "ьим", "ьем", "ья", "ье", "ьи", "ьих", "ьими", "ьей", "ью"];
 
+/// The scales that may open a number without one before them.
+const BARE: [&str; 3] = ["тысяча", "миллион", "миллиард"];
+
 const VOWELS: &str = "аеиоуыэюя";
 
 /// `text` with its Russian numbers of more than one word, and those of 11–19, in digits.
@@ -168,12 +171,15 @@ pub fn digits(text: &str) -> String {
   let mut out = String::with_capacity(text.len());
   let mut i = 0;
   while i < chunks.len() {
-    // A run of number words with nothing between them but spaces.
+    // A run of number words, and numbers the model wrote in digits, with nothing between them
+    // but spaces: a line break or a tab parts rows, and a run with digits in it stays as it is.
     let mut end = i;
-    while end < chunks.len() && word(chunks[end].1).is_some() {
+    while end < chunks.len() && (word(chunks[end].1).is_some() || in_digits(chunks[end].1)) {
       let (_, chunk) = chunks[end];
       end += 1;
-      let next = chunks.get(end).map(|(_, c)| c.starts_with(char::is_alphanumeric));
+      let next = chunks
+        .get(end)
+        .map(|(space, c)| space.chars().all(|c| c == ' ') && c.starts_with(char::is_alphanumeric));
       if !chunk.ends_with(char::is_alphanumeric) || next == Some(false) {
         break;
       }
@@ -202,9 +208,21 @@ fn number(chunks: &[(&str, &str)]) -> Option<String> {
     return None;
   }
 
+  let core = |i: usize| chunks[i].1.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
   let (mut total, mut group, mut stage, mut scale) = (0, 0, 0, u64::MAX);
   for (i, w) in words.iter().enumerate() {
     if w.ordinal.is_some() && i + 1 < words.len() {
+      return None;
+    }
+
+    // `тысячных` after a number is a fraction, `сто первых` the first hundred, and a scale with
+    // no number before it, but `тысяча`, an approximate one: `рублей тысяч пять`.
+    let fraction = w.kind == Kind::Scale && w.ordinal.is_some();
+    let firsts = w.value == 1
+      && w.ordinal.is_some()
+      && ["ые", "ых", "ыми"].iter().any(|e| core(i).ends_with(e));
+    let bare = w.kind == Kind::Scale && group == 0 && (i > 0 || !BARE.contains(&core(i).as_str()));
+    if fraction || firsts || bare {
       return None;
     }
 
@@ -239,6 +257,12 @@ fn number(chunks: &[(&str, &str)]) -> Option<String> {
   };
 
   Some(format!("{lead}{written}{trail}"))
+}
+
+/// Whether `chunk` is a number in digits, as `2` or `2026,`.
+fn in_digits(chunk: &str) -> bool {
+  let core = chunk.trim_matches(|c: char| !c.is_alphanumeric());
+  !core.is_empty() && core.chars().all(|c| c.is_ascii_digit())
 }
 
 /// The number word in `chunk`, without the marks around it.
@@ -308,7 +332,7 @@ mod tests {
       ("пятьюстами двадцатью", "520"),
       ("двадцать третьего", "23-го"),
       ("тридцать третья", "33-я"),
-      ("сто первыми", "101-ми"),
+      ("сто первом", "101-м"),
       ("девяносто седьмых", "97-х"),
       ("двадцать четвёртом", "24-м"),
       ("триста восьмидесятая", "380-я"),
@@ -358,7 +382,44 @@ mod tests {
     }
 
     assert_eq!(digits("двадцать пять, тридцать два"), "25, 32");
+    assert_eq!(digits("двадцать пять пятьдесят"), "двадцать пять пятьдесят");
     assert_eq!(digits("двадцать, пять"), "двадцать, пять");
+  }
+
+  /// What reads otherwise than as one number stays.
+  #[test]
+  fn numbers_of_another_sense_stay() {
+    for said in [
+      "рублей тысяч пять",
+      "миллиона два",
+      "тысячи три",
+      "сто первых посетителей",
+      "двадцать первыми пришли",
+      "пять тысячных секунды",
+      "две третьих",
+      "три пятых",
+    ] {
+      assert_eq!(digits(said), said);
+    }
+  }
+
+  /// A number partly in digits stays: its words alone would make another one.
+  #[test]
+  fn a_number_with_digits_in_it_stays() {
+    for said in ["2 тысячи двадцать пять", "2 миллиона триста тысяч", "двадцать 5", "в 2026 году"]
+    {
+      assert_eq!(digits(said), said);
+    }
+
+    assert_eq!(digits("в 2026, двадцать пятом"), "в 2026, 25-м");
+  }
+
+  /// A line break or a tab parts numbers: rows and columns.
+  #[test]
+  fn numbers_on_other_lines_stay_apart() {
+    assert_eq!(digits("сто\nдвадцать пять"), "сто\n25");
+    assert_eq!(digits("двадцать\tпять"), "двадцать\tпять");
+    assert_eq!(digits("двадцать  пять"), "25");
   }
 
   #[test]
