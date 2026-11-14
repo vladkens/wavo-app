@@ -277,12 +277,18 @@ fn start(
   let no_model = pick.active.is_none() && pick.other.as_ref().is_none_or(|(_, on)| !on);
   let missing = !app.accessibility && !needs_admin() || app.mic() != Access::Granted || no_model;
   let missing = missing && !may_launch_at_login();
+  let session = app.handle.clone();
   APP.with(|cell| *cell.borrow_mut() = Some(app));
   main.on_reopen(|main| open_window(main, None));
   // Only the open windows read them again ([Prefs]'s event). The menu reads them as it opens, and
   // its `mic:i` items index the list it shows: read again while it is open, a click would pick
-  // from another list.
-  if let Err(e) = main.watch(WATCHED, |_, _| {}) {
+  // from another list. The session hears of a microphone that came or went: an unplug.
+  let watched = move |_: &mut Main, change| {
+    if change == Change::AudioInputs {
+      session.inputs_changed();
+    }
+  };
+  if let Err(e) = main.watch(WATCHED, watched) {
     warn!("system changes: {e}");
   }
 

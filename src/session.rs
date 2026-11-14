@@ -461,6 +461,8 @@ enum Msg {
   Request(Request, Sender<Result<(), String>>),
   Edit(Box<dyn FnOnce(&mut Settings) + Send>),
   CheckModel,
+  /// A microphone came or went ([SlowStart::inputs_changed]).
+  InputsChanged,
   /// The model at this path is prepared for the Neural Engine now.
   Prepared(PathBuf),
   Quit,
@@ -549,6 +551,11 @@ impl Handle {
   /// The models on disk changed: which one transcribes is looked at again.
   pub fn check_model(&self) {
     let _ = self.0.send(Msg::CheckModel);
+  }
+
+  /// A microphone came or went: one unplugged starts fast once plugged in again.
+  pub fn inputs_changed(&self) {
+    let _ = self.0.send(Msg::InputsChanged);
   }
 
   pub fn request(&self, request: Request) -> Result<(), String> {
@@ -784,6 +791,7 @@ impl<O: TextOutput> Controller<O> {
 
         self.prepare();
       }
+      Msg::InputsChanged => self.slow_start.inputs_changed(&audio::devices()),
       Msg::Prepared(path) => {
         // Loaded on the GPU meanwhile: the next job loads it on the Neural Engine, in ~0.1 s.
         let on_gpu = |l: &Loaded| {
@@ -873,6 +881,10 @@ impl<O: TextOutput> Controller<O> {
     }
 
     let old = mem::replace(&mut self.settings, new);
+    if old.microphone != self.settings.microphone {
+      self.slow_start.chosen();
+    }
+
     self.machine.activation = self.settings.activation;
     if old.model != self.settings.model
       || old.unload_after_minutes != self.settings.unload_after_minutes
