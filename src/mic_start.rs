@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use crate::audio::{Recorder, Transport};
+use crate::audio::{Device, Recorder, Transport};
 use crate::session::Take;
 
 /// A USB microphone's first starts since the launch give its normal, its last ones its typical
@@ -21,7 +21,7 @@ const SLOWER_BY: Duration = Duration::from_millis(200);
 /// hundreds of ms at once.
 const RECENT: usize = 5;
 /// The menu's warning; the log has the device and the times.
-const SLOW: &str = "Microphone is slow to start: reconnect it";
+pub const SLOW: &str = "Microphone is slow to start: reconnect it";
 
 /// Each USB microphone's starts, in memory since the app launched, and the warning, raised once per
 /// climb. Others vary by themselves (a Bluetooth headset held open by another app or cold, a
@@ -102,6 +102,26 @@ impl SlowStart {
     raised
   }
 
+  /// The inputs changed: a warned microphone `listed` no more was unplugged, and starts fast once
+  /// plugged in again. A replug by hand takes longer than nimbo's 250 ms burst, so the unplug comes
+  /// as a change of its own; one of another device (an output too) keeps the warning, and a missed
+  /// unplug clears on [RECENT] starts back. Its window starts again, the normal kept: still slow,
+  /// it warns after a whole window.
+  pub fn inputs_changed(&mut self, listed: &[Device]) {
+    let listed = |key: &str| listed.iter().any(|d| d.id.as_deref().unwrap_or(&d.name) == key);
+    for (key, starts) in self.devices.iter_mut().filter(|(key, s)| s.slow && !listed(key)) {
+      info!("{key}: unplugged: the slow start warning cleared");
+      starts.last.clear();
+      starts.slow = false;
+    }
+  }
+
+  /// Another microphone was chosen: the warning, of the one that recorded last, goes until a
+  /// recording says which records now; the one chosen still slow, it is back after it.
+  pub fn chosen(&mut self) {
+    self.device = None;
+  }
+
   pub fn warning(&self) -> Option<String> {
     let key = self.device.as_ref()?;
     self.devices.get(key).filter(|s| s.slow).map(|_| SLOW.to_owned())
@@ -115,7 +135,8 @@ struct Starts {
   baseline: Option<Duration>,
   /// Its last [WINDOW] starts, since the calibration began or the warning cleared.
   last: VecDeque<Duration>,
-  /// The window's median is past the normal by [SLOWER_BY]: until [RECENT] starts are back.
+  /// The window's median is past the normal by [SLOWER_BY]: until [RECENT] starts are back, or it
+  /// is unplugged.
   slow: bool,
 }
 
@@ -253,6 +274,41 @@ mod tests {
     assert_eq!((starts(&mut s, RODE, held), baseline(&s)), (0, Some(359)));
     assert_eq!((starts(&mut s, RODE, level(83, 19)), baseline(&s)), (0, Some(359)));
     assert_eq!((starts(&mut s, RODE, level(83, 1)), baseline(&s)), (0, Some(83)));
+  }
+
+  /// The warned microphone unplugged: the warning goes at once, the normal kept; another change,
+  /// it listed still, keeps it. Still slow, it comes back after a whole window; fast, a whole
+  /// window is the new normal.
+  #[test]
+  fn an_unplug_clears_the_warning() {
+    let rode = Device { id: None, name: RODE.into(), default: true, transport: Transport::Usb };
+    let mut s = SlowStart::default();
+    assert_eq!(starts(&mut s, RODE, level(359, 20).chain(level(610, 11))), 1);
+    s.inputs_changed(std::slice::from_ref(&rode));
+    assert!(s.warning().is_some(), "listed still");
+
+    s.inputs_changed(&[]);
+    assert_eq!((s.warning(), baseline(&s)), (None, Some(359)));
+    assert_eq!(starts(&mut s, RODE, level(610, 19)), 0);
+    assert_eq!((starts(&mut s, RODE, level(610, 1)), s.warning().is_some()), (1, true));
+
+    s.inputs_changed(&[]);
+    assert_eq!(
+      (starts(&mut s, RODE, level(83, 20)), s.warning(), baseline(&s)),
+      (0, None, Some(83))
+    );
+  }
+
+  /// Another microphone chosen: the warning goes at once; a recording by the slow one again brings
+  /// it back.
+  #[test]
+  fn choosing_another_mic_clears_the_warning() {
+    let mut s = SlowStart::default();
+    assert_eq!(starts(&mut s, RODE, level(359, 20).chain(level(610, 11))), 1);
+    s.chosen();
+    assert_eq!(s.warning(), None);
+    starts(&mut s, RODE, level(610, 1));
+    assert!(s.warning().is_some(), "the slow one records again");
   }
 
   /// Only a kept recording's start counts: not a cancelled or aborted one, nor one after the chosen

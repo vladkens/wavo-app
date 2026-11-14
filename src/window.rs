@@ -29,13 +29,13 @@ use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
 use crate::audio::{self, Auto, Choice, Microphone, Playback, Transport};
-use crate::engine;
 use crate::history::{
   Entry, History, IN_MEMORY, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms,
 };
 use crate::session::{self, NoModel, Request, Status, label};
 use crate::settings::{Activation, HudPosition, HudStyle, Settings, language_name};
 use crate::transfer::Imported;
+use crate::{engine, mic_start};
 
 // MARK: Window
 
@@ -553,6 +553,9 @@ const MIC_HELP: &str = match () {
      microphone is attached, so neither skips a Bluetooth headset."
   }
 };
+// The menu's slow start warning ([mic_start]) in the Microphone row: what happens, what to do.
+const SLOW_MIC: &str = "The microphone takes longer and longer to start, so the first words get \
+  lost. Unplug it and plug it back in.";
 // Where the person turns launch at login back on, which the system turned off.
 const LOGIN_APPROVAL: &str = if cfg!(windows) {
   "Turn Wavo on in Task Manager › Startup apps."
@@ -593,7 +596,10 @@ impl Prefs {
       let (devices, saved) = (&self.devices, &self.settings.microphone);
       let (mics, at) = microphones(devices, saved, self.lid_closed);
       let labels: Vec<&str> = mics.iter().map(|m| m.0.as_str()).collect();
-      let warning = mic_warning(devices, saved, self.lid_closed);
+      // One unplugged or only Bluetooth first: what records matters more than how fast it starts.
+      let slow = self.status.warnings.iter().any(|w| w == mic_start::SLOW);
+      let warning =
+        mic_warning(devices, saved, self.lid_closed).or_else(|| slow.then(|| SLOW_MIC.to_owned()));
       // The warning alone in the ⓘ's place: what is wrong matters then, not how the modes choose.
       let mark = match &warning {
         Some(warning) => Mark::Warning(warning),
@@ -3519,6 +3525,30 @@ mod tests {
     assert!(h.event(Event::System(Change::AudioInputs)));
     h.frame();
     assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
+  }
+
+  /// The session's slow start warning shows in the Microphone row's ⓘ's place, saying what to do;
+  /// gone, the ⓘ is back. The chosen one unplugged says so instead.
+  #[test]
+  fn a_slow_mic_says_to_replug_it() {
+    let home = Home::new("window-slow", &TWO);
+    let fake = Fake::default();
+    let usb = Choice { id: Some("usb mic".into()), name: "USB Mic".into() };
+    let settings = Settings { microphone: Microphone::Device(usb), ..Settings::default() };
+    let mut h = home.harness(&fake, settings);
+    let slow = Status { warnings: vec![mic_start::SLOW.into()], ..Status::default() };
+    update(&mut h, slow.clone());
+    assert_eq!(tip(&mut h, "mic-row"), SLOW_MIC);
+
+    update(&mut h, Status::default());
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
+
+    let mac = fake.devices()[0].clone();
+    fake.log().devices = Some(vec![mac]);
+    assert!(h.event(Event::System(Change::AudioInputs)));
+    update(&mut h, slow);
+    let gone = "USB Mic isn’t connected: Wavo records with MacBook Pro Microphone";
+    assert_eq!(tip(&mut h, "mic-row"), gone);
   }
 
   /// The chosen microphone unplugged while the window is open: on the change, not before, the
