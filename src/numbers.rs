@@ -28,6 +28,19 @@ struct Word {
   ordinal: Option<String>,
 }
 
+impl Word {
+  fn new(value: u64, ordinal: Option<String>) -> Self {
+    let kind = match value {
+      1..10 => Kind::Unit,
+      10..20 => Kind::Teen,
+      20..100 => Kind::Ten,
+      100..1000 => Kind::Hundred,
+      _ => Kind::Scale,
+    };
+    Word { kind, value, ordinal }
+  }
+}
+
 /// The cardinals in all their cases, `ё` as `е`.
 const CARDINALS: [(u64, &[&str]); 31] = [
   (
@@ -166,13 +179,11 @@ pub fn digits(text: &str) -> String {
       }
     }
 
+    let end = end.max(i + 1);
     match number(&chunks[i..end]) {
       Some(number) => out.push_str(&format!("{}{number}", chunks[i].0)),
       None => {
-        let end = end.max(i + 1);
-        chunks[i..end].iter().for_each(|(space, chunk)| out.push_str(&format!("{space}{chunk}")));
-        i = end;
-        continue;
+        chunks[i..end].iter().for_each(|(space, chunk)| out.push_str(&format!("{space}{chunk}")))
       }
     }
 
@@ -237,15 +248,9 @@ fn word(chunk: &str) -> Option<Word> {
 }
 
 fn cardinal(word: &str) -> Option<Word> {
-  let kind = |value| match value {
-    1..10 => Kind::Unit,
-    10..20 => Kind::Teen,
-    20..100 => Kind::Ten,
-    _ => Kind::Hundred,
-  };
   let found = CARDINALS.iter().find(|(_, forms)| forms.contains(&word));
   if let Some(&(value, _)) = found {
-    return Some(Word { kind: kind(value), value, ordinal: None });
+    return Some(Word::new(value, None));
   }
 
   let hundred = HUNDREDS.iter().find(|(_, nom, other)| {
@@ -253,39 +258,29 @@ fn cardinal(word: &str) -> Option<Word> {
     cases.iter().any(|(stem, end)| word.strip_prefix(**stem) == Some(end))
   });
   if let Some(&(value, ..)) = hundred {
-    return Some(Word { kind: Kind::Hundred, value, ordinal: None });
+    return Some(Word::new(value, None));
   }
 
   let scale = SCALES
     .iter()
     .find(|(_, stem, ends)| word.strip_prefix(stem).is_some_and(|end| ends.contains(&end)));
-  scale.map(|&(value, ..)| Word { kind: Kind::Scale, value, ordinal: None })
+  scale.map(|&(value, ..)| Word::new(value, None))
 }
 
 /// An ordinal by its stem, the longest that leaves one of its endings; its ending after the
 /// digits: the last letter after a vowel, else the last two (`76-й`, `35-го`, `16-ми`).
 fn ordinal(word: &str) -> Option<Word> {
-  let mut stems = ORDINALS.to_vec();
-  stems.sort_by_key(|(_, stem)| std::cmp::Reverse(stem.len()));
-  stems.into_iter().find_map(|(value, stem)| {
-    let end = word.strip_prefix(stem)?;
-    let ends: &[&str] = if value == 3 { &THIRD } else { &ENDINGS };
-    if !ends.contains(&end) {
-      return None;
-    }
+  let (value, end) = ORDINALS
+    .iter()
+    .filter_map(|&(value, stem)| Some((value, stem.len(), word.strip_prefix(stem)?)))
+    .filter(|&(value, _, end)| if value == 3 { &THIRD[..] } else { &ENDINGS }.contains(&end))
+    .max_by_key(|&(_, len, _)| len)
+    .map(|(value, _, end)| (value, end))?;
 
-    let end: Vec<char> = end.trim_start_matches('ь').chars().collect();
-    let after_vowel = end.len() < 2 || VOWELS.contains(end[end.len() - 2]);
-    let suffix: String = end[end.len() - if after_vowel { 1 } else { 2 }..].iter().collect();
-    let kind = match value {
-      1..10 => Kind::Unit,
-      10..20 => Kind::Teen,
-      20..100 => Kind::Ten,
-      100..1000 => Kind::Hundred,
-      _ => Kind::Scale,
-    };
-    Some(Word { kind, value, ordinal: Some(suffix) })
-  })
+  let end: Vec<char> = end.trim_start_matches('ь').chars().collect();
+  let after_vowel = end.len() < 2 || VOWELS.contains(end[end.len() - 2]);
+  let suffix: String = end[end.len() - if after_vowel { 1 } else { 2 }..].iter().collect();
+  Some(Word::new(value, Some(suffix)))
 }
 
 #[cfg(test)]
