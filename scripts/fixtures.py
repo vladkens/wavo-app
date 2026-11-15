@@ -100,6 +100,11 @@ def main() -> int:
         # A video: a black picture over the sound.
         ff("-f", "lavfi", "-i", "color=c=black:s=320x240:r=5", "-i", aiff, "-shortest",
            "-c:v", "libx264", "-c:a", "aac", "-b:a", "96k", files / "ru-long-video.mp4")
+        # Two Ogg streams one after the other, as a recorder that went on does: each encode has
+        # a serial of its own.
+        ff("-i", aiff, *FORMATS["ogg"], tmp / "again.ogg")
+        chained = (files / "ru-long.ogg").read_bytes() + (tmp / "again.ogg").read_bytes()
+        (files / "ru-long-chained.ogg").write_bytes(chained)
 
     # No speech: digital silence and quiet pink noise, 5 s each.
     ff("-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "5", "-c:a", "pcm_s16le",
@@ -112,7 +117,9 @@ def main() -> int:
             ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
              "default=nw=1:nk=1", wav], capture_output=True, text=True, check=True,
         ).stdout.strip()
-        print(f"{wav.name:<28} {float(secs):6.1f} s")
+        # None for the chained Ogg.
+        secs = float(secs) if secs != "N/A" else float("nan")
+        print(f"{wav.name:<28} {secs:6.1f} s")
 
     return 0
 

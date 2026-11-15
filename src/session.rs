@@ -967,11 +967,16 @@ impl<O: TextOutput> Controller<O> {
         }
 
         let source = transcripts::Source::of(&path)?;
+        let Some(t) = self.transcripts.get(id)? else { return Ok(()) };
+        // Its text is of that recording: another one would go on in the middle of it. A moved or
+        // copied file keeps its size.
+        if t.done_ms > 0 && source.size != t.size {
+          bail!("it isn't the recording transcribed (its size differs)");
+        }
+
         self.transcripts.relocate(id, &source)?;
         // Failed for its file most likely, it goes on.
-        let failed =
-          self.transcripts.get(id)?.is_some_and(|t| t.state == transcripts::State::Failed);
-        if failed {
+        if t.state == transcripts::State::Failed {
           self.continue_file(id)?;
         }
 
@@ -3716,7 +3721,8 @@ mod tests {
   }
 
   /// A file gone or changed since it was added fails; found again, it goes on, and a changed one
-  /// is transcribed again as it is now.
+  /// is transcribed again as it is now. A transcript with text takes back only a file of its
+  /// recording's size.
   #[test]
   fn a_moved_or_changed_file_fails_until_found() {
     let s = files("files-moved", &Settings::default());
@@ -3748,6 +3754,15 @@ mod tests {
     let again = s.transcripts().list("").unwrap().iter().map(|t| t.id).max().unwrap();
     assert_eq!(s.file_in(again, FileState::Done).done_ms, 40_000);
     assert_eq!(s.transcripts().get(c).unwrap().unwrap().state, FileState::Failed, "kept as it was");
+
+    let other = s.handle.request(Request::LocateFile(a, paths[2].clone())).unwrap_err();
+    assert_eq!(format!("{other:#}"), "it isn't the recording transcribed (its size differs)");
+    assert_eq!(s.transcripts().get(a).unwrap().unwrap().path, paths[0]);
+    let copy = s.home.path().join("moved/a.wav");
+    fs::copy(&paths[0], &copy).unwrap();
+    s.handle.request(Request::LocateFile(a, copy.clone())).unwrap();
+    let t = s.transcripts().get(a).unwrap().unwrap();
+    assert_eq!((t.path, t.state, t.done_ms), (copy, FileState::Done, 30_000));
   }
 
   /// A file that can't be read, a chunk that fails and a file of another type each say why.
