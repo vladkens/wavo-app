@@ -153,12 +153,6 @@ impl Transcript {
       Err(_) => Check::Missing,
     }
   }
-
-  /// Its share done, when its duration is known.
-  pub fn fraction(&self) -> Option<f32> {
-    let total = self.duration_ms.filter(|&d| d > 0)?;
-    Some((self.done_ms as f32 / total as f32).clamp(0.0, 1.0))
-  }
 }
 
 /// A transcript's columns, and the first words of its text.
@@ -384,8 +378,7 @@ mod tests {
     t.start(id, Some(120_000)).unwrap();
     t.append(id, &[seg(0, "Добрый день."), seg(1000, "Начнём.")], 60_000).unwrap();
     let got = t.get(id).unwrap().unwrap();
-    let want = (State::Running, 60_000, Some(120_000), Some(0.5));
-    assert_eq!((got.state, got.done_ms, got.duration_ms, got.fraction()), want);
+    assert_eq!((got.state, got.done_ms, got.duration_ms), (State::Running, 60_000, Some(120_000)));
     assert_eq!((got.name.as_str(), got.preview.as_str()), ("Лекция 1.m4a", "Добрый день. Начнём."));
     assert_eq!(got.check(), Check::Same);
 
@@ -448,8 +441,12 @@ mod tests {
 
     t.delete(&[ids[0], ids[2], 404]).unwrap();
     assert_eq!(t.list("").unwrap().iter().map(|t| t.id).collect::<Vec<_>>(), [ids[1]]);
-    let left: i64 =
-      t.write().unwrap().conn().query_row("SELECT COUNT(*) FROM segments", [], |r| r.get(0)).unwrap();
+    let left: i64 = t
+      .write()
+      .unwrap()
+      .conn()
+      .query_row("SELECT COUNT(*) FROM segments", [], |r| r.get(0))
+      .unwrap();
     assert_eq!(left, 1);
   }
 

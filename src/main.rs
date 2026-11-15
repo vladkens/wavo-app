@@ -26,6 +26,7 @@ mod testing;
 mod transcripts;
 mod transfer;
 mod updater;
+mod viewer;
 mod window;
 
 use std::fs::{self, File};

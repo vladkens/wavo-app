@@ -360,6 +360,11 @@ fn chosen(main: &mut Main, action: Action) {
       open_window(main, Some(Page::Models))
     }
     Action::History => open_window(main, Some(Page::History)),
+    Action::TranscribeFile => {
+      open_window(main, Some(Page::Files));
+      with_window(Prefs::transcribe_file);
+    }
+    Action::Files => open_window(main, Some(Page::Files)),
     Action::Settings => open_window(main, None),
     Action::Quit => main.quit(),
     Action::Warning(Warn::Accessibility | Warn::Microphone | Warn::SecureInput | Warn::Hotkey) => {
@@ -421,7 +426,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
   };
   let mut prefs = Prefs::new(Box::new(shell), settings, hub, &home, history);
   if let Some(u) = &update {
-    prefs.update(&u.settings, &u.status, u.history);
+    prefs.update(&u.settings, &u.status, u.history, u.transcripts);
   }
 
   prefs.page = page.unwrap_or(Page::General);
@@ -553,7 +558,7 @@ impl App {
     if self.window.is_some() {
       with_window(|prefs| {
         if let Some(u) = with_app(|app| app.update.clone()).flatten() {
-          prefs.update(&u.settings, &u.status, u.history);
+          prefs.update(&u.settings, &u.status, u.history, u.transcripts);
         }
       });
     }
@@ -1160,12 +1165,12 @@ impl window::Shell for AppShell {
     });
   }
 
-  fn history(&self, req: Request) {
+  fn request(&self, req: Request) {
     let handle = self.handle.clone();
-    spawn("history", move || {
+    spawn("request", move || {
       if let Err(e) = handle.request(req.clone()) {
         warn!("{req:?}: {e}");
-        with_window(move |prefs| prefs.history_failed(req, &e));
+        with_window(move |prefs| prefs.request_failed(req, &e));
       }
     });
   }

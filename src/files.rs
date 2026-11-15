@@ -86,7 +86,8 @@ pub fn read(path: PathBuf, from_ms: i64) -> Receiver<Read> {
 /// [EXTENSIONS]: decode::EXTENSIONS
 pub fn readable(path: &Path) -> bool {
   let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
-  ext.is_some_and(|e| decode::EXTENSIONS.contains(&e.as_str()) || decode::MOSTLY_OPUS.contains(&&*e))
+  ext
+    .is_some_and(|e| decode::EXTENSIONS.contains(&e.as_str()) || decode::MOSTLY_OPUS.contains(&&*e))
 }
 
 /// A transcript running: its file read a chunk at a time, each chunk an engine job.

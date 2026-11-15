@@ -1,10 +1,10 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! The settings window, as macOS System Settings looks: toolbar tabs over pages of grey plates.
-//! General, Advanced and About are as high as their content; Models and History scroll under
-//! their search row. The window shows a copy of the settings and the session's status, which the
-//! shell keeps current ([Prefs::update]), and reaches the app only through [Shell]: tests run it
-//! in nimbo's harness with a fake one.
+//! General, Advanced and About are as high as their content; Models, History and Files scroll
+//! under their search row. The window shows a copy of the settings and the session's status, which
+//! the shell keeps current ([Prefs::update]), and reaches the app only through [Shell]: tests run
+//! it in nimbo's harness with a fake one.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{ControlFlow, Range};
@@ -21,21 +21,25 @@ use nimbo::ui::Role;
 use nimbo::ui::widgets::icon;
 use nimbo::{
   Align, Answer, App, Button, ButtonLook, ButtonRole, ButtonStyle, Config, ControlSize, Cx, Dialog,
-  Event, FileDialog, Font, FormRow, FormStyle, Frame, Hotkey, Icon, Id, Item, LinePattern, List,
-  ListStyle, Menu, Picker, Rect, Response, Section, Selection, Style, TabItem, Tag, TextStyle,
-  Tone, Ui, Weight, grow, open, paths, px,
+  Event, FieldStyle, FileDialog, Float, Font, FormRow, FormStyle, Frame, Hotkey, Icon, Id, Item,
+  LinePattern, List, ListStyle, Menu, Picker, Rect, Response, Section, Selection, Style, TabItem,
+  Tag, TextStyle, Tone, Ui, Weight, grow, open, paths, px,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
 use crate::audio::{self, Auto, Choice, Microphone, Playback, Transport};
+use crate::files::FileStatus;
 use crate::history::{
   Entry, History, IN_MEMORY, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms,
 };
+use crate::segments::{self, Segment, clock};
 use crate::session::{self, NoModel, Request, Status, label};
 use crate::settings::{Activation, HudPosition, HudStyle, KEYBOARD, Settings, language_name};
+use crate::transcripts::{Check, State as FileState, Transcript, Transcripts};
 use crate::transfer::Imported;
-use crate::{engine, mic_start};
+use crate::viewer::Viewer;
+use crate::{decode, engine, mic_start};
 
 // MARK: Window
 
@@ -45,9 +49,11 @@ const RECOMMENDED: &str = "parakeet-ultra";
 /// The height of the pages that scroll.
 pub const SCROLLING: f32 = 600.0;
 
+/// The window's content, under the drop target while files are dragged over it.
+const WINDOW: &str = "window";
 const TABS: &str = "tabs";
 const CONFIRM: &str = "confirm";
-/// The row of the Models and History pages' search, over the page.
+/// The row of the Models, History and Files pages' search, over the page.
 const PAGE_HEAD: &str = "page-head";
 /// A page's padding in the window, the History list's too.
 const PAGE_PAD: [f32; 4] = [12.0, 20.0, 20.0, 20.0];
@@ -57,21 +63,23 @@ pub enum Page {
   General,
   Models,
   History,
+  Files,
   Advanced,
   About,
 }
 
-const PAGES: [TabItem<Page>; 5] = [
+const PAGES: [TabItem<Page>; 6] = [
   TabItem::new(Page::General, Icon::GEAR, "General"),
   TabItem::new(Page::Models, Icon::DOWNLOAD, "Models"),
   TabItem::new(Page::History, Icon::HISTORY, "History"),
+  TabItem::new(Page::Files, Icon::DOC, "Files"),
   TabItem::new(Page::Advanced, Icon::SLIDERS, "Advanced"),
   TabItem::new(Page::About, Icon::INFO, "About"),
 ];
 
 impl Page {
   fn scrolls(self) -> bool {
-    matches!(self, Self::Models | Self::History)
+    matches!(self, Self::Models | Self::History | Self::Files)
   }
 }
 
@@ -121,7 +129,8 @@ pub trait Shell {
   fn download_state(&self, name: &str) -> Option<Download>;
   /// Then [Prefs::models_changed].
   fn delete_model(&self, _model: &'static ModelInfo) {}
-  fn history(&self, _req: Request) {}
+  /// Off the main thread: [Prefs::request_failed] when the session refuses it.
+  fn request(&self, _req: Request) {}
   fn autostart(&self) -> Result<Autostart, String>;
   /// Then [Prefs::autostart_set].
   fn set_autostart(&self, _on: bool) {}
@@ -155,6 +164,7 @@ enum Delete {
   Entries(Vec<i64>),
   /// The history saved on disk, Delete All's.
   Saved,
+  Transcripts(Vec<i64>),
 }
 
 /// A delete the dialog asks about.
@@ -199,6 +209,7 @@ pub struct Prefs {
   /// The downloaded models selected, keyed by their place in wavo's list.
   model_sel: Selection,
   history: HistoryPage,
+  files: FilesPage,
   /// How many dictations the history saved on disk has, counted when Advanced shows it; `None`
   /// once it may have changed.
   saved: Option<usize>,
@@ -237,13 +248,15 @@ impl Prefs {
       model_lang: 0,
       model_sel: Selection::default(),
       history: HistoryPage { db: history, in_memory, ..HistoryPage::default() },
+      files: FilesPage::new(home),
       saved: None,
     };
     prefs.refresh();
     prefs
   }
 
-  pub fn update(&mut self, settings: &Settings, status: &Status, history: u64) {
+  /// `history` and `transcripts`: their revisions ([session::Update]).
+  pub fn update(&mut self, settings: &Settings, status: &Status, history: u64, transcripts: u64) {
     let model = std::mem::replace(&mut self.settings, settings.clone()).model;
     if model != self.settings.model {
       self.repick();
@@ -261,6 +274,7 @@ impl Prefs {
     }
 
     self.history.revision = history;
+    self.files.revision = transcripts;
   }
 
   /// Looks again at what the session does not push: when the window opens or comes to the front.
@@ -375,8 +389,12 @@ impl Prefs {
 
         self.model_sel.clear();
       }
-      Delete::Entries(ids) => self.shell.history(Request::Delete(ids)),
-      Delete::Saved => self.shell.history(Request::DeleteSaved),
+      Delete::Entries(ids) => self.shell.request(Request::Delete(ids)),
+      Delete::Saved => self.shell.request(Request::DeleteSaved),
+      Delete::Transcripts(ids) => {
+        self.files.open.take_if(|o| ids.contains(&o.viewer.id));
+        self.shell.request(Request::DeleteFiles(ids));
+      }
     }
   }
 
@@ -388,6 +406,7 @@ impl Prefs {
     match self.page {
       Page::Models => self.model_sel.clear(),
       Page::History => self.history.selected.clear(),
+      Page::Files => self.files.selected.clear(),
       _ => {}
     }
   }
@@ -403,20 +422,25 @@ impl App for Prefs {
     }
 
     let fs = FormStyle::plates(&ui.theme());
-    ui.col(Style::new().grow().bg(fs.bg), |ui| {
+    ui.id(WINDOW).col(Style::new().grow().bg(fs.bg), |ui| {
       ui.id(TABS).toolbar_tabs(&fs, &mut self.page, &PAGES);
       let head = Style::new().w(grow()).pads([12.0, 20.0, 2.0, 20.0]).gap(10.0);
       let head = head.align(Align::Start, Align::Center);
       let head = match self.page {
         Page::Models => self.models_head(ui, head).clicked,
         Page::History => self.history_head(ui, head).clicked,
+        Page::Files => self.files_head(ui, head, &fs).clicked,
         _ => false,
       };
 
-      // History is a list, its own scroll area.
+      // History and Files are lists, each its own scroll area; a transcript open too.
       let page = match self.page {
         Page::History => {
           self.history(ui, &fs);
+          false
+        }
+        Page::Files => {
+          self.files(ui, &fs);
           false
         }
         page => {
@@ -439,6 +463,15 @@ impl App for Prefs {
         self.history_foot(ui, &fs);
         self.history_total(ui, &fs);
       }
+
+      if self.page == Page::Files {
+        self.files_foot(ui, &fs);
+        self.files_total(ui, &fs);
+      }
+
+      if self.files.dragging {
+        drop_target(ui, &fs);
+      }
     });
     self.confirm(ui);
 
@@ -450,13 +483,22 @@ impl App for Prefs {
     }
   }
 
-  /// The file Export's or Import's panel picked; the microphones or the lid changed: read again
-  /// for the Microphone row; back in front, from another app (System Settings, where a permission
-  /// was given): [Prefs::refresh].
+  /// The file a panel picked; files dragged over the window, dropped on it: each a transcript on
+  /// Files; the microphones or the lid changed: read again for the Microphone row; back in front,
+  /// from another app (System Settings, where a permission was given, Finder, where a file
+  /// moved): [Prefs::refresh].
   fn event(&mut self, _cx: &mut Cx, ev: &Event) -> bool {
     match ev {
       Event::Focus(true) => {
         self.refresh();
+        self.files.recheck();
+        true
+      }
+      Event::DragOver { .. } => !std::mem::replace(&mut self.files.dragging, true),
+      Event::DragExit => std::mem::take(&mut self.files.dragging),
+      Event::Drop { paths, .. } => {
+        self.files.dragging = false;
+        self.transcribe(paths.clone());
         true
       }
       Event::System(Change::AudioInputs | Change::DefaultInput) => {
@@ -474,8 +516,14 @@ impl App for Prefs {
       Event::FileDialog(answer) => {
         match (self.panel.take(), answer) {
           // GNOME's save panel adds no extension: Import's *.zip would not show it.
-          (Some(Panel::Export), Some(file)) => self.shell.export(with_zip(file)),
+          (Some(Panel::Export), Some(file)) => self.shell.export(with_ext(file, "zip")),
           (Some(Panel::Import), Some(file)) => self.shell.import(file.clone()),
+          (Some(Panel::Transcribe), Some(file)) => self.transcribe(vec![file.clone()]),
+          (Some(Panel::Locate(id)), Some(file)) => {
+            self.files.note = None;
+            self.shell.request(Request::LocateFile(id, file.clone()));
+          }
+          (Some(Panel::Save(id, format)), Some(file)) => self.save(id, format, file),
           _ => {}
         }
 
@@ -508,6 +556,23 @@ fn keyboard_languages(layouts: &[(String, String)]) -> Vec<(String, String)> {
   }
 
   by.into_values().map(|(lang, names)| (lang, names.join(", "))).collect()
+}
+
+/// Auto-detect, then the languages of `codes` by name, and `current` when it is none of them
+/// (`None`: Auto-detect): the choices, `(label, code)`, and the index of `current`.
+fn language_choices(codes: &[&str], current: Option<String>) -> (Vec<(String, String)>, usize) {
+  let mut langs: Vec<(String, String)> =
+    codes.iter().map(|c| (language_name(c), (*c).to_owned())).collect();
+  langs.sort();
+  langs.insert(0, ("Auto-detect".to_owned(), "auto".to_owned()));
+  let Some(current) = current else { return (langs, 0) };
+  if let Some(i) = langs.iter().position(|(_, c)| c.eq_ignore_ascii_case(&current)) {
+    return (langs, i);
+  }
+
+  langs.push((format!("{} (not one the model is meant for)", language_name(&current)), current));
+  let at = langs.len() - 1;
+  (langs, at)
 }
 
 /// wavo's name for a model choice, `None` for a file of the person's own.
@@ -816,28 +881,24 @@ impl Prefs {
   /// languages the model in use is meant for.
   fn languages(&self) -> (Vec<(String, String)>, usize) {
     let codes = self.active().map_or(&[][..], |f| f.0.langs);
-    let mut langs: Vec<(String, String)> =
-      codes.iter().map(|c| (language_name(c), (*c).to_owned())).collect();
-    langs.sort();
-    langs.insert(0, ("Auto-detect".to_owned(), "auto".to_owned()));
     let keyboard = self.settings.follows_keyboard();
-    if keyboard || !self.layouts.is_empty() {
-      langs.insert(1, ("Keyboard layout".to_owned(), KEYBOARD.to_owned()));
+    let current = if keyboard { None } else { self.settings.engine_language() };
+    let (mut langs, at) = language_choices(codes, current);
+    if !keyboard && self.layouts.is_empty() {
+      return (langs, at);
     }
 
-    if keyboard {
-      return (langs, 1);
-    }
-
-    let Some(current) = self.settings.engine_language() else { return (langs, 0) };
-
-    if let Some(i) = langs.iter().position(|(_, c)| c.eq_ignore_ascii_case(&current)) {
-      return (langs, i);
-    }
-
-    langs.push((format!("{} (not one the model is meant for)", language_name(&current)), current));
-    let at = langs.len() - 1;
-    (langs, at)
+    langs.insert(1, ("Keyboard layout".to_owned(), KEYBOARD.to_owned()));
+    (
+      langs,
+      if keyboard {
+        1
+      } else if at > 0 {
+        at + 1
+      } else {
+        0
+      },
+    )
   }
 
   /// The model row; with no model downloaded, the way to download one.
@@ -1274,23 +1335,24 @@ impl Prefs {
     });
   }
 
-  /// A history request the session refused: said under the panel.
-  pub fn history_failed(&mut self, req: Request, error: &str) {
-    let what = match req {
-      Request::Delete(ids) if ids.len() > 1 => "Could not delete the dictations",
-      Request::Delete(_) => "Could not delete the dictation",
-      Request::Retranscribe(_) => "Could not transcribe it again",
-      Request::Restore(_) => "Could not put the previous text back",
-      Request::DeleteSaved => "Could not delete the history",
+  /// A request the session refused: said under History's panel, or under Files' list.
+  pub fn request_failed(&mut self, req: Request, error: &str) {
+    let (files, what) = match req {
+      Request::Delete(ids) if ids.len() > 1 => (false, "Could not delete the dictations"),
+      Request::Delete(_) => (false, "Could not delete the dictation"),
+      Request::Retranscribe(_) => (false, "Could not transcribe it again"),
+      Request::Restore(_) => (false, "Could not put the previous text back"),
+      Request::DeleteSaved => (false, "Could not delete the history"),
       Request::Unload | Request::Transferred | Request::Close => return,
-      Request::Transcribe(_)
-      | Request::StopFile(_)
-      | Request::ContinueFile(_)
-      | Request::DeleteFiles(_)
-      | Request::TranscribeAgain { .. }
-      | Request::LocateFile(..) => return,
+      Request::Transcribe(_) => (true, "Could not add"),
+      Request::StopFile(_) => (true, "Could not stop it"),
+      Request::ContinueFile(_) => (true, "Could not go on"),
+      Request::DeleteFiles(_) => (true, "Could not delete"),
+      Request::TranscribeAgain { .. } => (true, "Could not transcribe it again"),
+      Request::LocateFile(..) => (true, "Could not take that file"),
     };
-    self.history.said = Some(format!("{what}: {error}"));
+    let said = if files { &mut self.files.said } else { &mut self.history.said };
+    *said = Some(format!("{what}: {error}"));
   }
 
   /// [Shell::set_autostart] to `on` ended: the system's state after it, or why not.
@@ -2222,6 +2284,12 @@ pub type Import = Transfer<Imported>;
 enum Panel {
   Export,
   Import,
+  /// Files' Transcribe File…
+  Transcribe,
+  /// Where a transcript's file is now.
+  Locate(i64),
+  /// A transcript's text to save.
+  Save(i64, Format),
 }
 
 /// The archive Export suggests, to the second, so another one the same day keeps its own:
@@ -2394,7 +2462,8 @@ impl HistoryPage {
           self.selected.retain(|k| read.contains(&k));
         }
 
-        (self.days, self.entries) = (days(&entries), entries);
+        let on = entries.iter().map(|e| (e.created_at, e.duration_ms));
+        (self.days, self.entries) = (days(on), entries);
       }
       Err(e) => self.note = Some((format!("Could not read the history: {e:#}"), now)),
     }
@@ -2412,26 +2481,28 @@ impl HistoryPage {
   }
 }
 
-/// `file`, with `.zip` added unless it ends in it; added, to a name not taken, as the panel asked
-/// about replacing `file` only: `backup.zip`, else `backup 2.zip`.
-fn with_zip(file: &Path) -> PathBuf {
-  if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+/// `file` with the extension `ext` (`zip`) added unless it ends in it, as GNOME's save panel adds
+/// none; added, to a name not taken, as the panel asked about replacing `file` only: `backup.zip`,
+/// else `backup 2.zip`.
+fn with_ext(file: &Path, ext: &str) -> PathBuf {
+  if file.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext)) {
     return file.to_owned();
   }
 
   let name = file.file_name().unwrap_or_default().to_string_lossy();
-  let numbered = |n| if n == 1 { format!("{name}.zip") } else { format!("{name} {n}.zip") };
+  let numbered = |n| if n == 1 { format!("{name}.{ext}") } else { format!("{name} {n}.{ext}") };
   (1..).map(|n| file.with_file_name(numbered(n))).find(|p| !p.exists()).unwrap()
 }
 
-/// The days of `entries`, newest first: each one's entries and their duration in ms.
-fn days(entries: &[Entry]) -> Vec<(Day, Range<usize>, i64)> {
+/// The days of `items`, `(created_at, duration_ms)` newest first: each one's items and their
+/// duration in ms.
+fn days(items: impl Iterator<Item = (i64, i64)>) -> Vec<(Day, Range<usize>, i64)> {
   let mut days: Vec<(Day, Range<usize>, i64)> = Vec::new();
-  for (i, e) in entries.iter().enumerate() {
-    let day = date_of(e.created_at);
+  for (i, (at, duration_ms)) in items.enumerate() {
+    let day = date_of(at);
     match days.last_mut() {
-      Some((d, r, ms)) if *d == day => (r.end, *ms) = (i + 1, *ms + e.duration_ms),
-      _ => days.push((day, i..i + 1, e.duration_ms)),
+      Some((d, r, ms)) if *d == day => (r.end, *ms) = (i + 1, *ms + duration_ms),
+      _ => days.push((day, i..i + 1, duration_ms)),
     }
   }
 
@@ -2504,6 +2575,15 @@ fn details(e: &Entry) -> String {
   parts.extend(e.model.as_deref().map(label));
   parts.retain(|p| !p.is_empty());
   parts.join(" · ")
+}
+
+/// `12 s`, `40 min`, `312 h`: how much was spoken, roughly.
+fn spoken(ms: i64) -> String {
+  match ms / 1000 {
+    s if s < 60 => format!("{s} s"),
+    s if s < 3600 => format!("{} min", s / 60),
+    s => format!("{} h", s / 3600),
+  }
 }
 
 /// `3 dictations · 1:15`: of the whole day, `(count, ms)`.
@@ -2705,12 +2785,7 @@ impl Prefs {
   fn total_text(&self) -> Option<String> {
     let (n, ms, Some(first)) = self.history.total.filter(|t| t.0 > 0)? else { return None };
     let what = if n == 1 { "dictation" } else { "dictations" };
-    let spoken = match ms / 1000 {
-      s if s < 60 => format!("{s} s"),
-      s if s < 3600 => format!("{} min", s / 60),
-      s => format!("{} h", s / 3600),
-    };
-    let mut text = format!("{} {what} · {spoken}", thousands(n));
+    let mut text = format!("{} {what} · {}", thousands(n), spoken(ms));
     if self.history.in_memory {
       return Some(text + " · kept until Wavo quits");
     }
@@ -2753,7 +2828,7 @@ impl Prefs {
       Some(Act::Stop) => h.playing = None,
       Some(Act::Request(req)) => {
         h.note = None;
-        self.shell.history(req);
+        self.shell.request(req);
       }
       Some(Act::Delete) => self.ask_delete(),
       Some(Act::RetranscribeChosen) => {
@@ -2762,7 +2837,7 @@ impl Prefs {
         let chosen = h.chosen().into_iter().filter(|e| e.audio_path.is_some());
         let ids: Vec<i64> = chosen.map(|e| e.id).filter(|id| !busy.contains(id)).collect();
         for id in ids {
-          self.shell.history(Request::Retranscribe(id));
+          self.shell.request(Request::Retranscribe(id));
         }
       }
       None => {}
@@ -2948,6 +3023,824 @@ fn row_act(item: RowItem, e: &Entry) -> Act {
   }
 }
 
+// MARK: Files
+
+const FILES_LIST: &str = "files-list";
+/// A transcript's text, open in place of the list.
+const VIEWER: &str = "viewer";
+/// What the empty tab says Wavo reads ([decode::EXTENSIONS]).
+const FORMATS: &str = "MP3, M4A, AAC, WAV, FLAC, OGG, AIFF, CAF, MP4, MOV and MKV";
+/// The Files tab's Model when it is the dictation's.
+const SAME_MODEL: &str = "Same as Dictation";
+const FILES_MODEL_HELP: &str = "The model a new transcript runs with: the dictation's Model, or \
+  one of its own. Transcribe Again in a transcript's menu runs it with another.";
+/// The viewer's text column until it is laid out: the window, the page's padding and the plate's.
+const VIEWER_W: f32 = WIDTH - 40.0 - 32.0;
+/// The viewer's way back to the list, and a row's way into it.
+const BACK: Icon = Icon::new("M14.5 6l-6 6 6 6");
+const OPEN: Icon = Icon::new("M9.5 6l6 6-6 6");
+
+/// What a transcript's text is saved as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Format {
+  /// The viewer's paragraphs, without times.
+  Txt,
+  /// A cue a segment.
+  Srt,
+}
+
+impl Format {
+  fn ext(self) -> &'static str {
+    match self {
+      Self::Txt => "txt",
+      Self::Srt => "srt",
+    }
+  }
+
+  fn text(self, segments: &[Segment]) -> String {
+    match self {
+      Self::Txt => segments::txt(segments),
+      Self::Srt => segments::srt(segments),
+    }
+  }
+}
+
+/// The transcript the viewer shows.
+struct Open {
+  t: Transcript,
+  check: Check,
+  viewer: Viewer,
+  /// The transcripts' revision it was read at.
+  revision: u64,
+}
+
+struct FilesPage {
+  db: Transcripts,
+  /// The session's transcripts change: a move reloads.
+  revision: u64,
+  search: String,
+  /// All of them the search finds, newest first, each with its file as it is now.
+  list: Vec<(Transcript, Check)>,
+  /// Their days: each one's transcripts and duration.
+  days: Vec<(Day, Range<usize>, i64)>,
+  /// What the list was loaded for: the search and the revision.
+  loaded: Option<(String, u64)>,
+  /// The search as typed last, and when ([Ui::now]).
+  typed: Option<(String, Duration)>,
+  /// The transcripts selected, by id.
+  selected: Selection,
+  /// What the line under the list says for [NOTE_TIME], and since when ([Ui::now]).
+  note: Option<(String, Duration)>,
+  /// A note from outside a frame (a request that failed, a file saved), stamped when Files shows
+  /// next.
+  said: Option<String>,
+  /// In place of the list.
+  open: Option<Open>,
+  /// Files are dragged over the window: it shows where they go.
+  dragging: bool,
+  /// Transcribe File… from the menu bar: the file panel opens with the next frame.
+  pick: bool,
+}
+
+impl FilesPage {
+  fn new(home: &Path) -> Self {
+    Self {
+      db: Transcripts::open(home),
+      revision: 0,
+      search: String::new(),
+      list: Vec::new(),
+      days: Vec::new(),
+      loaded: None,
+      typed: None,
+      selected: Selection::default(),
+      note: None,
+      said: None,
+      open: None,
+      dragging: false,
+      pick: false,
+    }
+  }
+
+  /// As [HistoryPage::typed].
+  fn typed(&mut self, now: Duration) {
+    let search = self.search.trim();
+    if self.typed.as_ref().is_none_or(|(s, _)| s != search) {
+      self.typed = Some((search.to_owned(), now));
+    }
+  }
+
+  /// Reads the transcripts again, and looks at their files, when they or the search changed, as
+  /// [HistoryPage::load] does.
+  fn load(&mut self, now: Duration) -> Option<Duration> {
+    let search = self.search.trim().to_owned();
+    let since = self.typed.as_ref().map_or(SEARCH_WAIT, |(_, at)| now.saturating_sub(*at));
+    let other = self.loaded.as_ref().is_some_and(|(s, _)| *s != search);
+    if other && since < SEARCH_WAIT {
+      return Some(SEARCH_WAIT - since);
+    }
+
+    let key = (search, self.revision);
+    if self.loaded.as_ref() == Some(&key) {
+      return None;
+    }
+
+    match self.db.list(&key.0) {
+      Ok(list) => {
+        if !self.selected.is_empty() {
+          let read: HashSet<u64> = list.iter().map(|t| t.id as u64).collect();
+          self.selected.retain(|k| read.contains(&k));
+        }
+
+        self.days = days(list.iter().map(|t| (t.created_at, length(t))));
+        self.list = list.into_iter().map(|t| (t.check(), t)).map(|(c, t)| (t, c)).collect();
+      }
+      Err(e) => self.note = Some((format!("Could not read the transcripts: {e:#}"), now)),
+    }
+
+    self.loaded = Some(key);
+    None
+  }
+
+  /// The open transcript read again when the transcripts changed, its text when it grew; closed
+  /// once deleted.
+  fn read_open(&mut self, now: Duration) {
+    let Some(o) = self.open.as_mut().filter(|o| o.revision != self.revision) else { return };
+    o.revision = self.revision;
+    let t = match self.db.get(o.t.id) {
+      Ok(Some(t)) => t,
+      Ok(None) => return self.open = None,
+      Err(e) => return self.note = Some((format!("Could not read the transcript: {e:#}"), now)),
+    };
+
+    let grew = t.done_ms != o.t.done_ms;
+    (o.check, o.t) = (t.check(), t);
+    if grew {
+      match self.db.segments(o.t.id) {
+        Ok(segments) => o.viewer.set(segments),
+        Err(e) => self.note = Some((format!("Could not read the transcript: {e:#}"), now)),
+      }
+    }
+  }
+
+  /// Back in front: the files may have moved meanwhile.
+  fn recheck(&mut self) {
+    self.loaded = None;
+    if let Some(o) = &mut self.open {
+      o.check = o.t.check();
+    }
+  }
+
+  /// Shows transcript `id` in place of the list.
+  fn open(&mut self, id: i64, now: Duration) {
+    let Some((t, check)) = self.list.iter().find(|(t, _)| t.id == id).cloned() else { return };
+    match self.db.segments(id) {
+      Ok(segments) => {
+        let mut viewer = Viewer::new(id);
+        viewer.set(segments);
+        self.open = Some(Open { t, check, viewer, revision: self.revision });
+      }
+      Err(e) => self.note = Some((format!("Could not read the transcript: {e:#}"), now)),
+    }
+  }
+
+  fn find(&self, id: i64) -> Option<&Transcript> {
+    let open = self.open.as_ref().map(|o| &o.t).filter(|t| t.id == id);
+    open.or_else(|| self.list.iter().map(|(t, _)| t).find(|t| t.id == id))
+  }
+
+  /// Transcript `id`'s segments: the viewer's when it is open.
+  fn segments(&self, id: i64) -> anyhow::Result<Vec<Segment>> {
+    match self.open.as_ref().filter(|o| o.t.id == id) {
+      Some(o) => Ok(o.viewer.segments().to_vec()),
+      None => self.db.segments(id),
+    }
+  }
+
+  /// The selected transcripts, newest first.
+  fn chosen(&self) -> Vec<&(Transcript, Check)> {
+    if self.selected.is_empty() {
+      return Vec::new();
+    }
+
+    self.list.iter().filter(|(t, _)| self.selected.contains(t.id as u64)).collect()
+  }
+}
+
+/// How long a transcript's audio is, or as far as it is known.
+fn length(t: &Transcript) -> i64 {
+  t.duration_ms.unwrap_or(t.done_ms)
+}
+
+/// What a transcript's row says under its name ([line_of]).
+enum Line {
+  /// Its progress bar, moving without a share.
+  Progress(Option<f32>, String),
+  Text(String),
+  /// In red.
+  Failed(String),
+}
+
+/// `1:02:03 of 4:30:00`, as far as it is known.
+fn at_of(ms: i64, duration_ms: Option<i64>) -> String {
+  match duration_ms {
+    Some(d) => format!("{} of {}", clock(ms), clock(d)),
+    None => clock(ms),
+  }
+}
+
+/// How transcript `t` is, its file `check`ed, `run` the one running: `42% · 1:02:03 of 4:30:00 ·
+/// 12 min left`, `Waiting`, `Stopped at 1:02:03 of 4:30:00`, `File not found`, done its details.
+fn line_of(t: &Transcript, check: Check, run: Option<&FileStatus>) -> Line {
+  if let Some(r) = run.filter(|r| r.id == t.id) {
+    let k = r.duration_ms.filter(|&d| d > 0).map(|d| (r.done_ms as f32 / d as f32).clamp(0.0, 1.0));
+    let mut parts: Vec<String> = k.map(|k| format!("{:.0}%", k * 100.0)).into_iter().collect();
+    parts.push(at_of(r.done_ms, r.duration_ms));
+    match r.waiting {
+      true => parts.push("waits for the dictation".into()),
+      false => parts.extend(r.left_ms.map(left_text)),
+    }
+    return Line::Progress(k, parts.join(" · "));
+  }
+
+  match t.state {
+    FileState::Queued | FileState::Running if t.done_ms > 0 => {
+      Line::Text(format!("Waiting · at {}", at_of(t.done_ms, t.duration_ms)))
+    }
+    FileState::Queued | FileState::Running => Line::Text("Waiting".into()),
+    FileState::Stopped => Line::Text(format!("Stopped at {}", at_of(t.done_ms, t.duration_ms))),
+    FileState::Failed => Line::Failed(match check {
+      Check::Missing => "File not found".into(),
+      Check::Changed => "The file changed since".into(),
+      Check::Same => format!("Failed: {}", t.error.as_deref().unwrap_or("see the log")),
+    }),
+    FileState::Done => Line::Text(file_details(t)),
+  }
+}
+
+/// A done transcript's: when, how long, the model, the language it was asked in.
+fn file_details(t: &Transcript) -> String {
+  let mut parts = vec![local_time(t.created_at).map(Local::hm).unwrap_or_default()];
+  parts.push(clock(length(t)));
+  parts.push(label(&t.model));
+  parts.extend(t.language.as_deref().map(language_name));
+  if t.preview.is_empty() {
+    parts.push("no text".into());
+  }
+
+  parts.retain(|p| !p.is_empty());
+  parts.join(" · ")
+}
+
+/// `12 min left`, `1 h 5 min left`.
+fn left_text(ms: i64) -> String {
+  match ms / 60_000 {
+    0 => "under a minute left".into(),
+    m if m < 60 => format!("{m} min left"),
+    m => format!("{} h {} min left", m / 60, m % 60),
+  }
+}
+
+/// `2 transcripts · 4:31:02`: of the whole day.
+fn files_note(n: usize, ms: i64) -> String {
+  let what = if n == 1 { "transcript" } else { "transcripts" };
+  format!("{n} {what} · {}", clock(ms))
+}
+
+/// Continue's tip: why it is off.
+fn continue_tip(check: Check) -> &'static str {
+  match check {
+    Check::Same => "Continue",
+    Check::Changed => "The file changed since",
+    Check::Missing => "File not found",
+  }
+}
+
+/// A row's line under its name, or the viewer's under its title; a failure whole in its tooltip
+/// on `tip`.
+fn show_line(ui: &mut Ui, fs: &FormStyle, line: &Line, tip: Option<Id>) {
+  match line {
+    Line::Progress(k, text) => progress_line(ui, fs, *k, text),
+    Line::Text(text) => ui.text(text, fs.caption),
+    Line::Failed(text) => {
+      let s = fs.caption.color(ui.theme().danger);
+      match tip {
+        Some(id) => ui.help(text).with_id(id).text(text, s),
+        None => ui.text(text, s),
+      }
+    }
+  }
+}
+
+enum FileAct {
+  Open(i64),
+  Copy(i64),
+  Export(i64, Format),
+  Reveal(i64),
+  Locate(i64),
+  Request(Request),
+  /// Deleting the selection, or the one open ([Prefs::ask_delete_files]).
+  Delete,
+}
+
+/// A transcript's row, all of one height: its name on a line and how it is under it; Stop, or
+/// Continue, Copy and Open at its right. The list selects it and draws the selection.
+fn file_row(
+  ui: &mut Ui,
+  fs: &FormStyle,
+  t: &Transcript,
+  check: Check,
+  run: Option<&FileStatus>,
+) -> Option<FileAct> {
+  ui.col(Style::new().w(grow()).gap(2.0), |ui| {
+    ui.text(&t.name, fs.label.line_limit(1));
+    show_line(ui, fs, &line_of(t, check, run), None);
+  });
+
+  let (mut act, id) = (None, t.id);
+  let large = ControlSize::Large;
+  match t.state {
+    s if s.pending() => {
+      let r = ui.help("Stop").control_size(large).id(("file-stop", id)).icon_button(Icon::STOP);
+      if r.clicked {
+        act = Some(FileAct::Request(Request::StopFile(id)));
+      }
+    }
+    FileState::Stopped | FileState::Failed => {
+      let r = ui.help(continue_tip(check)).disabled(check != Check::Same).control_size(large);
+      if r.id(("file-continue", id)).icon_button(Icon::PLAY).clicked {
+        act = Some(FileAct::Request(Request::ContinueFile(id)));
+      }
+    }
+    _ => {}
+  }
+
+  let r = ui.help("Copy").disabled(t.preview.is_empty()).control_size(large);
+  if r.id(("file-copy", id)).icon_button(Icon::COPY).clicked {
+    act = Some(FileAct::Copy(id));
+  }
+
+  if ui.help("Open").control_size(large).id(("file-open", id)).icon_button(OPEN).clicked {
+    act = Some(FileAct::Open(id));
+  }
+
+  act
+}
+
+/// What a row's context menu does ([file_menu]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileItem {
+  Open,
+  Copy,
+  Export(Format),
+  Reveal,
+  Locate,
+  Stop,
+  Continue,
+  /// By the model of this name.
+  Again(&'static str),
+  Delete,
+}
+
+/// A transcript's context menu, its file `check`ed: what its buttons do, its text exported, its
+/// file shown and located, a new transcript of it by one of the models `found`.
+fn file_menu(t: &Transcript, check: Check, found: &[Found]) -> Menu<FileItem> {
+  let (text, there) = (!t.preview.is_empty(), check != Check::Missing);
+  let show = format!("Show in {}", open::file_manager());
+  let mut items = vec![
+    Item::button(FileItem::Open, "Open"),
+    Item::button(FileItem::Copy, "Copy Text").enabled(text),
+    Item::button(FileItem::Export(Format::Txt), "Export TXT…").enabled(text),
+    Item::button(FileItem::Export(Format::Srt), "Export SRT…").enabled(text),
+    Item::Divider,
+    Item::button(FileItem::Reveal, &show).enabled(there),
+  ];
+  if check != Check::Same {
+    items.push(Item::button(FileItem::Locate, "Locate…"));
+  }
+
+  items.push(Item::Divider);
+  match t.state {
+    s if s.pending() => items.push(Item::button(FileItem::Stop, "Stop")),
+    FileState::Stopped | FileState::Failed => {
+      items.push(Item::button(FileItem::Continue, "Continue").enabled(check == Check::Same))
+    }
+    _ => {}
+  }
+
+  let models = found.iter().map(|f| Item::button(FileItem::Again(f.0.name), f.0.name)).collect();
+  let again = Item::submenu("Transcribe Again", Menu::new(models));
+  let delete = Item::button(FileItem::Delete, "Delete…").role(ButtonRole::Destructive);
+  items.extend([again.enabled(there && !found.is_empty()), Item::Divider, delete]);
+  Menu::new(items)
+}
+
+fn file_act(item: FileItem, id: i64) -> FileAct {
+  match item {
+    FileItem::Open => FileAct::Open(id),
+    FileItem::Copy => FileAct::Copy(id),
+    FileItem::Export(format) => FileAct::Export(id, format),
+    FileItem::Reveal => FileAct::Reveal(id),
+    FileItem::Locate => FileAct::Locate(id),
+    FileItem::Stop => FileAct::Request(Request::StopFile(id)),
+    FileItem::Continue => FileAct::Request(Request::ContinueFile(id)),
+    FileItem::Again(model) => {
+      FileAct::Request(Request::TranscribeAgain { id, model: model.into() })
+    }
+    FileItem::Delete => FileAct::Delete,
+  }
+}
+
+/// Over the window under its tabs while files are dragged over it, hiding the page: a drop
+/// anywhere transcribes them.
+fn drop_target(ui: &mut Ui, fs: &FormStyle) {
+  // The toolbar, the tabs and the line under them.
+  let bar = ui.rect(Id::of(TABS).key("head"));
+  let (Some(tabs), Some(window)) = (bar, ui.rect(Id::of(WINDOW))) else { return };
+  let t = ui.theme();
+  let inset = 8.0;
+  let top = tabs.y + tabs.h + inset;
+  let (w, h) = (window.w - 2.0 * inset, window.y + window.h - top - inset);
+  let s = Style::new().w(px(w)).h(px(h)).radius(fs.group.radii[0]).border(2.0, t.accent);
+  let s = s.bg(nimbo::mix(fs.bg, t.accent, 0.08)).align(Align::Center, Align::Center);
+  let text = fs.head.color(t.accent);
+  ui.float(Float::window().offset(window.x + inset, top).z(1))
+    .id("drop-target")
+    .col(s, |ui| ui.text("Drop to Transcribe", text));
+}
+
+impl Prefs {
+  /// Files dropped or picked: each a new transcript, the list showing it.
+  fn transcribe(&mut self, paths: Vec<PathBuf>) {
+    let f = &mut self.files;
+    (self.page, f.open, f.note) = (Page::Files, None, None);
+    f.search.clear();
+    self.shell.request(Request::Transcribe(paths));
+  }
+
+  /// Transcribe File… from the menu bar: Files, its file panel open.
+  pub fn transcribe_file(&mut self) {
+    (self.page, self.files.open, self.files.pick) = (Page::Files, None, true);
+  }
+
+  fn pick_file(&mut self, ui: &mut Ui) {
+    ui.file_dialog(FileDialog::open("Transcribe File").types(decode::EXTENSIONS));
+    self.panel = Some(Panel::Transcribe);
+  }
+
+  /// The search and Transcribe File…; a transcript open, the way back, its name and how it is.
+  fn files_head(&mut self, ui: &mut Ui, s: Style, fs: &FormStyle) -> Response {
+    let run = self.status.file.as_ref();
+    let f = &mut self.files;
+    let (mut back, mut pick) = (false, false);
+    let r = ui.id(PAGE_HEAD).row(s, |ui| {
+      let Some(o) = &f.open else {
+        if ui.id("files-search").search(&mut f.search, "Search transcripts").changed {
+          f.typed(ui.now());
+        }
+
+        pick = ui.id("transcribe-file").button("Transcribe File…").clicked;
+        return;
+      };
+
+      back = ui.help("All Transcripts").id("files-back").icon_button(BACK).clicked;
+      let line = match line_of(&o.t, o.check, run) {
+        Line::Text(details) if o.t.state == FileState::Done => {
+          Line::Text(format!("{} · {details}", day_title(date_of(o.t.created_at), now_ms())))
+        }
+        line => line,
+      };
+      ui.col(Style::new().w(grow()).gap(2.0), |ui| {
+        ui.id("viewer-title").text(&o.t.name, fs.head.line_limit(1));
+        show_line(ui, fs, &line, Some(Id::of("viewer-line")));
+      });
+    });
+    if back {
+      f.open = None;
+    }
+
+    if pick {
+      self.pick_file(ui);
+    }
+
+    r
+  }
+
+  /// The transcripts, newest first, on a plate a day, as History's list; a transcript open, its
+  /// text.
+  fn files(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    let f = &mut self.files;
+    if let Some(said) = f.said.take() {
+      f.note = Some((said, ui.now()));
+    }
+
+    if std::mem::take(&mut f.pick) {
+      self.pick_file(ui);
+    }
+
+    let f = &mut self.files;
+    if let Some(wait) = f.load(ui.now()) {
+      ui.request_frame_in(wait);
+    }
+
+    f.read_open(ui.now());
+    if f.open.is_some() {
+      return self.viewer(ui, fs);
+    }
+
+    if f.list.is_empty() {
+      let caption = format!(
+        "Drop an audio or video file here, or use Transcribe File… above. Wavo reads {FORMATS}; \
+        the text is kept until you delete it."
+      );
+      let row = match f.search.trim().is_empty() {
+        true => FormRow::new("No transcripts yet").caption(caption.as_str()),
+        false => FormRow::new("Nothing found"),
+      };
+      ui.col(fs.page.pads(PAGE_PAD).h(grow()), |ui| {
+        ui.form_section(fs, "", |ui| ui.id("files-empty").form_row(fs, row, |_| {}));
+      });
+      return;
+    }
+
+    let (now, mut act) = (now_ms(), None);
+    let fs = &FormStyle { caption: fs.caption.line_limit(1), ..*fs };
+    let FilesPage { list, days, selected, .. } = &mut self.files;
+    let run = self.status.file.as_ref();
+    let starts: Vec<usize> = days.iter().map(|(_, r, _)| r.start).collect();
+    let line = ui.line_height(fs.head);
+    let row_h = two_line_h(ui, fs);
+    let head = |ui: &mut Ui, g: usize| {
+      let (day, r, ms) = &days[g];
+      ui.text(day_title(*day, now), fs.head);
+      ui.spacer();
+      ui.text(files_note(r.len(), *ms), fs.note);
+    };
+    let key = |i: usize| list[i].0.id as u64;
+    let l = List::new(list.len(), row_h).key(&key).multi().selection(selected);
+    let l = l.sections(&starts, line + fs.head_pad[2], &head).list_style(ListStyle::Grouped);
+    if fs.fade > 0.0 {
+      ui.fade_edges(fs.bg, fs.fade);
+    }
+
+    let r = l.style(Style::new().grow().pads(PAGE_PAD)).show(ui.id(FILES_LIST), |ui, row| {
+      let (t, check) = &list[row.index];
+      if let Some(a) = file_row(ui, fs, t, *check, run) {
+        act = Some(a);
+      }
+    });
+    if let Some(i) = r.activated {
+      act = Some(FileAct::Open(list[i].0.id));
+    }
+
+    if r.delete {
+      act = Some(FileAct::Delete);
+    }
+
+    let chosen = self.files.chosen();
+    if let Some((t, check)) = chosen.first().map(|c| (&c.0, c.1)) {
+      let several = chosen.len() > 1;
+      let delete = || Item::button(FileItem::Delete, "Delete…").role(ButtonRole::Destructive);
+      let item = ui.context_menu(r.id, || match several {
+        false => file_menu(t, check, &self.found),
+        true => Menu::new(vec![delete()]),
+      });
+      act = item.map(|item| file_act(item, t.id)).or(act);
+    }
+
+    self.files_act(ui, act);
+  }
+
+  /// The open transcript's text, a paragraph a row with its time, on a plate.
+  fn viewer(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    let t = ui.theme();
+    let o = self.files.open.as_mut().unwrap();
+    if o.viewer.is_empty() {
+      let empty = match o.t.state {
+        FileState::Done => "No text: Wavo heard no speech in the file.",
+        _ => "No text yet: it comes as the file is transcribed.",
+      };
+      ui.col(fs.page.pads(PAGE_PAD).h(grow()), |ui| {
+        ui.form_section(fs, "", |ui| ui.form_row(fs, FormRow::new(empty), |_| {}));
+      });
+      return;
+    }
+
+    let text = FieldStyle { text: t.body(), ..t.field() };
+    ui.id(VIEWER).form_scroll(fs, Style::new().grow(), |ui| {
+      ui.col(fs.page.pads(PAGE_PAD), |ui| {
+        // The paragraphs' gap under the last one.
+        ui.col(fs.group.pads([14.0, 16.0, 2.0, 16.0]), |ui| {
+          o.viewer.show(ui, Id::of("viewer-text"), VIEWER_W, &text, fs.caption);
+        });
+      });
+    });
+  }
+
+  /// Under the list: the Model and Language new transcripts run with; a transcript open, what is
+  /// done with it.
+  fn files_foot(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
+    let s = Style::new().w(grow()).pads([10.0, 20.0, 10.0, 20.0]).gap(8.0);
+    let s = s.align(Align::Start, Align::Center);
+    let mut act = None;
+    if let Some(o) = &self.files.open {
+      let (id, text, check) = (o.t.id, !o.viewer.is_empty(), o.check);
+      ui.row(s, |ui| {
+        if ui.disabled(!text).id("viewer-copy").button("Copy Text").clicked {
+          act = Some(FileAct::Copy(id));
+        }
+
+        for (format, name) in [(Format::Txt, "Export TXT…"), (Format::Srt, "Export SRT…")] {
+          if ui.disabled(!text).id(("viewer-export", format.ext())).button(name).clicked {
+            act = Some(FileAct::Export(id, format));
+          }
+        }
+
+        ui.spacer();
+        let state = match o.t.state {
+          s if s.pending() => Some(("Stop", FileAct::Request(Request::StopFile(id)))),
+          FileState::Done => None,
+          _ if check != Check::Same => Some(("Locate…", FileAct::Locate(id))),
+          _ => Some(("Continue", FileAct::Request(Request::ContinueFile(id)))),
+        };
+        if let Some((button, then)) = state
+          && ui.id("viewer-state").button(button).clicked
+        {
+          act = Some(then);
+        }
+
+        if ui.id("viewer-delete").button("Delete…").clicked {
+          act = Some(FileAct::Delete);
+        }
+      });
+      return self.files_act(ui, act);
+    }
+
+    let (models, at) = self.files_models();
+    let (langs, lang) = self.files_languages();
+    let labels: Vec<String> = langs.iter().map(|l| l.0.clone()).collect();
+    let (mut model, mut language) = (None, None);
+    ui.row(s, |ui| {
+      ui.text("Model", fs.label.nowrap());
+      model = pick(ui.help(FILES_MODEL_HELP), "files-model", &models, at, &[0]);
+      ui.el(Style::new().w(px(8.0)));
+      ui.text("Language", fs.label.nowrap());
+      language = pick(ui, "files-language", &labels, lang, &[0]);
+    });
+
+    match model {
+      Some(0) => self.edit(|s| s.files_model = None),
+      Some(i) if let Some(f) = self.found.get(i - 1) => {
+        let name = f.0.name;
+        self.edit(move |s| s.files_model = Some(name.to_owned()));
+      }
+      _ => {}
+    }
+
+    if let Some(i) = language {
+      let code = langs[i].1.clone();
+      self.edit(move |s| s.files_language = code.clone());
+    }
+  }
+
+  /// Same as Dictation, the models downloaded, and the one set when it is none of them: the
+  /// choices and the index of the one set.
+  fn files_models(&self) -> (Vec<String>, usize) {
+    let mut items = vec![SAME_MODEL.to_owned()];
+    items.extend(self.found.iter().map(|f| f.0.name.to_owned()));
+    let Some(query) = &self.settings.files_model else { return (items, 0) };
+    let pick = Pick::new(&self.hub, Some(query), &self.found);
+    if let Some((name, there)) = pick.other {
+      items.push(if there { name } else { format!("{name} (not on disk)") });
+      let at = items.len() - 1;
+      return (items, at);
+    }
+
+    (items, pick.active.map_or(0, |i| i + 1))
+  }
+
+  /// The Files tab's language choices: those of its model, the dictation's Model's when it is
+  /// the same; no Keyboard layout.
+  fn files_languages(&self) -> (Vec<(String, String)>, usize) {
+    let model = match &self.settings.files_model {
+      Some(query) => {
+        let path = self.hub.resolve(query).ok();
+        self.found.iter().find(|f| Some(&f.1) == path.as_ref())
+      }
+      None => self.active(),
+    };
+    language_choices(model.map_or(&[][..], |f| f.0.langs), self.settings.files_language())
+  }
+
+  /// Under the foot: `12 transcripts · 31 h · kept until you delete them`, `3 found` while a
+  /// search shows; for [NOTE_TIME] after a note, the note.
+  fn files_total(&self, ui: &mut Ui, fs: &FormStyle) {
+    let (now, f) = (ui.now(), &self.files);
+    let note = f.note.as_ref().filter(|(_, at)| now < *at + NOTE_TIME);
+    let n = thousands(f.list.len());
+    let text = match note {
+      Some((note, at)) => {
+        ui.request_frame_in(*at + NOTE_TIME - now);
+        note.clone()
+      }
+      None if !f.search.trim().is_empty() => format!("{n} found"),
+      None if f.list.is_empty() => return,
+      None => {
+        let what = if f.list.len() == 1 { "transcript" } else { "transcripts" };
+        let ms = f.list.iter().map(|(t, _)| length(t)).sum();
+        format!("{n} {what} · {} · kept until you delete them", spoken(ms))
+      }
+    };
+
+    ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
+    ui.row(Style::new().w(grow()).h(px(TOTAL_H)).align(Align::Center, Align::Center), |ui| {
+      ui.id("files-total").text(&text, fs.note.nowrap());
+    });
+  }
+
+  fn files_act(&mut self, ui: &mut Ui, act: Option<FileAct>) {
+    let Some(act) = act else { return };
+    let (f, now) = (&mut self.files, ui.now());
+    match act {
+      FileAct::Open(id) => f.open(id, now),
+      FileAct::Copy(id) => match f.segments(id) {
+        Ok(segments) => {
+          ui.clipboard().write(&segments::txt(&segments));
+          f.note = Some(("Copied to the clipboard".into(), now));
+        }
+        Err(e) => f.note = Some((format!("Could not read the transcript: {e:#}"), now)),
+      },
+      FileAct::Export(id, format) => {
+        let Some(t) = f.find(id) else { return };
+        let stem = Path::new(&t.name).file_stem().unwrap_or_default().to_string_lossy();
+        let name = format!("{stem}.{}", format.ext());
+        let panel = FileDialog::save("Export").name(&name).types(&[format.ext()]);
+        ui.file_dialog(FileDialog { dir: paths::downloads(), ..panel });
+        self.panel = Some(Panel::Save(id, format));
+      }
+      FileAct::Reveal(id) => {
+        if let Some(t) = f.find(id) {
+          self.shell.reveal(&t.path);
+        }
+      }
+      FileAct::Locate(id) => {
+        let Some(t) = f.find(id) else { return };
+        let dir = t.path.parent().filter(|d| d.is_dir()).map(Path::to_owned);
+        let types: Vec<&str> =
+          decode::EXTENSIONS.iter().chain(decode::MOSTLY_OPUS).copied().collect();
+        ui.file_dialog(FileDialog { dir, ..FileDialog::open("Locate").types(&types) });
+        self.panel = Some(Panel::Locate(id));
+      }
+      FileAct::Request(req) => {
+        f.note = None;
+        self.shell.request(req);
+      }
+      FileAct::Delete => self.ask_delete_files(),
+    }
+  }
+
+  /// The text of transcript `id` written to `file`, the save panel's answer.
+  fn save(&mut self, id: i64, format: Format, file: &Path) {
+    let file = with_ext(file, format.ext());
+    let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let segments = self.files.segments(id);
+    let written = segments.and_then(|s| std::fs::write(&file, format.text(&s)).map_err(Into::into));
+    self.files.said = Some(match written {
+      Ok(()) => {
+        info!("files: transcript {id} saved to {}", file.display());
+        format!("Saved {name}")
+      }
+      Err(e) => {
+        warn!("files: save transcript {id} to {}: {e:#}", file.display());
+        format!("Could not save {name}: {e:#}")
+      }
+    });
+  }
+
+  /// Asks to delete the transcripts selected, or the one open; their files stay.
+  fn ask_delete_files(&mut self) {
+    let f = &self.files;
+    let doomed: Vec<&Transcript> = match &f.open {
+      Some(o) => vec![&o.t],
+      None => f.chosen().into_iter().map(|(t, _)| t).collect(),
+    };
+    let (title, message) = match doomed[..] {
+      [] => return,
+      [t] => {
+        let name = crate::history::shorten(&t.name, 60);
+        let message = format!("The text of “{name}” is removed. The file itself stays.");
+        ("Delete this transcript?".to_owned(), message)
+      }
+      _ => (
+        format!("Delete {} transcripts?", doomed.len()),
+        "Their text is removed. The files themselves stay.".to_owned(),
+      ),
+    };
+    let ids = doomed.iter().map(|t| t.id).collect();
+    self.ask = Some(Ask { title, message, delete: Delete::Transcripts(ids) });
+  }
+}
+
 // MARK: About
 
 const SOURCE: &str = "https://github.com/vladkens/wavo-app";
@@ -3034,12 +3927,14 @@ mod tests {
 
   use nimbo::harness::mac_titlebar;
   use nimbo::{
-    Appearance, Event, Harness, Modifiers, MouseButton, NamedKey, Os, Phase, Point, Size,
+    Appearance, Event, FileDialogKind, Harness, Modifiers, MouseButton, NamedKey, Os, Phase, Point,
+    Size,
   };
 
   use super::*;
   use crate::session::EngineStatus;
   use crate::testing::TempDir;
+  use crate::transcripts::Source;
 
   #[derive(Default)]
   struct Log {
@@ -3157,7 +4052,7 @@ mod tests {
       self.log().deleted.push(m.name);
     }
 
-    fn history(&self, req: Request) {
+    fn request(&self, req: Request) {
       self.log().requests.push(req);
     }
 
@@ -3245,6 +4140,33 @@ mod tests {
     /// [add_dictations] to the saved history, with a recording each.
     fn dictations(&self, items: &[(&str, i64)]) -> Vec<i64> {
       add_dictations(&History::open(self.dir.path()).unwrap(), items)
+    }
+
+    /// A transcript of file `name`, made in the home, added `ago` minutes ago by parakeet-v3:
+    /// its audio `duration_ms` long, done up to the end of its `segments`, then in `state`; one
+    /// failed, for the model that did not load. Its id.
+    fn transcript(
+      &self,
+      name: &str,
+      ago: i64,
+      duration_ms: i64,
+      segments: &[Segment],
+      state: FileState,
+    ) -> i64 {
+      let path = self.dir.path().join(name);
+      std::fs::write(&path, name).unwrap();
+      let db = Transcripts::open(self.dir.path());
+      let source = Source::of(&path).unwrap();
+      let id = db.add(&source, "parakeet-v3", None, now_ms() - ago * 60_000).unwrap();
+      if state == FileState::Queued {
+        return id;
+      }
+
+      db.start(id, Some(duration_ms)).unwrap();
+      db.append(id, segments, segments.last().map_or(0, |s| s.end_ms)).unwrap();
+      let error = (state == FileState::Failed).then_some("parakeet-v3 does not load");
+      db.set_state(id, state, error).unwrap();
+      id
     }
   }
 
@@ -3352,13 +4274,13 @@ mod tests {
     for (picked, file) in
       [("a/wavo backup", "a/wavo backup.zip"), ("a/x.ZIP", "a/x.ZIP"), ("x.tar", "x.tar.zip")]
     {
-      assert_eq!(with_zip(Path::new(picked)), PathBuf::from(file));
+      assert_eq!(with_ext(Path::new(picked), "zip"), PathBuf::from(file));
     }
 
     // Never over an archive the panel didn't ask about.
     let dir = TempDir::new("export-zip");
     std::fs::write(dir.path().join("backup.zip"), "").unwrap();
-    assert_eq!(with_zip(&dir.path().join("backup")), dir.path().join("backup 2.zip"));
+    assert_eq!(with_ext(&dir.path().join("backup"), "zip"), dir.path().join("backup 2.zip"));
   }
 
   /// A Mac's layouts: two of English, one of Russian.
@@ -3489,6 +4411,24 @@ mod tests {
         ("Купить хлеб, сыр и кофе.", 2),
       ],
     );
+    // Files: a lecture done yesterday, today's one running, others stopped, failed and waiting.
+    let hour = 3_600_000;
+    let lecture_id =
+      home.transcript("Thermodynamics, week 3.mp4", 1500, 0, &lecture(4_050), FileState::Done);
+    let podcast =
+      home.transcript("Podcast with Anna.mp3", 40, 2 * hour, &lecture(900), FileState::Running);
+    home.transcript("Team call.m4a", 30, hour, &lecture(450), FileState::Stopped);
+    home.transcript("Interview.wav", 20, hour, &[], FileState::Failed);
+    std::fs::remove_file(home.dir.path().join("Interview.wav")).unwrap();
+    home.transcript("Voice memo.m4a", 10, 0, &[], FileState::Queued);
+    let file = FileStatus {
+      id: podcast,
+      name: "Podcast with Anna.mp3".into(),
+      done_ms: 3_960_000,
+      duration_ms: Some(2 * hour),
+      left_ms: Some(1_380_000),
+      waiting: false,
+    };
     let first_run = Home::new("window-shots-first-run", &[]);
     let fits = Home::new("window-shots-fit", &["parakeet-ultra", "gigaam-v3", "whisper-turbo"]);
     let dir = std::env::var_os("WAVO_SHOTS").map(PathBuf::from);
@@ -3508,12 +4448,14 @@ mod tests {
       fake.log().updates = true;
       let mut h = home.harness(&fake, Settings::default());
       h.event(Event::Appearance(appearance));
+      update(&mut h, Status { file: Some(file.clone()), ..Status::default() });
       for TabItem { value: page, label: name, .. } in PAGES {
         tab(&mut h, page);
         shot(&mut h, &format!("{}-{look}", name.to_lowercase()));
         let size = h.size();
         let area = match page {
           Page::History => Id::of("history-list"),
+          Page::Files => Id::of(FILES_LIST),
           _ => Id::of(("page", page as u8)),
         };
         let sc = h.scroll(area).expect("the page's scroll area");
@@ -3561,6 +4503,22 @@ mod tests {
       h.event(Event::Scroll { pos, delta, precise: true, phase, momentum, mods });
       h.frame();
       assert!(h.scroll(panel).unwrap().offset.y > 0.0, "{look}: it scrolled");
+
+      // A transcript open; files dragged over the window.
+      tab(&mut h, Page::Files);
+      click(&mut h, Id::of(("file-open", lecture_id)));
+      shot(&mut h, &format!("files-viewer-{look}"));
+      click(&mut h, Id::of("files-back"));
+      let paths = vec![home.dir.path().join("talk.m4a")];
+      h.event(Event::DragOver { pos: Point::new(300.0, 300.0), paths });
+      h.frame();
+      assert!(h.rect(Id::of("drop-target")).is_some(), "{look}: where they go");
+      if let Some(dir) = &dir {
+        h.shot(&dir.join(format!("files-drop-{look}.png"))).unwrap();
+      }
+
+      h.event(Event::DragExit);
+      h.frame();
 
       tab(&mut h, Page::Models);
       click(&mut h, Id::of(("delete", "whisper-turbo")));
@@ -3683,6 +4641,8 @@ mod tests {
       let mut h = first_run.harness(&fake, Settings::default());
       h.event(Event::Appearance(appearance));
       shot(&mut h, &format!("general-first-run-{look}"));
+      tab(&mut h, Page::Files);
+      shot(&mut h, &format!("files-empty-{look}"));
     }
   }
 
@@ -3991,11 +4951,11 @@ mod tests {
     tab(&mut h, Page::History);
     assert_eq!(h.app().history.entries.len(), 2);
     tab(&mut h, Page::Advanced);
-    h.app_mut().update(&Settings::default(), &waits, 0);
+    h.app_mut().update(&Settings::default(), &waits, 0, 0);
     h.frame();
     assert_eq!(caption(&h).as_deref(), Some(DELETE_WAITS));
     assert_eq!(History::delete_saved(home.dir.path()).unwrap(), Some(2));
-    h.app_mut().update(&Settings::default(), &Status::default(), 1);
+    h.app_mut().update(&Settings::default(), &Status::default(), 1, 0);
     h.frame();
     assert!(button(&h).contains("disabled") && caption(&h).as_deref() == Some(NOTHING_SAVED));
     tab(&mut h, Page::History);
@@ -4021,7 +4981,7 @@ mod tests {
 
     let status = Status { in_memory: true, ..Status::default() };
     let settings = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
-    h.app_mut().update(&settings, &status, 0);
+    h.app_mut().update(&settings, &status, 0, 0);
     h.frame();
     assert_eq!(h.text(Id::of("saved-row").key("caption")), Some(NOT_SAVED));
 
@@ -4058,7 +5018,7 @@ mod tests {
     assert!(again.contains("disabled") && again.contains(NO_RECORDING), "{again}");
 
     let status = Status { in_memory: false, ..Status::default() };
-    h.app_mut().update(&Settings::default(), &status, 0);
+    h.app_mut().update(&Settings::default(), &status, 0, 0);
     h.waker().wake();
     h.frame();
     h.frame();
@@ -4307,7 +5267,7 @@ mod tests {
     };
     let switch = |h: &mut Harness<Prefs>, name: &str, status: Status| {
       let settings = Settings { model: Some(name.into()), ..h.app().settings.clone() };
-      h.app_mut().update(&settings, &status, 0);
+      h.app_mut().update(&settings, &status, 0, 0);
       h.waker().wake();
       h.frame();
     };
@@ -4617,7 +5577,7 @@ mod tests {
     history.db.update_text(ids[0], again, Some("whisper-tiny-Q8_0"), None).unwrap();
     let settings = h.app().settings.clone();
     let status = Status { restorable: vec![ids[0]], ..Status::default() };
-    h.app_mut().update(&settings, &status, 2);
+    h.app_mut().update(&settings, &status, 2, 0);
     h.waker().wake();
     h.frame();
     click(&mut h, Id::of(("restore", ids[0])));
@@ -4709,7 +5669,7 @@ mod tests {
     };
     let update = |h: &mut Harness<Prefs>, status: Status, n| {
       let settings = h.app().settings.clone();
-      h.app_mut().update(&settings, &status, n);
+      h.app_mut().update(&settings, &status, n, 0);
       h.waker().wake();
       h.frame();
     };
@@ -4796,7 +5756,7 @@ mod tests {
 
   fn update(h: &mut Harness<Prefs>, status: Status) {
     let settings = h.app().settings.clone();
-    h.app_mut().update(&settings, &status, 0);
+    h.app_mut().update(&settings, &status, 0, 0);
     h.waker().wake();
     h.frame();
   }
@@ -5070,5 +6030,364 @@ mod tests {
     assert_eq!(fake.log().looks, 1, "not in the back");
     h.event(Event::Focus(true));
     assert_eq!(fake.log().looks, 2, "in front again, before a frame");
+  }
+
+  // MARK: Files
+
+  /// Transcript `id`'s row in the Files list.
+  fn transcript_row(id: i64) -> Id {
+    Id::of(FILES_LIST).key(("row", id as u64))
+  }
+
+  /// A lecture's `n` segments, 4 s apart, in paragraphs of six, its sentences long and short.
+  fn lecture(n: usize) -> Vec<Segment> {
+    let sentences = [
+      "Today we start with the second law.",
+      "Entropy never goes down in a closed system, and that is the whole point of this week.",
+      "Write it down.",
+      "The engine takes heat from the hot side, turns a part of it into work and gives the rest \
+       to the cold side, whatever the engine is made of and however well it is built.",
+      "Any questions so far?",
+      "Carnot found the limit before anyone knew what heat was.",
+      "Let's look at the numbers.",
+    ];
+    let segment = |i: usize| {
+      let start_ms = i as i64 * 4_000;
+      let text = sentences[i % sentences.len()].into();
+      Segment { start_ms, end_ms: start_ms + 3_500, speaker: None, text }
+    };
+    (0..n).map(segment).collect()
+  }
+
+  /// The texts shown, as assistive technology reads them.
+  fn texts(h: &Harness<Prefs>) -> Vec<String> {
+    let tree = h.a11y();
+    let text =
+      |l: &str| l.trim().strip_prefix("static text \"")?.split('"').next().map(str::to_owned);
+    tree.lines().filter_map(text).collect()
+  }
+
+  fn shows(h: &Harness<Prefs>, text: &str) -> bool {
+    texts(h).iter().any(|t| t == text)
+  }
+
+  /// A drag over the window shows where the files go, a drop anywhere transcribes them on Files;
+  /// so does the file picked in Transcribe File…'s panel, from the tab or the menu bar. The empty
+  /// tab says so.
+  #[test]
+  fn files_come_by_a_drop_or_the_file_panel() {
+    let home = Home::new("window-files-drop", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Files);
+    assert_eq!(h.text(Id::of("files-empty").key("label")), Some("No transcripts yet"));
+    let caption = h.text(Id::of("files-empty").key("caption")).unwrap();
+    assert!(caption.contains(FORMATS), "{caption}");
+    assert_eq!(h.text(Id::of("files-total")), None, "no totals of none");
+
+    tab(&mut h, Page::General);
+    let paths = vec![home.dir.path().join("a.m4a"), home.dir.path().join("b.mp4")];
+    let pos = Point::new(300.0, 300.0);
+    h.event(Event::DragOver { pos, paths: paths.clone() });
+    h.frame();
+    let target = h.rect(Id::of("drop-target"));
+    let tabs = h.rect(Id::of(TABS).key("head")).unwrap();
+    assert!(target.is_some_and(|t| t.y >= tabs.y + tabs.h), "under the tabs: {target:?}");
+    assert!(shows(&h, "Drop to Transcribe"));
+    h.event(Event::DragExit);
+    h.frame();
+    assert!(h.rect(Id::of("drop-target")).is_none(), "gone with the drag");
+
+    h.event(Event::DragOver { pos, paths: paths.clone() });
+    h.event(Event::Drop { pos, paths: paths.clone() });
+    h.frame();
+    assert_eq!(h.app().page, Page::Files);
+    assert!(h.rect(Id::of("drop-target")).is_none());
+    assert_eq!(fake.log().requests, [Request::Transcribe(paths)]);
+
+    // The tab's button; the menu bar's item, from another tab.
+    fake.log().requests.clear();
+    click(&mut h, Id::of("transcribe-file"));
+    let file = home.dir.path().join("talk.mp3");
+    let asked = h.file_dialog(Some(&file)).expect("the file panel");
+    assert!(asked.kind == FileDialogKind::Open && asked.types == decode::EXTENSIONS, "{asked:?}");
+    h.frame();
+    tab(&mut h, Page::About);
+    h.app_mut().transcribe_file();
+    h.frame();
+    assert_eq!(h.app().page, Page::Files);
+    assert!(h.file_dialog(None).is_some(), "asked again, cancelled");
+    h.frame();
+    assert_eq!(fake.log().requests, [Request::Transcribe(vec![file.clone()])]);
+
+    // The session could not take it: said under the list.
+    h.app_mut().request_failed(Request::Transcribe(vec![file]), "the disk is full");
+    h.frame();
+    assert_eq!(h.text(Id::of("files-total")), Some("Could not add: the disk is full"));
+  }
+
+  /// Each row says how its transcript is, with what can be done to it: running, waiting, stopped,
+  /// failed, its file gone, done.
+  #[test]
+  fn file_rows_say_how_they_are() {
+    let home = Home::new("window-files-rows", &TWO);
+    let hour = 3_600_000;
+    let done = home.transcript("Interview.m4a", 50, hour, &lecture(3), FileState::Done);
+    let failed = home.transcript("Call.mp3", 40, hour, &[], FileState::Failed);
+    let gone = home.transcript("Gone.wav", 30, hour, &lecture(2), FileState::Failed);
+    std::fs::remove_file(home.dir.path().join("Gone.wav")).unwrap();
+    let stopped = home.transcript("Lecture.mp4", 20, hour, &lecture(450), FileState::Stopped);
+    let running = home.transcript("Podcast.mp3", 10, 2 * hour, &lecture(900), FileState::Running);
+    let queued = home.transcript("Talk.mov", 5, hour, &[], FileState::Queued);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Files);
+    for (id, text) in [
+      (failed, "Failed: parakeet-v3 does not load"),
+      (gone, "File not found"),
+      (stopped, "Stopped at 29:59 of 1:00:00"),
+      (running, "Waiting · at 59:59 of 2:00:00"),
+      (queued, "Waiting"),
+    ] {
+      assert!(shows(&h, text), "{id}: {text}: {:?}", texts(&h));
+    }
+
+    let details = texts(&h).into_iter().find(|t| t.ends_with(" · 0:11 · parakeet-v3"));
+    assert!(details.is_some(), "done: when, how long, by what: {:?}", texts(&h));
+    let total = h.text(Id::of("files-total")).unwrap();
+    assert_eq!(total, "6 transcripts · 5 h · kept until you delete them");
+
+    // The one running, then waiting for a dictation.
+    let mut file = FileStatus {
+      id: running,
+      name: "Podcast.mp3".into(),
+      done_ms: hour,
+      duration_ms: Some(2 * hour),
+      left_ms: Some(12 * 60_000 + 5_000),
+      waiting: false,
+    };
+    update(&mut h, Status { file: Some(file.clone()), ..Status::default() });
+    assert!(shows(&h, "50% · 1:00:00 of 2:00:00 · 12 min left"), "{:?}", texts(&h));
+    file.waiting = true;
+    update(&mut h, Status { file: Some(file), ..Status::default() });
+    assert!(shows(&h, "50% · 1:00:00 of 2:00:00 · waits for the dictation"));
+
+    // Stop on those to do, Continue on those stopped or failed, off while the file is not there.
+    for id in [running, queued] {
+      assert!(h.rect(Id::of(("file-stop", id))).is_some(), "{id}");
+    }
+
+    for id in [done, failed, stopped, gone] {
+      assert!(h.rect(Id::of(("file-stop", id))).is_none(), "{id}");
+    }
+
+    assert!(h.rect(Id::of(("file-continue", done))).is_none());
+    click(&mut h, Id::of(("file-stop", running)));
+    click(&mut h, Id::of(("file-continue", stopped)));
+    click(&mut h, Id::of(("file-continue", failed)));
+    click(&mut h, Id::of(("file-continue", gone)));
+    let want = [Request::StopFile(running), Request::ContinueFile(stopped)];
+    assert_eq!(fake.log().requests, [&want[..], &[Request::ContinueFile(failed)]].concat());
+    let r = h.rect(Id::of(("file-continue", gone))).unwrap();
+    h.move_to(r.x + r.w / 2.0, r.y + r.h / 2.0);
+    h.wait(Duration::from_millis(400));
+    assert_eq!(h.text(Id::of(("file-continue", gone)).key("tip").nth(0)), Some("File not found"));
+    h.leave();
+
+    // Copy, on one with text.
+    click(&mut h, Id::of(("file-copy", done)));
+    assert_eq!(h.clipboard().read(), Some(segments::txt(&lecture(3))));
+    assert_eq!(h.text(Id::of("files-total")), Some("Copied to the clipboard"));
+  }
+
+  /// A 4.5-hour lecture opens at once: the viewer builds only the paragraphs in view, each as high
+  /// as its text and the gap under it, and a frame scrolled far into it takes under 16 ms; back,
+  /// the list.
+  #[test]
+  fn a_long_transcript_reads_at_once() {
+    let home = Home::new("window-files-viewer", &TWO);
+    // 675 paragraphs.
+    let segments = lecture(4_050);
+    let id = home.transcript("Lecture.mp4", 30, 16_200_000, &segments, FileState::Done);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Files);
+    let at = Instant::now();
+    click(&mut h, Id::of(("file-open", id)));
+    let opened = at.elapsed();
+    assert_eq!(h.text(Id::of("viewer-title")), Some("Lecture.mp4"));
+    let text = Id::of("viewer-text");
+    assert!(h.rect(text.key(0usize)).is_some() && h.rect(text.key(674usize)).is_none());
+    assert!(h.built() < 500, "built {}", h.built());
+
+    let heights = |h: &Harness<Prefs>| {
+      let shown: Vec<usize> = (0..675).filter(|&i| h.rect(text.key(i)).is_some()).collect();
+      for &i in &shown {
+        let (p, t) = (h.rect(text.key(i)).unwrap(), h.rect(text.key(i).key("text")).unwrap());
+        assert!((p.h - t.h - 12.0).abs() < 0.5, "paragraph {i}: {p:?}, its text {t:?}");
+      }
+
+      shown
+    };
+    assert!(heights(&h).len() > 3);
+
+    let v = h.scroll(Id::of(VIEWER)).expect("the viewer's scroll area").viewport;
+    let (pos, delta) = (Point::new(v.x + v.w / 2.0, v.y + v.h / 2.0), Point::new(0.0, -1e6));
+    let (phase, momentum, mods) = (Phase::None, Phase::None, Modifiers::default());
+    h.event(Event::Scroll { pos, delta, precise: true, phase, momentum, mods });
+    let at = Instant::now();
+    h.frame();
+    let scrolled = at.elapsed();
+    assert!(scrolled < Duration::from_millis(16), "{scrolled:?} (opened in {opened:?})");
+    let sc = h.scroll(Id::of(VIEWER)).unwrap();
+    assert!(sc.offset.y > 0.0 && sc.offset.y + sc.viewport.h >= sc.content.h - 0.5, "{sc:?}");
+    let shown = heights(&h);
+    assert!(shown.contains(&674) && !shown.contains(&0), "{shown:?}");
+    assert!(h.built() < 500, "built {}", h.built());
+
+    click(&mut h, Id::of("files-back"));
+    assert!(h.app().files.open.is_none() && h.rect(transcript_row(id)).is_some());
+  }
+
+  /// Export TXT… and Export SRT…, from a row's menu or the viewer, write the text where the save
+  /// panel says, with the extension it asked for, and say so.
+  #[test]
+  fn a_transcript_exports_to_txt_and_srt() {
+    let home = Home::new("window-files-export", &TWO);
+    let segments = lecture(14);
+    let id = home.transcript("Interview.m4a", 5, 60_000, &segments, FileState::Done);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    h.native_menus();
+    tab(&mut h, Page::Files);
+    let r = h.rect(transcript_row(id)).unwrap();
+    h.right_click(r.x + 20.0, r.y + r.h / 2.0);
+    h.context_menu(Some("Export SRT…")).expect("the row's menu");
+    h.frame();
+    // GNOME's panel adds no extension.
+    let file = home.dir.path().join("subtitles");
+    let asked = h.file_dialog(Some(&file)).expect("the save panel");
+    let name = asked.name.as_deref();
+    assert_eq!(
+      (asked.kind, name, &asked.types[..]),
+      (FileDialogKind::Save, Some("Interview.srt"), &["srt".to_owned()][..])
+    );
+    h.frame();
+    let written = std::fs::read_to_string(file.with_extension("srt")).unwrap();
+    assert_eq!(written, segments::srt(&segments));
+    assert_eq!(h.text(Id::of("files-total")), Some("Saved subtitles.srt"));
+
+    click(&mut h, Id::of(("file-open", id)));
+    click(&mut h, Id::of(("viewer-export", "txt")));
+    let file = home.dir.path().join("Interview.txt");
+    let asked = h.file_dialog(Some(&file)).expect("the save panel");
+    assert_eq!(asked.name.as_deref(), Some("Interview.txt"));
+    h.frame();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), segments::txt(&segments));
+    assert_eq!(h.text(Id::of("files-total")), Some("Saved Interview.txt"));
+  }
+
+  /// The menu of row `id` by a right-click, answered `answer`: its items' labels, each on or off,
+  /// a divider `("", true)`.
+  fn file_menu_of(h: &mut Harness<Prefs>, id: i64, answer: Option<&str>) -> Vec<(String, bool)> {
+    let r = h.rect(transcript_row(id)).unwrap();
+    h.right_click(r.x + 20.0, r.y + r.h / 2.0);
+    let (_, menu) = h.context_menu(answer).expect("the row's menu");
+    h.frame();
+    let item = |i: &nimbo::Item<usize>| match i {
+      nimbo::Item::Divider => (String::new(), true),
+      i => (i.label().to_owned(), i.is_enabled()),
+    };
+    menu.items.iter().map(item).collect()
+  }
+
+  /// A row's menu does what its buttons do, and more: shows the file, transcribes it again by
+  /// another model, finds it when it is gone.
+  #[test]
+  fn a_files_menu_transcribes_again_and_locates() {
+    let home = Home::new("window-files-menu", &TWO);
+    let done = home.transcript("Interview.m4a", 10, 60_000, &lecture(3), FileState::Done);
+    let gone = home.transcript("Call.mp3", 5, 60_000, &lecture(3), FileState::Stopped);
+    std::fs::remove_file(home.dir.path().join("Call.mp3")).unwrap();
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    h.native_menus();
+    tab(&mut h, Page::Files);
+    let items = |want: &[(&str, bool)]| -> Vec<(String, bool)> {
+      want.iter().map(|&(label, on)| (label.into(), on)).collect()
+    };
+    let show = format!("Show in {}", open::file_manager());
+    let there = items(&[
+      ("Open", true),
+      ("Copy Text", true),
+      ("Export TXT…", true),
+      ("Export SRT…", true),
+      ("", true),
+      (&show, true),
+      ("", true),
+      ("Transcribe Again", true),
+      ("", true),
+      ("Delete…", true),
+    ]);
+    assert_eq!(file_menu_of(&mut h, done, Some("parakeet-v2")), there);
+    assert_eq!(h.app().files.selected.keys().collect::<Vec<_>>(), [done as u64], "selected");
+    file_menu_of(&mut h, done, Some(&show));
+    assert_eq!(fake.log().revealed, [home.dir.path().join("Interview.m4a")]);
+
+    let missing = items(&[
+      ("Open", true),
+      ("Copy Text", true),
+      ("Export TXT…", true),
+      ("Export SRT…", true),
+      ("", true),
+      (&show, false),
+      ("Locate…", true),
+      ("", true),
+      ("Continue", false),
+      ("Transcribe Again", false),
+      ("", true),
+      ("Delete…", true),
+    ]);
+    assert_eq!(file_menu_of(&mut h, gone, Some("Locate…")), missing);
+    let moved = home.dir.path().join("Call, moved.mp3");
+    let asked = h.file_dialog(Some(&moved)).expect("the file panel");
+    assert_eq!(asked.dir.as_deref(), Some(home.dir.path()), "where it was");
+    assert!(asked.types.iter().any(|t| t == "opus"), "to say it is not read: {:?}", asked.types);
+    h.frame();
+    let model = "parakeet-v2".to_owned();
+    let want = [Request::TranscribeAgain { id: done, model }, Request::LocateFile(gone, moved)];
+    assert_eq!(fake.log().requests, want);
+  }
+
+  /// Delete… asks first, for the one open or those selected; their files stay, the viewer closes.
+  #[test]
+  fn deleting_transcripts_asks_first() {
+    let home = Home::new("window-files-delete", &TWO);
+    let old = home.transcript("Interview.m4a", 10, 60_000, &lecture(3), FileState::Done);
+    let new = home.transcript("Call.mp3", 5, 60_000, &lecture(3), FileState::Done);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Files);
+    click(&mut h, Id::of(("file-open", new)));
+    click(&mut h, Id::of("viewer-delete"));
+    let ask = h.app().ask.as_ref().map(|a| (a.title.clone(), a.message.clone()));
+    let message = "The text of “Call.mp3” is removed. The file itself stays.";
+    assert_eq!(ask, Some(("Delete this transcript?".into(), message.into())));
+    confirm(&mut h);
+    assert!(h.app().files.open.is_none(), "closed");
+    assert_eq!(fake.log().requests, [Request::DeleteFiles(vec![new])]);
+
+    fake.log().requests.clear();
+    h.set_focus(Some(Id::of(FILES_LIST)));
+    h.key('a', nimbo::CMD);
+    h.frame();
+    h.key(NamedKey::Delete, Modifiers::empty());
+    h.frame();
+    let ask = h.app().ask.as_ref().map(|a| (a.title.clone(), a.message.clone()));
+    let message = "Their text is removed. The files themselves stay.";
+    assert_eq!(ask, Some(("Delete 2 transcripts?".into(), message.into())));
+    confirm(&mut h);
+    assert_eq!(fake.log().requests, [Request::DeleteFiles(vec![new, old])]);
+    assert!(home.dir.path().join("Call.mp3").is_file(), "the file stays");
   }
 }

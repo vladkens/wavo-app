@@ -19,9 +19,9 @@
 //! - The saved history goes only when the person asks ([Request::DeleteSaved]), the one in use or
 //!   the one left on disk, once no dictation nor a transcription again runs: none of them writes
 //!   into it meanwhile.
-//! - Files go one at a time, in the order added, a chunk of audio per background job ([files]):
-//!   on the dictation's engine when their model is the same, else on one of their own, and never
-//!   while a dictation runs. A quit leaves the one running to go on from its last chunk at the next
+//! - Files go one at a time, in the order added, a chunk of audio per background job ([files]): on
+//!   the dictation's engine when their model is the same, else on one of their own, and never while
+//!   a dictation runs. A quit leaves the one running to go on from its last chunk at the next
 //!   start.
 
 use std::collections::BTreeMap;
@@ -483,7 +483,7 @@ pub enum Request {
   DeleteFiles(Vec<i64>),
   /// A new transcript of a transcript's file by `model`, in the Files tab's language.
   TranscribeAgain { id: i64, model: String },
-  /// A transcript's file is at this path now.
+  /// A transcript's file is at this path now; a failed one goes on from where it got to.
   LocateFile(i64, PathBuf),
 }
 
@@ -967,7 +967,15 @@ impl<O: TextOutput> Controller<O> {
         }
 
         let source = transcripts::Source::of(&path)?;
-        self.transcripts.relocate(id, &source)
+        self.transcripts.relocate(id, &source)?;
+        // Failed for its file most likely, it goes on.
+        let failed =
+          self.transcripts.get(id)?.is_some_and(|t| t.state == transcripts::State::Failed);
+        if failed {
+          self.continue_file(id)?;
+        }
+
+        Ok(())
       }
     }
   }
@@ -2145,10 +2153,10 @@ mod tests {
   use crate::history::{DB_FILE, RECORDINGS_DIR, Transferring};
   use crate::menu;
   use crate::segments::Segment;
-  use crate::transcripts::{State as FileState, Transcript};
   use crate::testing::{
     FakeModels, TempDir, download, entry_ids, poll, tone, wav_count, write_wav,
   };
+  use crate::transcripts::{State as FileState, Transcript};
   use crate::window::Pick;
 
   // MARK: Machine
@@ -3724,11 +3732,13 @@ mod tests {
     drop(gate);
 
     let failed = |id| s.file_in(id, FileState::Failed).error.unwrap();
-    assert_eq!((failed(b), failed(c)), ("its file is not found".into(), "its file changed since".into()));
+    assert_eq!(
+      (failed(b), failed(c)),
+      ("its file is not found".into(), "its file changed since".into())
+    );
     assert_eq!(s.file_in(a, FileState::Done).done_ms, 30_000);
 
     s.handle.request(Request::LocateFile(b, moved.clone())).unwrap();
-    s.handle.request(Request::ContinueFile(b)).unwrap();
     let t = s.file_in(b, FileState::Done);
     assert_eq!((t.path, t.name.as_str()), (moved, "b.wav"));
     whole(&s.segments(b), 30_000);
@@ -3866,7 +3876,11 @@ mod tests {
     let (t, segments) = run("files/lecture.m4a");
     let peak = peak_memory();
     let mb = |b: u64| b / 1_000_000;
-    println!("peak memory: {} MB after the short file, {} MB after the lecture", mb(base), mb(peak));
+    println!(
+      "peak memory: {} MB after the short file, {} MB after the lecture",
+      mb(base),
+      mb(peak)
+    );
     assert!(peak < base + 300_000_000, "{} MB more", mb(peak - base));
 
     // The lecture repeats the three fixtures, each with a pause after it.
