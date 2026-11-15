@@ -5,7 +5,8 @@
 //! (recordings do not compress), in this order:
 //!
 //! - `wavo-export.json`, the manifest: an archive without it is refused;
-//! - `history.db`, a consistent copy of the history (`VACUUM INTO`, while the app may run);
+//! - `history.db`, a consistent copy of the history (`VACUUM INTO`, while the app may run), without
+//!   the file transcripts ([crate::transcripts]);
 //! - `recordings/<name>`, the recordings of its entries, as they name them.
 //!
 //! An import adds the entries the history does not have: one is there when an entry there started
@@ -29,6 +30,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::history::{DB_FILE, Db, Entry, RECORDINGS_DIR, Recordings, Transferring, now_ms};
+use crate::transcripts::Transcripts;
 
 /// The archive's layout; one from a newer Wavo is refused.
 const FORMAT: u32 = 1;
@@ -102,7 +104,8 @@ pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
 
   copy_db.update_without_audio(&missing)?;
   copy_db.delete_entries(&empty)?;
-  drop(copy_db);
+  // File transcripts are no part of the history: TXT and SRT take them elsewhere.
+  Transcripts::of(copy_db).clear()?;
 
   let manifest =
     Manifest { format: FORMAT, version: env!("CARGO_PKG_VERSION").into(), created_at: now_ms() };
@@ -341,7 +344,9 @@ mod tests {
 
   use super::*;
   use crate::history::History;
+  use crate::segments::Segment;
   use crate::testing::{TempDir, entry_ids, tone, wav_count, write_wav};
+  use crate::transcripts::Source;
 
   /// 2026-10-09 00:00 UTC.
   const NOW: i64 = 1_791_504_000_000;
@@ -395,6 +400,27 @@ mod tests {
     let again = import(to.path(), &file, |_, _| {}).unwrap();
     assert_eq!(again, Imported { entries: 3, ..Imported::default() });
     assert_eq!(entry_ids(to.path()).len(), 4);
+  }
+
+  /// File transcripts stay out of the archive, none of their text in its database.
+  #[test]
+  fn leaves_file_transcripts_out() {
+    let (from, out) = (TempDir::new("tr-files"), TempDir::new("tr-files-out"));
+    add(&History::open(from.path()).unwrap(), NOW, "dictated", None);
+    let t = Transcripts::open(from.path()).unwrap();
+    let lecture = from.path().join("lecture.m4a");
+    fs::write(&lecture, b"audio").unwrap();
+    let id = t.add(&Source::of(&lecture).unwrap(), "m", None, NOW).unwrap();
+    let said = Segment { start_ms: 0, end_ms: 1, speaker: None, text: "a lecture secret".into() };
+    t.append(id, &[said], 1).unwrap();
+
+    let file = out.path().join("wavo.zip");
+    assert_eq!(export(from.path(), &file, |_, _| {}).unwrap().entries, 1);
+    let mut zip = ZipArchive::new(File::open(&file).unwrap()).unwrap();
+    let mut bytes = Vec::new();
+    zip.by_name(DB_FILE).unwrap().read_to_end(&mut bytes).unwrap();
+    assert!(!bytes.windows(6).any(|w| w == b"secret"), "nothing of the text in its pages");
+    assert_eq!(t.list("").unwrap().len(), 1, "the home's stay");
   }
 
   /// An archive cut short is refused whole; a recording an import cut short did not copy comes

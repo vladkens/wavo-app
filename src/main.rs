@@ -16,10 +16,12 @@ mod live;
 mod menu;
 mod mic_start;
 mod numbers;
+mod segments;
 mod session;
 mod settings;
 #[cfg(test)]
 mod testing;
+mod transcripts;
 mod transfer;
 mod updater;
 mod window;

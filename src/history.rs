@@ -176,10 +176,46 @@ fn migrate_v1(db: &Connection) -> Result<()> {
   Ok(())
 }
 
+/// File transcripts ([crate::transcripts]), no part of the dictation history.
+fn migrate_v2(db: &Connection) -> Result<()> {
+  let queries = vec![
+    "CREATE TABLE transcripts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL DEFAULT 'file',
+      created_at INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      path TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      modified INTEGER NOT NULL,
+      duration_ms INTEGER,
+      model TEXT NOT NULL,
+      language TEXT,
+      state TEXT NOT NULL,
+      done_ms INTEGER NOT NULL DEFAULT 0,
+      error TEXT
+    );",
+    "CREATE TABLE segments (
+      id INTEGER PRIMARY KEY,
+      transcript_id INTEGER NOT NULL,
+      start_ms INTEGER NOT NULL,
+      end_ms INTEGER NOT NULL,
+      speaker INTEGER,
+      text TEXT NOT NULL
+    );",
+    "CREATE INDEX segments_transcript ON segments (transcript_id, start_ms);",
+  ];
+
+  for qs in queries {
+    db.execute(qs, [])?;
+  }
+
+  Ok(())
+}
+
 /// Runs the migrations the database has not had; one from a newer Wavo is refused rather than
 /// written in a layout this one does not know.
 fn migrate(db: &Connection) -> Result<()> {
-  let migrations: Vec<fn(&Connection) -> Result<()>> = vec![migrate_v1];
+  let migrations: Vec<fn(&Connection) -> Result<()>> = vec![migrate_v1, migrate_v2];
   let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
   if version > migrations.len() as i64 {
     bail!("the database has schema {version}, newer than this Wavo knows ({})", migrations.len());
@@ -275,6 +311,11 @@ impl Db {
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
     db.create_scalar_function("wavo_fold", 1, flags, |ctx| Ok(fold(&ctx.get::<String>(0)?)))?;
     Ok(Self { db })
+  }
+
+  /// For the tables of others than the history ([crate::transcripts]).
+  pub fn conn(&self) -> &Connection {
+    &self.db
   }
 
   /// Moves on every row this connection writes and on every commit of another one: a history
@@ -843,6 +884,27 @@ mod tests {
       ..Entry::default()
     };
     (h.db.insert(&[entry]).unwrap()[0], path)
+  }
+
+  /// Schema 1 gets the transcripts' tables and keeps its entries; a newer schema is refused.
+  #[test]
+  fn migrates_schema_1_and_refuses_a_newer_one() {
+    let dir = TempDir::new("history-migrate");
+    let path = dir.path().join(DB_FILE);
+    let old = Connection::open(&path).unwrap();
+    migrate_v1(&old).unwrap();
+    old.pragma_update(None, "user_version", 1).unwrap();
+    old.execute("INSERT INTO entries (created_at, text) VALUES (5, 'old')", []).unwrap();
+    drop(old);
+
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.get_entries().unwrap()[0].text, "old");
+    let count = "SELECT COUNT(*) FROM transcripts, segments";
+    assert_eq!(db.conn().query_row(count, [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    db.conn().pragma_update(None, "user_version", 3).unwrap();
+    drop(db);
+    let err = format!("{:#}", Db::open(&path).err().unwrap());
+    assert!(err.contains("schema 3, newer"), "{err}");
   }
 
   #[test]
