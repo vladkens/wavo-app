@@ -9,6 +9,7 @@ mod app;
 mod audio;
 mod cleanup;
 mod cli;
+mod decode;
 mod engine;
 mod history;
 mod hud;
