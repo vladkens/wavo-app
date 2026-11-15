@@ -7,6 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
+use nimbo::{Localized, t};
 use tracing::{info, warn};
 
 use crate::audio::{Device, Recorder, Transport};
@@ -21,7 +22,7 @@ const SLOWER_BY: Duration = Duration::from_millis(200);
 /// hundreds of ms at once.
 const RECENT: usize = 5;
 /// The menu's warning; the log has the device and the times.
-pub const SLOW: &str = "Microphone is slow to start: reconnect it";
+pub const SLOW: Localized = t!("Microphone is slow to start: reconnect it");
 
 /// Each USB microphone's starts, in memory since the app launched, and the warning, raised once per
 /// climb. Others vary by themselves (a Bluetooth headset held open by another app or cold, a
@@ -124,7 +125,7 @@ impl SlowStart {
 
   pub fn warning(&self) -> Option<String> {
     let key = self.device.as_ref()?;
-    self.devices.get(key).filter(|s| s.slow).map(|_| SLOW.to_owned())
+    self.devices.get(key).filter(|s| s.slow).map(|_| SLOW.to_string())
   }
 }
 

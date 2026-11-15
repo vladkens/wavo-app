@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context, Result, bail};
+use nimbo::t;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use zip::read::ZipFile;
@@ -75,7 +76,7 @@ pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
   let _transferring = Transferring::begin(home);
   let db = home.join(DB_FILE);
   if !db.is_file() {
-    bail!("no history in {}", home.display());
+    bail!("{}", t!("no history in {folder}", folder = home.display()));
   }
 
   let scratch = Scratch::new()?;
@@ -157,18 +158,22 @@ pub fn import(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
 
   // The archive is checked before the history is opened.
   let reader = File::open(file).with_context(|| format!("open {}", file.display()))?;
-  let not_ours = || format!("{} is not an archive of Wavo's Export", file.display());
+  let not_ours = || t!("{file} is not an archive of Wavo’s Export", file = file.display());
   let mut archive = ZipArchive::new(BufReader::new(reader)).with_context(not_ours)?;
   let manifest = archive.by_name(MANIFEST).with_context(not_ours)?;
   let manifest: Manifest = serde_json::from_reader(manifest).with_context(not_ours)?;
   if manifest.format > FORMAT {
-    bail!("{} is from a newer Wavo ({}): update this one first", file.display(), manifest.version);
+    let (file, version) = (file.display(), manifest.version);
+    bail!(
+      "{}",
+      t!("{file} is from a newer Wavo ({version}): update this one first", file, version)
+    );
   }
 
   let scratch = Scratch::new()?;
   let path = scratch.0.join(DB_FILE);
   let mut db =
-    archive.by_name(DB_FILE).with_context(|| format!("{}: no history in it", not_ours()))?;
+    archive.by_name(DB_FILE).with_context(|| t!("{why}: no history in it", why = not_ours()))?;
   io::copy(&mut db, &mut File::create(&path)?)?;
   drop(db);
 

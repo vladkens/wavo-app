@@ -25,7 +25,7 @@ use nimbo::paste::{self, PORTAL_WAIT, Paste};
 use nimbo::permissions::{self, Access, Pane};
 use nimbo::system::Change;
 use nimbo::tray::{Menu, Tray};
-use nimbo::{Clipboard, Main, Proxy, SystemClipboard, Window, autostart, input_source};
+use nimbo::{Clipboard, Locale, Main, Proxy, SystemClipboard, Window, autostart, input_source, t};
 use shipo::{Release, Staged};
 use tracing::{error, info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -84,6 +84,8 @@ struct App {
   menu: Menu<Action>,
   hotkeys: Hotkeys,
   hud: HudWindow,
+  /// The language of the texts ([Settings::locale]), the one nimbo was told.
+  locale: Locale,
   handle: Handle,
   home: PathBuf,
   hub: Hub,
@@ -197,6 +199,11 @@ fn start(
   let observer = Box::new(|update: Update| {
     proxy().post(move |main| _ = with_app(|app| app.on_update(main, update)))
   });
+  // The language before any text: the session's warnings are made in it. nimbo reads the
+  // catalogs from a window's config, so the HUD opens first, hidden.
+  let locale = Settings::locale_at(&home.join(settings::FILE));
+  main.set_locale(locale);
+  let hud = open_hud(main, HudPosition::default(), false);
   let session = Session::start(config, GuiOutput, observer)?;
   let handle = session.handle();
   // The session has not told its settings yet: they are read from the file.
@@ -244,7 +251,8 @@ fn start(
     icon: Icon::Idle,
     menu: Menu::default(),
     hotkeys,
-    hud: open_hud(main, HudPosition::default(), false),
+    hud,
+    locale,
     handle,
     home,
     hub,
@@ -542,6 +550,16 @@ impl App {
   }
 
   fn on_update(&mut self, main: &mut Main, update: Update) {
+    // The windows redraw in the new language; the menu and the tooltip are made again below and
+    // the session's warnings once it checks the model again.
+    let locale = update.settings.locale();
+    if locale != self.locale {
+      self.locale = locale;
+      main.set_locale(locale);
+      self.tray.set_tooltip(&self.icon.description());
+      self.handle.check_model();
+    }
+
     // The session took the other history: the menu reads it from now on, the window too.
     if update.status.in_memory != self.in_memory {
       self.in_memory = update.status.in_memory;
@@ -573,9 +591,9 @@ impl App {
         // microphone sends silence: no level to show.
         let denied = matches!(self.mic(), Access::Denied | Access::Restricted);
         let hint = match () {
-          _ if denied => Some("allow the microphone to record".to_owned()),
+          _ if denied => Some(t!("allow the microphone to record").to_string()),
           _ if self.pastes(&update.settings) && !self.accessibility => {
-            Some("allow Accessibility to paste".to_owned())
+            Some(t!("allow Accessibility to paste").to_string())
           }
           _ => hud::during(status),
         };
@@ -1314,11 +1332,11 @@ fn user_initiated() {
   };
 }
 
-/// `16.0 GB in 52.3 s, 306 MB/s` since `started`.
+/// `16000 MB in 52.3 s, 306 MB/s` since `started`, for the log: in English.
 fn rate(bytes: u64, started: Instant) -> String {
   let secs = started.elapsed().as_secs_f64();
-  let mbs = bytes as f64 / 1e6 / secs.max(0.001);
-  format!("{} in {secs:.1} s, {mbs:.0} MB/s", window::size_text(bytes))
+  let mb = bytes as f64 / 1e6;
+  format!("{mb:.0} MB in {secs:.1} s, {:.0} MB/s", mb / secs.max(0.001))
 }
 
 /// Marks a transfer running, unless one is: one at a time.

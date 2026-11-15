@@ -14,13 +14,14 @@ use std::ops::ControlFlow;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{fmt, thread};
 
 use anyhow::Result;
 use crossbeam_channel::{
   Receiver, RecvTimeoutError, Sender, after, bounded, never, select, unbounded,
 };
+use nimbo::t;
 use tracing::{debug, info, warn};
 use wavo::Backend;
 
@@ -168,15 +169,26 @@ impl SpeechModel for wavo::Model {
 
 // MARK: Engine
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// Why a job gave no text; said in the app's language, the engine's own reason as it gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineError {
-  #[error("could not load the model: {0}")]
   Load(String),
-  #[error("transcription failed: {0}")]
   Failed(String),
-  #[error("the transcription was cancelled")]
   Cancelled,
 }
+
+// By hand, not thiserror's: xgettext reads no texts in attributes.
+impl fmt::Display for EngineError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Load(e) => f.write_str(&t!("could not load the model: {e}", e)),
+      Self::Failed(e) => f.write_str(&t!("transcription failed: {e}", e)),
+      Self::Cancelled => f.write_str(&t!("the transcription was cancelled")),
+    }
+  }
+}
+
+impl std::error::Error for EngineError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Phase {
