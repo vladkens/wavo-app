@@ -19,11 +19,9 @@ use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
 use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, Track, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::units::{Time, TimeBase, Timestamp};
-use tracing::warn;
 
 use crate::audio::{Resample, SAMPLE_RATE, downmix};
 
@@ -37,61 +35,19 @@ pub const MOSTLY_OPUS: &[&str] = &["opus", "oga", "webm"];
 
 /// Samples per ms at [SAMPLE_RATE].
 const PER_MS: usize = SAMPLE_RATE as usize / 1000;
-/// How far before its time a seek goes: a decoder gives the audio again only some way after a
-/// reset (Vorbis's first packet gives none, an MP3 frame leans on those before it).
-const PREROLL_S: f64 = 2.0;
 
 pub struct Decoder {
   format: Box<dyn FormatReader>,
   decoder: Box<dyn AudioDecoder>,
   track: u32,
   rate: u32,
-  time_base: Option<TimeBase>,
   duration_ms: Option<i64>,
   resample: Resample,
-  /// The frame at the file's rate the audio is asked from, until it is reached: what decodes
-  /// before it by its packets' times is dropped, after a seek or, from the start, an encoder's
-  /// delay that Matroska puts before 0.
-  from: Option<i64>,
   frame: Vec<f32>,
   ended: bool,
 }
 
 impl Decoder {
-  /// The audio of the file at `path` from `ms` into it on: a seek to [PREROLL_S] before it, and
-  /// the audio up to it decoded and dropped by its packets' times. Where the format can't seek or
-  /// lands past the time (Matroska's seeks), the file is decoded from its start to there.
-  pub fn open_at(path: &Path, ms: i64) -> Result<Self> {
-    let mut d = Self::open(path)?;
-    if ms <= 0 {
-      return Ok(d);
-    }
-
-    let secs = ms as f64 / 1000.0;
-    let from = (secs * f64::from(d.rate)).round() as i64;
-    let time =
-      Time::try_from_secs_f64((secs - PREROLL_S).max(0.0)).context("a time out of range")?;
-    let landed =
-      match d.format.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(d.track) }) {
-        Ok(to) => d.frame_at(to.actual_ts) <= from,
-        Err(e) => {
-          warn!("no seek: {e}");
-          false
-        }
-      };
-
-    match landed {
-      true => d.decoder.reset(),
-      false => {
-        warn!("decoding the first {secs:.0} s to drop them");
-        d = Self::open(path)?;
-      }
-    }
-
-    d.from = Some(from);
-    Ok(d)
-  }
-
   /// The first audio track of the file at `path`, by its extension and content.
   pub fn open(path: &Path) -> Result<Self> {
     let file = File::open(path).with_context(|| format!("can't open {}", path.display()))?;
@@ -109,8 +65,8 @@ impl Decoder {
     })?;
 
     let (t, rate, decoder) = first_audio(&*format)?;
-    let (track, time_base) = (t.id, t.time_base);
-    let duration_ms = (t.duration.zip(time_base))
+    let track = t.id;
+    let duration_ms = (t.duration.zip(t.time_base))
       .and_then(|(d, tb)| tb.calc_duration(d))
       .map(|t| t.as_millis() as i64)
       .or_else(|| t.num_frames.map(|n| (n * 1000 / u64::from(rate)) as i64));
@@ -121,21 +77,11 @@ impl Decoder {
       decoder,
       track,
       rate,
-      time_base,
       duration_ms,
       resample,
-      from: Some(0),
       frame: Vec::new(),
       ended: false,
     })
-  }
-
-  /// The frame at the file's rate that time `ts` of the track is.
-  fn frame_at(&self, ts: Timestamp) -> i64 {
-    match self.time_base.and_then(|tb| tb.calc_time(ts)) {
-      Some(t) => (t.as_secs_f64() * f64::from(self.rate)).round() as i64,
-      None => ts.get(),
-    }
   }
 
   /// How long the audio is, if the file tells.
@@ -159,13 +105,13 @@ impl Decoder {
         // A new stream (a chained Ogg): its track, maybe of another codec or rate.
         Err(Error::ResetRequired) => {
           let (t, rate, decoder) = first_audio(&*self.format)?;
-          let (track, time_base) = (t.id, t.time_base);
+          let track = t.id;
           if rate != self.rate {
             self.resample.finish(&mut out);
             self.resample = Resample::new(rate, SAMPLE_RATE)?;
           }
 
-          (self.track, self.rate, self.time_base, self.decoder) = (track, rate, time_base, decoder);
+          (self.track, self.rate, self.decoder) = (track, rate, decoder);
           continue;
         }
         Err(e) => return Err(e).context("can't read it"),
@@ -184,16 +130,7 @@ impl Decoder {
       let channels = audio.spec().channels().count().max(1);
       audio.copy_to_vec_interleaved(&mut self.frame);
       let mono: Vec<f32> = self.frame.chunks_exact(channels).map(downmix).collect();
-      let mut skip = 0;
-      if let Some(from) = self.from {
-        let start = self.frame_at(packet.pts);
-        skip = (from - start).clamp(0, mono.len() as i64) as usize;
-        if skip < mono.len() {
-          self.from = None;
-        }
-      }
-
-      self.resample.push(&mono[skip..], &mut out);
+      self.resample.push(&mono, &mut out);
       if !out.is_empty() {
         return Ok(Some(out));
       }
@@ -270,11 +207,22 @@ pub struct Chunks {
 }
 
 impl Chunks {
-  /// The audio of the file at `path` from `from_ms` on.
+  /// The audio of the file at `path` from `from_ms` on, the very samples a whole run gives
+  /// there: decoded from the start, as a seek's times needn't be the run's (a chained Ogg starts
+  /// them again, Matroska's needn't start at 0). Going 4 h in takes 1.4 s in AAC at 16 kHz, 8 s
+  /// at 48 kHz stereo (Apple M5).
   pub fn open(path: &Path, from_ms: i64, max_ms: u32) -> Result<Self> {
-    let decoder = Decoder::open_at(path, from_ms)?;
-    let at = from_ms.max(0) as usize * PER_MS;
-    Ok(Self { decoder, max_ms, buf: Vec::new(), at })
+    let mut c = Self { decoder: Decoder::open(path)?, max_ms, buf: Vec::new(), at: 0 };
+    let from = from_ms.max(0) as usize * PER_MS;
+    while c.at < from
+      && let Some(part) = c.decoder.next()?
+    {
+      let drop = part.len().min(from - c.at);
+      c.buf.extend_from_slice(&part[drop..]);
+      c.at += drop;
+    }
+
+    Ok(c)
   }
 
   pub fn duration_ms(&self) -> Option<i64> {
@@ -385,20 +333,26 @@ mod tests {
     }
   }
 
-  /// A seek gives the audio from there on: at 16 kHz the very samples; resampled, the same tone.
-  #[test]
-  fn a_seek_goes_on_from_its_time() {
-    let dir = TempDir::new("decode-seek");
-    let plain = wav(dir.path(), "plain.wav", 16_000, 1, 16, 4.0);
-    let whole = decode_all(&mut Decoder::open(&plain).unwrap());
-    let mut d = Decoder::open_at(&plain, 1_500).unwrap();
-    assert_eq!(decode_all(&mut d), whole[24_000..]);
+  /// The audio of the chunks of the file at `path` from `ms` on, as a resume reads it.
+  fn chunks_from(path: &Path, ms: i64) -> Vec<f32> {
+    let mut chunks = Chunks::open(path, ms, 60_000).unwrap();
+    let mut pcm = Vec::new();
+    while let Some(c) = chunks.next().unwrap() {
+      pcm.extend(c.pcm);
+    }
 
-    let stereo = wav(dir.path(), "stereo.wav", 44_100, 2, 16, 4.0);
-    let mut d = Decoder::open_at(&stereo, 2_500).unwrap();
-    let rest = decode_all(&mut d);
-    assert!(rest.len().abs_diff(24_000) <= 160, "{}", rest.len());
-    assert!((crossings(&rest[500..]) - 880.0).abs() < 5.0);
+    pcm
+  }
+
+  /// From a time on, the chunks are the very samples a whole run gives from there.
+  #[test]
+  fn a_resume_goes_on_with_the_runs_samples() {
+    let dir = TempDir::new("decode-from");
+    for (name, rate, channels) in [("plain.wav", 16_000, 1), ("stereo.wav", 44_100, 2)] {
+      let path = wav(dir.path(), name, rate, channels, 16, 4.0);
+      let whole = decode_all(&mut Decoder::open(&path).unwrap());
+      assert!(chunks_from(&path, 1_500) == whole[24_000..], "{name}");
+    }
   }
 
   #[test]
@@ -423,9 +377,8 @@ mod tests {
     assert!(gone.starts_with("can't open"), "{gone}");
   }
 
-  /// The fixture in each format decodes as long as its WAV and as loud, and from a time on it
-  /// gives what follows that time in the whole; two Ogg streams one after the other decode both.
-  /// Opus is refused.
+  /// The fixture in each format decodes as long as its WAV and as loud, and a resume goes on
+  /// with the same samples; two Ogg streams one after the other decode both. Opus is refused.
   #[test]
   #[ignore = "needs make fixtures"]
   fn fixtures_in_every_format() {
@@ -444,30 +397,16 @@ mod tests {
       let (got, want) = (rms(&pcm), rms(&wav));
       assert!((got / want - 1.0).abs() < 0.1, "{path:?}: rms {got} of {want}");
 
-      let rest = decode_all(&mut Decoder::open_at(&path, 15_000).unwrap());
-      let lag = lag(&pcm, &rest, 15_000 * 16);
-      assert!(lag.abs() <= 16 * 10, "{path:?}: from 15 s on, {} ms off", lag as f64 / 16.0);
+      assert!(chunks_from(&path, 15_000) == pcm[15_000 * 16..], "{path:?}: from 15 s on");
     }
 
     let chained = files.join("ru-long-chained.ogg");
     let pcm = decode_all(&mut Decoder::open(&chained).unwrap());
     assert!(pcm.len().abs_diff(2 * wav.len()) < 16 * 300, "{} of {}", pcm.len(), 2 * wav.len());
+    assert!(chunks_from(&chained, 40_000) == pcm[40_000 * 16..], "from the second stream on");
 
     let opus = format!("{:#}", Decoder::open(&files.join("ru-long.opus")).err().unwrap());
     assert_eq!(opus, "its sound is Opus, which Wavo can't read yet");
-  }
-
-  /// How much later than `at` (in samples, negative: earlier) `part` starts in `whole`: the lag
-  /// within 0.5 s that matches 2 s of it best.
-  fn lag(whole: &[f32], part: &[f32], at: usize) -> isize {
-    let (from, n, reach) = (8_000, 32_000, 8_000isize);
-    let part = &part[from..from + n];
-    let score = |l: isize| {
-      let w = &whole[(at as isize + from as isize + l) as usize..][..n];
-      let dot: f32 = w.iter().zip(part).map(|(a, b)| a * b).sum();
-      dot / (w.iter().map(|x| x * x).sum::<f32>().sqrt() + 1e-9)
-    };
-    (-reach..=reach).max_by(|a, b| score(*a).total_cmp(&score(*b))).unwrap()
   }
 
   /// Chunks cut at pauses, each at most `max_ms`, cover the audio without a sample lost or twice,
