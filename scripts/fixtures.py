@@ -96,6 +96,7 @@ def main() -> int:
         aiff = tmp / "ru-long.aiff"
         for name, codec in FORMATS.items():
             ff("-i", aiff, *codec, files / f"ru-long.{name}")
+
         # A video: a black picture over the sound.
         ff("-f", "lavfi", "-i", "color=c=black:s=320x240:r=5", "-i", aiff, "-shortest",
            "-c:v", "libx264", "-c:a", "aac", "-b:a", "96k", files / "ru-long-video.mp4")

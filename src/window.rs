@@ -1351,6 +1351,7 @@ impl Prefs {
       Request::TranscribeAgain { .. } => (true, "Could not transcribe it again"),
       Request::LocateFile(..) => (true, "Could not take that file"),
     };
+
     let said = if files { &mut self.files.said } else { &mut self.history.said };
     *said = Some(format!("{what}: {error}"));
   }
@@ -3259,6 +3260,7 @@ fn line_of(t: &Transcript, check: Check, run: Option<&FileStatus>) -> Line {
       true => parts.push("waits for the dictation".into()),
       false => parts.extend(r.left_ms.map(left_text)),
     }
+
     return Line::Progress(k, parts.join(" · "));
   }
 
@@ -3509,6 +3511,7 @@ impl Prefs {
         }
         line => line,
       };
+
       ui.col(Style::new().w(grow()).gap(2.0), |ui| {
         ui.id("viewer-title").text(&o.t.name, fs.head.line_limit(1));
         show_line(ui, fs, &line, Some(Id::of("viewer-line")));
@@ -3556,6 +3559,7 @@ impl Prefs {
         true => FormRow::new("No transcripts yet").caption(caption.as_str()),
         false => FormRow::new("Nothing found"),
       };
+
       ui.col(fs.page.pads(PAGE_PAD).h(grow()), |ui| {
         ui.form_section(fs, "", |ui| ui.id("files-empty").form_row(fs, row, |_| {}));
       });
@@ -3619,6 +3623,7 @@ impl Prefs {
         FileState::Done => "No text: Wavo heard no speech in the file.",
         _ => "No text yet: it comes as the file is transcribed.",
       };
+
       ui.col(fs.page.pads(PAGE_PAD).h(grow()), |ui| {
         ui.form_section(fs, "", |ui| ui.form_row(fs, FormRow::new(empty), |_| {}));
       });
@@ -3663,6 +3668,7 @@ impl Prefs {
           _ if check != Check::Same => Some(("Locate…", FileAct::Locate(id))),
           _ => Some(("Continue", FileAct::Request(Request::ContinueFile(id)))),
         };
+
         if let Some((button, then)) = state
           && ui.id("viewer-state").button(button).clicked
         {
@@ -3729,6 +3735,7 @@ impl Prefs {
       }
       None => self.active(),
     };
+
     language_choices(model.map_or(&[][..], |f| f.0.langs), self.settings.files_language())
   }
 
@@ -3824,6 +3831,7 @@ impl Prefs {
       Some(o) => vec![&o.t],
       None => f.chosen().into_iter().map(|(t, _)| t).collect(),
     };
+
     let (title, message) = match doomed[..] {
       [] => return,
       [t] => {
@@ -3836,6 +3844,7 @@ impl Prefs {
         "Their text is removed. The files themselves stay.".to_owned(),
       ),
     };
+
     let ids = doomed.iter().map(|t| t.id).collect();
     self.ask = Some(Ask { title, message, delete: Delete::Transcripts(ids) });
   }

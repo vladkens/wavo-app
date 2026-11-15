@@ -253,7 +253,7 @@ impl Transcripts {
     Ok(stmt.query_map([id], segment)?.collect::<rusqlite::Result<_>>()?)
   }
 
-  // MARK: Changes
+  // MARK: Inserters
 
   /// A new transcript of `source`, queued; its id.
   pub fn add(&self, source: &Source, model: &str, language: Option<&str>, at: i64) -> Result<i64> {
@@ -269,20 +269,6 @@ impl Transcripts {
     Ok(db.last_insert_rowid())
   }
 
-  /// Transcript `id` is being transcribed, its audio `duration_ms` long if known: anything past its
-  /// `done_ms` (none should be) goes.
-  pub fn start(&self, id: i64, duration_ms: Option<i64>) -> Result<()> {
-    let tx = self.write()?.conn().unchecked_transaction()?;
-    let qs = "DELETE FROM segments WHERE transcript_id = ?1
-      AND start_ms >= (SELECT done_ms FROM transcripts WHERE id = ?1);";
-    tx.prepare_cached(qs)?.execute([id])?;
-    let qs = "UPDATE transcripts SET state = 'running', error = NULL,
-      duration_ms = COALESCE(?2, duration_ms) WHERE id = ?1;";
-    tx.prepare_cached(qs)?.execute(params![id, duration_ms])?;
-    tx.commit()?;
-    Ok(())
-  }
-
   /// A chunk of transcript `id` is done: its `segments`, and the audio up to `done_ms`.
   pub fn append(&self, id: i64, segments: &[Segment], done_ms: i64) -> Result<()> {
     let tx = self.write()?.conn().unchecked_transaction()?;
@@ -294,6 +280,22 @@ impl Transcripts {
 
     let qs = "UPDATE transcripts SET done_ms = ?2 WHERE id = ?1;";
     tx.prepare_cached(qs)?.execute(params![id, done_ms])?;
+    tx.commit()?;
+    Ok(())
+  }
+
+  // MARK: Updater
+
+  /// Transcript `id` is being transcribed, its audio `duration_ms` long if known: anything past its
+  /// `done_ms` (none should be) goes.
+  pub fn start(&self, id: i64, duration_ms: Option<i64>) -> Result<()> {
+    let tx = self.write()?.conn().unchecked_transaction()?;
+    let qs = "DELETE FROM segments WHERE transcript_id = ?1
+      AND start_ms >= (SELECT done_ms FROM transcripts WHERE id = ?1);";
+    tx.prepare_cached(qs)?.execute([id])?;
+    let qs = "UPDATE transcripts SET state = 'running', error = NULL,
+      duration_ms = COALESCE(?2, duration_ms) WHERE id = ?1;";
+    tx.prepare_cached(qs)?.execute(params![id, duration_ms])?;
     tx.commit()?;
     Ok(())
   }

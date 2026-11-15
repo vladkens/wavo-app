@@ -303,6 +303,7 @@ fn file_title(f: &FileStatus) -> String {
     Some(k) => format!("{:.0}%", k * 100.0),
     None => crate::segments::clock(f.done_ms),
   };
+
   let name = shorten(&f.name, LABEL - at.chars().count() - 3);
   format!("{name} · {at}")
 }

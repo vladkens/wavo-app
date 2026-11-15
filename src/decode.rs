@@ -431,6 +431,7 @@ mod tests {
       let x = if pause(i) { 0.0 } else { 0.5 * (TAU * 440.0 * i as f32 / 16_000.0).sin() };
       w.write_sample((x * 32_767.0) as i16).unwrap();
     }
+
     w.finalize().unwrap();
 
     let mut chunks = Chunks::open(&path, 0, 60_000).unwrap();
