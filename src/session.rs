@@ -1060,6 +1060,7 @@ impl<O: TextOutput> Controller<O> {
 
   fn on_engine(&mut self, event: engine::Event) {
     let engine::Event::Done(id, result, ran) = event else { return };
+    let result = result.map(|heard| heard.text);
     if let Some((p, _)) = self.dictation.as_mut().and_then(|d| d.preview.as_mut())
       && p.job() == Some(id)
     {

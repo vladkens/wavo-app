@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
-//! A transcript's text with times: segments, each a sentence short enough to be a subtitle, and
-//! what is made of them: paragraphs to read, TXT and SRT.
+//! A transcript's text with times: segments, each a sentence short enough to be a subtitle, made
+//! of a model's tokens, and what is made of them: paragraphs to read, TXT and SRT.
 
 use std::fmt::Write;
 use std::ops::Range;
@@ -15,6 +15,68 @@ pub struct Segment {
   /// Who speaks, from 0; `None` until a transcript tells speakers apart.
   pub speaker: Option<i64>,
   pub text: String,
+}
+
+/// A segment ends after one of these, as a sentence does.
+const SENTENCE_ENDS: [char; 7] = ['.', '?', '!', '…', '。', '？', '！'];
+/// A segment ends before it would grow past this many characters: two subtitle lines of 42.
+const SEGMENT_CHARS: usize = 84;
+/// A segment ends before a word this long after its start.
+const SEGMENT_MS: i64 = 10_000;
+/// A segment lasts at most this long after its last time for each word at that time: a word-timed
+/// model's last word, or a Whisper segment's words, which all start at the segment's time.
+const LINGER_MS: i64 = 1_500;
+
+/// The segments of a piece of audio a model transcribed whole, `start_ms..end_ms`, from its tokens:
+/// their text (`▁` or a space starts a word) and start times.
+///
+/// A segment ends after a sentence, or before it would pass [SEGMENT_CHARS] or [SEGMENT_MS]. Words
+/// that start at the same time stay in one segment, as times can't part them: a frame of GigaAM's
+/// or Parakeet's, a segment of Whisper's, which times its tokens by their segment, and the whole
+/// piece of Moonshine's, which has no times. A segment ends where the next one starts, the last
+/// one where the piece ends, but [LINGER_MS] after its last time for each word at it, so that a
+/// pause after it is a pause.
+pub fn of_tokens<'a>(
+  start_ms: i64,
+  end_ms: i64,
+  tokens: impl IntoIterator<Item = (&'a str, i64)>,
+) -> Vec<Segment> {
+  // Each word's start and text, the space before it included.
+  let mut words: Vec<(i64, String)> = Vec::new();
+  for (piece, at) in tokens {
+    let piece = piece.replace('▁', " ");
+    match words.last_mut() {
+      Some(word) if !piece.starts_with(' ') => word.1 += &piece,
+      _ => words.push((at.clamp(start_ms, end_ms), piece)),
+    }
+  }
+
+  // Each segment, its last time and how many of its words start at it.
+  let mut out: Vec<(Segment, i64, i64)> = Vec::new();
+  for (at, text) in words {
+    let text = text.trim();
+    match out.last_mut() {
+      _ if text.is_empty() => {}
+      Some((s, last, n)) if at == *last => {
+        (s.text, *n) = (format!("{} {text}", s.text), *n + 1);
+      }
+      Some((s, last, n))
+        if !s.text.ends_with(SENTENCE_ENDS)
+          && s.text.chars().count() + 1 + text.chars().count() <= SEGMENT_CHARS
+          && at - s.start_ms < SEGMENT_MS =>
+      {
+        (s.text, *last, *n) = (format!("{} {text}", s.text), at, 1);
+      }
+      _ => {
+        out.push((Segment { start_ms: at, end_ms: at, speaker: None, text: text.into() }, at, 1))
+      }
+    }
+  }
+
+  let nexts: Vec<i64> = out.iter().skip(1).map(|o| o.0.start_ms).chain([end_ms]).collect();
+  let ends = out.into_iter().zip(nexts);
+  let end = |s: &Segment, last, n, next: i64| next.min(last + n * LINGER_MS).max(s.start_ms);
+  ends.map(|((s, last, n), next)| Segment { end_ms: end(&s, last, n, next), ..s }).collect()
 }
 
 /// A pause this long between segments starts a new paragraph.
@@ -94,6 +156,74 @@ mod tests {
 
   fn seg(start_ms: i64, end_ms: i64, text: &str) -> Segment {
     Segment { start_ms, end_ms, speaker: None, text: text.into() }
+  }
+
+  /// Tokens from `(piece, start_ms)`.
+  fn cut(start_ms: i64, end_ms: i64, tokens: &[(&str, i64)]) -> Vec<Segment> {
+    of_tokens(start_ms, end_ms, tokens.iter().copied())
+  }
+
+  /// The words of the segments' texts joined: those of the piece's text.
+  fn words(segments: &[Segment]) -> String {
+    segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ")
+  }
+
+  #[test]
+  fn segments_end_at_sentences_and_pauses() {
+    let tokens = [
+      ("▁При", 1000),
+      ("вет", 1040),
+      (".", 1300),
+      ("▁Как", 2000),
+      ("▁дела", 2400),
+      ("?", 2600),
+      ("▁Хорошо", 9000),
+    ];
+    let s = cut(1000, 12_000, &tokens);
+    assert_eq!(
+      s,
+      [seg(1000, 2000, "Привет."), seg(2000, 3900, "Как дела?"), seg(9000, 10_500, "Хорошо")]
+    );
+    assert_eq!(words(&s), "Привет. Как дела? Хорошо");
+    assert_eq!(cut(0, 1000, &[("。", 0)])[0].text, "。");
+    assert!(cut(0, 1000, &[]).is_empty(), "an empty piece");
+    assert!(cut(0, 1000, &[("▁", 0), (" ", 500)]).is_empty(), "only spaces");
+  }
+
+  #[test]
+  fn a_long_sentence_is_cut_at_a_word() {
+    let long: Vec<(String, i64)> = (0..30).map(|i| (format!("▁word{i:02}"), i * 300)).collect();
+    let s = of_tokens(0, 9000, long.iter().map(|(p, at)| (p.as_str(), *at)));
+    assert!(s.iter().all(|s| s.text.chars().count() <= SEGMENT_CHARS), "{s:?}");
+    assert_eq!(s.len(), 3);
+    assert_eq!((s[0].end_ms, s[1].start_ms), (s[1].start_ms, 12 * 300));
+    assert_eq!(words(&s).split(' ').count(), 30);
+
+    let slow: Vec<(String, i64)> = (0..6).map(|i| (format!("▁w{i}"), i * 4000)).collect();
+    let s = of_tokens(0, 24_000, slow.iter().map(|(p, at)| (p.as_str(), *at)));
+    assert_eq!(s.iter().map(|s| s.start_ms).collect::<Vec<_>>(), [0, 12_000], "at 10 s");
+  }
+
+  #[test]
+  fn shared_times_keep_their_words_together() {
+    // Whisper: each token carries its segment's start.
+    let whisper =
+      [(" One", 0), (" two.", 0), (" Three", 0), (" four", 0), (" five.", 0), (" Six.", 4000)];
+    let s = cut(0, 30_000, &whisper);
+    assert_eq!(s, [seg(0, 4000, "One two. Three four five."), seg(4000, 5500, "Six.")]);
+
+    // Moonshine: no times, each token at its piece's start.
+    let moonshine = [("▁A", 25_000), ("▁long", 25_000), ("▁piece.", 25_000), ("▁Of", 25_000)];
+    assert_eq!(cut(25_000, 30_000, &moonshine), [seg(25_000, 30_000, "A long piece. Of")]);
+  }
+
+  #[test]
+  fn character_vocabularies_join_with_their_spaces() {
+    // GigaAM ctc: a token per character, and a piece after the first starts with a space.
+    let chars = [(" ", 0), ("д", 40), ("а", 80), (" ", 120), ("н", 160), ("е", 200), ("т", 240)];
+    assert_eq!(cut(0, 5000, &chars), [seg(0, 1620, "да нет")]);
+    let later = [("т", 6000), ("а", 6040), ("к", 6080)];
+    assert_eq!(cut(5000, 7000, &later), [seg(6000, 7000, "так")], "a piece starts a word");
   }
 
   #[test]

@@ -334,7 +334,7 @@ mod tests {
           };
           // The first loads the model.
           busy += if id > 1 { started.elapsed() } else { Duration::ZERO };
-          p.done(id, result);
+          p.done(id, result.map(|h| h.text));
         }
 
         if !p.fixed_since(from) {
