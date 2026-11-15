@@ -14,6 +14,7 @@
 //! transaction ([Transcripts::append]), so a quit or a crash leaves a transcript that goes on from
 //! its `done_ms`.
 
+use std::cell::OnceCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -109,7 +110,7 @@ pub struct Transcript {
   pub modified: i64,
   /// Known once its file is opened, if the file tells.
   pub duration_ms: Option<i64>,
-  /// The model's file name without extension.
+  /// The model it runs with: wavo's name of it, or its file's path.
   pub model: String,
   /// `None`: told by the model.
   pub language: Option<String>,
@@ -167,36 +168,58 @@ const COLUMNS: &str = "
   )) AS preview
 ";
 
+/// The transcripts of a home, in its `history.db` ([DB_FILE]) from the first one added: until
+/// then a home whose dictations are kept in memory has no database.
 pub struct Transcripts {
-  db: Db,
+  path: PathBuf,
+  db: OnceCell<Db>,
 }
 
 impl Transcripts {
-  /// The transcripts saved in `home`: always on disk.
-  pub fn open(home: &Path) -> Result<Self> {
-    Ok(Self { db: Db::open(&home.join(DB_FILE))? })
+  /// The transcripts saved in `home`: always on disk, opened once the database is there.
+  pub fn open(home: &Path) -> Self {
+    Self { path: home.join(DB_FILE), db: OnceCell::new() }
   }
 
   /// Those of the database `db` opened (a copy for an export).
   pub fn of(db: Db) -> Self {
-    Self { db }
+    Self { path: PathBuf::new(), db: OnceCell::from(db) }
   }
 
-  /// Moves on every change, of this connection's or another one's.
+  /// Moves on every change, of this connection's or another one's; 0 until the database is open.
   pub fn changes(&self) -> u64 {
-    self.db.changes()
+    self.db.get().map_or(0, Db::changes)
+  }
+
+  /// The database to read, `None` while there is none.
+  fn read(&self) -> Result<Option<&Db>> {
+    match self.db.get().is_some() || self.path.exists() {
+      true => self.write().map(Some),
+      false => Ok(None),
+    }
+  }
+
+  /// The database to write, made when not there.
+  fn write(&self) -> Result<&Db> {
+    if let Some(db) = self.db.get() {
+      return Ok(db);
+    }
+
+    let db = Db::open(&self.path)?;
+    Ok(self.db.get_or_init(|| db))
   }
 
   // MARK: Getters
 
   pub fn get(&self, id: i64) -> Result<Option<Transcript>> {
+    let Some(db) = self.read()? else { return Ok(None) };
     let qs = format!("SELECT {COLUMNS} FROM transcripts t WHERE id = ?1;");
-    let db = self.db.conn();
-    Ok(db.prepare_cached(&qs)?.query_row([id], Transcript::from_row).optional()?)
+    Ok(db.conn().prepare_cached(&qs)?.query_row([id], Transcript::from_row).optional()?)
   }
 
   /// Newest first, those whose name or text holds `search` in any case ([fold]; empty: all).
   pub fn list(&self, search: &str) -> Result<Vec<Transcript>> {
+    let Some(db) = self.read()? else { return Ok(Vec::new()) };
     let qs = format!(
       "SELECT {COLUMNS} FROM transcripts t
       WHERE ?1 = '' OR instr(wavo_fold(name), ?1) > 0 OR EXISTS (
@@ -205,29 +228,31 @@ impl Transcripts {
       ORDER BY created_at DESC, id DESC;"
     );
 
-    let mut stmt = self.db.conn().prepare_cached(&qs)?;
+    let mut stmt = db.conn().prepare_cached(&qs)?;
     let rows = stmt.query_map([fold(search)], Transcript::from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
   }
 
   /// The one the work goes on with: the oldest queued or running.
   pub fn next(&self) -> Result<Option<Transcript>> {
+    let Some(db) = self.read()? else { return Ok(None) };
     let qs = format!(
       "SELECT {COLUMNS} FROM transcripts t WHERE state IN ('queued', 'running')
       ORDER BY id LIMIT 1;"
     );
 
-    Ok(self.db.conn().prepare_cached(&qs)?.query_row([], Transcript::from_row).optional()?)
+    Ok(db.conn().prepare_cached(&qs)?.query_row([], Transcript::from_row).optional()?)
   }
 
   /// Its segments in time order.
   pub fn segments(&self, id: i64) -> Result<Vec<Segment>> {
+    let Some(db) = self.read()? else { return Ok(Vec::new()) };
     let qs = "
     SELECT start_ms, end_ms, speaker, text FROM segments WHERE transcript_id = ?1
     ORDER BY start_ms, id;
     ";
 
-    let mut stmt = self.db.conn().prepare_cached(qs)?;
+    let mut stmt = db.conn().prepare_cached(qs)?;
     let segment = |r: &Row| {
       Ok(Segment { start_ms: r.get(0)?, end_ms: r.get(1)?, speaker: r.get(2)?, text: r.get(3)? })
     };
@@ -244,7 +269,7 @@ impl Transcripts {
     ";
 
     let path = source.path.to_string_lossy();
-    let db = self.db.conn();
+    let db = self.write()?.conn();
     let row = params![at, source.name(), path, source.size, source.modified, model, language];
     db.prepare_cached(qs)?.execute(row)?;
     Ok(db.last_insert_rowid())
@@ -253,7 +278,7 @@ impl Transcripts {
   /// Transcript `id` is being transcribed, its audio `duration_ms` long if known: anything past its
   /// `done_ms` (none should be) goes.
   pub fn start(&self, id: i64, duration_ms: Option<i64>) -> Result<()> {
-    let tx = self.db.conn().unchecked_transaction()?;
+    let tx = self.write()?.conn().unchecked_transaction()?;
     let qs = "DELETE FROM segments WHERE transcript_id = ?1
       AND start_ms >= (SELECT done_ms FROM transcripts WHERE id = ?1);";
     tx.prepare_cached(qs)?.execute([id])?;
@@ -266,7 +291,7 @@ impl Transcripts {
 
   /// A chunk of transcript `id` is done: its `segments`, and the audio up to `done_ms`.
   pub fn append(&self, id: i64, segments: &[Segment], done_ms: i64) -> Result<()> {
-    let tx = self.db.conn().unchecked_transaction()?;
+    let tx = self.write()?.conn().unchecked_transaction()?;
     let qs = "INSERT INTO segments (transcript_id, start_ms, end_ms, speaker, text)
       VALUES (?1, ?2, ?3, ?4, ?5);";
     for s in segments {
@@ -283,32 +308,22 @@ impl Transcripts {
   pub fn set_state(&self, id: i64, state: State, error: Option<&str>) -> Result<()> {
     let qs = "UPDATE transcripts SET state = ?2, error = ?3,
       duration_ms = CASE WHEN ?2 = 'done' THEN done_ms ELSE duration_ms END WHERE id = ?1;";
-    self.db.conn().prepare_cached(qs)?.execute(params![id, state.as_str(), error])?;
+    self.write()?.conn().prepare_cached(qs)?.execute(params![id, state.as_str(), error])?;
     Ok(())
   }
 
-  /// Transcript `id`'s file is `source` now (found again, maybe moved).
+  /// Transcript `id`'s file is `source` now (found again, maybe moved); its name stays.
   pub fn relocate(&self, id: i64, source: &Source) -> Result<()> {
     let qs = "UPDATE transcripts SET path = ?2, size = ?3, modified = ?4 WHERE id = ?1;";
     let path = source.path.to_string_lossy();
     let row = params![id, path, source.size, source.modified];
-    self.db.conn().prepare_cached(qs)?.execute(row)?;
-    Ok(())
-  }
-
-  /// Transcript `id` starts over: none of its text stays.
-  pub fn restart(&self, id: i64) -> Result<()> {
-    let tx = self.db.conn().unchecked_transaction()?;
-    tx.prepare_cached("DELETE FROM segments WHERE transcript_id = ?1;")?.execute([id])?;
-    let qs = "UPDATE transcripts SET done_ms = 0, duration_ms = NULL WHERE id = ?1;";
-    tx.prepare_cached(qs)?.execute([id])?;
-    tx.commit()?;
+    self.write()?.conn().prepare_cached(qs)?.execute(row)?;
     Ok(())
   }
 
   /// Deletes transcripts `ids` with their text, in one transaction.
   pub fn delete(&self, ids: &[i64]) -> Result<()> {
-    let tx = self.db.conn().unchecked_transaction()?;
+    let tx = self.write()?.conn().unchecked_transaction()?;
     for id in ids {
       tx.prepare_cached("DELETE FROM segments WHERE transcript_id = ?1;")?.execute([id])?;
       tx.prepare_cached("DELETE FROM transcripts WHERE id = ?1;")?.execute([id])?;
@@ -320,7 +335,7 @@ impl Transcripts {
 
   /// Every transcript goes, and the pages they were on (an export's copy keeps none).
   pub fn clear(&self) -> Result<()> {
-    self.db.conn().execute_batch("DELETE FROM segments; DELETE FROM transcripts; VACUUM;")?;
+    self.write()?.conn().execute_batch("DELETE FROM segments; DELETE FROM transcripts; VACUUM;")?;
     Ok(())
   }
 }
@@ -341,10 +356,26 @@ mod tests {
     Source::of(&path).unwrap()
   }
 
+  /// Read, a home without a database has no transcripts and still no database: the first one
+  /// added makes it.
+  #[test]
+  fn the_database_is_made_by_the_first_transcript() {
+    let dir = TempDir::new("transcripts-none");
+    let t = Transcripts::open(dir.path());
+    assert!(t.list("").unwrap().is_empty() && t.segments(1).unwrap().is_empty());
+    assert!(t.next().unwrap().is_none() && t.get(1).unwrap().is_none());
+    assert_eq!(t.changes(), 0);
+    assert!(!dir.path().join(DB_FILE).exists());
+
+    t.add(&file(dir.path(), "a.wav", b"a"), "m", None, 1).unwrap();
+    assert!(dir.path().join(DB_FILE).exists());
+    assert_ne!(t.changes(), 0);
+  }
+
   #[test]
   fn added_run_in_chunks_and_listed() {
     let dir = TempDir::new("transcripts-run");
-    let t = Transcripts::open(dir.path()).unwrap();
+    let t = Transcripts::open(dir.path());
     let lecture = file(dir.path(), "Лекция 1.m4a", b"audio");
     let id = t.add(&lecture, "gigaam-v3", Some("ru"), 1_000).unwrap();
     let other = t.add(&file(dir.path(), "talk.mp3", b"x"), "parakeet", None, 2_000).unwrap();
@@ -367,6 +398,8 @@ mod tests {
 
     let ids = |search: &str| -> Vec<i64> { t.list(search).unwrap().iter().map(|t| t.id).collect() };
     assert_eq!(ids(""), [other, id]);
+    let reader = Transcripts::open(dir.path());
+    assert_eq!(reader.list("").unwrap().len(), 2, "another connection reads them");
     assert_eq!(
       (ids("НАЧНЁМ"), ids("лекция"), ids("TALK"), ids("%")),
       (vec![id], vec![id], vec![other], vec![])
@@ -378,22 +411,18 @@ mod tests {
   #[test]
   fn a_start_drops_what_is_past_done() {
     let dir = TempDir::new("transcripts-resume");
-    let t = Transcripts::open(dir.path()).unwrap();
+    let t = Transcripts::open(dir.path());
     let id = t.add(&file(dir.path(), "a.wav", b"a"), "m", None, 1).unwrap();
     t.append(id, &[seg(0, "one"), seg(5_000, "two")], 4_000).unwrap();
     t.start(id, None).unwrap();
     let texts: Vec<String> = t.segments(id).unwrap().into_iter().map(|s| s.text).collect();
     assert_eq!(texts, ["one"]);
-
-    t.restart(id).unwrap();
-    assert!(t.segments(id).unwrap().is_empty());
-    assert_eq!(t.get(id).unwrap().unwrap().done_ms, 0);
   }
 
   #[test]
   fn a_moved_or_changed_file_is_told() {
     let dir = TempDir::new("transcripts-check");
-    let t = Transcripts::open(dir.path()).unwrap();
+    let t = Transcripts::open(dir.path());
     let source = file(dir.path(), "a.wav", b"audio");
     let id = t.add(&source, "m", None, 1).unwrap();
     fs::write(&source.path, b"other audio").unwrap();
@@ -410,7 +439,7 @@ mod tests {
   #[test]
   fn deletes_several_with_their_text() {
     let dir = TempDir::new("transcripts-delete");
-    let t = Transcripts::open(dir.path()).unwrap();
+    let t = Transcripts::open(dir.path());
     let ids: Vec<i64> =
       (0..3).map(|i| t.add(&file(dir.path(), "a.wav", b"a"), "m", None, i).unwrap()).collect();
     for &id in &ids {
@@ -420,7 +449,7 @@ mod tests {
     t.delete(&[ids[0], ids[2], 404]).unwrap();
     assert_eq!(t.list("").unwrap().iter().map(|t| t.id).collect::<Vec<_>>(), [ids[1]]);
     let left: i64 =
-      t.db.conn().query_row("SELECT COUNT(*) FROM segments", [], |r| r.get(0)).unwrap();
+      t.write().unwrap().conn().query_row("SELECT COUNT(*) FROM segments", [], |r| r.get(0)).unwrap();
     assert_eq!(left, 1);
   }
 
@@ -428,7 +457,7 @@ mod tests {
   #[test]
   fn the_history_leaves_them_alone() {
     let dir = TempDir::new("transcripts-history");
-    let t = Transcripts::open(dir.path()).unwrap();
+    let t = Transcripts::open(dir.path());
     let id = t.add(&file(dir.path(), "a.wav", b"a"), "m", None, 1).unwrap();
     t.append(id, &[seg(0, "kept")], 1000).unwrap();
 

@@ -27,12 +27,13 @@ use tracing::warn;
 
 use crate::audio::{Resample, SAMPLE_RATE, downmix};
 
-/// What the file picker offers: the extensions of the formats above, but those that are mostly
-/// Opus (`.opus`, `.oga`, `.webm`), which a drop may still bring.
+/// What the file picker offers: the extensions of the formats above, but [MOSTLY_OPUS].
 pub const EXTENSIONS: &[&str] = &[
   "wav", "wave", "aif", "aiff", "aifc", "caf", "mp3", "m4a", "m4b", "aac", "mp4", "mov", "flac",
   "ogg", "mka", "mkv",
 ];
+/// Extensions of files that are mostly Opus: a drop may still bring one, and the decoder tells.
+pub const MOSTLY_OPUS: &[&str] = &["opus", "oga", "webm"];
 
 /// Samples per ms at [SAMPLE_RATE].
 const PER_MS: usize = SAMPLE_RATE as usize / 1000;
@@ -261,9 +262,10 @@ impl Chunks {
       return Ok(None);
     }
 
+    // At a whole ms, but the last: a chunk ends where the next one's time says it starts.
     let cut = match ended && self.buf.len() <= max {
       true => self.buf.len(),
-      false => wavo::split(&self.buf, self.max_ms)[0].end,
+      false => (wavo::split(&self.buf, self.max_ms)[0].end / PER_MS * PER_MS).max(PER_MS),
     };
 
     let pcm: Vec<f32> = self.buf.drain(..cut).collect();

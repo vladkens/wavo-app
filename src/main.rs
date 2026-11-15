@@ -11,6 +11,7 @@ mod cleanup;
 mod cli;
 mod decode;
 mod engine;
+mod files;
 mod history;
 mod hud;
 mod live;
@@ -140,6 +141,18 @@ fn home() -> PathBuf {
     Some(dir) if !dir.is_empty() => PathBuf::from(dir),
     _ => nimbo::paths::data_dir(INFO.id),
   }
+}
+
+/// The calling thread runs as the person's own action, not as background work: macOS gives it
+/// the disk and the cores a background thread waits for. The process's side, no App Nap while
+/// Wavo is out of view, is nimbo's activity the work holds (an export, an import, a file's
+/// transcript). Other systems don't tell them apart.
+fn user_initiated() {
+  // SAFETY: it sets the calling thread's own class.
+  #[cfg(target_os = "macos")]
+  unsafe {
+    libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0)
+  };
 }
 
 /// Logs go to stderr and, given a home, to its [LOG_FILE], filtered by `WAVO_LOG`

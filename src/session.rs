@@ -19,6 +19,10 @@
 //! - The saved history goes only when the person asks ([Request::DeleteSaved]), the one in use or
 //!   the one left on disk, once no dictation nor a transcription again runs: none of them writes
 //!   into it meanwhile.
+//! - Files go one at a time, in the order added, a chunk of audio per background job ([files]):
+//!   on the dictation's engine when their model is the same, else on one of their own, and never
+//!   while a dictation runs. A quit leaves the one running to go on from its last chunk at the next
+//!   start.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -35,11 +39,14 @@ use wavo::hub::{self, Hub, ModelInfo};
 
 use crate::audio::{self, Clip, Meter, Recorder, Source};
 use crate::cleanup;
-use crate::engine::{self, Engine, EngineError, Loader, Wavo};
+use crate::engine::{self, Engine, EngineError, Heard, Loader, Wavo};
+use crate::files::{self, FileStatus, Read, Run};
 use crate::history::{self, Entry, History, Retention, now_ms};
 use crate::live::{self, Preview};
 use crate::mic_start::{SlowStart, Start};
+use crate::segments::clock;
 use crate::settings::{self, Activation, Settings, language_name};
+use crate::transcripts::{self, Check, Transcripts};
 
 /// The microphone stays open at least this long after the stop, for the end of a word the key-up
 /// cut.
@@ -347,6 +354,8 @@ pub struct Status {
   pub no_model: Option<NoModel>,
   /// The history in use is the one in memory, kept until Wavo quits.
   pub in_memory: bool,
+  /// The file transcript running now.
+  pub file: Option<FileStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -424,6 +433,8 @@ pub struct Update {
   pub meter: Option<Meter>,
   /// Moves on every change of the history: a history window reloads then.
   pub history: u64,
+  /// Moves on every change of the file transcripts, as `history` does.
+  pub transcripts: u64,
 }
 
 /// Called on the session thread; it must return at once.
@@ -458,8 +469,22 @@ pub enum Request {
   /// quits: once no dictation nor a transcription again runs, nor an export or an import of it.
   DeleteSaved,
   /// The app quits for an update: no dictation runs, as the session stands after what was sent
-  /// before it, and none starts from then on; an error while one runs, which ends as usual.
+  /// before it, and none starts from then on; an error while one runs, which ends as usual. The
+  /// file running stops where it got to, and goes on at the next start.
   Close,
+  /// Files to transcribe, each a new transcript by the Files tab's model and language, queued. A
+  /// file of a type Wavo doesn't read is left out, and the error names it.
+  Transcribe(Vec<PathBuf>),
+  /// Stop a transcript queued or running: its text so far stays.
+  StopFile(i64),
+  /// A stopped or failed transcript goes on from where it got to.
+  ContinueFile(i64),
+  /// Delete transcripts with their text; the one running stops first.
+  DeleteFiles(Vec<i64>),
+  /// A new transcript of a transcript's file by `model`, in the Files tab's language.
+  TranscribeAgain { id: i64, model: String },
+  /// A transcript's file is at this path now.
+  LocateFile(i64, PathBuf),
 }
 
 enum Msg {
@@ -493,6 +518,7 @@ impl Session {
     }
 
     let history = History::open_as(&config.home, settings.history_retention.in_memory())?;
+    let transcripts = Transcripts::open(&config.home);
     let (tx, rx) = unbounded();
     let (events_tx, events) = unbounded();
     let controller = Controller {
@@ -500,6 +526,7 @@ impl Session {
       machine: Machine::new(settings.activation),
       settings,
       history,
+      transcripts,
       output,
       config,
       engine: None,
@@ -524,6 +551,9 @@ impl Session {
       error: None,
       settings_warning: warning,
       slow_start: SlowStart::default(),
+      file: None,
+      file_engine: None,
+      files_pending: true,
       observer,
       published: None,
     };
@@ -712,9 +742,17 @@ struct Controller<O: TextOutput> {
   error: Option<String>,
   settings_warning: Option<String>,
   slow_start: SlowStart,
+  transcripts: Transcripts,
+  /// The file transcript running.
+  file: Option<Run>,
+  /// The engine of a file's model other than the dictation's, kept while files run.
+  file_engine: Option<(PathBuf, Engine)>,
+  /// A transcript may wait for its turn: the store is asked for the next one.
+  files_pending: bool,
   observer: Observer,
-  /// The last update's status (without the recording's time), settings and history changes.
-  published: Option<(Status, Settings, u64)>,
+  /// The last update's status (without the recording's time), settings, history and transcripts
+  /// changes.
+  published: Option<(Status, Settings, u64, u64)>,
 }
 
 impl<O: TextOutput> Controller<O> {
@@ -728,6 +766,8 @@ impl<O: TextOutput> Controller<O> {
     }
 
     self.cleanup();
+    // A file a quit left goes on.
+    self.step_files();
     self.publish();
     let events = self.events.clone();
     loop {
@@ -741,6 +781,11 @@ impl<O: TextOutput> Controller<O> {
         (Some((_, None)), Some((p, next))) if p.job().is_none() => at(*next),
         _ => never(),
       };
+      // The next chunk once the one read last is in.
+      let reads = match &self.file {
+        Some(run) if run.chunk.is_none() => run.reads.clone(),
+        _ => never(),
+      };
 
       select! {
         recv(rx) -> msg => match msg {
@@ -751,11 +796,13 @@ impl<O: TextOutput> Controller<O> {
         recv(tail) -> _ => self.on_tail(),
         recv(preview) -> _ => self.preview(),
         recv(events) -> event => self.on_engine(event.unwrap()),
+        recv(reads) -> read => self.on_read(read.unwrap_or(Read::Failed("its reader stopped".into()))),
       }
 
       self.switch_history();
       self.delete_saved_history();
       self.transcribe_untried();
+      self.step_files();
       self.publish();
     }
 
@@ -780,15 +827,17 @@ impl<O: TextOutput> Controller<O> {
       r.seconds = 0.0;
     }
 
-    let key = (key, self.settings.clone(), self.history.db.changes() + self.saved_deletes);
+    let history = self.history.db.changes() + self.saved_deletes;
+    let key = (key, self.settings.clone(), history, self.transcripts.changes());
     if self.published.as_ref() == Some(&key) {
       return;
     }
 
-    let history = key.2;
+    let transcripts = key.3;
     self.published = Some(key);
     let meter = self.dictation.as_ref().and_then(|d| d.recorder.as_ref()).map(Recorder::meter);
-    (self.observer)(Update { status, settings: self.settings.clone(), meter, history });
+    let settings = self.settings.clone();
+    (self.observer)(Update { status, settings, meter, history, transcripts });
   }
 
   fn on_msg(&mut self, msg: Msg) {
@@ -898,7 +947,27 @@ impl<O: TextOutput> Controller<O> {
 
         info!("closed for the update: no dictation starts");
         self.closed = true;
+        self.drop_file();
         Ok(())
+      }
+      Request::Transcribe(paths) => self.add_files(&paths),
+      Request::StopFile(id) => self.stop_file(id),
+      Request::ContinueFile(id) => self.continue_file(id),
+      Request::DeleteFiles(ids) => {
+        if self.file.as_ref().is_some_and(|r| ids.contains(&r.id)) {
+          self.drop_file();
+        }
+
+        self.transcripts.delete(&ids)
+      }
+      Request::TranscribeAgain { id, model } => self.transcribe_again(id, model),
+      Request::LocateFile(id, path) => {
+        if self.file.as_ref().is_some_and(|r| r.id == id) {
+          bail!("transcript {id} is running");
+        }
+
+        let source = transcripts::Source::of(&path)?;
+        self.transcripts.relocate(id, &source)
       }
     }
   }
@@ -978,27 +1047,17 @@ impl<O: TextOutput> Controller<O> {
   /// wavo's info on it; or why there is none.
   fn check_model(&mut self) -> Result<(PathBuf, Option<&'static ModelInfo>), NoModel> {
     let chosen = self.route().0;
-    if let Some(chosen) = &chosen
-      && let Ok(path) = self.config.hub.resolve(chosen)
-    {
-      (self.model_error, self.model_fallback) = (None, None);
-      return Ok((self.found_model(path), hub::lookup(chosen).ok()));
-    }
-
-    let error = match (self.config.hub.downloaded().into_iter().next(), chosen) {
-      (Some((info, path)), chosen) => {
-        let note = chosen
-          .map(|c| format!("{} is not on disk: {} transcribes instead", label(&c), info.name));
+    match find_model(&self.config.hub, chosen.as_deref()) {
+      Ok((path, info, note)) => {
         (self.model_error, self.model_fallback) = (None, note);
-        return Ok((self.found_model(path), Some(info)));
+        Ok((self.found_model(path), info))
       }
-      (None, Some(chosen)) => NoModel::Gone { model: label(&chosen) },
-      (None, None) => NoModel::NoneDownloaded,
-    };
-
-    (self.model_path, self.model_fallback) = (None, None);
-    self.model_error = Some(error.clone());
-    Err(error)
+      Err(error) => {
+        (self.model_path, self.model_fallback) = (None, None);
+        self.model_error = Some(error.clone());
+        Err(error)
+      }
+    }
   }
 
   /// Another model than before may transcribe the entries without text.
@@ -1060,6 +1119,18 @@ impl<O: TextOutput> Controller<O> {
 
   fn on_engine(&mut self, event: engine::Event) {
     let engine::Event::Done(id, result, ran) = event else { return };
+    if let Some(run) = self.file.as_ref().filter(|r| r.job == Some(id)) {
+      // On the dictation's engine, a chunk heals it as a dictation does.
+      let on = |l: &Loaded| run.engine.as_ref().is_some_and(|(e, _)| l.engine.same(e));
+      let current = self.engine.as_ref().is_some_and(on);
+      self.on_file_done(result);
+      if current && let Some(ran) = ran {
+        self.heal(ran);
+      }
+
+      return;
+    }
+
     let result = result.map(|heard| heard.text);
     if let Some((p, _)) = self.dictation.as_mut().and_then(|d| d.preview.as_mut())
       && p.job() == Some(id)
@@ -1766,7 +1837,270 @@ impl<O: TextOutput> Controller<O> {
       warnings,
       no_model: self.no_model(),
       in_memory: self.history.in_memory(),
+      file: self.file.as_ref().map(|r| r.status(d.is_some())),
     }
+  }
+
+  // MARK: Files
+
+  /// Queues `paths`, each a new transcript by the Files tab's model and language; those of a type
+  /// Wavo doesn't read (or no file at all) are left out, and the error names them.
+  fn add_files(&mut self, paths: &[PathBuf]) -> Result<()> {
+    let model = self.files_model()?;
+    let language = self.settings.files_language();
+    let mut skipped = Vec::new();
+    for path in paths {
+      let source = transcripts::Source::of(path).ok();
+      let Some(source) = source.filter(|_| path.is_file() && files::readable(path)) else {
+        skipped.push(path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned());
+        continue;
+      };
+
+      let id = self.transcripts.add(&source, &model, language.as_deref(), now_ms())?;
+      info!("file {id}: {} queued for {model}", path.display());
+      self.files_pending = true;
+    }
+
+    if !skipped.is_empty() {
+      bail!("not an audio or video file Wavo can read: {}", skipped.join(", "));
+    }
+
+    Ok(())
+  }
+
+  /// The model a new transcript runs with: the Files tab's, else the dictation's `model` (not a
+  /// keyboard layout's) or the one transcribing in its place, as wavo names it or by its path.
+  fn files_model(&self) -> Result<String, NoModel> {
+    let hub = &self.config.hub;
+    if let Some(chosen) = &self.settings.files_model {
+      return match hub.resolve(chosen) {
+        Ok(_) => Ok(chosen.clone()),
+        Err(_) => Err(NoModel::Gone { model: label(chosen) }),
+      };
+    }
+
+    let (path, info, _) = find_model(hub, self.settings.model.as_deref())?;
+    Ok(info.map_or_else(|| path.display().to_string(), |m| m.name.to_owned()))
+  }
+
+  fn stop_file(&mut self, id: i64) -> Result<()> {
+    let t = self.transcripts.get(id)?.ok_or_else(|| anyhow!("no transcript {id}"))?;
+    if !t.state.pending() {
+      bail!("transcript {id} is not queued nor running");
+    }
+
+    info!("file {id}: stopped at {}", clock(t.done_ms));
+    match self.file.as_ref().is_some_and(|r| r.id == id) {
+      true => self.end_file(transcripts::State::Stopped, None),
+      false => self.transcripts.set_state(id, transcripts::State::Stopped, None)?,
+    }
+
+    Ok(())
+  }
+
+  fn continue_file(&mut self, id: i64) -> Result<()> {
+    let t = self.transcripts.get(id)?.ok_or_else(|| anyhow!("no transcript {id}"))?;
+    if !matches!(t.state, transcripts::State::Stopped | transcripts::State::Failed) {
+      bail!("transcript {id} is not stopped nor failed");
+    }
+
+    self.transcripts.set_state(id, transcripts::State::Queued, None)?;
+    self.files_pending = true;
+    Ok(())
+  }
+
+  /// A new transcript of `id`'s file as it is now, beside the one there is.
+  fn transcribe_again(&mut self, id: i64, model: String) -> Result<()> {
+    let t = self.transcripts.get(id)?.ok_or_else(|| anyhow!("no transcript {id}"))?;
+    if self.config.hub.resolve(&model).is_err() {
+      bail!("{} is not on disk", label(&model));
+    }
+
+    let source = transcripts::Source::of(&t.path).map_err(|_| anyhow!("its file is not found"))?;
+    let language = self.settings.files_language();
+    let again = self.transcripts.add(&source, &model, language.as_deref(), now_ms())?;
+    info!("file {again}: transcript {id}'s file queued again for {model}");
+    self.files_pending = true;
+    Ok(())
+  }
+
+  /// The files work goes on: the next transcript starts when none runs, and the chunk read last
+  /// goes to the engine, but while a dictation runs, which takes the engine from it.
+  fn step_files(&mut self) {
+    if self.file.is_none() && self.files_pending && !self.closed {
+      self.start_file();
+    }
+
+    if self.file.is_none() {
+      self.file_engine = None;
+      return;
+    }
+
+    let dictation = self.dictation.is_some();
+    let run = self.file.as_mut().unwrap();
+    if dictation {
+      if let (Some(id), Some((engine, _))) = (run.job.take(), &run.engine) {
+        debug!("file {}: a dictation goes first", run.id);
+        engine.cancel(id);
+      }
+
+      return;
+    }
+
+    if run.job.is_some() || run.chunk.is_none() {
+      return;
+    }
+
+    let model = run.model.clone();
+    let (engine, shared) = self.file_engine(&model);
+    self.next_job += 1;
+    let (id, run) = (self.next_job, self.file.as_mut().unwrap());
+    let pcm = run.chunk.as_ref().unwrap().pcm.clone();
+    // The dictation's engine would unload between chunks after a dictation's idle time.
+    if shared {
+      engine.prewarm();
+    }
+
+    engine.transcribe(id, pcm, run.language.clone(), true);
+    (run.job, run.engine) = (Some(id), Some((engine, shared)));
+  }
+
+  /// The next transcript, the oldest queued or running, goes on from where it got to, once its
+  /// file is still the one it was and its model is on disk; otherwise it fails, saying why.
+  fn start_file(&mut self) {
+    loop {
+      let next = self.transcripts.next().inspect_err(|e| warn!("files: {e:#}"));
+      let Some(t) = next.ok().flatten() else {
+        self.files_pending = false;
+        return;
+      };
+
+      let model = self.config.hub.resolve(&t.model);
+      let why = match (t.check(), model) {
+        (Check::Missing, _) => "its file is not found".to_owned(),
+        (Check::Changed, _) => "its file changed since".to_owned(),
+        (Check::Same, Err(_)) => format!("{} is not on disk", label(&t.model)),
+        (Check::Same, Ok(model)) => {
+          info!("file {}: from {} by {}", t.id, clock(t.done_ms), t.model);
+          self.file = Some(Run::start(&t, model));
+          return;
+        }
+      };
+
+      warn!("file {}: {why}", t.id);
+      if let Err(e) = self.transcripts.set_state(t.id, transcripts::State::Failed, Some(&why)) {
+        warn!("files: {e:#}");
+        self.files_pending = false;
+        return;
+      }
+    }
+  }
+
+  /// The engine for a file's model: the dictation's for the same model, else one of its own,
+  /// which goes once no file runs.
+  fn file_engine(&mut self, path: &Path) -> (Engine, bool) {
+    let dictation = self.model_path.as_deref() == Some(path);
+    let shared = dictation.then(|| self.engine().ok()).flatten();
+    if let Some(l) = shared.filter(|l| l.path == path) {
+      let engine = l.engine.clone();
+      self.file_engine = None;
+      return (engine, true);
+    }
+
+    let own = match self.file_engine.take() {
+      Some((p, engine)) if p == path => engine,
+      _ => {
+        info!("files: an engine of their own for {}", path.display());
+        let (loader, ane, events) =
+          (self.config.loader.clone(), self.settings.neural_engine, self.events_tx.clone());
+        Engine::start(loader, path.to_owned(), ane, None, events)
+      }
+    };
+
+    self.file_engine = Some((path.to_owned(), own.clone()));
+    (own, false)
+  }
+
+  fn on_read(&mut self, read: Read) {
+    let Some(run) = self.file.as_mut() else { return };
+    match read {
+      Read::Opened(duration_ms) => {
+        run.duration_ms = duration_ms.or(run.duration_ms);
+        if let Err(e) = self.transcripts.start(run.id, duration_ms) {
+          self.end_file(transcripts::State::Failed, Some(format!("{e:#}")));
+        }
+      }
+      Read::Chunk(chunk) => run.chunk = Some(chunk),
+      Read::End => self.end_file(transcripts::State::Done, None),
+      Read::Failed(error) => self.end_file(transcripts::State::Failed, Some(error)),
+    }
+  }
+
+  /// The chunk's job ended: its text goes in, or it goes to the engine again after a dictation,
+  /// or the transcript fails.
+  fn on_file_done(&mut self, result: Result<Heard, EngineError>) {
+    let run = self.file.as_mut().unwrap();
+    match result {
+      Ok(heard) => {
+        let (segments, done_ms) = run.done(heard.segments);
+        if let Err(e) = self.transcripts.append(run.id, &segments, done_ms) {
+          self.end_file(transcripts::State::Failed, Some(format!("its text not saved: {e:#}")));
+        }
+      }
+      Err(EngineError::Cancelled) => run.job = None,
+      Err(e) => self.end_file(transcripts::State::Failed, Some(e.to_string())),
+    }
+  }
+
+  /// The transcript running ends in `state`, and the next one may start.
+  fn end_file(&mut self, state: transcripts::State, error: Option<String>) {
+    let Some(run) = self.drop_file() else { return };
+    let at = clock(run.done_ms);
+    match &error {
+      Some(e) => warn!("file {}: {state:?} at {at}: {e}", run.id),
+      None => info!("file {}: {state:?} at {at}", run.id),
+    }
+
+    if let Err(e) = self.transcripts.set_state(run.id, state, error.as_deref()) {
+      warn!("files: {e:#}");
+    }
+  }
+
+  /// The transcript running stops as it is: its chunk in the engine goes, its state stays. The
+  /// dictation's engine may unload when idle again.
+  fn drop_file(&mut self) -> Option<Run> {
+    let run = self.file.take()?;
+    if let Some((engine, true)) = &run.engine
+      && self.dictation.is_none()
+    {
+      engine.release();
+    }
+
+    self.files_pending = true;
+    Some(run)
+  }
+}
+
+/// The file of the model `chosen` on `hub` and wavo's info on it, else the first one downloaded
+/// and the note that it transcribes in its place; or why there is none.
+fn find_model(
+  hub: &Hub,
+  chosen: Option<&str>,
+) -> Result<(PathBuf, Option<&'static ModelInfo>, Option<String>), NoModel> {
+  if let Some(chosen) = chosen
+    && let Ok(path) = hub.resolve(chosen)
+  {
+    return Ok((path, hub::lookup(chosen).ok(), None));
+  }
+
+  match (hub.downloaded().into_iter().next(), chosen) {
+    (Some((info, path)), chosen) => {
+      let note =
+        chosen.map(|c| format!("{} is not on disk: {} transcribes instead", label(c), info.name));
+      Ok((path, Some(info), note))
+    }
+    (None, Some(chosen)) => Err(NoModel::Gone { model: label(chosen) }),
+    (None, None) => Err(NoModel::NoneDownloaded),
   }
 }
 
@@ -1810,6 +2144,8 @@ mod tests {
   use crate::audio::SAMPLE_RATE;
   use crate::history::{DB_FILE, RECORDINGS_DIR, Transferring};
   use crate::menu;
+  use crate::segments::Segment;
+  use crate::transcripts::{State as FileState, Transcript};
   use crate::testing::{
     FakeModels, TempDir, download, entry_ids, poll, tone, wav_count, write_wav,
   };
@@ -2075,12 +2411,24 @@ mod tests {
       }
 
       settings.save(&home.path().join(settings::FILE)).unwrap();
-      let mic_path = home.path().join("mic.wav");
       if let Some(pcm) = mic {
-        write_wav(&mic_path, pcm);
+        write_wav(&home.path().join("mic.wav"), pcm);
       }
 
-      let models = FakeModels::new(text);
+      Self::launch(home, hub, FakeModels::new(text))
+    }
+
+    /// The session quits, `meanwhile` sees its home, and it starts again there with the same
+    /// models.
+    fn restart(self, meanwhile: impl FnOnce(&Path)) -> Self {
+      let Self { home, hub, models, _session, .. } = self;
+      drop(_session);
+      meanwhile(home.path());
+      Self::launch(home, hub, models)
+    }
+
+    fn launch(home: TempDir, hub: Hub, models: FakeModels) -> Self {
+      let mic_path = home.path().join("mic.wav");
       let ahead = Arc::new(Mutex::new(Duration::ZERO));
       let by = ahead.clone();
       let config = Config {
@@ -3190,5 +3538,346 @@ mod tests {
     s.press();
     let entry = s.kept(&s.finished(1).last.unwrap());
     assert_eq!((entry.model.unwrap(), entry.language), (stem("parakeet-v3"), Some("en".into())));
+  }
+
+  // MARK: Files
+
+  /// What the fake engine hears in each chunk of a file.
+  const HEARD: &str = "hello there";
+
+  impl InProcess {
+    /// `seconds` of tone in a new WAV file at `name` in the home; its path.
+    fn audio(&self, name: &str, seconds: f64) -> PathBuf {
+      let path = self.home.path().join(name);
+      fs::create_dir_all(path.parent().unwrap()).unwrap();
+      write_wav(&path, &loud(seconds));
+      path
+    }
+
+    fn transcripts(&self) -> Transcripts {
+      Transcripts::open(self.home.path())
+    }
+
+    /// Queues `paths`: the new transcripts' ids, in order.
+    fn transcribe(&self, paths: &[&Path]) -> Vec<i64> {
+      let before = self.transcripts().list("").unwrap().len();
+      let paths = paths.iter().map(|p| p.to_path_buf()).collect();
+      self.handle.request(Request::Transcribe(paths)).unwrap();
+      let mut ids: Vec<i64> = self.transcripts().list("").unwrap().iter().map(|t| t.id).collect();
+      ids.sort();
+      ids.split_off(before)
+    }
+
+    /// Transcript `id` once it is in `state`.
+    fn file_in(&self, id: i64, state: FileState) -> Transcript {
+      poll(&format!("file {id} {state:?}"), Duration::from_secs(20), || {
+        self.transcripts().get(id).unwrap().filter(|t| t.state == state)
+      })
+    }
+
+    /// Transcript `id` once its text goes past the start.
+    fn file_begun(&self, id: i64) -> Transcript {
+      poll(&format!("file {id} begun"), Duration::from_secs(20), || {
+        self.transcripts().get(id).unwrap().filter(|t| t.done_ms > 0)
+      })
+    }
+
+    fn segments(&self, id: i64) -> Vec<Segment> {
+      self.transcripts().segments(id).unwrap()
+    }
+
+    /// The next update where the file running is `id`, or none runs.
+    fn running(&self, id: Option<i64>) -> Update {
+      self.update_where("the file running", |u| u.status.file.as_ref().map(|f| f.id) == id)
+    }
+  }
+
+  /// `ms` of audio transcribed whole: a segment per chunk, end to end, none twice.
+  fn whole(segments: &[Segment], ms: i64) {
+    let ends = segments.first().map(|s| s.start_ms).zip(segments.last().map(|s| s.end_ms));
+    assert_eq!(ends, Some((0, ms)), "{segments:?}");
+    assert!(segments.windows(2).all(|w| w[0].end_ms == w[1].start_ms), "{segments:?}");
+    let chunk = i64::from(files::CHUNK_MS);
+    assert!(segments.iter().all(|s| s.text == HEARD && s.end_ms - s.start_ms <= chunk));
+    assert!(segments.len() as u64 >= (ms as u64).div_ceil(chunk as u64), "{segments:?}");
+  }
+
+  fn files(name: &str, settings: &Settings) -> InProcess {
+    InProcess::start(name, settings, Some(&loud(10.0)), HEARD, &["parakeet-v3"])
+  }
+
+  /// A file goes a chunk at a time on the dictation's engine, which keeps its model loaded until
+  /// the file is done, and each chunk's text goes in as it is done.
+  #[test]
+  fn a_file_is_transcribed_a_chunk_at_a_time() {
+    let settings = Settings { unload_after_minutes: Some(0), ..Settings::default() };
+    let s = files("files-whole", &settings);
+    let lecture = s.audio("lecture.wav", 150.0);
+    let [id] = s.transcribe(&[&lecture])[..] else { panic!("one transcript") };
+    let running = s.running(Some(id)).status.file.unwrap();
+    assert_eq!((running.name.as_str(), running.waiting), ("lecture.wav", false));
+    assert_ne!(s.running(None).transcripts, s.first.transcripts, "the window reloads");
+
+    let t = s.file_in(id, FileState::Done);
+    assert_eq!((t.done_ms, t.duration_ms, t.error), (150_000, Some(150_000), None));
+    assert_eq!((t.model.as_str(), t.language), ("parakeet-v3", None));
+    whole(&s.segments(id), 150_000);
+    assert_eq!(s.models.loads(), 1, "loaded once for all chunks");
+    poll("unloaded once done", Duration::from_secs(10), || (s.models.live() == 0).then_some(()));
+  }
+
+  /// A dictation in the middle of a file takes the engine from it: the chunk in progress goes
+  /// again after it, and the text has it once.
+  #[test]
+  fn a_dictation_goes_first_and_the_file_goes_on() {
+    let s = files("files-dictation", &Settings::default());
+    let gate = s.models.hold();
+    let lecture = s.audio("lecture.wav", 150.0);
+    let [id] = s.transcribe(&[&lecture])[..] else { panic!("one transcript") };
+    s.running(Some(id));
+
+    s.record(0.3);
+    s.update_where("the file waits", |u| u.status.file.as_ref().is_some_and(|f| f.waiting));
+    thread::sleep(Duration::from_millis(300));
+    s.press();
+    drop(gate);
+    let status = s.finished(1);
+    assert_eq!((status.last.unwrap().text.as_str(), status.file.unwrap().done_ms), (HEARD, 0));
+
+    s.file_in(id, FileState::Done);
+    whole(&s.segments(id), 150_000);
+  }
+
+  /// A quit leaves the file running as it got to, and the next start goes on from there.
+  #[test]
+  fn a_file_goes_on_after_a_quit() {
+    let s = files("files-quit", &Settings::default());
+    let gate = s.models.hold();
+    let lecture = s.audio("lecture.wav", 150.0);
+    let [id] = s.transcribe(&[&lecture])[..] else { panic!("one transcript") };
+    gate.send(()).unwrap();
+    let first = s.file_begun(id);
+    let s = s.restart(|home| {
+      let t = Transcripts::open(home).get(id).unwrap().unwrap();
+      assert_eq!((t.state, t.done_ms), (FileState::Running, first.done_ms));
+      drop(gate);
+    });
+
+    s.file_in(id, FileState::Done);
+    whole(&s.segments(id), 150_000);
+  }
+
+  /// A stopped file keeps its text so far and goes on from there.
+  #[test]
+  fn a_file_stops_and_goes_on() {
+    let s = files("files-stop", &Settings::default());
+    let gate = s.models.hold();
+    let lecture = s.audio("lecture.wav", 150.0);
+    let [id] = s.transcribe(&[&lecture])[..] else { panic!("one transcript") };
+    gate.send(()).unwrap();
+    let first = s.file_begun(id);
+    s.handle.request(Request::StopFile(id)).unwrap();
+    s.running(None);
+    drop(gate);
+
+    let t = s.file_in(id, FileState::Stopped);
+    assert_eq!((t.done_ms, s.segments(id).len()), (first.done_ms, 1));
+    assert!(s.handle.request(Request::StopFile(id)).is_err(), "stopped already");
+    s.handle.request(Request::ContinueFile(id)).unwrap();
+    s.file_in(id, FileState::Done);
+    whole(&s.segments(id), 150_000);
+    assert!(s.handle.request(Request::ContinueFile(id)).is_err(), "done");
+  }
+
+  /// Files go one at a time in the order added; deleting the one running goes on to the next.
+  #[test]
+  fn files_queue_and_a_deleted_one_makes_way() {
+    let s = files("files-queue", &Settings::default());
+    let gate = s.models.hold();
+    let (a, b) = (s.audio("a.wav", 150.0), s.audio("b.wav", 30.0));
+    let [a, b] = s.transcribe(&[&a, &b])[..] else { panic!("two transcripts") };
+    s.running(Some(a));
+    assert_eq!(s.transcripts().get(b).unwrap().unwrap().state, FileState::Queued);
+
+    s.handle.request(Request::DeleteFiles(vec![a])).unwrap();
+    s.running(Some(b));
+    drop(gate);
+    s.file_in(b, FileState::Done);
+    whole(&s.segments(b), 30_000);
+    assert_eq!((s.transcripts().get(a).unwrap(), s.segments(a)), (None, vec![]));
+  }
+
+  /// A file gone or changed since it was added fails; found again, it goes on, and a changed one
+  /// is transcribed again as it is now.
+  #[test]
+  fn a_moved_or_changed_file_fails_until_found() {
+    let s = files("files-moved", &Settings::default());
+    let gate = s.models.hold();
+    let paths = [s.audio("a.wav", 30.0), s.audio("b.wav", 30.0), s.audio("c.wav", 30.0)];
+    let [a, b, c] = s.transcribe(&paths.each_ref().map(PathBuf::as_path))[..] else { panic!() };
+    s.running(Some(a));
+    let moved = s.home.path().join("moved/b.wav");
+    fs::create_dir_all(moved.parent().unwrap()).unwrap();
+    fs::rename(&paths[1], &moved).unwrap();
+    fs::remove_file(&paths[2]).unwrap();
+    write_wav(&paths[2], &loud(40.0));
+    drop(gate);
+
+    let failed = |id| s.file_in(id, FileState::Failed).error.unwrap();
+    assert_eq!((failed(b), failed(c)), ("its file is not found".into(), "its file changed since".into()));
+    assert_eq!(s.file_in(a, FileState::Done).done_ms, 30_000);
+
+    s.handle.request(Request::LocateFile(b, moved.clone())).unwrap();
+    s.handle.request(Request::ContinueFile(b)).unwrap();
+    let t = s.file_in(b, FileState::Done);
+    assert_eq!((t.path, t.name.as_str()), (moved, "b.wav"));
+    whole(&s.segments(b), 30_000);
+
+    let model = "parakeet-v3".to_owned();
+    s.handle.request(Request::TranscribeAgain { id: c, model }).unwrap();
+    let again = s.transcripts().list("").unwrap().iter().map(|t| t.id).max().unwrap();
+    assert_eq!(s.file_in(again, FileState::Done).done_ms, 40_000);
+    assert_eq!(s.transcripts().get(c).unwrap().unwrap().state, FileState::Failed, "kept as it was");
+  }
+
+  /// A file that can't be read, a chunk that fails and a file of another type each say why.
+  #[test]
+  fn a_file_that_fails_says_why() {
+    let s = files("files-failed", &Settings::default());
+    let broken = s.home.path().join("broken.wav");
+    fs::write(&broken, b"RIFF not a wave").unwrap();
+    let [id] = s.transcribe(&[&broken])[..] else { panic!("one transcript") };
+    assert!(!s.file_in(id, FileState::Failed).error.unwrap().is_empty());
+
+    s.models.panic_next();
+    let lecture = s.audio("lecture.wav", 90.0);
+    let [id] = s.transcribe(&[&lecture])[..] else { panic!("one transcript") };
+    let t = s.file_in(id, FileState::Failed);
+    assert!(t.error.as_ref().unwrap().contains("injected panic"), "{t:?}");
+    s.handle.request(Request::ContinueFile(id)).unwrap();
+    whole(&s.segments(s.file_in(id, FileState::Done).id), 90_000);
+
+    let notes = s.home.path().join("notes.txt");
+    fs::write(&notes, "hello").unwrap();
+    let paths = vec![notes, s.home.path().join("gone.wav"), lecture];
+    let error = s.handle.request(Request::Transcribe(paths)).unwrap_err();
+    assert_eq!(error, "not an audio or video file Wavo can read: notes.txt, gone.wav");
+    assert_eq!(s.transcripts().list("").unwrap().len(), 3, "the one it reads is queued");
+  }
+
+  /// Dictations kept until Wavo quits leave the transcripts on disk.
+  #[test]
+  fn transcripts_stay_on_disk_with_the_history_in_memory() {
+    let settings = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
+    let s = files("files-in-memory", &settings);
+    assert!(s.first.status.in_memory);
+    let lecture = s.audio("lecture.wav", 30.0);
+    let [id] = s.transcribe(&[&lecture])[..] else { panic!("one transcript") };
+    s.file_in(id, FileState::Done);
+    let s = s.restart(|_| {});
+    assert_eq!(s.transcripts().get(id).unwrap().unwrap().state, FileState::Done);
+    whole(&s.segments(id), 30_000);
+  }
+
+  /// A Files model other than the dictation's runs on an engine of its own, which goes once no
+  /// file runs; the dictation's stays.
+  #[test]
+  fn a_files_model_of_its_own_runs_on_its_own_engine() {
+    let settings = Settings { model: Some("parakeet-v3".into()), ..Settings::default() };
+    let models = ["parakeet-v3", "gigaam-v3"];
+    let s = InProcess::start("files-own-model", &settings, Some(&loud(10.0)), HEARD, &models);
+    let lecture = s.audio("lecture.wav", 90.0);
+    let [shared] = s.transcribe(&[&lecture])[..] else { panic!("one transcript") };
+    s.file_in(shared, FileState::Done);
+    assert_eq!((s.models.loads(), s.models.live()), (1, 1), "the dictation's engine");
+
+    s.handle.edit_settings(|s| s.files_model = Some("gigaam-v3".into()));
+    s.update_where("the files model", |u| u.settings.files_model.is_some());
+    let [own] = s.transcribe(&[&lecture])[..] else { panic!("one transcript") };
+    assert_eq!(s.file_in(own, FileState::Done).model, "gigaam-v3");
+    whole(&s.segments(own), 90_000);
+    assert_eq!(s.models.loads(), 2);
+    poll("its own engine gone", Duration::from_secs(10), || (s.models.live() == 1).then_some(()));
+  }
+
+  /// The most memory this process has held so far, in bytes.
+  #[cfg(unix)]
+  fn peak_memory() -> u64 {
+    // SAFETY: it fills `usage`.
+    let usage = unsafe {
+      let mut usage: libc::rusage = mem::zeroed();
+      libc::getrusage(libc::RUSAGE_SELF, &mut usage);
+      usage
+    };
+    // In bytes on macOS, in KiB elsewhere.
+    let max = usage.ru_maxrss as u64;
+    if cfg!(target_os = "macos") { max } else { max * 1024 }
+  }
+
+  /// `make test-lecture`'s 4.5 hours of the fixtures' speech on a real model: all of it heard,
+  /// with memory staying within 300 MB of a short file's on the same model.
+  #[cfg(unix)]
+  #[test]
+  #[ignore = "needs the lecture: make test-lecture"]
+  fn a_lecture_on_a_real_model() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/fixtures");
+    let home = TempDir::new("files-lecture");
+    let model = crate::testing::model_ru();
+    let settings =
+      Settings { files_model: Some(model.display().to_string()), ..Settings::default() };
+    settings.save(&home.path().join(settings::FILE)).unwrap();
+    let config = Config {
+      home: home.path().to_owned(),
+      hub: Hub::at(home.path().join("hub")),
+      loader: Arc::new(Wavo),
+      fake_mic: None,
+      clock: Arc::new(Instant::now),
+    };
+    let session = Session::start(config, FakeOutput::default(), Box::new(|_| {})).unwrap();
+    let transcripts = Transcripts::open(home.path());
+    let run = |name: &str| {
+      let started = Instant::now();
+      session.handle().request(Request::Transcribe(vec![fixtures.join(name)])).unwrap();
+      let id = transcripts.list("").unwrap()[0].id;
+      let mut said = Instant::now();
+      let t = loop {
+        let t = transcripts.get(id).unwrap().unwrap();
+        if !t.state.pending() {
+          break t;
+        }
+
+        if said.elapsed() > Duration::from_secs(30) {
+          println!("{name}: {} of {:?}", clock(t.done_ms), t.duration_ms.map(clock));
+          said = Instant::now();
+        }
+
+        thread::sleep(Duration::from_millis(200));
+      };
+
+      let took = started.elapsed();
+      let speed = t.done_ms as f64 / took.as_millis() as f64;
+      println!("{name}: {:?} in {took:.1?}, {speed:.0}x, {:?}", clock(t.done_ms), t.error);
+      assert_eq!((t.state, t.error.as_deref()), (FileState::Done, None), "{name}");
+      (t.clone(), transcripts.segments(id).unwrap())
+    };
+
+    let _ = run("files/ru-long.m4a");
+    let base = peak_memory();
+    let (t, segments) = run("files/lecture.m4a");
+    let peak = peak_memory();
+    let mb = |b: u64| b / 1_000_000;
+    println!("peak memory: {} MB after the short file, {} MB after the lecture", mb(base), mb(peak));
+    assert!(peak < base + 300_000_000, "{} MB more", mb(peak - base));
+
+    // The lecture repeats the three fixtures, each with a pause after it.
+    let talk = ["ru-long", "ru-typical", "ru-short"].map(crate::testing::fixture);
+    let once_ms: usize = talk.iter().map(|f| f.pcm.len() / 16 + 3_000).sum();
+    let words: usize = talk.iter().map(|f| f.text.split_whitespace().count()).sum();
+    let want = t.done_ms as f64 / once_ms as f64 * words as f64;
+    let heard: usize = segments.iter().map(|s| s.text.split_whitespace().count()).sum();
+    println!("{} segments, {heard} words of {want:.0}", segments.len());
+    assert!((heard as f64 / want - 1.0).abs() < 0.1, "{heard} words of {want:.0}");
+    assert!(segments.windows(2).all(|w| w[0].start_ms <= w[1].start_ms), "in order");
+    assert!(segments.iter().all(|s| s.end_ms <= t.done_ms), "inside the audio");
   }
 }

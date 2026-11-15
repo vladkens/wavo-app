@@ -1283,6 +1283,12 @@ impl Prefs {
       Request::Restore(_) => "Could not put the previous text back",
       Request::DeleteSaved => "Could not delete the history",
       Request::Unload | Request::Transferred | Request::Close => return,
+      Request::Transcribe(_)
+      | Request::StopFile(_)
+      | Request::ContinueFile(_)
+      | Request::DeleteFiles(_)
+      | Request::TranscribeAgain { .. }
+      | Request::LocateFile(..) => return,
     };
     self.history.said = Some(format!("{what}: {error}"));
   }

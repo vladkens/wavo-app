@@ -48,7 +48,8 @@ def lecture(out: Path) -> None:
     """4.5 h of the fixtures' speech with pauses, as a phone records a lecture: 64 kbps AAC."""
     files = out / "files"
     files.mkdir(parents=True, exist_ok=True)
-    talk = [out / f"{name}.wav" for name in ("ru-long", "ru-typical", "ru-short")]
+    # Absolute: ffmpeg takes a list's paths from the list's folder.
+    talk = [(out / f"{name}.wav").resolve() for name in ("ru-long", "ru-typical", "ru-short")]
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         ff("-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "3", "-c:a", "pcm_s16le",

@@ -407,7 +407,7 @@ mod tests {
   fn leaves_file_transcripts_out() {
     let (from, out) = (TempDir::new("tr-files"), TempDir::new("tr-files-out"));
     add(&History::open(from.path()).unwrap(), NOW, "dictated", None);
-    let t = Transcripts::open(from.path()).unwrap();
+    let t = Transcripts::open(from.path());
     let lecture = from.path().join("lecture.m4a");
     fs::write(&lecture, b"audio").unwrap();
     let id = t.add(&Source::of(&lecture).unwrap(), "m", None, NOW).unwrap();

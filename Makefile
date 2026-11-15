@@ -29,7 +29,7 @@ clean:
 	cargo clean
 
 # wavo-app
-.PHONY: bundle dist pack run run-copy install uninstall shots fixtures test-models
+.PHONY: bundle dist pack run run-copy install uninstall shots fixtures test-models test-lecture
 
 APP := target/Wavo.app
 PROFILE := release
@@ -106,3 +106,12 @@ MODEL_TESTS := engine::tests:: audio::tests::fixtures session::tests::the_tail_a
 
 test-models: fixtures # the ignored tests on real models
 	cargo test $(CARGO_FLAGS) -- --ignored --test-threads=1 --nocapture $(MODEL_TESTS)
+
+# 4.5 hours of the fixtures' speech, as a phone records a lecture (scripts/fixtures.py --lecture).
+LECTURE := target/fixtures/files/lecture.m4a
+
+$(LECTURE): $(FIXTURES)
+	python3 scripts/fixtures.py --lecture
+
+test-lecture: $(LECTURE) # the lecture through the files work on a real model: its speed and memory
+	cargo test $(CARGO_FLAGS) -- --ignored --nocapture session::tests::a_lecture_on_a_real_model

@@ -46,6 +46,11 @@ pub struct Settings {
   /// The text comes without hesitation sounds, and its paste ends with a space and goes on a
   /// sentence the paste before it left open.
   pub clean_text: bool,
+  /// The Files tab's model, a model name or a GGUF file path; `None` is `model`'s (not a keyboard
+  /// layout's).
+  pub files_model: Option<String>,
+  /// The Files tab's language: a code, or `auto` for the model to detect it.
+  pub files_language: String,
   /// Free the idle model after this many minutes: 0 right after each dictation, `None` never.
   pub unload_after_minutes: Option<u32>,
   /// Parakeet and GigaAM run on the Neural Engine once prepared for it, else on the GPU.
@@ -121,6 +126,8 @@ impl Default for Settings {
       auto_paste: true,
       keep_in_clipboard: false,
       clean_text: true,
+      files_model: None,
+      files_language: "auto".into(),
       unload_after_minutes: Some(15),
       neural_engine: true,
       history_retention: Retention::Unlimited,
@@ -192,9 +199,13 @@ impl Settings {
   /// The language chosen for the engine; `None` (empty, `auto` or [KEYBOARD]) leaves it to the
   /// model, or to the layout.
   pub fn engine_language(&self) -> Option<String> {
-    let code = self.language.trim();
-    let chosen = !code.is_empty() && !code.eq_ignore_ascii_case("auto") && code != KEYBOARD;
-    chosen.then(|| code.to_owned())
+    chosen_language(&self.language)
+  }
+
+  /// The language a new file transcript is asked in; `None` (empty or `auto`) leaves it to the
+  /// model.
+  pub fn files_language(&self) -> Option<String> {
+    chosen_language(&self.files_language)
   }
 
   pub fn follows_keyboard(&self) -> bool {
@@ -220,6 +231,13 @@ impl Settings {
 }
 
 // MARK: Languages
+
+/// A language setting's code; `None` for empty, `auto` or [KEYBOARD].
+fn chosen_language(code: &str) -> Option<String> {
+  let code = code.trim();
+  let chosen = !code.is_empty() && !code.eq_ignore_ascii_case("auto") && code != KEYBOARD;
+  chosen.then(|| code.to_owned())
+}
 
 /// A language's English name by the code wavo's models list it under (`ru`: `Russian`): ISO 639-1,
 /// else 639-3, and Whisper's `jw` for Javanese; an unknown code as it is.
