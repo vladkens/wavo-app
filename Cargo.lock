@@ -837,7 +837,7 @@ dependencies = [
 [[package]]
 name = "nimbo"
 version = "0.0.1"
-source = "git+https://github.com/vladkens/nimbo?branch=main#299b33db20539a9ede59c93e0cb7669af9bbbb86"
+source = "git+https://github.com/vladkens/nimbo?branch=main#a1d5b96c5a963fa11082d8ff4d69d8d93416ad6a"
 dependencies = [
  "block2",
  "dispatch2",
