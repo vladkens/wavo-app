@@ -1236,8 +1236,8 @@ impl Clip {
     let runs = |below: f32| {
       let mut runs = Vec::new();
       let mut start = None;
-      for i in min..n {
-        match (self.scores[i] < below, start) {
+      for (i, &score) in self.scores.iter().enumerate().skip(min) {
+        match (score < below, start) {
           (true, None) => start = Some(i),
           (false, Some(a)) => {
             runs.push(a..i);
@@ -1283,8 +1283,9 @@ impl Clip {
     let (edge, long, kept) = (frames(EDGE_MS), frames(LONG_PAUSE_MS), frames(KEPT_PAUSE_MS));
     let mut cut = Vec::new();
     let mut start = None;
-    for i in 0..=n {
-      let pause = i < n && self.scores[i] < PAUSE;
+    // One more, not a pause: the last run ends.
+    let pauses = self.scores.iter().map(|&s| s < PAUSE).chain(std::iter::once(false));
+    for (i, pause) in pauses.enumerate() {
       match (pause, start) {
         (true, None) => start = Some(i),
         (false, Some(a)) => {
