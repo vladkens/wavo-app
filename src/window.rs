@@ -311,6 +311,15 @@ impl Prefs {
     self.found.get(self.pick.active?)
   }
 
+  /// The Model's name, on disk or not; `None` with none.
+  fn model_label(&self) -> Option<String> {
+    match (self.active(), &self.pick.other) {
+      (_, Some((name, _))) => Some(name.clone()),
+      (Some(f), None) => Some(f.0.name.to_owned()),
+      (None, None) => None,
+    }
+  }
+
   /// wavo's model chosen in the settings, on disk or not.
   fn chosen(&self) -> Option<&'static str> {
     hub::lookup(self.settings.model.as_deref()?).ok().map(|m| m.name)
@@ -1035,11 +1044,7 @@ impl Prefs {
   /// and Download more…; the models' names, and the choice in use.
   fn keyboard_choices(&self, lang: &str) -> (Vec<String>, Vec<&'static str>, usize) {
     let models = self.models_for(lang);
-    let default = match (self.active(), &self.pick.other) {
-      (_, Some((name, _))) => name.clone(),
-      (Some(f), None) => f.0.name.to_owned(),
-      (None, None) => "none".to_owned(),
-    };
+    let default = self.model_label().unwrap_or_else(|| "none".to_owned());
     let mut labels = vec![format!("{default} (default)")];
     labels.extend(models.iter().map(|m| m.name.to_owned()));
     let at = match self.settings.keyboard_models.get(lang).and_then(Option::as_ref) {
@@ -3031,8 +3036,13 @@ const FILES_LIST: &str = "files-list";
 const VIEWER: &str = "viewer";
 /// What the empty tab says Wavo reads ([decode::EXTENSIONS]).
 const FORMATS: &str = "MP3, M4A, AAC, WAV, FLAC, OGG, AIFF, CAF, MP4, MOV and MKV";
-/// The Files tab's Model when it is the dictation's.
+/// The Files tab's Model when it is the dictation's and there is none; else `<its name> (same as
+/// Dictation)`.
 const SAME_MODEL: &str = "Same as Dictation";
+/// The Files tab's Model and Language pop-ups at their widest, in points: both fit the window
+/// beside their labels, a longer name ends in "…".
+const FILES_MODEL_W: f32 = 248.0;
+const FILES_LANGUAGE_W: f32 = 132.0;
 const FILES_MODEL_HELP: &str = "The model a new transcript runs with: the dictation's Model, or \
   one of its own. Transcribe Again in a transcript's menu runs it with another.";
 /// The viewer's text column until it is laid out: the window, the page's padding and the plate's.
@@ -3684,14 +3694,18 @@ impl Prefs {
 
     let (models, at) = self.files_models();
     let (langs, lang) = self.files_languages();
-    let labels: Vec<String> = langs.iter().map(|l| l.0.clone()).collect();
     let (mut model, mut language) = (None, None);
     ui.row(s, |ui| {
       ui.text("Model", fs.label.nowrap());
-      model = pick(ui.help(FILES_MODEL_HELP), "files-model", &models, at, &[0]);
+      let mut cur = at;
+      let pop = picker(&mut cur, models.iter().map(String::as_str), &[0]).max_width(FILES_MODEL_W);
+      model = pop.show(ui.help(FILES_MODEL_HELP).id("files-model")).changed.then_some(cur);
       ui.el(Style::new().w(px(8.0)));
       ui.text("Language", fs.label.nowrap());
-      language = pick(ui, "files-language", &labels, lang, &[0]);
+      let mut cur = lang;
+      let labels = langs.iter().map(|l| l.0.as_str());
+      let pop = picker(&mut cur, labels, &[0]).max_width(FILES_LANGUAGE_W);
+      language = pop.show(ui.id("files-language")).changed.then_some(cur);
     });
 
     match model {
@@ -3709,10 +3723,14 @@ impl Prefs {
     }
   }
 
-  /// Same as Dictation, the models downloaded, and the one set when it is none of them: the
-  /// choices and the index of the one set.
+  /// The dictation's Model (same as Dictation), the models downloaded, and the one set when it is
+  /// none of them: the choices and the index of the one set.
   fn files_models(&self) -> (Vec<String>, usize) {
-    let mut items = vec![SAME_MODEL.to_owned()];
+    let same = match self.model_label() {
+      Some(m) => format!("{m} (same as Dictation)"),
+      None => SAME_MODEL.to_owned(),
+    };
+    let mut items = vec![same];
     items.extend(self.found.iter().map(|f| f.0.name.to_owned()));
     let Some(query) = &self.settings.files_model else { return (items, 0) };
     let pick = Pick::new(&self.hub, Some(query), &self.found);
@@ -6398,5 +6416,33 @@ mod tests {
     confirm(&mut h);
     assert_eq!(fake.log().requests, [Request::DeleteFiles(vec![new, old])]);
     assert!(home.dir.path().join("Call.mp3").is_file(), "the file stays");
+  }
+
+  /// Same as Dictation names the dictation's Model, the default one under the keyboard layouts'
+  /// own, and the Files tab offers that model's languages. The list of every model, taller than
+  /// the window, opens from the foot under the window's buttons.
+  #[test]
+  fn the_files_model_names_the_dictations() {
+    let all: Vec<&str> = hub::MODELS.iter().map(|m| m.name).collect();
+    let home = Home::new("window-files-model", &all);
+    let rows = BTreeMap::from([("ru".to_owned(), Some("gigaam-v3".to_owned()))]);
+    let settings = Settings {
+      language: KEYBOARD.into(),
+      model: Some("parakeet-uk".into()),
+      keyboard_models: rows,
+      ..Settings::default()
+    };
+    let mut h = home.harness(&Fake::default(), settings);
+    let (models, at) = h.app().files_models();
+    assert_eq!((at, models[0].as_str()), (0, "parakeet-uk (same as Dictation)"));
+    let langs: Vec<String> = h.app().files_languages().0.into_iter().map(|l| l.1).collect();
+    assert_eq!(langs, ["auto", "en", "uk"]);
+
+    tab(&mut h, Page::Files);
+    click(&mut h, Id::of("files-model"));
+    h.frame();
+    let lights = mac_titlebar("", false).buttons.unwrap();
+    let menu = h.rect(Id::of("files-model").key("menu")).unwrap();
+    assert!(menu.y >= lights.y + lights.h && menu.y + menu.h <= h.size().h, "{menu:?}");
   }
 }
