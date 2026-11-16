@@ -843,7 +843,7 @@ dependencies = [
 [[package]]
 name = "nimbo"
 version = "0.0.1"
-source = "git+https://github.com/vladkens/nimbo?branch=main#f060f59e4d4ccabc44c60fb796f8ae33a70dea46"
+source = "git+https://github.com/vladkens/nimbo?branch=main#0ac51e9fff1cf9c5ed1ccb9037780c719d90aacb"
 dependencies = [
  "block2",
  "dispatch2",
@@ -2414,7 +2414,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
