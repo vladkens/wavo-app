@@ -975,7 +975,7 @@ impl Processor {
 
 /// A frame of interleaved samples as one; a NaN or infinity (a broken driver) would panic the
 /// resampler's FFT, so it is silence.
-fn downmix(frame: &[f32]) -> f32 {
+pub fn downmix(frame: &[f32]) -> f32 {
   let s = frame.iter().sum::<f32>() / frame.len() as f32;
   if s.is_finite() { s } else { 0.0 }
 }
@@ -1010,7 +1010,7 @@ const CHUNK: usize = 1024;
 
 /// Streaming mono resampler (rubato's FFT one, startup delay trimmed): input in any chunk sizes,
 /// and on [finish](Resample::finish) the tail, so the output is as long as the input.
-struct Resample {
+pub struct Resample {
   /// `None` at the same rate: samples pass through.
   fft: Option<Fft<f32>>,
   ratio: f64,
@@ -1023,7 +1023,7 @@ struct Resample {
 }
 
 impl Resample {
-  fn new(from: u32, to: u32) -> Result<Self> {
+  pub fn new(from: u32, to: u32) -> Result<Self> {
     let fft = match from == to {
       true => None,
       false => Some(
@@ -1039,7 +1039,7 @@ impl Resample {
   }
 
   /// Appends the resampled samples that are ready to `out`.
-  fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
+  pub fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
     let Some(fft) = &mut self.fft else { return out.extend_from_slice(input) };
     self.pending.extend_from_slice(input);
     self.fed += input.len();
@@ -1055,7 +1055,7 @@ impl Resample {
   }
 
   /// The input still buffered and the filter's tail.
-  fn finish(&mut self, out: &mut Vec<f32>) {
+  pub fn finish(&mut self, out: &mut Vec<f32>) {
     let Some(fft) = &mut self.fft else { return };
     let expected = (self.fed as f64 * self.ratio).ceil() as usize;
     let mut partial = self.pending.len();
@@ -1236,8 +1236,8 @@ impl Clip {
     let runs = |below: f32| {
       let mut runs = Vec::new();
       let mut start = None;
-      for i in min..n {
-        match (self.scores[i] < below, start) {
+      for (i, &score) in self.scores.iter().enumerate().skip(min) {
+        match (score < below, start) {
           (true, None) => start = Some(i),
           (false, Some(a)) => {
             runs.push(a..i);
@@ -1283,8 +1283,9 @@ impl Clip {
     let (edge, long, kept) = (frames(EDGE_MS), frames(LONG_PAUSE_MS), frames(KEPT_PAUSE_MS));
     let mut cut = Vec::new();
     let mut start = None;
-    for i in 0..=n {
-      let pause = i < n && self.scores[i] < PAUSE;
+    // One more, not a pause: the last run ends.
+    let pauses = self.scores.iter().map(|&s| s < PAUSE).chain(std::iter::once(false));
+    for (i, pause) in pauses.enumerate() {
       match (pause, start) {
         (true, None) => start = Some(i),
         (false, Some(a)) => {

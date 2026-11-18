@@ -2,14 +2,15 @@
 
 //! The menu bar icon and menu: a header with the app, the hotkey and the state; the warnings, most
 //! opening where they are fixed; an update found or going on; Copy Last Dictation and Recent; the
-//! model in use with the others downloaded; Unload Model, History…, Settings…, Check for Updates…,
-//! Quit.
+//! model in use with the others downloaded; Unload Model, History…, Transcribe File… and the file
+//! running, Settings…, Check for Updates…, Quit.
 
 use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
 use nimbo::{Hotkey, Shortcut};
 
 use crate::audio::{Auto, Device, Microphone};
 use crate::engine::Phase as EnginePhase;
+use crate::files::FileStatus;
 use crate::history::{local_time, shorten};
 use crate::session::{NoModel, Outcome, Phase, Status};
 use crate::updater::{self, State};
@@ -41,6 +42,10 @@ pub enum Action {
   Models,
   Unload,
   History,
+  /// Files with its file panel open.
+  TranscribeFile,
+  /// The file running: Files.
+  Files,
   Settings,
   /// The update's row under the warnings while it has news: it opens the update's window.
   Update,
@@ -279,14 +284,28 @@ pub fn menu(
     Item::button(Action::Unload, "Unload Model").enabled(loaded),
     Item::Divider,
     Item::button(Action::History, "History…"),
-    // A tray menu's keys work only in macOS's; Windows' and Linux's would show keys that do
-    // nothing.
-    with_key(Item::button(Action::Settings, "Settings…"), Shortcut::char(',').cmd()),
+    Item::button(Action::TranscribeFile, "Transcribe File…"),
   ]);
+  items.extend(status.file.as_ref().map(|f| Item::button(Action::Files, &file_title(f))));
+  // A tray menu's keys work only in macOS's; Windows' and Linux's would show keys that do nothing.
+  items.push(with_key(Item::button(Action::Settings, "Settings…"), Shortcut::char(',').cmd()));
   items.extend(update.map(check_item));
   let quit = Item::button(Action::Quit, &format!("Quit {}", crate::INFO.name));
   items.extend([Item::Divider, with_key(quit, Shortcut::char('q').cmd())]);
   Menu::new(items)
+}
+
+/// The file running, under Transcribe File…: `lecture.m4a · 42%`, its name shortened so the menu
+/// doesn't cut the share.
+fn file_title(f: &FileStatus) -> String {
+  let share = f.duration_ms.filter(|&d| d > 0).map(|d| (f.done_ms as f64 / d as f64).min(1.0));
+  let at = match share {
+    Some(k) => format!("{:.0}%", k * 100.0),
+    None => crate::segments::clock(f.done_ms),
+  };
+
+  let name = shorten(&f.name, LABEL - at.chars().count() - 3);
+  format!("{name} · {at}")
 }
 
 /// The update's row while it has news: a release on offer, its download, the restart, a failure.
@@ -606,6 +625,39 @@ mod tests {
     assert!(!idle.iter().any(|(a, _)| *a == Some(Action::Update)), "no news");
     let available = items(State::Available(Release::test("1.2.0")));
     assert_eq!(available[1], (Some(Action::Update), "Update Available: v1.2.0…".into()));
+  }
+
+  /// Transcribe File… sits under History…, the file running under it with how far it is, its
+  /// name shortened to keep the share.
+  #[test]
+  fn the_file_running_shows_under_transcribe_file() {
+    let pick = Pick::default();
+    let items = |s: &Status| {
+      let mics = (&[][..], &Microphone::System, false);
+      let items = menu(None, s, &[], &[], mics, (&[], &pick), None).items;
+      let item = |i: Item<Action>| Some((i.action()?.clone(), i.label().to_owned()));
+      items.into_iter().filter_map(item).collect::<Vec<_>>()
+    };
+    let at = |items: &[(Action, String)], a| items.iter().position(|i| i.0 == a);
+    let idle = items(&Status::default());
+    assert_eq!(at(&idle, Action::TranscribeFile), at(&idle, Action::History).map(|i| i + 1));
+    assert_eq!(at(&idle, Action::Files), None);
+
+    let file = FileStatus {
+      id: 1,
+      name: "A lecture on thermodynamics, the second law and the engines of it, week 3.m4a".into(),
+      done_ms: 5_400_000,
+      duration_ms: Some(16_200_000),
+      left_ms: None,
+      waiting: false,
+    };
+    let running = items(&Status { file: Some(file.clone()), ..Status::default() });
+    let i = at(&running, Action::Files).unwrap();
+    assert_eq!(Some(i), at(&running, Action::TranscribeFile).map(|i| i + 1));
+    let title = &running[i].1;
+    assert!(title.ends_with("… · 33%") && title.chars().count() <= LABEL, "{title}");
+    let unknown = FileStatus { duration_ms: None, ..file };
+    assert!(file_title(&unknown).ends_with("… · 1:30:00"));
   }
 
   #[test]

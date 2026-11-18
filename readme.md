@@ -40,6 +40,7 @@ Wavo is inspired by [Handy](https://github.com/cjpais/Handy) and runs the same G
 - 💊 **A quiet indicator**: a small pill shows the level while you speak and never takes the focus
 - 🎧 **Picks the microphone**: a USB one first, then the built-in one, a Bluetooth headset only when there is nothing else
 - 📜 **History**: every dictation with its recording, searchable; play it back, transcribe it again, export it
+- 🎞️ **Files**: drop an audio or video file on the window and get its text with times, even a 4.5-hour lecture; copy it or export it to TXT or SRT. It reads MP3, M4A, AAC, WAV, FLAC, OGG, AIFF, CAF, MP4, MOV and MKV
 - 📦 **Shared models**: kept in the standard Hugging Face cache, so other tools that use the same models share them
 - 🖥️ **Every desktop**: macOS, Windows and Linux on X11 and Wayland, in about 10 MB
 
@@ -58,7 +59,9 @@ Wavo is inspired by [Handy](https://github.com/cjpais/Handy) and runs the same G
 curl -fsSL https://raw.githubusercontent.com/vladkens/wavo-app/main/scripts/handy.py | python3 -
 ```
 
-The same Export… and Import… in Advanced › Data move your history to another computer.
+The same Export… and Import… in Advanced › Data move your history to another computer; the transcripts of files stay out of it.
+
+**A recording to transcribe?** Drop the file on the settings window, or choose Transcribe File… in Wavo's menu. It goes on in the background, a dictation first, and picks up where it stopped after a quit; the text stays in the Files tab until you delete it, and the file itself is not copied.
 
 <details>
 <summary>Which file, and the first launch</summary>

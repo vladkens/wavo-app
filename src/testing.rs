@@ -16,8 +16,9 @@ use rusqlite::Connection;
 use wavo::Backend;
 
 use crate::audio::{Clip, SAMPLE_RATE, WavSink, read_wav};
-use crate::engine::{Loader, Model, SpeechModel};
+use crate::engine::{Heard, Loader, Model, SpeechModel};
 use crate::history::DB_FILE;
+use crate::segments::Segment;
 
 /// A fresh directory under the system temp dir, removed on drop.
 pub struct TempDir(PathBuf);
@@ -318,7 +319,7 @@ impl SpeechModel for FakeModel {
     pcm: &[f32],
     _language: Option<&str>,
     on_piece: &mut dyn FnMut(usize, usize) -> ControlFlow<()>,
-  ) -> anyhow::Result<String> {
+  ) -> anyhow::Result<Heard> {
     let m = &self.0;
     m.jobs_on_ane.lock().unwrap().push(self.1);
     assert!(!m.panic_next.swap(false, Ordering::SeqCst), "injected panic in a run");
@@ -328,6 +329,7 @@ impl SpeechModel for FakeModel {
 
     let pieces = wavo::split(pcm, m.window_ms);
     let count = pieces.len();
+    let mut segments = Vec::new();
     for (index, range) in pieces.into_iter().enumerate() {
       let gate = m.gate.lock().unwrap().clone();
       if let Some(gate) = gate {
@@ -338,9 +340,15 @@ impl SpeechModel for FakeModel {
       if on_piece(index, count).is_break() {
         return Err(wavo::Error::Cancelled.into());
       }
+
+      if !m.text.is_empty() {
+        let (start_ms, end_ms) = (range.start as i64 / 16, range.end as i64 / 16);
+        segments.push(Segment { start_ms, end_ms, speaker: None, text: m.text.clone() });
+      }
     }
 
-    Ok(vec![m.text.as_str(); count].join(" ").trim().to_owned())
+    let text = vec![m.text.as_str(); count].join(" ").trim().to_owned();
+    Ok(Heard { text, segments })
   }
 }
 

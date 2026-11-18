@@ -360,6 +360,11 @@ fn chosen(main: &mut Main, action: Action) {
       open_window(main, Some(Page::Models))
     }
     Action::History => open_window(main, Some(Page::History)),
+    Action::TranscribeFile => {
+      open_window(main, Some(Page::Files));
+      with_window(Prefs::transcribe_file);
+    }
+    Action::Files => open_window(main, Some(Page::Files)),
     Action::Settings => open_window(main, None),
     Action::Quit => main.quit(),
     Action::Warning(Warn::Accessibility | Warn::Microphone | Warn::SecureInput | Warn::Hotkey) => {
@@ -421,7 +426,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
   };
   let mut prefs = Prefs::new(Box::new(shell), settings, hub, &home, history);
   if let Some(u) = &update {
-    prefs.update(&u.settings, &u.status, u.history);
+    prefs.update(&u.settings, &u.status, u.history, u.transcripts);
   }
 
   prefs.page = page.unwrap_or(Page::General);
@@ -553,7 +558,7 @@ impl App {
     if self.window.is_some() {
       with_window(|prefs| {
         if let Some(u) = with_app(|app| app.update.clone()).flatten() {
-          prefs.update(&u.settings, &u.status, u.history);
+          prefs.update(&u.settings, &u.status, u.history, u.transcripts);
         }
       });
     }
@@ -1160,12 +1165,12 @@ impl window::Shell for AppShell {
     });
   }
 
-  fn history(&self, req: Request) {
+  fn request(&self, req: Request) {
     let handle = self.handle.clone();
-    spawn("history", move || {
+    spawn("request", move || {
       if let Err(e) = handle.request(req.clone()) {
         warn!("{req:?}: {e}");
-        with_window(move |prefs| prefs.history_failed(req, &e));
+        with_window(move |prefs| prefs.request_failed(req, &e));
       }
     });
   }
@@ -1230,7 +1235,7 @@ impl window::Shell for AppShell {
     let (home, handle, state) = (self.home.clone(), self.handle.clone(), self.export.clone());
     spawn("export", move || {
       let _awake = nimbo::activity::begin("Exporting the history");
-      user_initiated();
+      crate::user_initiated();
       let started = Instant::now();
       let result = transfer::export(&home, &file, progress(&state));
       let end = match result {
@@ -1267,7 +1272,7 @@ impl window::Shell for AppShell {
     let (home, handle, state) = (self.home.clone(), self.handle.clone(), self.import.clone());
     spawn("import", move || {
       let _awake = nimbo::activity::begin("Importing a history");
-      user_initiated();
+      crate::user_initiated();
       let started = Instant::now();
       let end = match transfer::import(&home, &file, progress(&state)) {
         Ok(done) => {
@@ -1300,18 +1305,6 @@ impl window::Shell for AppShell {
   fn check_updates(&self) {
     proxy().post(open_update);
   }
-}
-
-/// The calling thread runs as the person's own action, not as background work: macOS gives it
-/// the disk and the cores a background thread waits for. The process's side, no App Nap while
-/// Wavo is out of view, is nimbo's activity the transfer holds. Other systems don't tell them
-/// apart.
-fn user_initiated() {
-  // SAFETY: it sets the calling thread's own class.
-  #[cfg(target_os = "macos")]
-  unsafe {
-    libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0)
-  };
 }
 
 /// `16.0 GB in 52.3 s, 306 MB/s` since `started`.

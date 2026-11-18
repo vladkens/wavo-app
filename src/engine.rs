@@ -24,6 +24,8 @@ use crossbeam_channel::{
 use tracing::{debug, info, warn};
 use wavo::Backend;
 
+use crate::segments::{self, Segment};
+
 // MARK: Models
 
 pub trait Loader: Send + Sync {
@@ -50,17 +52,25 @@ pub trait SpeechModel {
     None
   }
 
-  /// Text of 16 kHz mono audio, cut at pauses into pieces of the model's window. `on_piece(index,
-  /// count)` follows each piece; a break stops the run there with an error.
+  /// What it hears in 16 kHz mono audio, cut at pauses into pieces of the model's window.
+  /// `on_piece(index, count)` follows each piece; a break stops the run there with an error.
   fn transcribe(
     &self,
     pcm: &[f32],
     language: Option<&str>,
     on_piece: &mut dyn FnMut(usize, usize) -> ControlFlow<()>,
-  ) -> Result<String>;
+  ) -> Result<Heard>;
 }
 
 pub type Model = Box<dyn SpeechModel + Send>;
+
+/// A job's text, and its words in segments with times from the start of its audio: dictations
+/// take the text, files the segments.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Heard {
+  pub text: String,
+  pub segments: Vec<Segment>,
+}
 
 pub struct Wavo;
 
@@ -145,7 +155,7 @@ impl SpeechModel for wavo::Model {
     pcm: &[f32],
     language: Option<&str>,
     on_piece: &mut dyn FnMut(usize, usize) -> ControlFlow<()>,
-  ) -> Result<String> {
+  ) -> Result<Heard> {
     let mut options = wavo::Options::default();
     let listed = language.and_then(|c| self.languages().iter().find(|l| l.eq_ignore_ascii_case(c)));
     match (language, listed) {
@@ -161,8 +171,20 @@ impl SpeechModel for wavo::Model {
       options.window_ms = Some(PARAKEET_WINDOW_MS);
     }
 
-    let transcript = self.transcribe_long(pcm, &options, |p| on_piece(p.index, p.count))?;
-    Ok(transcript.text.trim().to_owned())
+    // Each piece's start and how many tokens it added to the transcript.
+    let mut pieces: Vec<(i64, usize)> = Vec::new();
+    let transcript = self.transcribe_long(pcm, &options, |p| {
+      pieces.push((p.start_ms.into(), p.transcript.tokens.len()));
+      on_piece(p.index, p.count)
+    })?;
+
+    let ends = pieces.iter().skip(1).map(|p| p.0).chain([pcm.len() as i64 / 16]);
+    let mut tokens = transcript.tokens.iter().map(|t| (t.piece.as_str(), t.start_ms.into()));
+    let segments = pieces
+      .iter()
+      .zip(ends)
+      .flat_map(|(&(start, n), end)| segments::of_tokens(start, end, tokens.by_ref().take(n)));
+    Ok(Heard { segments: segments.collect(), text: transcript.text.trim().to_owned() })
   }
 }
 
@@ -204,8 +226,8 @@ pub struct Status {
 pub enum Event {
   /// [`Engine::status`] changed.
   Changed,
-  /// The text of job `id`, and the model it ran on, unless it never ran.
-  Done(u64, Result<String, EngineError>, Option<Ran>),
+  /// What job `id` heard, and the model it ran on, unless it never ran.
+  Done(u64, Result<Heard, EngineError>, Option<Ran>),
 }
 
 /// The model a job ran on.
@@ -628,7 +650,7 @@ impl Worker {
         debug!(id = job.id, "a dictation goes first: the background job starts over after it");
         return self.queue.push_front(job);
       }
-      Ok(Ok(text)) => Ok(text),
+      Ok(Ok(heard)) => Ok(heard),
       Ok(Err(e)) => Err(EngineError::Failed(format!("{e:#}"))),
       Err(panic) => Err(EngineError::Failed(format!("panicked: {}", panic_message(&*panic)))),
     };
@@ -646,7 +668,7 @@ impl Worker {
     self.set(|s| (s.phase, s.device, s.software_gpu) = (Phase::Stopped, None, false));
   }
 
-  fn done(&self, id: u64, result: Result<String, EngineError>, ran: Option<Ran>) {
+  fn done(&self, id: u64, result: Result<Heard, EngineError>, ran: Option<Ran>) {
     let _ = self.events.send(Event::Done(id, result, ran));
   }
 
@@ -717,11 +739,11 @@ mod tests {
 
     fn done(&self) -> (u64, Result<String, EngineError>) {
       let (id, result, _) = self.done_on();
-      (id, result)
+      (id, result.map(|h| h.text))
     }
 
-    /// Also the model it ran on.
-    fn done_on(&self) -> (u64, Result<String, EngineError>, Option<Ran>) {
+    /// What it heard, and the model it ran on.
+    fn done_on(&self) -> (u64, Result<Heard, EngineError>, Option<Ran>) {
       loop {
         match self.events.recv_timeout(Duration::from_secs(10)).expect("a job done") {
           Event::Done(id, result, ran) => return (id, result, ran),
@@ -763,7 +785,8 @@ mod tests {
     let f = Fake::start("engine-ran", &models, None);
     let job = |id| {
       f.engine.transcribe(id, vec![0.0; SECOND], None, false);
-      f.done_on()
+      let (id, result, ran) = f.done_on();
+      (id, result.map(|h| h.text), ran)
     };
     let ran = |load| Some(Ran { device: "fake".into(), load });
     assert_eq!(job(1), (1, Ok("text".into()), ran(1)));
@@ -970,15 +993,18 @@ mod tests {
     let engine = Engine::start(Arc::new(Wavo), model, false, None, tx);
     let mut failed = Vec::new();
     for (id, &(fixture_name, lang)) in cases.iter().cycle().take(cases.len() + 1).enumerate() {
-      let f = fixture(fixture_name);
-      let started = Instant::now();
-      engine.transcribe(id as u64, f.input().pcm, lang.map(str::to_owned), false);
-      let text = loop {
+      let (f, started) = (fixture(fixture_name), Instant::now());
+      let pcm = f.input().pcm;
+      let audio_ms = pcm.len() as i64 / 16;
+      engine.transcribe(id as u64, pcm, lang.map(str::to_owned), false);
+      let heard = loop {
         if let Event::Done(_, result, _) = events.recv().unwrap() {
           break result.unwrap();
         }
       };
 
+      check_segments(&heard, audio_ms);
+      let text = heard.text;
       let w = wer(&f.text, &text);
       let took = started.elapsed();
       eprintln!("{name} {fixture_name}: WER {:.1}% in {took:.2?}\n  {text}", w * 100.0);
@@ -988,6 +1014,16 @@ mod tests {
     }
 
     assert!(failed.is_empty(), "{name}: WER above {:.0}% on {failed:?}", MAX_WER * 100.0);
+  }
+
+  /// The segments in order, inside the audio, and with the text's words.
+  fn check_segments(heard: &Heard, audio_ms: i64) {
+    let s = &heard.segments;
+    assert!(s.windows(2).all(|w| w[0].end_ms <= w[1].start_ms), "out of order: {s:?}");
+    assert!(s.iter().all(|s| 0 <= s.start_ms && s.end_ms <= audio_ms), "outside: {s:?}");
+    let words = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let joined: Vec<&str> = s.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(words(&joined.join(" ")), words(&heard.text));
   }
 
   #[test]
