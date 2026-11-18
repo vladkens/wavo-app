@@ -4,11 +4,12 @@
 
 # Wavo
 
-**Local dictation for macOS, Windows and Linux**
+**Local dictation for macOS, Windows, Linux and Android**
 
 [<img src="https://badges.ws/badge/-/macOS%2014.2%2B/424a53?logo=apple&label" alt="macOS 14.2+" />](#-usage)
 [<img src="https://badges.ws/badge/-/Windows%2010%2B/0969da?logo=windows11&label" alt="Windows 10+" />](#-usage)
 [<img src="https://badges.ws/badge/-/Linux%20%C2%B7%20X11%20%C2%B7%20Wayland/875a00?logo=linux&label" alt="Linux, X11 and Wayland" />](#-usage)
+[<img src="https://badges.ws/badge/-/Android%2010%2B/3ddc84?logo=android&label" alt="Android 10+" />](#-android)
 [<img src="https://badges.ws/github/license/vladkens/wavo-app" alt="license" />](https://github.com/vladkens/wavo-app/blob/main/LICENSE)
 [<img src="https://badges.ws/badge/follow-@uid127-black" alt="follow @uid127" />](https://x.com/uid127)
 [<img src="https://badges.ws/badge/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
@@ -83,6 +84,19 @@ Wavo's icon goes in the tray, which GNOME needs the AppIndicator extension for (
 The GPU needs a Vulkan driver (`mesa-vulkan-drivers` on Debian and Ubuntu); without one Wavo runs on the CPU, much slower.
 
 </details>
+
+## 📱 Android
+
+The same engine on a phone: a **voice keyboard** that types what you say into any app, and a screen to dictate, copy and share. Speech is recognized on the phone, with the same models; only a model's download uses the network.
+
+- The **recording pill** from the desktop HUD, drawn from the same gradient code through JNI, so the phone and the Mac show one picture.
+- **Pause and resume** into the same recording, and — with the setting on — **recording while the app is left**, under a notification with the time and pause and stop.
+- **Recordings kept with their text**: play them, share them, name a dictation, and **transcribe the same audio with another model** to compare two versions.
+- **Conversations** with speaker labels, a turn a line with the time it started.
+
+**[Download the APK](https://github.com/tyetladd/wavo-app/releases/latest)** — arm64-v8a, Android 10 or later, signed with a debug key: installable by hand, not for a store.
+
+Build it, and what is and isn't there yet: **[android/readme.md](android/readme.md)**. The code is in `android/` — a Rust core behind JNI and a Kotlin app. The GPU (Vulkan) path is measured on a Pixel 7 Pro; on a Galaxy S20 Ultra's Adreno 650 it falls back to the CPU, which runs 4–8× real time.
 
 ## 🤖 How it's made
 

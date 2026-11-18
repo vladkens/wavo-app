@@ -10,6 +10,7 @@ mod audio;
 mod cleanup;
 mod cli;
 mod engine;
+mod gradient;
 mod history;
 mod hud;
 mod live;

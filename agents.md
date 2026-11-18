@@ -21,6 +21,6 @@ The dictation app (`wavo-app`, `publish = false`) for macOS, Windows and Linux: 
 - Never record from the real microphone (macOS would ask the person for permission): `WAVO_FAKE_MIC=<wav>` plays a file instead, and a test that needs a device is `#[ignore]`.
 - Tests only read the Hugging Face cache (`make test-models` runs on its real models); anything that downloads gets a temp `HF_HOME`.
 - No generated or binary files in git: screenshots and speech fixtures are made into `target/`; the app icon is the one binary.
-- Start every `.rs` file with `// Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app`.
+- Start every source file with a copyright line: the desktop's, and anything moved out of it, with `// Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app`; the Android app's own files (`android/`, Kotlin and Rust alike) with `// Copyright (c) tyetladd | MIT License | https://github.com/tyetladd/wavo-app`.
 - `make check` (nightly fmt, clippy with `-D warnings`) and `make test` pass before a pull request.
 - A commit is one short lowercase line, no body.

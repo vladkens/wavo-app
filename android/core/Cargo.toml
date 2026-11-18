@@ -1,0 +1,29 @@
+[package]
+name = "wavo-android"
+version = "0.1.0"
+edition = "2024"
+description = "Wavo for Android: the speech engine, its models and the text cleanup behind JNI."
+license = "MIT"
+publish = false
+
+# A crate of its own, not a member of the desktop app's: it builds without nimbo and cpal.
+[workspace]
+
+[lib]
+name = "wavo_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.21"
+libc = "0.2.191"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
+wavo = { git = "https://github.com/vladkens/wavo", rev = "06dfe6642db8a2f9159ad0f23719f23276431a84", version = "0.5.0", default-features = false, features = ["hub"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[dev-dependencies]
+hound = "3.5.1"
