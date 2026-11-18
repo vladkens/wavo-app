@@ -481,6 +481,7 @@ mod tests {
       ["whisper-tiny · 1.2 GB"]
     );
     assert!(unmarked("static text \"⌥Space · 12:04\"", &["Space"]).is_empty());
+    assert!(unmarked("static text \"Ctrl+Alt+Space\"", &["Ctrl", "Alt", "Space"]).is_empty());
     assert_eq!(unmarked("static text \"P Paste\"", &["P"]), ["P Paste"]);
   }
 

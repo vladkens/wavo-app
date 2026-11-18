@@ -5399,7 +5399,7 @@ mod tests {
     names.extend(ACKS.iter().map(|a| a.2.trim_start_matches("https://").to_owned()));
     let projects = ACKS.iter().filter(|a| a.0 != THE_MODELS.key());
     names.extend(projects.map(|a| a.0.to_owned()));
-    names.extend(["Wavo", "Finder", "fn", "Space"].map(Into::into));
+    names.extend(["Wavo", "Finder", "fn", "Space", "Ctrl", "Alt"].map(Into::into));
     names
   }
 
