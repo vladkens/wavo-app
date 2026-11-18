@@ -76,11 +76,38 @@ const LAUNCHER: Launcher = Launcher {
 };
 
 /// The app's translations (`make i18n` keeps them): its English texts are the keys.
-const LOCALES: Localizations = &[("ru", include_str!("../locales/ru.po"))];
+const LOCALES: Localizations = &[
+  ("de", include_str!("../locales/de.po")),
+  ("es", include_str!("../locales/es.po")),
+  ("fr", include_str!("../locales/fr.po")),
+  ("it", include_str!("../locales/it.po")),
+  ("ja", include_str!("../locales/ja.po")),
+  ("ko", include_str!("../locales/ko.po")),
+  ("pl", include_str!("../locales/pl.po")),
+  ("pt-BR", include_str!("../locales/pt-BR.po")),
+  ("ru", include_str!("../locales/ru.po")),
+  ("tr", include_str!("../locales/tr.po")),
+  ("uk", include_str!("../locales/uk.po")),
+  ("zh-Hans", include_str!("../locales/zh-Hans.po")),
+];
 
 /// The languages Advanced › Language offers besides the system's, each by its own name: English,
 /// the texts' own, and those of [LOCALES].
-const LANGUAGES: [(&str, &str); 2] = [("en", "English"), ("ru", "Русский")];
+const LANGUAGES: [(&str, &str); 13] = [
+  ("en", "English"),
+  ("de", "Deutsch"),
+  ("es", "Español"),
+  ("fr", "Français"),
+  ("it", "Italiano"),
+  ("ja", "日本語"),
+  ("ko", "한국어"),
+  ("pl", "Polski"),
+  ("pt-BR", "Português (Brasil)"),
+  ("ru", "Русский"),
+  ("tr", "Türkçe"),
+  ("uk", "Українська"),
+  ("zh-Hans", "简体中文"),
+];
 
 /// `cfg` with the app's translations, and its icon in the title bar and taskbar; macOS shows the
 /// bundle's. Every window's, the HUD's too.

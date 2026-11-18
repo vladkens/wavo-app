@@ -1552,12 +1552,13 @@ fn share(done: u64, total: u64) -> (f32, String) {
   (k, format!("{:.0}% · {}", k * 100.0, done_text(done, total)))
 }
 
-/// A progress bar, moving without a share, and its text, as high as a caption's line.
+/// A progress bar, moving without a share, and its text, as high as a caption's line: the text
+/// ends in "…" where the row is short, never pushing the row's buttons out.
 fn progress_line(ui: &mut Ui, fs: &FormStyle, k: Option<f32>, text: &str) {
-  let line = Style::new().w(grow()).h(px(ui.line_height(fs.caption))).gap(8.0);
+  let line = Style::new().w(grow()).h(px(ui.line_height(fs.caption))).gap(8.0).clip();
   ui.row(line.align(Align::Start, Align::Center), |ui| {
     ui.col(Style::new().w(px(120.0)), |ui| ui.progress(k));
-    ui.text(text, fs.caption.nowrap());
+    ui.text(text, fs.caption.line_limit(1));
   });
 }
 
@@ -5349,7 +5350,9 @@ mod tests {
     click(&mut h, Id::of("app-language"));
     let items = h.a11y();
     assert!(items.contains(r#""English""#) && items.contains(r#""Русский""#), "{items}");
-    click(&mut h, Id::of("app-language").key(("item", 2)));
+    // Russian among the languages, after the system's.
+    let ru = 1 + crate::LANGUAGES.iter().position(|l| l.0 == "ru").unwrap();
+    click(&mut h, Id::of("app-language").key(("item", ru)));
     let settings = fake.log().settings.clone();
     assert_eq!(settings.app_language.as_deref(), Some("ru"));
     assert_eq!(settings.locale(), Locale::Tag("ru"));

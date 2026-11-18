@@ -26,7 +26,7 @@ plist.NSSupportsAutomaticTermination = false
 plist.NSSupportsSuddenTermination = false
 # The languages of locales/: macOS lists the app under them in System Settings › General ›
 # Language & Region › Applications and gives it the first of the person's it has.
-plist.CFBundleLocalizations = ["en", "ru"]
+plist.CFBundleLocalizations = ["en", "de", "es", "fr", "it", "ja", "ko", "pl", "pt-BR", "ru", "tr", "uk", "zh-Hans"]
 # MallocSpaceEfficient=1 (libmalloc's src/malloc.c): no large-block cache, empty pages given back
 # at once, or malloc keeps the large blocks a model frees after its unload. LaunchServices sets it.
 plist.LSEnvironment.MallocSpaceEfficient = "1"
