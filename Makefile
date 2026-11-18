@@ -1,11 +1,13 @@
 .PHONY: prepare check test build update clean
 
+LINT := uv run --script https://raw.githubusercontent.com/vladkens/lint/main/rust.py
 CARGO_FLAGS := --release --locked
 # The binary's extension: .exe on Windows, where make sees OS=Windows_NT.
 EXE := $(if $(filter Windows_NT,$(OS)),.exe)
 
 prepare:
 	cargo +nightly fmt
+	$(LINT) fix
 	cargo clippy $(CARGO_FLAGS) --fix --all-targets --allow-dirty --allow-staged
 
 check:
@@ -13,6 +15,7 @@ check:
 	cargo clippy $(CARGO_FLAGS) --all-targets -- -D warnings
 	$(if $(CROSS),cargo-zigbuild clippy $(CARGO_FLAGS) --keep-going --all-targets \
 	  $(addprefix --target ,$(CROSS)) -- -D warnings)
+	$(LINT)
 
 test:
 	cargo test $(CARGO_FLAGS)
