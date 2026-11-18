@@ -38,6 +38,7 @@ impl Word {
       100..1000 => Kind::Hundred,
       _ => Kind::Scale,
     };
+
     Word { kind, value, ordinal }
   }
 }
@@ -210,6 +211,7 @@ fn ungroup(text: &str) -> String {
   let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
   let mut out = String::with_capacity(text.len());
   let mut i = 0;
+
   while i < chunks.len() {
     let (space, lead) = chunks[i];
     let core = lead.trim_start_matches(|c: char| !c.is_alphanumeric() && !"+,.".contains(c));

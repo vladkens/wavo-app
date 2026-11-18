@@ -839,6 +839,7 @@ mod tests {
   fn dictations_go_first_and_cancel_stops_after_the_piece() {
     let models = FakeModels::new("text").window_ms(10_000);
     let f = Fake::start("engine-queue", &models, None);
+
     let gate = models.hold();
     f.engine.transcribe(1, vec![0.0; 25 * SECOND], None, true);
     f.wait(Phase::Running);
@@ -846,6 +847,7 @@ mod tests {
     f.engine.transcribe(3, vec![0.0; 2000], None, false);
     f.engine.cancel(3);
     drop(gate);
+
     assert_eq!(f.done(), (3, Err(EngineError::Cancelled)));
     assert_eq!(f.done(), (2, Ok("text".into())));
     assert_eq!(f.done(), (1, Ok("text text text".into())));
@@ -868,6 +870,7 @@ mod tests {
     let models = FakeModels::new("text");
     let f = Fake::start("engine-preview", &models, None);
     assert_eq!(f.run(1, 1000), Ok("text".into()));
+
     let gate = models.hold();
     f.engine.transcribe(2, vec![0.0; 2000], None, false);
     f.wait(Phase::Running);
@@ -876,6 +879,7 @@ mod tests {
     f.engine.preview(5, vec![0.0; 5000], None);
     f.engine.transcribe(6, vec![0.0; 6000], None, false);
     drop(gate);
+
     assert_eq!(f.done(), (4, Err(EngineError::Cancelled)), "replaced while queued");
     let order: Vec<u64> = (0..4).map(|_| f.done().0).collect();
     assert_eq!(order, [2, 6, 5, 3]);

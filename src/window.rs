@@ -443,6 +443,7 @@ impl App for Prefs {
           r.clicked
         }
       };
+
       if head || page {
         self.deselect();
       }
@@ -707,6 +708,7 @@ impl Prefs {
         Some(warning) => Mark::Warning(warning),
         None => Mark::Info(MIC_HELP.as_str()),
       };
+
       let row = FormRow::new(marked(t!("Microphone"), mark, Some(Id::of("mic-row").key("info"))));
       ui.id("mic-row").form_row(fs, row, |ui| {
         // ALSA's names run past 60 characters: a longer one ends in "…" beside its label.
@@ -758,6 +760,7 @@ impl Prefs {
         true => format!("{KEEP_HELP}\n\n{CLIPBOARD_NOTE}"),
         false => KEEP_HELP.to_string(),
       };
+
       let row = FormRow::new(marked(t!("Keep the text on the clipboard"), Mark::Info(&help), None));
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.keep_in_clipboard;
@@ -813,6 +816,7 @@ impl Prefs {
           } else {
             Button::new(t!("Open Settings").as_str())
           };
+
           if button.show(ui.id(id)).clicked {
             self.shell.allow(pane);
           }
@@ -852,6 +856,7 @@ impl Prefs {
       Some((name, false)) => Some(t!("{name} (not on disk)", name)),
       None => None,
     };
+
     if let Some(other) = other {
       items.push(other);
       at = items.len() - 1;
@@ -932,12 +937,14 @@ impl Prefs {
       _ if self.settings.engine_language().is_none() => Mark::Info(&auto),
       _ => Mark::None,
     };
+
     let label = marked(t!("Language"), mark, Some(Id::of("lang-row").key("info")));
     // With Keyboard layout, its languages under it in the same row, each with its model.
     let rows = if keyboard { keyboard_languages(&self.layouts) } else { Vec::new() };
     let choices: Vec<_> = rows.iter().map(|(lang, _)| self.keyboard_choices(lang)).collect();
     let mut row = FormRow::new(label);
     let mut chosen = None;
+
     if !rows.is_empty() {
       let (label_style, chosen, rows, choices) = (fs.label, &mut chosen, &rows, &choices);
       row = row.footer(move |ui: &mut Ui, s: TextStyle| {
@@ -950,6 +957,7 @@ impl Prefs {
               // The label's size, dimmed: one baseline with the name.
               ui.text(layouts.as_str(), label_style.color(s.color).line_limit(1));
               ui.el(Style::new().w(grow()));
+
               let id = format!("keyboard-{lang}");
               if let Some(p) = pick(ui, &id, labels, *at, &[0, labels.len() - 2]) {
                 *chosen = Some((i, p));
@@ -1291,6 +1299,7 @@ impl Prefs {
       true => vec![NOT_SAVED.to_string()],
       false => [exported.caption, imported.caption].into_iter().flatten().collect(),
     };
+
     let waits = self.status.warnings.iter().any(|w| w == session::DELETE_WAITS.as_str());
     match () {
       _ if waits => captions.push(DELETE_WAITS.to_string()),
@@ -1339,6 +1348,7 @@ impl Prefs {
             count = thousands(n)
           ),
         };
+
         let message = t!("This can’t be undone.").to_string();
         self.ask = Some(Ask { title, message, delete: Delete::Saved });
       }
@@ -1377,6 +1387,7 @@ impl Prefs {
       Some(h) => h.db.get_total().map(|t| t.0),
       None => History::count_saved(&self.home),
     };
+
     total.inspect_err(|e| warn!("the saved history: {e:#}")).unwrap_or(0)
   }
 
@@ -1392,6 +1403,7 @@ impl Prefs {
       (None, Err(why)) if !why.is_empty() => Some(why.clone()),
       _ => None,
     };
+
     let state = login.state.as_ref().map_or(self.settings.autostart, |s| s.wanted());
     let mut on = login.busy.unwrap_or(state);
     let off = login.state.is_err() || login.busy.is_some();
@@ -1415,6 +1427,7 @@ impl Prefs {
       Request::DeleteSaved => t!("Could not delete the history"),
       Request::Unload | Request::Transferred | Request::Close => return,
     };
+
     self.history.said = Some(format!("{what}: {error}"));
   }
 
@@ -1432,6 +1445,7 @@ impl Prefs {
           true => t!("Couldn’t turn it on: {e}", e),
           false => t!("Couldn’t turn it off: {e}", e),
         };
+
         self.login.error = Some(error);
       }
     }
@@ -1458,10 +1472,12 @@ pub fn microphones(
     (Auto::System, None) => t!("Automatic").to_string(),
     (Auto::Nothing, _) => t!("Automatic (none: the lid is closed)").to_string(),
   };
+
   let default = match default {
     Some(d) => t!("System Default ({device})", device = d.name),
     None => t!("System Default").to_string(),
   };
+
   let mut items = vec![(automatic, Microphone::Automatic), (default, Microphone::System)];
   for d in devices {
     let choice = Choice { id: d.id.clone(), name: d.name.clone() };
@@ -1473,6 +1489,7 @@ pub fn microphones(
     Microphone::System => return (items, 1),
     Microphone::Device(choice) => choice,
   };
+
   if let Some(i) = audio::position(devices, saved) {
     return (items, i + 2);
   }
@@ -1831,10 +1848,12 @@ impl Prefs {
     let pick = best_for(lang);
     let best = pick.as_ref().map(|p| p.0);
     let why = |m: &ModelInfo| pick.as_ref().filter(|p| p.0 == m.name).map(|p| p.1.as_str());
+
     let mut downloaded: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| on_disk(m) && shown(m)).collect();
     // The ones dictations go to first, then as the rest.
     downloaded.sort_by_key(|m| (!self.dictates(m), rank(lang, best, m)));
+
     // Lowercase without punctuation only to delete, but the one chosen, to download it again,
     // and one for a language that has nothing better ([plain_fits]).
     let plain = |m: &ModelInfo| match lang {
@@ -1845,6 +1864,7 @@ impl Prefs {
     let mut remote: Vec<&'static ModelInfo> =
       hub::MODELS.iter().filter(|m| !on_disk(m) && offered(m) && shown(m)).collect();
     remote.sort_by_key(|m| rank(lang, best, m));
+
     // Folded under rows of their own, in rank: those with too many errors, and the ones not
     // measured unless none is; but one downloading and the one chosen, and none while searching.
     let searching = !self.model_search.trim().is_empty();
@@ -1902,6 +1922,7 @@ impl Prefs {
               lang = language_name(lang)
             ),
           };
+
           folded(ui, "other-models", t!("Other models").as_str(), &more, &other);
         }
 
@@ -1943,6 +1964,7 @@ impl Prefs {
         ui.text(&note, fs.note);
       });
     };
+
     // Its rows the form's, padded by the list.
     let keys: Vec<u64> = downloaded.iter().map(|m| model_key(m)).collect();
     let key = |i: usize| keys[i];
@@ -1968,6 +1990,7 @@ impl Prefs {
         Menu::new(vec![delete.enabled(n > 0)])
       }),
     };
+
     match act {
       Some(m) => vec![m],
       None if r.delete || item.is_some() => chosen,
@@ -1991,6 +2014,7 @@ impl Prefs {
         t!("They free {size} in the Hugging Face cache. You can download them again.", size),
       ),
     };
+
     let kept = match &kept[..] {
       [] => None,
       [m] => Some(t!("{model} is in use and stays.", model = m.name)),
@@ -2000,6 +2024,7 @@ impl Prefs {
         Some(t!("{models} and {last} are in use and stay.", models, last))
       }
     };
+
     if let Some(kept) = kept {
       message = format!("{message} {kept}");
     }
@@ -2033,6 +2058,7 @@ impl Prefs {
     ui.with_id(id).form_row(fs, model_row(m, fit).caption(caption), |ui| {
       fit.show(ui, m);
       let slot = actions(ui, fs.gap);
+
       // Use and In use as wide, both centred in one column: the rows line up.
       let w = use_w(ui).ceil();
       let column = Style::new().w(px(w)).align(Align::Center, Align::Center);
@@ -2055,6 +2081,7 @@ impl Prefs {
           (_, true) => t!("In use until the dictation ends"),
           _ => t!("Delete…"),
         };
+
         let off = in_use || busy;
         if ui.help(&tip).disabled(off).id(("delete", m.name)).icon_button(Icon::TRASH).clicked {
           act = Some(m);
@@ -2352,6 +2379,7 @@ impl Downloads {
             Download::Running { done: p.done, total: p.total, rate }
           }
         };
+
         let tell = state == Download::Preparing
           || told.is_none_or(|t: Instant| t.elapsed() >= Duration::from_millis(100));
         downloads.set(model.name, &cancel, Some(state));
@@ -2443,10 +2471,12 @@ fn shown<T>(
         Panel::Export => t!("Could not export: {e}", e),
         Panel::Import => t!("Could not import: {e}", e),
       };
+
       (Some(why), None)
     }
     None => (None, None),
   };
+
   Shown { caption, progress, failed: matches!(state, Some(Transfer::Failed(_))) }
 }
 
@@ -2484,6 +2514,7 @@ fn imported_text(r: &Imported) -> String {
     0 => t!("Nothing new: all of its dictations are here").to_string(),
     n => tn!("Added {n} dictation", "Added {n} dictations", n),
   };
+
   if r.failed > 0 {
     s += &tn!(" · {n} recording not copied", " · {n} recordings not copied", r.failed);
   }
@@ -2756,6 +2787,7 @@ impl Prefs {
         (true, true) => t!("No dictations since Wavo started: they’re kept only until it quits."),
         (false, _) => t!("Nothing found"),
       };
+
       ui.col(fs.page.pads(PAGE_PAD).h(grow()), |ui| {
         ui.form_section(fs, "", |ui| ui.form_row(fs, FormRow::new(empty), |_| {}));
       });
@@ -2769,6 +2801,7 @@ impl Prefs {
     let starts: Vec<usize> = days.iter().map(|(_, r, _)| r.start).collect();
     let line = ui.line_height(fs.head);
     let row_h = two_line_h(ui, fs);
+
     let head = |ui: &mut Ui, g: usize| {
       let (day, r, ms) = &days[g];
       ui.text(day_title(*day, now), fs.head);
@@ -2817,6 +2850,7 @@ impl Prefs {
     let t = ui.theme();
     let chosen = self.history.chosen();
     let mut act = None;
+
     ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
     let s = Style::new().w(grow()).h(px(FOOT_H)).pads([12.0, 20.0, 16.0, 20.0]).gap(10.0);
     ui.col(s, |ui| {
@@ -2913,6 +2947,7 @@ impl Prefs {
       // Translators: hours, short: "312 h".
       s => t!("{hours} h", hours = s / 3600),
     };
+
     let count = thousands(n);
     let mut text =
       tn!("{count} dictation · {spoken}", "{count} dictations · {spoken}", n, count, spoken);
@@ -2993,6 +3028,7 @@ impl Prefs {
           true => t!("“{start}” and its recording are removed from the history.", start),
           false => t!("“{start}” is removed from the history.", start),
         };
+
         (t!("Delete this dictation?").to_string(), message)
       }
       _ => {
@@ -3009,9 +3045,11 @@ impl Prefs {
             n
           ),
         };
+
         (tn!("Delete {n} dictation?", "Delete {n} dictations?", n), message)
       }
     };
+
     self.ask = Some(Ask { title, message, delete: Delete::Entries(ids) });
   }
 
@@ -3079,6 +3117,7 @@ fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, playing: bool, working: boo
     _ if e.audio_path.is_none() => NO_RECORDING,
     _ => t!("Play the recording"),
   };
+
   let r = ui.help(&tip).disabled(e.audio_path.is_none()).control_size(ControlSize::Large);
   let r = r.id(("play", e.id)).icon_button(if playing { Icon::STOP } else { Icon::PLAY });
   if r.clicked {
@@ -3115,6 +3154,7 @@ fn row_menu(e: &Entry, st: &RowState, on_disk: bool) -> Menu<RowItem> {
     true => (RowItem::Stop, t!("Stop")),
     false => (RowItem::Play, t!("Play the Recording")),
   };
+
   let mut items = vec![
     Item::button(RowItem::Copy, t!("Copy Text").as_str()).enabled(!e.text.is_empty()),
     Item::button(play, &label).enabled(e.audio_path.is_some()),
@@ -3208,6 +3248,7 @@ impl Prefs {
       let icon = nimbo::Png::new(crate::ICON).side(128);
       ui.image(icon, Style::new().w(px(64.0)).h(px(64.0)));
       ui.el(Style::new().h(px(10.0)));
+
       let title = TextStyle::new(Font { size: 20.0, ..t.bold }, t.text).line_limit(1);
       ui.text(crate::INFO.name, title);
       ui.el(Style::new().h(px(2.0)));
@@ -3634,6 +3675,7 @@ mod tests {
     click(&mut h, Id::of("lang"));
     assert_eq!(items(&h), without + 1, "Keyboard layout is offered");
     click(&mut h, item(1));
+
     type Rows = BTreeMap<String, Option<String>>;
     let rows = |m: &[(&str, Option<&str>)]| {
       m.iter().map(|(l, m)| ((*l).into(), m.map(Into::into))).collect()
@@ -3713,6 +3755,7 @@ mod tests {
       и окно не должно при этом зависать. В конце короткая сводка: сколько добавлено, сколько \
       было, сколько не скопировалось и почему.";
     history.db.update_text(ids[6], again, Some("whisper-large-v3-turbo-Q8_0"), None).unwrap();
+
     // This run's dictations, in memory without their recordings.
     let memory = History::open_memory(home.dir.path()).unwrap();
     let this_run = add_dictations(
@@ -3750,6 +3793,7 @@ mod tests {
           Page::History => Id::of("history-list"),
           _ => Id::of(("page", page as u8)),
         };
+
         let sc = h.scroll(area).expect("the page's scroll area");
         match page.scrolls() {
           true => assert_eq!(size, Size::new(WIDTH, SCROLLING + 32.0), "{name}: and the title bar"),
@@ -3809,6 +3853,7 @@ mod tests {
       click(&mut h, Id::of("delete-all"));
       assert!(h.rect(Id::of(CONFIRM).key("card")).is_some(), "{look}: the dialog");
       shot(&mut h, &format!("advanced-delete-all-{look}"));
+
       let settings = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
       let mut h = home.harness(&fake, settings);
       h.event(Event::Appearance(appearance));
@@ -3827,6 +3872,7 @@ mod tests {
         h.frame();
         let name = if code.is_empty() { "all" } else { code };
         shot(&mut h, &format!("models-{name}-{look}"));
+
         // The speeds and their bolts line up whatever the button.
         for part in [None, Some("bolt")] {
           let id = |m: &ModelInfo| {
@@ -3841,6 +3887,7 @@ mod tests {
       h.frame();
       click(&mut h, Id::of(("other-models", "ru")));
       shot(&mut h, &format!("models-ru-other-{look}"));
+
       // Other models hovered, then held down.
       let r = h.rect(Id::of(("other-models", "ru"))).unwrap();
       let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
@@ -3890,6 +3937,7 @@ mod tests {
       assert_eq!(h.app().model_sel.len(), 3, "{look}");
 
       shot(&mut h, &format!("models-selected-{look}"));
+
       // Scrolled, the header goes under the search with the rows.
       let page = Id::of(("page", Page::Models as u8));
       let v = h.scroll(page).expect("the page's scroll area").viewport;
@@ -3902,6 +3950,7 @@ mod tests {
       wheel(&mut h, -20.0);
       assert!(h.scroll(page).unwrap().offset.y > 0.0, "{look}: it scrolled");
       shot(&mut h, &format!("models-selected-scrolled-{look}"));
+
       wheel(&mut h, 20.0);
       h.key(NamedKey::Delete, Modifiers::empty());
       h.frame();
@@ -3956,6 +4005,7 @@ mod tests {
     let mut h = home.harness(&fake, Settings::default());
     assert!(fake.log().settings.auto_update);
     let switch = |h: &Harness<Prefs>| a11y_line(h, r#"switch "Check for updates""#);
+
     tab(&mut h, Page::About);
     assert!(h.rect(Id::of("updates")).is_none());
     tab(&mut h, Page::Advanced);
@@ -4036,11 +4086,13 @@ mod tests {
     let row = |h: &Harness<Prefs>| a11y_line(h, r#"pop up button "Microphone""#);
     let mark = |h: &Harness<Prefs>| a11y_line(h, r#"button "Warning""#);
     let info = format!(r#"button "Info" desc {:?}"#, MIC_HELP.as_str());
+
     let wh = Choice { id: Some("wh-1000xm5".into()), name: "WH-1000XM5".into() };
     let wh = Microphone::Device(wh);
     let mut h = home.harness(&fake, Settings { microphone: wh.clone(), ..Settings::default() });
     let warning = "WH-1000XM5 isn’t connected: Wavo records with MacBook Pro Microphone";
     let pop = r#"pop up button "Microphone" value "WH-1000XM5 (not connected)""#;
+
     assert_eq!(row(&h).as_deref(), Some(pop), "no caption");
     assert_eq!(mark(&h), Some(format!(r#"button "Warning" desc {warning:?}"#)));
     assert_eq!(a11y_line(&h, &info), None, "no ⓘ beside the warning");
@@ -4067,6 +4119,7 @@ mod tests {
       true => unnamed,
       false => "WH-1000XM5 isn’t connected, and there is no other microphone",
     };
+
     assert_eq!(mic_warning(&[], &wh, false).as_deref(), Some(none));
   }
 
@@ -4214,6 +4267,7 @@ mod tests {
       tab(&mut h, Page::Advanced);
       assert!(!button(&h).contains("disabled") && caption(&h).is_none(), "{}", button(&h));
       click(&mut h, Id::of("delete-all"));
+
       let ask = h.app().ask.as_ref().map(|a| (a.title.as_str(), a.message.as_str()));
       let title = "Delete all 2 dictations and their recordings?";
       assert_eq!(ask, Some((title, "This can’t be undone.")));
@@ -4227,10 +4281,12 @@ mod tests {
     h = home.harness(&fake, Settings::default());
     tab(&mut h, Page::History);
     assert_eq!(h.app().history.entries.len(), 2);
+
     tab(&mut h, Page::Advanced);
     h.app_mut().update(&Settings::default(), &waits, 0);
     h.frame();
     assert_eq!(caption(&h).as_deref(), Some(DELETE_WAITS.as_str()));
+
     assert_eq!(History::delete_saved(home.dir.path()).unwrap(), Some(2));
     h.app_mut().update(&Settings::default(), &Status::default(), 1);
     h.frame();
@@ -4282,6 +4338,7 @@ mod tests {
     let fake = Fake::default();
     let settings = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
     let mut h = home.harness(&fake, settings.clone());
+
     tab(&mut h, Page::History);
     // Ids of their own: the saved one's is one of them.
     let texts = |h: &Harness<Prefs>| -> Vec<String> {
@@ -4404,6 +4461,7 @@ mod tests {
     assert_eq!(models_chosen(&h).len(), 2, "Cmd-click adds");
     click_model(&mut h, "parakeet-v3", nimbo::CMD);
     assert_eq!(models_chosen(&h), ["whisper-tiny"], "Cmd-click takes away");
+
     click(&mut h, Id::of(("delete", "parakeet-v3")));
     assert_eq!(models_chosen(&h), ["whisper-tiny"], "the bin's click, not the row's");
     h.wait(Duration::from_millis(200));
@@ -4447,6 +4505,7 @@ mod tests {
     let active = h.app().active().unwrap().0.name;
     let m = *names.iter().find(|&&n| n != active).unwrap();
     click_model(&mut h, m, Modifiers::empty());
+
     let (list, row) = (h.rect(Id::of("downloaded")).unwrap(), h.rect(row_of(m)).unwrap());
     let search = h.rect(Id::of("model-search")).unwrap();
     // The header over the first row.
@@ -4504,6 +4563,7 @@ mod tests {
     h.key('a', nimbo::CMD);
     h.frame();
     assert_eq!(h.app().model_sel.len(), 3);
+
     // The menu says how many go.
     h.native_menus();
     let r = h.rect(row_of("whisper-tiny")).unwrap();
@@ -4535,6 +4595,7 @@ mod tests {
     let fake = Fake::default();
     let mut h = home.harness(&fake, Settings::default());
     tab(&mut h, Page::Models);
+
     let ask_all = |h: &mut Harness<Prefs>| {
       h.set_focus(Some(Id::of("downloaded")));
       h.key('a', nimbo::CMD);
@@ -4550,6 +4611,7 @@ mod tests {
       h.waker().wake();
       h.frame();
     };
+
     assert!(ask_all(&mut h).ends_with("parakeet-v3 is in use and stays."));
     switch(&mut h, "parakeet-v2", Status::default());
     confirm(&mut h);
@@ -4585,6 +4647,7 @@ mod tests {
       h.frame();
     };
     let shown = |h: &Harness<Prefs>, name: &str| h.rect(Id::of(("card", name))).is_some();
+
     search(&mut h, "gigaam");
     assert!(h.rect(Id::of(("download", "gigaam-v3-ctc"))).is_some(), "to download again");
     assert!(shown(&h, "gigaam-v3") && !shown(&h, "gigaam-v3-rnnt"), "without punctuation");
@@ -4618,6 +4681,7 @@ mod tests {
     let mut h = home.harness(&fake, Settings::default());
     tab(&mut h, Page::Models);
     click(&mut h, Id::of(("use", "whisper-tiny")));
+
     // What assistive technology reads after the name, which it reads.
     let after = |h: &Harness<Prefs>, name: &str| {
       let tree = h.a11y();
@@ -4633,6 +4697,7 @@ mod tests {
     let v3 = caption("25 European languages", "· 740 MB ·", ane);
     assert_eq!(after(&h, "parakeet-v3"), v3, "downloaded");
     assert_eq!(after(&h, "gigaam-v3"), caption("Russian", "· 274 MB ·", ane), "available");
+
     // parakeet-v2 below the page's fold: found by the search.
     let search = |h: &mut Harness<Prefs>, s: &str| {
       h.app_mut().model_search = s.to_owned();
@@ -4859,6 +4924,7 @@ mod tests {
     h.app_mut().update(&settings, &status, 2);
     h.waker().wake();
     h.frame();
+
     click(&mut h, Id::of(("restore", ids[0])));
     click(&mut h, Id::of(("delete", ids[0])));
     let want = "“Move the design review.” and its recording are removed from the history.";
@@ -5012,6 +5078,7 @@ mod tests {
       h.event(Event::MouseUp { pos, button, mods });
       let up = h.context_menu(None).is_some();
       h.frame();
+
       assert_eq!((down, up), (os == Os::Mac, os == Os::Windows), "{os:?}: the menu, once");
       assert_eq!(selected(&h), [id], "{os:?}: selected");
     }
@@ -5350,6 +5417,7 @@ mod tests {
     click(&mut h, Id::of("app-language"));
     let items = h.a11y();
     assert!(items.contains(r#""English""#) && items.contains(r#""Русский""#), "{items}");
+
     // Russian among the languages, after the system's.
     let ru = 1 + crate::LANGUAGES.iter().position(|l| l.0 == "ru").unwrap();
     click(&mut h, Id::of("app-language").key(("item", ru)));
@@ -5390,10 +5458,12 @@ mod tests {
     let mut names: Vec<String> = hub::MODELS.iter().map(|m| m.name.to_owned()).collect();
     names.extend(hub::MODELS.iter().map(|m| m.file().trim_end_matches(".gguf").to_owned()));
     names.extend(["P", "G", "W", "M", "ANE"].map(Into::into));
+
     names.extend(["MacBook Pro Microphone", "USB Mic"].map(Into::into));
     names.extend(layouts().into_iter().map(|l| l.1));
     names.extend(["hub", "recordings"].map(|d| home.dir.path().join(d).display().to_string()));
     names.extend(dictations.iter().map(|d| d.0.to_owned()));
+
     names.extend(crate::LANGUAGES.map(|l| l.1.to_owned()));
     names.push(crate::VERSION.to_owned());
     names.extend(ACKS.iter().map(|a| a.2.trim_start_matches("https://").to_owned()));
@@ -5410,10 +5480,12 @@ mod tests {
     let home = Home::new("window-pseudo", &["parakeet-v3", "whisper-turbo", "gigaam-v3"]);
     let dictations = [("Draft a reply to Anna.", 1500), ("", 4), ("Купить кофе.", 1)];
     let ids = home.dictations(&dictations);
+
     let fake = Fake::default();
     fake.log().updates = true;
     let running = Download::Running { done: 114_000_000, total: 272_000_000, rate: Some(3.2e6) };
     fake.log().states.insert("gigaam-v3-e2e-ctc", running);
+
     let allowed = not_translated(&home, &dictations);
     let allowed: Vec<&str> = allowed.iter().map(String::as_str).collect();
     let mut found = Vec::new();
@@ -5467,6 +5539,7 @@ mod tests {
     h.set_locale(Locale::Tag("pseudo"), crate::LOCALES);
     h.frame();
     sweep(&mut h, "general keyboard");
+
     let first = Home::new("window-pseudo-first", &[]);
     let mut h = first.harness(&Fake::default(), Settings::default());
     h.set_locale(Locale::Tag("pseudo"), crate::LOCALES);
