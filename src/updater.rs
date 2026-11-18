@@ -383,6 +383,7 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
         } else {
           Button::new(label)
         };
+
         if b.show(ui.id(id)).clicked {
           act = Some(then);
         }
@@ -565,6 +566,7 @@ mod tests {
     assert_eq!(u.state, State::Idle);
     checked(&mut u, false, newer("1.3.0"), Some("1.2.0"));
     assert_eq!(u.state, State::Available(r("1.3.0")), "put off until the next check");
+
     checked(&mut u, false, error(), None);
     assert_eq!(u.state, State::Available(r("1.3.0")), "offline: the offer stays");
     checked(&mut u, false, Ok(None), None);
@@ -802,6 +804,7 @@ mod tests {
       ),
     ];
     let dir = std::env::var_os("WAVO_SHOTS").map(PathBuf::from);
+
     for (look, appearance) in [("light", Appearance::LIGHT), ("dark", Appearance::DARK)] {
       for (name, state) in &states {
         let (mut h, _) = window(state.clone());

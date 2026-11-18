@@ -101,6 +101,7 @@ impl Icon {
       Icon::Transcribing => status_icon!("transcribing"),
       Icon::Warning => status_icon!("warning"),
     };
+
     TrayIcon::from_svg(svg).expect("the status icons are tested")
   }
 
@@ -311,6 +312,7 @@ fn check_item(state: &State) -> Item<Action> {
     true => t!("Checking for Updates…"),
     false => t!("Check for Updates…"),
   };
+
   Item::button(Action::CheckUpdates, &label)
 }
 
@@ -340,6 +342,7 @@ fn microphones(
     Auto::System => t!("System Default").to_string(),
     Auto::Nothing => t!("No Microphone").to_string(),
   };
+
   (title, menu, Some(t!("{name} isn’t connected", name)))
 }
 
@@ -359,6 +362,7 @@ fn models(found: &[Found], pick: &Pick) -> (String, Menu<Action>) {
     (None, Some(i)) => found[i].0.name.to_owned(),
     (None, None) => t!("No Model").to_string(),
   };
+
   if let Some(other) = other {
     items.push(Item::toggle(Action::ModelChosen, &other, pick.gone().is_none()));
   }
@@ -489,6 +493,7 @@ mod tests {
       true => assert_eq!(*label, header),
       false => assert!(label.starts_with("Wavo v") && label.contains("⌥Space"), "{label}"),
     }
+
     assert_eq!(
       (items[1].label(), items[8].label()),
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")
@@ -511,6 +516,7 @@ mod tests {
     };
     let system = mic_label(&devices, &Microphone::System, false);
     assert_eq!(system, ("System Default (MacBook Pro Microphone)".into(), None));
+
     // Automatic: the USB one over the built-in default; the built-in one over a Bluetooth one, but
     // not under a closed lid, and a Bluetooth one left alone has a note; a virtual one only when
     // no other is there, as the system's, also under a closed lid.

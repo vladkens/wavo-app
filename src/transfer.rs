@@ -112,6 +112,7 @@ pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
   let sizes: Vec<u64> = names.iter().map(|name| size(&dir.join(name))).collect();
   let total = size(&copy) + sizes.iter().sum::<u64>();
   let mut recordings = 0;
+
   via_part(file, |part| {
     let out = File::create(part).with_context(|| format!("create {}", part.display()))?;
     // Streamed: an entry's sizes follow its data. A seek back to its header, a flush and two
@@ -120,6 +121,7 @@ pub fn export(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
     let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     zip.start_file(MANIFEST, stored)?;
     serde_json::to_writer_pretty(&mut zip, &manifest)?;
+
     zip.start_file(DB_FILE, stored)?;
     io::copy(&mut File::open(&copy)?, &mut zip)?;
     let mut done = size(&copy);
@@ -194,6 +196,7 @@ pub fn import(home: &Path, file: &Path, mut progress: impl FnMut(u64, u64)) -> R
       Some(Ok(name)) => name.strip_prefix(&prefix).and_then(|rec| copies.remove(rec)),
       _ => None,
     };
+
     let Some(dst) = dst else { continue };
     let copied = archive.by_index(i).map_err(anyhow::Error::from).and_then(|mut item| {
       write_recording(&dst, &mut item)?;

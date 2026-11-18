@@ -449,6 +449,7 @@ fn quoted(line: &str) -> Vec<String> {
       if c == '"' {
         cur = Some(String::new());
       }
+
       continue;
     };
 

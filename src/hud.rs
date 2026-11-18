@@ -506,6 +506,7 @@ impl Hud {
           self.enter(Mode::Transcribing, now);
           self.text = None;
           self.resize(self.base(), now);
+
           // What it said stays, none of it to change now.
           for word in self.words.iter_mut().filter(|w| w.tail) {
             (word.tail, word.firm) = (false, Some(now));
@@ -515,6 +516,7 @@ impl Hud {
       Show::Error(reason) => {
         self.say(f, None);
         self.language = None;
+
         let reason = fit(f, reason);
         let to = reason_width(f.measure(&reason, FONT));
         let from = if self.mode == Mode::Hidden { to } else { self.width_at(now) };
@@ -525,6 +527,7 @@ impl Hud {
       Show::Done(took) => {
         self.say(f, None);
         self.language = None;
+
         let from = if self.mode == Mode::Hidden { WIDTH } else { self.width_at(now) };
         self.enter(Mode::Done, now);
         self.text = Some(took);
@@ -561,6 +564,7 @@ impl Hud {
       let broken = |(w, tail)| pieces(f, w, width).into_iter().map(move |p| (p, tail));
       words.into_iter().flat_map(broken).collect::<Vec<_>>()
     });
+
     let (had, wait) = (self.words.len(), if self.words.is_empty() { FIRST_WAIT } else { ms(0) });
     let gap = WORD_GAP.min(CATCH_UP / said.len().saturating_sub(had).max(1) as u32);
     self.words.truncate(said.len());
@@ -722,10 +726,12 @@ impl Hud {
     let (th, now) = (if plain { &self.theme } else { &DARK }, f.now);
     let (width, pill_alpha, a) = self.pill(now);
     let fade = |c: Color, k: f32| alpha(c, c[3] * pill_alpha * k);
+
     // The row at its edge of the window; the pill around it, open for the live text away from it.
     let size = self.shape(now, f.scale);
     let row = if self.top { MARGIN } else { f.size.h - MARGIN - HEIGHT };
     let radius = corner(size.h);
+
     // The gradient's pill starts on the pixel grid, where its images, drawn 1:1, start too, so
     // the grey under the edge meets it.
     let left = (f.size.w - size.w) / 2.0;
@@ -733,6 +739,7 @@ impl Hud {
     let pill = Rect::new(left, if self.top { row } else { row + HEIGHT - size.h }, size.w, size.h);
     let shadow = Rect::new(pill.x, pill.y + 2.0, pill.w, pill.h);
     f.shadow(shadow, radius, 6.0, fade(th.shadow, 1.0));
+
     let flows = self.flows();
     let ground = if plain { th.menu } else { GREY };
     if plain {
@@ -774,6 +781,7 @@ impl Hud {
       let ring = fade(alpha([1.0; 4], 0.9), k);
       f.quad(Quad::new(rect, fade(th.danger, k)).radius(side / 2.0).border(RING, ring));
     };
+
     // White with the code in violet on the gradient; the plain pill's text colour, its code in the
     // pill's.
     let chip = |f: &mut Frame, k: f32| {
@@ -786,6 +794,7 @@ impl Hud {
       let y = baseline(f, CHIP);
       f.text(at, y, &code, CHIP, fade(ink, k));
     };
+
     let bar = |f: &mut Frame, i: usize, height: f32, k: f32| {
       let rect =
         Rect::new(xd + BARS_X + i as f32 * BAR_STEP, mid - height / 2.0, BAR_WIDTH, height);
@@ -807,6 +816,7 @@ impl Hud {
         let glyph = Rect::new(x + PAD, mid - GLYPH / 2.0, GLYPH, GLYPH);
         icon::draw(f, TRIANGLE, glyph, fade(th.warning, a));
         icon::draw(f, MARK.stroke(2.2), glyph, fade(ground, a));
+
         // Never left of its place: a pill still widening to fit the reason has less room.
         let room = width.max(WIDTH) - REASON_X - PAD;
         let gap = if plain { 0.0 } else { ((room - f.measure(text, FONT)) / 2.0).max(0.0) };
@@ -818,6 +828,7 @@ impl Hud {
         let start = x + (WIDTH - GLYPH - 6.0 - f.measure(took, TIME)) / 2.0;
         let glyph = Rect::new(start, mid - GLYPH / 2.0, GLYPH, GLYPH);
         icon::draw(f, Icon::CHECK.stroke(2.2), glyph, fade(th.success, a));
+
         let y = baseline(f, TIME);
         f.text(start + GLYPH + 6.0, y, took, TIME, fade(th.text, a));
       }
@@ -844,6 +855,7 @@ impl Hud {
             Mode::Closing => WAVE_LOW,
             _ => wave(i, t.saturating_sub(SETTLE)),
           };
+
           bar(f, i, height, 0.6 * a);
         }
 
@@ -884,6 +896,7 @@ impl Hud {
         Some(at) => lerp(TAIL, 1.0, eased(now.saturating_sub(at), FIRM)),
         None => 1.0,
       };
+
       let y = view.y + word.line as f32 * LINE - scroll;
       let out = ((y - view.y) / LINE + 1.0).clamp(0.0, 1.0);
       let k = shown * out * tail;
@@ -1742,6 +1755,7 @@ mod tests {
       count.set(count.get() + 1);
       count.get() * 1_234_567
     });
+
     let step = |a: [u8; 4], b: [u8; 4]| (0..3).map(|i| a[i].abs_diff(b[i])).max().unwrap();
     h.app_mut().show(recording(None));
     h.wait(ms(500));
@@ -1887,6 +1901,7 @@ mod tests {
       (HudStyle::Plain, Appearance::DARK, "plain-dark"),
       (HudStyle::Plain, Appearance::LIGHT, "plain-light"),
     ];
+
     for (style, appearance, look) in looks {
       for (position, at) in [(HudPosition::Bottom, "bottom"), (HudPosition::Top, "top")] {
         for (lines, fixed, tail) in
@@ -1900,6 +1915,7 @@ mod tests {
           h.wait(ms(300));
           h.app_mut().show(saying(fixed, tail));
           h.wait(ms(1000));
+
           let size = config(position, true).size;
           let img = h.render();
           assert_eq!(img.pixel(1.0, size.h / 2.0)[3], 0, "{name}: around");
@@ -1910,6 +1926,7 @@ mod tests {
           } else {
             (row - ROOM, row)
           };
+
           let light = appearance == Appearance::LIGHT && style == HudStyle::Plain;
           let ink = (0..(WIDE as usize)).step_by(2).any(|x| {
             let x = (size.w - WIDE) / 2.0 + x as f32;

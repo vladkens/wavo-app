@@ -753,6 +753,7 @@ impl<O: TextOutput> Controller<O> {
         Some((r, Some(stopped))) => at(tail_end(stopped, Instant::now(), r.meter().pause())),
         _ => never(),
       };
+
       let preview = match (recorder, self.dictation.as_ref().and_then(|d| d.preview.as_ref())) {
         (Some((_, None)), Some((p, next))) if p.job().is_none() => at(*next),
         _ => never(),
@@ -1332,6 +1333,7 @@ impl<O: TextOutput> Controller<O> {
       (false, Ok(model)) => self.add_entry(Some(model)),
       _ => None,
     };
+
     self.dictation.as_mut().unwrap().last.entry = entry;
     let model = match model {
       Ok(model) => model,
@@ -1427,6 +1429,7 @@ impl<O: TextOutput> Controller<O> {
       (None, true) => Some("the app in focus when the dictation started is unknown".into()),
       (_, false) => Some("auto-paste is off".into()),
     };
+
     let refused = refused.map(|why| match keep {
       true => match self.output.copy(&text) {
         Ok(()) => format!("{why}; the text is on the clipboard"),
@@ -2504,12 +2507,14 @@ mod tests {
         (seed as f32 / u32::MAX as f32 * 2.0 - 1.0) * 0.01 * 3f32.sqrt()
       })
       .collect();
+
     for name in ["ru-short", "en-short", "ru-typical", "en-paragraph"] {
       let speech = crate::testing::fixture_pcm(name);
       let last = speech.iter().rposition(|s| s.abs() > 0.02).unwrap();
       let end = ms(last as u64 * 1000 / u64::from(audio::SAMPLE_RATE));
       let with = |after: &[f32]| [&speech[..last], after].concat();
       let (quiet, hissing) = (audio::pauses(&with(&[0.0; 48_000])), audio::pauses(&with(&hiss)));
+
       // The first poll at or after the stop at which the tail is due.
       let tail = |pauses: &[(Duration, Duration)], stop: Duration| {
         let at = Instant::now();
@@ -2735,12 +2740,14 @@ mod tests {
     let waits = |u: &Update| u.status.warnings.iter().any(|w| w == DELETE_WAITS.as_str());
     let waiting = s.update_where("the delete waits", waits);
     assert_eq!((entry_ids(s.home.path()), s.recordings()), (vec![saved], 1), "not under it");
+
     drop(export);
     s.handle.request(Request::Transferred).unwrap();
     let done = s.update_where("deleted", |u| !waits(u));
     assert!(done.history != waiting.history, "a window counts it again");
     assert!(entry_ids(s.home.path()).is_empty());
     assert!(!s.home.path().join(RECORDINGS_DIR).exists());
+
     let memory = History::open_memory(s.home.path()).unwrap();
     let kept: Vec<i64> = memory.db.get_page("", 100).unwrap().iter().map(|e| e.id).collect();
     assert_eq!((kept, done.status.in_memory), (vec![last.entry.unwrap()], true));
@@ -2766,6 +2773,7 @@ mod tests {
     thread::sleep(Duration::from_millis(300));
     s.press();
     let done = s.update_where("deleted", |u| u.status.state == Phase::Idle && !waits(u));
+
     assert_eq!(s.pasted().len(), 2, "the dictation ended as usual");
     assert!(done.status.last.is_none(), "its text went with its entry");
     assert!(entry_ids(s.home.path()).is_empty());
@@ -2989,6 +2997,7 @@ mod tests {
         3
       }),
     ];
+
     for (name, between) in cases {
       let s = cleaning(name, &clean(), "Потом домой");
       s.dictate(1);
@@ -3204,6 +3213,7 @@ mod tests {
     };
     let models = ["gigaam-v3", "parakeet-v3"];
     let s = InProcess::start("session-no-keyboard", &settings, Some(&loud(10.0)), "hi", &models);
+
     s.handle.keyboard(Some("ru".into()));
     s.press();
     let recording = s.update_where("recording", |u| u.status.state == Phase::Recording);

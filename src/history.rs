@@ -1029,6 +1029,7 @@ mod tests {
     assert_eq!(History::delete_saved(dir.path()).unwrap(), None, "not under an import");
     assert_eq!(entry_ids(dir.path()).len(), 3);
     drop(import);
+
     // A reader in the middle of a read: the WAL can't be emptied, so nothing goes.
     let reader = Connection::open(dir.path().join(DB_FILE)).unwrap();
     reader.execute_batch("BEGIN;").unwrap();
@@ -1037,6 +1038,7 @@ mod tests {
     assert!(format!("{busy:#}").contains("being read"), "{busy:#}");
     assert_eq!(History::count_saved(dir.path()).unwrap(), 3, "the rows stay");
     assert_eq!(wav_count(&dir.path().join(RECORDINGS_DIR)), 3, "the recordings too");
+
     reader.execute_batch("COMMIT;").unwrap();
     assert_eq!(History::delete_saved(dir.path()).unwrap(), Some(3));
     assert!(entry_ids(dir.path()).is_empty() && !dir.path().join(RECORDINGS_DIR).exists());
