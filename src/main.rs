@@ -15,12 +15,14 @@ mod hud;
 mod live;
 mod menu;
 mod mic_start;
+mod models;
 mod numbers;
 mod session;
 mod settings;
 #[cfg(test)]
 mod testing;
 mod transfer;
+mod ui;
 mod updater;
 mod window;
 
