@@ -14,7 +14,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use nimbo::{Align, Button, ButtonStyle, Config, Png, Style, TextStyle, Ui, grow, px};
+use nimbo::{
+  Align, Button, ButtonStyle, Config, Localized, Png, Style, TextStyle, Ui, grow, px, t,
+};
 use shipo::{Error, Feed, Release};
 
 /// `update.txt` beside the latest release's files, which CI's publish job writes and signs
@@ -280,7 +282,8 @@ pub enum Act {
 
 /// The update's window: a fixed size, the app's icon in its title bar off macOS.
 pub fn config() -> Config {
-  crate::with_icon(Config::new("Software Update", 500.0, 196.0).fixed())
+  // The title of the window that offers an update, as macOS apps name it.
+  crate::app_config(Config::new(t!("Software Update").as_str(), 500.0, 196.0).fixed())
 }
 
 /// The update's window over the app's [Updater]: what the person chooses goes to `chosen`.
@@ -310,18 +313,27 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
   let t = ui.theme();
   let current = shown(crate::VERSION);
   let (title, text) = match state {
-    State::Idle | State::Checking => ("Checking for updates…", String::new()),
-    State::UpToDate => ("You're up to date!", format!("Wavo {current} is the newest version.")),
-    State::Available(r) => (
-      "A new version of Wavo is available!",
-      format!("Wavo {} is out, you have {current}. Install it now?", shown(&r.version)),
-    ),
-    State::Downloading(..) => ("Downloading the update…", String::new()),
-    State::Restarting(r) => {
-      ("Installing the update…", format!("Wavo restarts as {} once it can.", shown(&r.version)))
+    State::Idle | State::Checking => (t!("Checking for updates…"), String::new()),
+    State::UpToDate => {
+      (t!("You’re up to date!"), t!("Wavo {current} is the newest version.", current))
     }
-    State::Failed(Some(_), why) | State::Relaunched(why) => ("The update failed", sentence(why)),
-    State::Failed(None, why) => ("Couldn't check for updates", sentence(why)),
+    State::Available(r) => (
+      t!("A new version of Wavo is available!"),
+      t!(
+        "Wavo {new} is out, you have {current}. Install it now?",
+        new = shown(&r.version),
+        current
+      ),
+    ),
+    State::Downloading(..) => (t!("Downloading the update…"), String::new()),
+    State::Restarting(r) => (
+      t!("Installing the update…"),
+      t!("Wavo restarts as {new} once it can.", new = shown(&r.version)),
+    ),
+    State::Failed(Some(_), why) | State::Relaunched(why) => {
+      (t!("The update failed"), sentence(why))
+    }
+    State::Failed(None, why) => (t!("Couldn’t check for updates"), sentence(why)),
   };
 
   let mut act = None;
@@ -340,8 +352,9 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
             ui.el(Style::new().h(px(2.0)));
             ui.progress(Some(f32::from(*done) / 100.0));
             if r.size > 0 {
-              let mb = |b: u64| format!("{:.1} MB", b as f64 / 1e6);
-              let of = format!("{} of {}", mb(r.size * u64::from(*done) / 100), mb(r.size));
+              let mb = |b: u64| t!("{size} MB", size = format!("{:.1}", b as f64 / 1e6));
+              let done = mb(r.size * u64::from(*done) / 100);
+              let of = t!("{done} of {total}", done, total = mb(r.size));
               ui.text(&of, t.muted());
             }
           }
@@ -350,7 +363,7 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
             ui.progress(None);
           }
           State::Available(r) if r.notes.is_some() => {
-            if ui.id(NOTES).link("Release notes").clicked {
+            if ui.id(NOTES).link(&t!("Release notes")).clicked {
               act = Some(Act::Notes);
             }
           }
@@ -363,7 +376,8 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
     // Under the text and the icon, the window's width: Sparkle's bar.
     let bar = Style::new().w(grow()).gap(8.0).align(Align::Start, Align::Center);
     ui.row(bar, |ui| {
-      let mut button = |ui: &mut Ui, id, label, then, primary| {
+      let mut button = |ui: &mut Ui, id, label: Localized, then, primary| {
+        let label = label.as_str();
         let b = if primary {
           Button::new(label).style(ButtonStyle::BorderedProminent)
         } else {
@@ -376,27 +390,27 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
 
       match state {
         State::Available(_) => {
-          button(ui, SKIP, "Skip This Version", Act::Skip, false);
+          button(ui, SKIP, t!("Skip This Version"), Act::Skip, false);
           ui.spacer();
-          button(ui, LATER, "Remind Me Later", Act::Later, false);
-          button(ui, INSTALL, "Install Update", Act::Install, true);
+          button(ui, LATER, t!("Remind Me Later"), Act::Later, false);
+          button(ui, INSTALL, t!("Install Update"), Act::Install, true);
         }
         State::Failed(..) | State::Relaunched(_) => {
           ui.spacer();
-          button(ui, CLOSE, "Close", Act::Close, false);
-          button(ui, RETRY, "Retry", Act::Retry, true);
+          button(ui, CLOSE, t!("Close"), Act::Close, false);
+          button(ui, RETRY, t!("Retry"), Act::Retry, true);
         }
         State::UpToDate => {
           ui.spacer();
-          button(ui, CLOSE, "OK", Act::Close, true);
+          button(ui, CLOSE, t!("OK"), Act::Close, true);
         }
         State::Idle | State::Checking => {
           ui.spacer();
-          button(ui, CLOSE, "Cancel", Act::Close, false);
+          button(ui, CLOSE, t!("Cancel"), Act::Close, false);
         }
         State::Downloading(..) | State::Restarting(_) => {
           ui.spacer();
-          button(ui, CLOSE, "Hide", Act::Close, false);
+          button(ui, CLOSE, t!("Hide"), Act::Close, false);
         }
       }
     });
@@ -417,7 +431,7 @@ mod tests {
   use std::path::PathBuf;
   use std::rc::Rc;
 
-  use nimbo::{Appearance, Event, Harness, Id};
+  use nimbo::{Appearance, Event, Harness, Id, Locale};
 
   use super::*;
 
@@ -688,6 +702,7 @@ mod tests {
     let chosen = acts.clone();
     let w = UpdateWindow::new(Arc::new(Mutex::new(u)), move |act| chosen.borrow_mut().push(act));
     let mut h = Harness::new(w, config().size, 2.0);
+    crate::testing::shots_locale(&mut h);
     h.event(Event::Appearance(Appearance::LIGHT));
     h.render();
     (h, acts)
@@ -729,7 +744,7 @@ mod tests {
     let r = Some(release("1.2.0"));
     let failures = [
       (State::Failed(r, "the download stopped".into()), "The update failed"),
-      (State::Failed(None, "offline".into()), "Couldn't check for updates"),
+      (State::Failed(None, "offline".into()), "Couldn’t check for updates"),
       (State::Relaunched("the new version didn't start".into()), "The update failed"),
     ];
     for (state, title) in failures {
@@ -739,6 +754,32 @@ mod tests {
         assert!(h.click_id(Id::of(id)), "{id}");
         assert_eq!(*acts.borrow(), [act], "{state:?} {id}");
       }
+    }
+  }
+
+  /// Every state's texts in the pseudo-locale are marked, but for the versions and shipo's
+  /// reasons, which it gives in English.
+  #[test]
+  fn every_text_is_marked() {
+    let r = release("1.2.0");
+    let why = "the download stopped";
+    let states = [
+      State::Available(r.clone()),
+      State::Checking,
+      State::UpToDate,
+      State::Downloading(r.clone(), 42),
+      State::Restarting(r.clone()),
+      State::Failed(Some(r), why.into()),
+      State::Failed(None, why.into()),
+      State::Relaunched(why.into()),
+    ];
+    let allowed = ["1.2.0", &shown(crate::VERSION), &sentence(why)];
+    for state in states {
+      let (mut h, _) = window(state.clone());
+      h.set_locale(Locale::Tag("pseudo"), crate::LOCALES);
+      h.frame();
+      let found = crate::testing::unmarked(&h.a11y(), &allowed);
+      assert!(found.is_empty(), "{state:?}: {found:?}");
     }
   }
 

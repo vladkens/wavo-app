@@ -25,6 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, mem};
 
 use anyhow::{Context, Result, bail};
+use nimbo::{Localized, t};
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -55,19 +56,38 @@ pub struct Local {
   pub minute: u32,
 }
 
-const MONTHS: [&str; 12] = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
+/// The months as a date names them, `October` of `October 17` (Russian's `октября`).
+const MONTHS: [Localized; 12] = [
+  // Translators: a month as a date says it, "October" of "October 17": a genitive in Russian.
+  t!("January"),
+  t!("February"),
+  t!("March"),
+  t!("April"),
+  t!("May"),
+  t!("June"),
+  t!("July"),
+  t!("August"),
+  t!("September"),
+  t!("October"),
+  t!("November"),
+  t!("December"),
+];
+
+/// The months short, `Oct` of `Oct 17`.
+const SHORT_MONTHS: [Localized; 12] = [
+  // Translators: a month short, as a date says it: "Oct" of "Oct 17".
+  t!("Jan"),
+  t!("Feb"),
+  t!("Mar"),
+  t!("Apr"),
+  t!("May"),
+  t!("Jun"),
+  t!("Jul"),
+  t!("Aug"),
+  t!("Sep"),
+  t!("Oct"),
+  t!("Nov"),
+  t!("Dec"),
 ];
 
 impl Local {
@@ -75,9 +95,29 @@ impl Local {
     (self.year, self.month, self.day)
   }
 
-  /// Empty for the month 0 of a date out of range (an imported entry's).
-  pub fn month_name(self) -> &'static str {
-    MONTHS.get((self.month as usize).wrapping_sub(1)).copied().unwrap_or_default()
+  /// `October 17` in the app's language; the month empty for the month 0 of a date out of range
+  /// (an imported entry's).
+  pub fn day_month(self) -> String {
+    let month = Self::month_of(&MONTHS, self.month);
+    // Translators: a date, the month as the months above name it: "October 17".
+    t!("{month} {day}", month, day = self.day)
+  }
+
+  /// `Oct 17`, as [Local::day_month].
+  pub fn short_day_month(self) -> String {
+    let month = Self::month_of(&SHORT_MONTHS, self.month);
+    t!("{month} {day}", month, day = self.day)
+  }
+
+  /// `October 17, 2026`, as [Local::day_month].
+  pub fn day_month_year(self) -> String {
+    let month = Self::month_of(&MONTHS, self.month);
+    // Translators: a date, the month as the months above name it: "October 17, 2026".
+    t!("{month} {day}, {year}", month, day = self.day, year = self.year)
+  }
+
+  fn month_of(months: &[Localized; 12], month: u32) -> &'static str {
+    months.get((month as usize).wrapping_sub(1)).map_or("", |m| m.as_str())
   }
 
   /// `09:05`.

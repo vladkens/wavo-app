@@ -29,7 +29,7 @@ clean:
 	cargo clean
 
 # wavo-app
-.PHONY: bundle dist pack run run-copy install uninstall shots fixtures test-models
+.PHONY: bundle dist pack run run-copy install uninstall shots i18n fixtures test-models
 
 APP := target/Wavo.app
 PROFILE := release
@@ -85,8 +85,29 @@ uninstall: # remove Wavo and all it left (data, models, permissions, the app): t
 	$(if $(wildcard $(INSTALLED)),,cargo build $(CARGO_FLAGS))
 	$(or $(wildcard $(INSTALLED)),target/release/wavo-app) uninstall $(ARGS)
 
+# LOCALE=ru (or pseudo, nimbo's accented and longer texts) draws them in that language, into
+# target/shots/<LOCALE>/.
 shots: # the settings window's pages, the update window's and the HUD's states in both styles, headless, into target/shots/
-	WAVO_SHOTS=$(CURDIR)/target/shots cargo test $(CARGO_FLAGS) -- every_page_renders every_state_renders
+	WAVO_SHOTS=$(CURDIR)/target/shots$(if $(LOCALE),/$(LOCALE)) $(if $(LOCALE),WAVO_SHOTS_LOCALE=$(LOCALE)) \
+	  cargo test $(CARGO_FLAGS) -- every_page_renders every_state_renders
+
+# The catalogs: xgettext reads the texts marked with t! and tn! (and the `// Translators:` comments
+# above them) from the sources without their tests (scripts/i18n-sources.py) into
+# target/messages.pot, msgmerge brings each locales/*.po up to it, msgfmt checks them and counts
+# the texts translated, fuzzy and missing. Needs GNU gettext 0.24 or newer (Rust): `brew install
+# gettext`.
+I18N := target/i18n
+
+i18n: # the marked texts into target/messages.pot, merged into locales/*.po and checked
+	rm -rf $(I18N)
+	python3 scripts/i18n-sources.py src $(I18N)
+	cd $(I18N) && xgettext --language=Rust --keyword='t!:1' --keyword='tn!:1,2' \
+	  --add-comments=Translators --from-code=UTF-8 --sort-by-file --package-name=Wavo \
+	  -o $(CURDIR)/target/messages.pot $$(find src -name '*.rs' | sort)
+	for po in locales/*.po; do \
+	  msgmerge --quiet --update --backup=none $$po target/messages.pot && \
+	  printf '%s: ' $$po && msgfmt -c --statistics -o /dev/null $$po || exit 1; \
+	done
 
 # WAV fixtures and reference transcripts in target/fixtures/ (scripts/fixtures.py, macOS
 # voices and ffmpeg); regenerated when the script or a text changes.

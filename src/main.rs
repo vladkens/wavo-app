@@ -32,7 +32,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use nimbo::desktop::Launcher;
-use nimbo::{AppInfo, Config, Png, Presence};
+use nimbo::{AppInfo, Config, Localizations, Png, Presence};
 use tracing::warn;
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt;
@@ -75,12 +75,47 @@ const LAUNCHER: Launcher = Launcher {
   icon: Png::icon(ICON),
 };
 
-/// `cfg` with the app's icon in the title bar and taskbar; macOS shows the bundle's.
-fn with_icon(cfg: Config) -> Config {
+/// The app's translations (`make i18n` keeps them): its English texts are the keys.
+const LOCALES: Localizations = &[
+  ("de", include_str!("../locales/de.po")),
+  ("es", include_str!("../locales/es.po")),
+  ("fr", include_str!("../locales/fr.po")),
+  ("it", include_str!("../locales/it.po")),
+  ("ja", include_str!("../locales/ja.po")),
+  ("ko", include_str!("../locales/ko.po")),
+  ("pl", include_str!("../locales/pl.po")),
+  ("pt-BR", include_str!("../locales/pt-BR.po")),
+  ("ru", include_str!("../locales/ru.po")),
+  ("tr", include_str!("../locales/tr.po")),
+  ("uk", include_str!("../locales/uk.po")),
+  ("zh-Hans", include_str!("../locales/zh-Hans.po")),
+];
+
+/// The languages Advanced › Language offers besides the system's, each by its own name: English,
+/// the texts' own, and those of [LOCALES].
+const LANGUAGES: [(&str, &str); 13] = [
+  ("en", "English"),
+  ("de", "Deutsch"),
+  ("es", "Español"),
+  ("fr", "Français"),
+  ("it", "Italiano"),
+  ("ja", "日本語"),
+  ("ko", "한국어"),
+  ("pl", "Polski"),
+  ("pt-BR", "Português (Brasil)"),
+  ("ru", "Русский"),
+  ("tr", "Türkçe"),
+  ("uk", "Українська"),
+  ("zh-Hans", "简体中文"),
+];
+
+/// `cfg` with the app's translations, and its icon in the title bar and taskbar; macOS shows the
+/// bundle's. Every window's, the HUD's too.
+fn app_config(cfg: Config) -> Config {
   #[cfg(not(target_os = "macos"))]
   let cfg = cfg.png_icon(Png::icon(ICON));
 
-  cfg
+  cfg.localizations(LOCALES)
 }
 
 #[derive(Parser)]
@@ -180,6 +215,24 @@ mod tests {
 
   use super::*;
   use crate::testing::TempDir;
+
+  /// Each language but English has its catalog, every text in it translated and none fuzzy:
+  /// `make i18n` brings them up to the sources.
+  #[test]
+  fn every_catalog_is_complete() {
+    for (tag, _) in LANGUAGES.iter().filter(|l| l.0 != "en") {
+      let (_, po) = LOCALES.iter().find(|c| c.0 == *tag).expect("a catalog");
+      for entry in po.split("\n\n").skip(1).filter(|e| !e.trim().is_empty()) {
+        assert!(!entry.contains("#, fuzzy"), "{tag}: fuzzy: {entry}");
+        let lines: Vec<&str> = entry.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+          let next = lines.get(i + 1).is_some_and(|l| l.starts_with('"'));
+          let empty = line.starts_with("msgstr") && line.ends_with(" \"\"") && !next;
+          assert!(!empty, "{tag}: not translated: {entry}");
+        }
+      }
+    }
+  }
 
   #[test]
   fn wavo_dev_is_an_app_of_its_own() {

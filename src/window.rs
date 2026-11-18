@@ -7,6 +7,8 @@
 //! in nimbo's harness with a fake one.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Display;
+use std::iter;
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -22,8 +24,8 @@ use nimbo::ui::widgets::icon;
 use nimbo::{
   Align, Answer, App, Button, ButtonLook, ButtonRole, ButtonStyle, Config, ControlSize, Cx, Dialog,
   Event, FileDialog, Font, FormRow, FormStyle, Frame, Hotkey, Icon, Id, Item, LinePattern, List,
-  ListStyle, Menu, Picker, Rect, Response, Section, Selection, Style, TabItem, Tag, TextStyle,
-  Tone, Ui, Weight, grow, open, paths, px,
+  ListStyle, Localized, Menu, Picker, Rect, Response, Section, Selection, Style, TabItem, Tag,
+  TextStyle, Tone, Ui, Weight, grow, open, paths, px, t, tn,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -33,7 +35,9 @@ use crate::history::{
   Entry, History, IN_MEMORY, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms,
 };
 use crate::session::{self, NoModel, Request, Status, label};
-use crate::settings::{Activation, HudPosition, HudStyle, KEYBOARD, Settings, language_name};
+use crate::settings::{
+  Activation, HudPosition, HudStyle, KEYBOARD, Settings, english_name, language_name,
+};
 use crate::transfer::Imported;
 use crate::{engine, mic_start};
 
@@ -61,13 +65,16 @@ pub enum Page {
   About,
 }
 
-const PAGES: [TabItem<Page>; 5] = [
-  TabItem::new(Page::General, Icon::GEAR, "General"),
-  TabItem::new(Page::Models, Icon::DOWNLOAD, "Models"),
-  TabItem::new(Page::History, Icon::HISTORY, "History"),
-  TabItem::new(Page::Advanced, Icon::SLIDERS, "Advanced"),
-  TabItem::new(Page::About, Icon::INFO, "About"),
-];
+/// The tabs, in the language chosen now.
+fn pages() -> [TabItem<'static, Page>; 5] {
+  [
+    TabItem::new(Page::General, Icon::GEAR, t!("General").as_str()),
+    TabItem::new(Page::Models, Icon::DOWNLOAD, t!("Models").as_str()),
+    TabItem::new(Page::History, Icon::HISTORY, t!("History").as_str()),
+    TabItem::new(Page::Advanced, Icon::SLIDERS, t!("Advanced").as_str()),
+    TabItem::new(Page::About, Icon::INFO, t!("About").as_str()),
+  ]
+}
 
 impl Page {
   fn scrolls(self) -> bool {
@@ -78,7 +85,7 @@ impl Page {
 /// A macOS preferences window: the title over the tabs, under one background.
 pub fn config(page: Page) -> Config {
   let h = if page.scrolls() { SCROLLING } else { 500.0 };
-  crate::with_icon(Config::new(crate::INFO.name, WIDTH, h).fixed().unified())
+  crate::app_config(Config::new(crate::INFO.name, WIDTH, h).fixed().unified())
 }
 
 /// What the system allows the app.
@@ -194,8 +201,8 @@ pub struct Prefs {
   /// The file panel open: its answer goes to it.
   panel: Option<Panel>,
   model_search: String,
-  /// An index of [LANGUAGES].
-  model_lang: usize,
+  /// The code of the language Models shows, one of [languages]; `""` for all.
+  model_lang: &'static str,
   /// The downloaded models selected, keyed by their place in wavo's list.
   model_sel: Selection,
   history: HistoryPage,
@@ -234,7 +241,7 @@ impl Prefs {
       ask: None,
       panel: None,
       model_search: String::new(),
-      model_lang: 0,
+      model_lang: "",
       model_sel: Selection::default(),
       history: HistoryPage { db: history, in_memory, ..HistoryPage::default() },
       saved: None,
@@ -335,8 +342,12 @@ impl Prefs {
   fn model_note(&self) -> Option<String> {
     if let Some(chosen) = self.pick.gone() {
       return Some(match self.active() {
-        Some(f) => format!("{chosen} is not on disk: {} transcribes instead.", f.0.name),
-        None => format!("{chosen} is not on disk: download it again in Models, or pick another."),
+        Some(f) => {
+          t!("{chosen} is not on disk: {model} transcribes instead.", chosen, model = f.0.name)
+        }
+        None => {
+          t!("{chosen} is not on disk: download it again in Models, or pick another.", chosen)
+        }
       });
     }
 
@@ -349,7 +360,8 @@ impl Prefs {
   fn confirm(&mut self, ui: &mut Ui) {
     let Some(ask) = &self.ask else { return };
     let mut open = true;
-    let d = Dialog::new(&ask.title).message(&ask.message).button("Delete", ButtonRole::Destructive);
+    let d = Dialog::new(&ask.title).message(&ask.message);
+    let d = d.button(t!("Delete").as_str(), ButtonRole::Destructive);
     let answer = d.show(ui.id(CONFIRM), &mut open);
     if open {
       return;
@@ -404,7 +416,7 @@ impl App for Prefs {
 
     let fs = FormStyle::plates(&ui.theme());
     ui.col(Style::new().grow().bg(fs.bg), |ui| {
-      ui.id(TABS).toolbar_tabs(&fs, &mut self.page, &PAGES);
+      ui.id(TABS).toolbar_tabs(&fs, &mut self.page, &pages());
       let head = Style::new().w(grow()).pads([12.0, 20.0, 2.0, 20.0]).gap(10.0);
       let head = head.align(Align::Start, Align::Center);
       let head = match self.page {
@@ -543,7 +555,7 @@ enum Mark<'s> {
 
 /// A row's label: `name`, then its mark with its tip, as `id` when given.
 fn marked<'s>(
-  name: &'s str,
+  name: impl Display + 's,
   mark: Mark<'s>,
   id: Option<Id>,
 ) -> impl FnOnce(&mut Ui, TextStyle) + 's {
@@ -569,98 +581,133 @@ fn marked<'s>(
 
 // MARK: General
 
-const FN_NOTE: &str =
-  "Set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”, or macOS acts on it too.";
-const SECURE_INPUT_NOTE: &str = "Secure Input is on (a password field, or a terminal’s Secure \
-  Keyboard Entry): the shortcut works through a backup path, and Esc may not cancel.";
-const ACTIVATION_HELP: &str = "How the hotkey records: while you hold it, from one press to the \
-  next, or both (a short tap latches the recording on).";
+const FN_NOTE: Localized = t!(
+  "Set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”, or macOS acts on it too."
+);
+const SECURE_INPUT_NOTE: Localized = t!(
+  "Secure Input is on (a password field, or a terminal’s Secure \
+  Keyboard Entry): the shortcut works through a backup path, and Esc may not cancel."
+);
+const ACTIVATION_HELP: Localized = t!(
+  "How the hotkey records: while you hold it, from one press to the \
+  next, or both (a short tap latches the recording on)."
+);
 // What Automatic does here ([audio::automatic]): macOS tells the built-in microphone from a
 // headset on its jack, and the lid; Windows tells USB and Bluetooth, and counts its board's sound
 // (HDAUDIO), the jack too, as built-in; Linux (ALSA) tells no transport and lists no default.
-const MIC_HELP: &str = match () {
+const MIC_HELP: Localized = match () {
   _ if cfg!(target_os = "macos") => {
-    "Automatic takes a USB microphone first, then the built-in one while the lid is open, then a \
+    t!(
+      "Automatic takes a USB microphone first, then the built-in one while the lid is open, then a \
      wired one, and a Bluetooth headset only when there is no other: it records at call quality \
      and loses the first words. System Default uses whatever the system picks."
+    )
   }
   _ if cfg!(windows) => {
-    "Automatic takes a USB microphone first, then the computer’s own or a wired one, and a \
+    t!(
+      "Automatic takes a USB microphone first, then the computer’s own or a wired one, and a \
      Bluetooth headset only when there is no other: it records at call quality and loses the \
      first words. System Default uses whatever the system picks."
+    )
   }
   _ => {
-    "Automatic and System Default both use the system’s input. Linux doesn’t tell Wavo how a \
+    t!(
+      "Automatic and System Default both use the system’s input. Linux doesn’t tell Wavo how a \
      microphone is attached, so neither skips a Bluetooth headset."
+    )
   }
 };
 // The menu's slow start warning ([mic_start]) in the Microphone row: what happens, what to do.
-const SLOW_MIC: &str = "The microphone takes longer and longer to start, so the first words get \
-  lost. Unplug it and plug it back in.";
+const SLOW_MIC: Localized = t!(
+  "The microphone takes longer and longer to start, so the first words get \
+  lost. Unplug it and plug it back in."
+);
 // Where the person turns launch at login back on, which the system turned off.
-const LOGIN_APPROVAL: &str = if cfg!(windows) {
-  "Turn Wavo on in Task Manager › Startup apps."
+const LOGIN_APPROVAL: Localized = if cfg!(windows) {
+  t!("Turn Wavo on in Task Manager › Startup apps.")
 } else {
-  "Allow Wavo in System Settings › General › Login Items."
+  t!("Allow Wavo in System Settings › General › Login Items.")
 };
-const KEEP_HELP: &str = "On: the dictated text stays on the clipboard, pasted or not. Off: after \
-  a paste the clipboard gets back what it held; with pasting off, the text is only in History.";
-const AUTO_HELP: &str = "The model tells the language of each dictation by itself. Short \
+const KEEP_HELP: Localized = t!(
+  "On: the dictated text stays on the clipboard, pasted or not. Off: after \
+  a paste the clipboard gets back what it held; with pasting off, the text is only in History."
+);
+const AUTO_HELP: Localized = t!(
+  "The model tells the language of each dictation by itself. Short \
   phrases, an accent or two languages mixed can mislead it: choose the language you speak, or \
-  Keyboard layout to follow the layout you type with.";
-const MODEL_KEYBOARD_HELP: &str = "With Keyboard layout, each language under Language goes to \
+  Keyboard layout to follow the layout you type with."
+);
+const MODEL_KEYBOARD_HELP: Localized = t!(
+  "With Keyboard layout, each language under Language goes to \
   the model chosen there. This one takes a language set to it, one no model knows, and a layout \
-  of any other language.";
+  of any other language."
+);
 /// How far a keyboard language sits in from the Language row's name.
 const KEYBOARD_INDENT: f32 = 16.0;
-const KEYBOARD_HELP: &str = "Each dictation is in the language of the keyboard layout in use when \
+const KEYBOARD_HELP: Localized = t!(
+  "Each dictation is in the language of the keyboard layout in use when \
   it ends, with the model chosen for that language below. Switch the layout while you speak and \
-  the whole dictation follows it; the HUD shows the language.";
-const CLEAN_HELP: &str = "Adds a space after each paste. A paste into the same window less than \
+  the whole dictation follows it; the HUD shows the language."
+);
+const CLEAN_HELP: Localized = t!(
+  "Adds a space after each paste. A paste into the same window less than \
   20 s after one that ended mid-sentence starts in lower case, unless its first word is in Latin \
   letters. Hesitation sounds like “э-э” and “um” are left out in Russian and English, when you \
   choose the language or the model has only one. In Russian, a number of more than one word, or \
   from 11 to 19, is written in digits: “семьдесят шестой” becomes “76-й”, and “1 000” \
-  becomes “1000”.";
-const CLIPBOARD_NOTE: &str = "Wavo can’t put the clipboard back after a paste: allow it in System \
-  Settings › Privacy & Security › Paste from Other Apps.";
-const MICROPHONE_WHY: &str = "Wavo records your voice through it while you hold the shortcut; \
-  the recording stays on this Mac.";
-const ACCESSIBILITY_WHY: &str = "Wavo hears the shortcut in every app and pastes the text where \
-  you type through it.";
-const NO_ADMIN: &str = "You’re not an administrator on this Mac, so Wavo can’t paste for you. \
-  You can turn on Keep the text on the clipboard and paste with ⌘V.";
-const LONE_KEY_NOTE: &str = "A single key needs Accessibility, which only an administrator can \
-  allow on this Mac. Use a combination like ⌥Space.";
+  becomes “1000”."
+);
+const CLIPBOARD_NOTE: Localized = t!(
+  "Wavo can’t put the clipboard back after a paste: allow it in System \
+  Settings › Privacy & Security › Paste from Other Apps."
+);
+const MICROPHONE_WHY: Localized = t!(
+  "Wavo records your voice through it while you hold the shortcut; \
+  the recording stays on this Mac."
+);
+const ACCESSIBILITY_WHY: Localized = t!(
+  "Wavo hears the shortcut in every app and pastes the text where \
+  you type through it."
+);
+const NO_ADMIN: Localized = t!(
+  "You’re not an administrator on this Mac, so Wavo can’t paste for you. \
+  You can turn on Keep the text on the clipboard and paste with ⌘V."
+);
+const LONE_KEY_NOTE: Localized = t!(
+  "A single key needs Accessibility, which only an administrator can \
+  allow on this Mac. Use a combination like ⌥Space."
+);
 
 /// A triangle with "!" in it, for a permission missing.
 const WARNING: Icon = Icon::new("M12 4.5 3 19.5h18ZM12 10v4.5M12 17v.2");
 
-const ACTIVATIONS: [Tag<Activation>; 3] = [
-  Tag::new(Activation::HoldOrToggle, "Hold to talk, or tap to start and stop"),
-  Tag::new(Activation::PushToTalk, "Hold to talk"),
-  Tag::new(Activation::Toggle, "Tap to start and stop"),
-];
+fn activations() -> [Tag<'static, Activation>; 3] {
+  [
+    Tag::new(Activation::HoldOrToggle, t!("Hold to talk, or tap to start and stop").as_str()),
+    Tag::new(Activation::PushToTalk, t!("Hold to talk").as_str()),
+    Tag::new(Activation::Toggle, t!("Tap to start and stop").as_str()),
+  ]
+}
 
 impl Prefs {
   fn general(&mut self, ui: &mut Ui, fs: &FormStyle) {
     self.permissions(ui, fs);
     // By what a dictation needs: the microphone, the model, how the key records and the key; then
     // the language, which may open into one row per keyboard layout.
-    ui.form_section(fs, "Dictation", |ui| {
+    ui.form_section(fs, t!("Dictation"), |ui| {
       let (devices, saved) = (&self.devices, &self.settings.microphone);
       let (mics, at) = microphones(devices, saved, self.lid_closed);
       let labels: Vec<&str> = mics.iter().map(|m| m.0.as_str()).collect();
       // One unplugged or only Bluetooth first: what records matters more than how fast it starts.
-      let slow = self.status.warnings.iter().any(|w| w == mic_start::SLOW);
+      let slow = self.status.warnings.iter().any(|w| w == mic_start::SLOW.as_str());
       let warning =
-        mic_warning(devices, saved, self.lid_closed).or_else(|| slow.then(|| SLOW_MIC.to_owned()));
+        mic_warning(devices, saved, self.lid_closed).or_else(|| slow.then(|| SLOW_MIC.to_string()));
       // The warning alone in the ⓘ's place: what is wrong matters then, not how the modes choose.
       let mark = match &warning {
         Some(warning) => Mark::Warning(warning),
-        None => Mark::Info(MIC_HELP),
+        None => Mark::Info(MIC_HELP.as_str()),
       };
-      let row = FormRow::new(marked("Microphone", mark, Some(Id::of("mic-row").key("info"))));
+      let row = FormRow::new(marked(t!("Microphone"), mark, Some(Id::of("mic-row").key("info"))));
       ui.id("mic-row").form_row(fs, row, |ui| {
         // ALSA's names run past 60 characters: a longer one ends in "…" beside its label.
         let mut cur = at;
@@ -673,32 +720,32 @@ impl Prefs {
 
       self.model_row(ui, fs);
       let note = match (self.access.secure_input, self.settings.hotkey == "fn") {
-        (true, _) => Some(SECURE_INPUT_NOTE),
-        (false, true) => Some(FN_NOTE),
+        (true, _) => Some(SECURE_INPUT_NOTE.as_str()),
+        (false, true) => Some(FN_NOTE.as_str()),
         (false, false) => None,
       };
       // A modifier alone needs the event tap, and so Accessibility.
       let lone = matches!(Hotkey::parse(&self.settings.hotkey), Ok(Hotkey::Modifier(_)));
       let mark = match note {
-        _ if lone && self.access.needs_admin => Mark::Warning(LONE_KEY_NOTE),
+        _ if lone && self.access.needs_admin => Mark::Warning(LONE_KEY_NOTE.as_str()),
         Some(note) => Mark::Info(note),
         None => Mark::None,
       };
 
-      let row = FormRow::new(marked("Activation", Mark::Info(ACTIVATION_HELP), None));
+      let row = FormRow::new(marked(t!("Activation"), Mark::Info(ACTIVATION_HELP.as_str()), None));
       ui.form_row(fs, row, |ui| {
         let mut cur = self.settings.activation;
-        if ui.id("activation").picker(&mut cur, &ACTIVATIONS).changed {
+        if ui.id("activation").picker(&mut cur, &activations()).changed {
           self.edit(move |s| s.activation = cur);
         }
       });
-      ui.form_row(fs, FormRow::new(marked("Shortcut", mark, None)), |ui| self.shortcut(ui));
+      ui.form_row(fs, FormRow::new(marked(t!("Shortcut"), mark, None)), |ui| self.shortcut(ui));
       self.language_row(ui, fs);
     });
 
-    ui.form_section(fs, "Output", |ui| {
+    ui.form_section(fs, t!("Output"), |ui| {
       let locked = self.access.needs_admin;
-      let row = FormRow::new("Paste the text into the app you dictate in");
+      let row = FormRow::new(t!("Paste the text into the app you dictate in"));
       ui.disabled(locked).form_row(fs, row, |ui| {
         let mut on = self.settings.auto_paste;
         if ui.id("paste").toggle(&mut on, "").changed {
@@ -709,9 +756,9 @@ impl Prefs {
       let restores = self.settings.restores_clipboard() && !locked;
       let help = match self.access.clipboard_unread && restores {
         true => format!("{KEEP_HELP}\n\n{CLIPBOARD_NOTE}"),
-        false => KEEP_HELP.to_owned(),
+        false => KEEP_HELP.to_string(),
       };
-      let row = FormRow::new(marked("Keep the text on the clipboard", Mark::Info(&help), None));
+      let row = FormRow::new(marked(t!("Keep the text on the clipboard"), Mark::Info(&help), None));
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.keep_in_clipboard;
         if ui.id("keep").toggle(&mut on, "").changed {
@@ -719,7 +766,8 @@ impl Prefs {
         }
       });
 
-      let row = FormRow::new(marked("Clean up the text", Mark::Info(CLEAN_HELP), None));
+      let row =
+        FormRow::new(marked(t!("Clean up the text"), Mark::Info(CLEAN_HELP.as_str()), None));
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.clean_text;
         if ui.id("clean").toggle(&mut on, "").changed {
@@ -728,7 +776,7 @@ impl Prefs {
       });
     });
 
-    ui.form_section(fs, "Startup", |ui| self.login(ui, fs));
+    ui.form_section(fs, t!("Startup"), |ui| self.login(ui, fs));
   }
 
   /// While the system does not allow them, a row for the microphone and one for Accessibility, or
@@ -746,24 +794,24 @@ impl Prefs {
     let ax = !self.access.accessibility && !self.access.needs_admin;
     let title = match (mic, ax) {
       (false, false) => return,
-      (true, true) => "Wavo needs two permissions",
-      _ => "Wavo needs a permission",
+      (true, true) => t!("Wavo needs two permissions"),
+      _ => t!("Wavo needs a permission"),
     };
 
     // A denied microphone is not asked again: only System Settings changes it.
     let ask = self.access.microphone == Grant::NotDetermined;
     let rows = [
-      (mic, "Microphone", MICROPHONE_WHY, "open-microphone", Pane::Microphone, ask),
-      (ax, "Accessibility", ACCESSIBILITY_WHY, "open-accessibility", Pane::Accessibility, true),
+      (mic, t!("Microphone"), MICROPHONE_WHY, "open-microphone", Pane::Microphone, ask),
+      (ax, t!("Accessibility"), ACCESSIBILITY_WHY, "open-accessibility", Pane::Accessibility, true),
     ];
     ui.form_section(fs, title, |ui| {
       for (_, name, why, id, pane, ask) in rows.into_iter().filter(|r| r.0) {
-        let row = FormRow::new(marked(name, Mark::Info(why), None)).tile(tile);
+        let row = FormRow::new(marked(name, Mark::Info(why.as_str()), None)).tile(tile);
         ui.form_row(fs, row, |ui| {
           let button = if ask {
-            Button::new("Allow").style(ButtonStyle::BorderedProminent)
+            Button::new(t!("Allow").as_str()).style(ButtonStyle::BorderedProminent)
           } else {
-            Button::new("Open Settings")
+            Button::new(t!("Open Settings").as_str())
           };
           if button.show(ui.id(id)).clicked {
             self.shell.allow(pane);
@@ -788,7 +836,7 @@ impl Prefs {
 
     let default = Settings::default().hotkey;
     let off = Hotkey::parse(&self.settings.hotkey).ok() == Hotkey::parse(&default).ok();
-    let ui = ui.disabled(off).help("Back to the default shortcut");
+    let ui = ui.disabled(off).help(t!("Back to the default shortcut").as_str());
     if ui.id("reset").icon_button(Icon::RESET).clicked {
       self.edit(move |s| s.hotkey = default.clone());
     }
@@ -800,7 +848,8 @@ impl Prefs {
     let mut at = self.pick.active.unwrap_or_default();
     let other = match &self.pick.other {
       Some((name, true)) => Some(name.clone()),
-      Some((name, false)) => Some(format!("{name} (not on disk)")),
+      // Translators: a model in a list of models.
+      Some((name, false)) => Some(t!("{name} (not on disk)", name)),
       None => None,
     };
     if let Some(other) = other {
@@ -808,7 +857,7 @@ impl Prefs {
       at = items.len() - 1;
     }
 
-    items.push("Download more…".into());
+    items.push(t!("Download more…").to_string());
     (items, at)
   }
 
@@ -819,10 +868,10 @@ impl Prefs {
     let mut langs: Vec<(String, String)> =
       codes.iter().map(|c| (language_name(c), (*c).to_owned())).collect();
     langs.sort();
-    langs.insert(0, ("Auto-detect".to_owned(), "auto".to_owned()));
+    langs.insert(0, (t!("Auto-detect").to_string(), "auto".to_owned()));
     let keyboard = self.settings.follows_keyboard();
     if keyboard || !self.layouts.is_empty() {
-      langs.insert(1, ("Keyboard layout".to_owned(), KEYBOARD.to_owned()));
+      langs.insert(1, (t!("Keyboard layout").to_string(), KEYBOARD.to_owned()));
     }
 
     if keyboard {
@@ -835,7 +884,8 @@ impl Prefs {
       return (langs, i);
     }
 
-    langs.push((format!("{} (not one the model is meant for)", language_name(&current)), current));
+    let lang = language_name(&current);
+    langs.push((t!("{lang} (not one the model is meant for)", lang), current));
     let at = langs.len() - 1;
     (langs, at)
   }
@@ -844,9 +894,9 @@ impl Prefs {
   fn model_row(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let (labels, at) = self.model_choices();
     let note = self.model_note();
-    let keyboard = self.settings.follows_keyboard().then_some(MODEL_KEYBOARD_HELP);
+    let keyboard = self.settings.follows_keyboard().then_some(MODEL_KEYBOARD_HELP.as_str());
     let mark = note.as_deref().or(keyboard).map_or(Mark::None, Mark::Info);
-    let name = if keyboard.is_some() { "Default model" } else { "Model" };
+    let name = if keyboard.is_some() { t!("Default model") } else { t!("Model") };
     let row = FormRow::new(marked(name, mark, Some(Id::of("model-row").key("info"))));
 
     let none = self.found.is_empty() && self.pick.other.is_none();
@@ -854,7 +904,7 @@ impl Prefs {
     ui.form_row(fs, row, |ui| {
       if !none {
         picked = pick(ui, "model", &labels, at, &[labels.len() - 2]);
-      } else if Button::new("Download a Model…")
+      } else if Button::new(t!("Download a Model…").as_str())
         .style(ButtonStyle::BorderedProminent)
         .show(ui.id("download-model"))
         .clicked
@@ -878,11 +928,11 @@ impl Prefs {
     let keyboard = self.settings.follows_keyboard();
     let auto = self.auto_help();
     let mark = match () {
-      _ if keyboard => Mark::Info(KEYBOARD_HELP),
+      _ if keyboard => Mark::Info(KEYBOARD_HELP.as_str()),
       _ if self.settings.engine_language().is_none() => Mark::Info(&auto),
       _ => Mark::None,
     };
-    let label = marked("Language", mark, Some(Id::of("lang-row").key("info")));
+    let label = marked(t!("Language"), mark, Some(Id::of("lang-row").key("info")));
     // With Keyboard layout, its languages under it in the same row, each with its model.
     let rows = if keyboard { keyboard_languages(&self.layouts) } else { Vec::new() };
     let choices: Vec<_> = rows.iter().map(|(lang, _)| self.keyboard_choices(lang)).collect();
@@ -935,7 +985,7 @@ impl Prefs {
       info!("settings: {lang} goes to the default model");
       self.edit(move |s| _ = s.keyboard_models.insert(lang.clone(), None));
     } else if p + 1 == labels.len() {
-      self.model_lang = LANGUAGES.iter().position(|l| l.1 == lang).unwrap_or_default();
+      self.model_lang = languages().iter().find(|l| l.1 == lang).map_or("", |l| l.1);
       self.page = Page::Models;
     } else if let Some(&model) = models.get(p - 1) {
       info!("settings: {lang} goes to {model}");
@@ -948,9 +998,9 @@ impl Prefs {
     match self.active().map(|f| f.0) {
       Some(m) if let [code] = m.langs => {
         let lang = language_name(code);
-        format!("{} knows {lang} only, so every dictation is in {lang}.", m.name)
+        t!("{model} knows {lang} only, so every dictation is in {lang}.", model = m.name, lang)
       }
-      _ => AUTO_HELP.to_owned(),
+      _ => AUTO_HELP.to_string(),
     }
   }
 
@@ -977,94 +1027,151 @@ impl Prefs {
     let default = match (self.active(), &self.pick.other) {
       (_, Some((name, _))) => name.clone(),
       (Some(f), None) => f.0.name.to_owned(),
-      (None, None) => "none".to_owned(),
+      // Translators: no model, as the default model of a keyboard language.
+      (None, None) => t!("none").to_string(),
     };
-    let mut labels = vec![format!("{default} (default)")];
+    // Translators: a model in a list of models.
+    let mut labels = vec![t!("{default} (default)", default)];
     labels.extend(models.iter().map(|m| m.name.to_owned()));
     let at = match self.settings.keyboard_models.get(lang).and_then(Option::as_ref) {
       None => 0,
       Some(c) => match models.iter().position(|m| model_name(c) == Some(m.name)) {
         Some(i) => i + 1,
         None => {
-          labels.push(format!("{} (not on disk)", label(c)));
+          labels.push(t!("{name} (not on disk)", name = label(c)));
           labels.len() - 1
         }
       },
     };
 
-    labels.push("Download more…".into());
+    labels.push(t!("Download more…").to_string());
     (labels, models.iter().map(|m| m.name).collect(), at)
   }
 }
 
 // MARK: Advanced
 
-const TOOK_HELP: &str = "After each dictation the HUD shows for a second how long the text took after \
-  the stop.";
-const LIVE_HELP: &str = "The HUD shows the words as you speak, recognized again every half second. \
+const TOOK_HELP: Localized = t!(
+  "After each dictation the HUD shows for a second how long the text took after \
+  the stop."
+);
+const LIVE_HELP: Localized = t!(
+  "The HUD shows the words as you speak, recognized again every half second. \
   The text pasted is still recognized from the whole recording after the stop. On by default on a \
-  Mac or with a discrete GPU: an integrated one is kept busy while you speak.";
-const UNLOAD_HELP: &str = "Frees the model's memory after Wavo has been idle this long. The next \
-  dictation loads it again, which takes a moment.";
-const ANE_HELP: &str = "Models marked ANE run on the Neural Engine: as fast as on the GPU at a \
+  Mac or with a discrete GPU: an integrated one is kept busy while you speak."
+);
+const UNLOAD_HELP: Localized = t!(
+  "Frees the model's memory after Wavo has been idle this long. The next \
+  dictation loads it again, which takes a moment."
+);
+const ANE_HELP: Localized = t!(
+  "Models marked ANE run on the Neural Engine: as fast as on the GPU at a \
   fraction of the energy. Each new version of Wavo prepares such a model once, in the background \
-  (10–30 s); meanwhile it runs on the GPU. Other models always run on the GPU.";
-const IMPORT_HELP: &str = "A .zip that Wavo exported, here or on another computer: the dictations this \
-  history does not have are added with their recordings; the settings stay as they are.";
-const EXPORT_HELP: &str = "The history, its recordings and the settings, into a .zip archive: \
-  Import brings it back, here or on another computer.";
+  (10–30 s); meanwhile it runs on the GPU. Other models always run on the GPU."
+);
+const IMPORT_HELP: Localized = t!(
+  "A .zip that Wavo exported, here or on another computer: the dictations this \
+  history does not have are added with their recordings; the settings stay as they are."
+);
+const EXPORT_HELP: Localized = t!(
+  "The history, its recordings and the settings, into a .zip archive: \
+  Import brings it back, here or on another computer."
+);
 /// Export and Import while the history is kept until Wavo quits.
-const NOT_SAVED: &str = "Off while the history is kept until Wavo quits";
-const DELETE_HELP: &str = "Deletes every dictation saved on disk and its recording. The ones kept \
-  until Wavo quits stay.";
+const NOT_SAVED: Localized = t!("Off while the history is kept until Wavo quits");
+const DELETE_HELP: Localized = t!(
+  "Deletes every dictation saved on disk and its recording. The ones kept \
+  until Wavo quits stay."
+);
 /// Delete All with no dictation saved on disk.
-const NOTHING_SAVED: &str = "No dictations saved";
+const NOTHING_SAVED: Localized = t!("No dictations saved");
 /// Delete All asked for, while the dictation, the export or the import runs.
-const DELETE_WAITS: &str = "Deleted once the dictation, export or import ends";
+const DELETE_WAITS: Localized = t!("Deleted once the dictation, export or import ends");
 
-const UPDATE_HELP: &str = "Wavo looks for a new version at launch and once a day; the menu says \
-  when there is one. Off, it looks only when you choose Check for Updates.";
-const NO_UPDATES: &str = "This copy of Wavo doesn’t update itself.";
+const UPDATE_HELP: Localized = t!(
+  "Wavo looks for a new version at launch and once a day; the menu says \
+  when there is one. Off, it looks only when you choose Check for Updates."
+);
+const NO_UPDATES: Localized = t!("This copy of Wavo doesn’t update itself.");
 
-const HUDS: [Tag<HudPosition>; 2] = [
-  Tag::new(HudPosition::Bottom, "Bottom of the screen"),
-  Tag::new(HudPosition::Top, "Top of the screen"),
-];
+fn huds() -> [Tag<'static, HudPosition>; 2] {
+  [
+    Tag::new(HudPosition::Bottom, t!("Bottom of the screen").as_str()),
+    Tag::new(HudPosition::Top, t!("Top of the screen").as_str()),
+  ]
+}
 
-const HUD_STYLES: [Tag<HudStyle>; 2] =
-  [Tag::new(HudStyle::Gradient, "Gradient"), Tag::new(HudStyle::Plain, "Plain")];
+fn hud_styles() -> [Tag<'static, HudStyle>; 2] {
+  [
+    // Translators: a look of the HUD, its background a gradient.
+    Tag::new(HudStyle::Gradient, t!("Gradient").as_str()),
+    // Translators: a look of the HUD, its background one colour.
+    Tag::new(HudStyle::Plain, t!("Plain").as_str()),
+  ]
+}
 
-const UNLOADS: [Tag<Option<u32>>; 7] = [
-  Tag::new(None, "Never"),
-  Tag::new(Some(0), "Right after each dictation"),
-  Tag::new(Some(2), "After 2 minutes"),
-  Tag::new(Some(5), "After 5 minutes"),
-  Tag::new(Some(10), "After 10 minutes"),
-  Tag::new(Some(15), "After 15 minutes"),
-  Tag::new(Some(60), "After 60 minutes"),
-];
+fn unloads() -> [Tag<'static, Option<u32>>; 7] {
+  [
+    // Translators: when to unload the model.
+    Tag::new(None, t!("Never").as_str()),
+    Tag::new(Some(0), t!("Right after each dictation").as_str()),
+    Tag::new(Some(2), t!("After 2 minutes").as_str()),
+    Tag::new(Some(5), t!("After 5 minutes").as_str()),
+    Tag::new(Some(10), t!("After 10 minutes").as_str()),
+    Tag::new(Some(15), t!("After 15 minutes").as_str()),
+    Tag::new(Some(60), t!("After 60 minutes").as_str()),
+  ]
+}
 
 /// The last item, after a line: the history in memory.
-const UNTIL_QUIT: Tag<Retention> = Tag::new(Retention::UntilQuit, "Until Wavo quits");
+fn until_quit() -> Tag<'static, Retention> {
+  Tag::new(Retention::UntilQuit, t!("Until Wavo quits").as_str())
+}
 
-const RETENTIONS: [Tag<Retention>; 7] = [
-  Tag::new(Retention::Unlimited, "Forever"),
-  Tag::new(Retention::Count(100), "The last 100 dictations"),
-  Tag::new(Retention::Count(1000), "The last 1,000 dictations"),
-  Tag::new(Retention::Count(10_000), "The last 10,000 dictations"),
-  Tag::new(Retention::Days3, "3 days"),
-  Tag::new(Retention::Weeks2, "2 weeks"),
-  Tag::new(Retention::Months3, "3 months"),
-];
+fn retentions() -> [Tag<'static, Retention>; 7] {
+  [
+    // Translators: how long to keep the history.
+    Tag::new(Retention::Unlimited, t!("Forever").as_str()),
+    Tag::new(Retention::Count(100), t!("The last 100 dictations").as_str()),
+    Tag::new(Retention::Count(1000), t!("The last 1,000 dictations").as_str()),
+    Tag::new(Retention::Count(10_000), t!("The last 10,000 dictations").as_str()),
+    Tag::new(Retention::Days3, t!("3 days").as_str()),
+    Tag::new(Retention::Weeks2, t!("2 weeks").as_str()),
+    Tag::new(Retention::Months3, t!("3 months").as_str()),
+  ]
+}
+
+/// The app's languages: the system's, then each of [crate::LANGUAGES] by its own name; `None` for
+/// the system's.
+fn app_languages() -> Vec<Tag<'static, Option<&'static str>>> {
+  // Translators: the app's language, the system's.
+  let system = Tag::new(None, t!("System").as_str());
+  let own = crate::LANGUAGES.iter().map(|&(tag, name)| Tag::new(Some(tag), name));
+  iter::once(system).chain(own).collect()
+}
 
 impl Prefs {
   fn advanced(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    // The model and where it runs, then updates.
-    ui.form_section(fs, "App", |ui| {
-      let row = FormRow::new(marked("Unload the model", Mark::Info(UNLOAD_HELP), None));
+    // The app's language, the model and where it runs, then updates.
+    ui.form_section(fs, t!("App"), |ui| {
+      // Its own name in each language: the one to go back to in any.
+      ui.form_row(fs, FormRow::new(t!("Language")), |ui| {
+        let tag = self.settings.app_language.as_deref();
+        let mut cur = crate::LANGUAGES.iter().find(|l| Some(l.0) == tag).map(|l| l.0);
+        let items = app_languages();
+        let p = Picker::new(&mut cur).options(&items[..1]).divider().options(&items[1..]);
+        if p.show(ui.id("app-language")).changed {
+          info!("settings: app language {}", cur.unwrap_or("system"));
+          self.edit(move |s| s.app_language = cur.map(str::to_owned));
+        }
+      });
+
+      let row =
+        FormRow::new(marked(t!("Unload the model"), Mark::Info(UNLOAD_HELP.as_str()), None));
       ui.form_row(fs, row, |ui| {
         let mut cur = self.settings.unload_after_minutes;
-        let p = Picker::new(&mut cur).options(&UNLOADS[..1]).divider().options(&UNLOADS[1..]);
+        let unloads = unloads();
+        let p = Picker::new(&mut cur).options(&unloads[..1]).divider().options(&unloads[1..]);
         if p.show(ui.id("unload")).changed {
           self.edit(move |s| s.unload_after_minutes = cur);
         }
@@ -1072,7 +1179,8 @@ impl Prefs {
 
       // Only where there is one: Apple silicon with macOS 15 or later.
       if self.shell.has_neural_engine() {
-        let row = FormRow::new(marked("Use the Neural Engine", Mark::Info(ANE_HELP), None));
+        let row =
+          FormRow::new(marked(t!("Use the Neural Engine"), Mark::Info(ANE_HELP.as_str()), None));
         ui.form_row(fs, row, |ui| {
           let mut on = self.settings.neural_engine;
           if ui.id("ane").toggle(&mut on, "").changed {
@@ -1085,7 +1193,7 @@ impl Prefs {
       let updates = self.shell.updates();
       let help = if updates { UPDATE_HELP } else { NO_UPDATES };
       let mark = Some(Id::of("auto-update-row").key("info"));
-      let row = FormRow::new(marked("Check for updates", Mark::Info(help), mark));
+      let row = FormRow::new(marked(t!("Check for updates"), Mark::Info(help.as_str()), mark));
       ui.disabled(!updates).id("auto-update-row").form_row(fs, row, |ui| {
         let mut on = updates && self.settings.auto_update;
         if ui.id("auto-update").toggle(&mut on, "").changed {
@@ -1094,22 +1202,26 @@ impl Prefs {
       });
     });
 
-    ui.form_section(fs, "HUD", |ui| {
-      ui.form_row(fs, FormRow::new("Show the HUD at"), |ui| {
+    ui.form_section(fs, t!("HUD"), |ui| {
+      ui.form_row(fs, FormRow::new(t!("Show the HUD at")), |ui| {
         let mut cur = self.settings.hud_position;
-        if ui.id("hud").picker(&mut cur, &HUDS).changed {
+        if ui.id("hud").picker(&mut cur, &huds()).changed {
           self.edit(move |s| s.hud_position = cur);
         }
       });
 
-      ui.form_row(fs, FormRow::new("HUD style"), |ui| {
+      ui.form_row(fs, FormRow::new(t!("HUD style")), |ui| {
         let mut cur = self.settings.hud_style;
-        if ui.id("hud-style").picker(&mut cur, &HUD_STYLES).changed {
+        if ui.id("hud-style").picker(&mut cur, &hud_styles()).changed {
           self.edit(move |s| s.hud_style = cur);
         }
       });
 
-      let row = FormRow::new(marked("Show the text while speaking", Mark::Info(LIVE_HELP), None));
+      let row = FormRow::new(marked(
+        t!("Show the text while speaking"),
+        Mark::Info(LIVE_HELP.as_str()),
+        None,
+      ));
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.live_preview;
         if ui.id("live").toggle(&mut on, "").changed {
@@ -1117,7 +1229,11 @@ impl Prefs {
         }
       });
 
-      let row = FormRow::new(marked("Show the transcription time", Mark::Info(TOOK_HELP), None));
+      let row = FormRow::new(marked(
+        t!("Show the transcription time"),
+        Mark::Info(TOOK_HELP.as_str()),
+        None,
+      ));
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.show_transcription_time;
         if ui.id("took").toggle(&mut on, "").changed {
@@ -1127,21 +1243,24 @@ impl Prefs {
     });
 
     // How long it is kept, what is saved, then the folders.
-    ui.form_section(fs, "History", |ui| {
-      let help = format!(
-        "Until Wavo quits: the last {IN_MEMORY} dictations stay in memory for History and the \
-        menu, without their audio, and nothing is saved to disk."
+    ui.form_section(fs, t!("History"), |ui| {
+      let help = tn!(
+        "Until Wavo quits: the last {n} dictation stays in memory for History and the menu, \
+        without its audio, and nothing is saved to disk.",
+        "Until Wavo quits: the last {n} dictations stay in memory for History and the menu, \
+        without their audio, and nothing is saved to disk.",
+        IN_MEMORY
       );
-      let row = FormRow::new(marked("Keep the history", Mark::Info(&help), None));
+      let row = FormRow::new(marked(t!("Keep the history"), Mark::Info(&help), None));
       ui.form_row(fs, row, |ui| {
         let mut cur = self.settings.history_retention;
-        let p = Picker::new(&mut cur).options(&RETENTIONS).divider().options(&[UNTIL_QUIT]);
+        let p = Picker::new(&mut cur).options(&retentions()).divider().options(&[until_quit()]);
         if p.show(ui.id("retention")).changed {
           self.edit(move |s| s.history_retention = cur);
         }
       });
 
-      let show = format!("Show in {}", open::file_manager());
+      let show = t!("Show in {app}", app = open::file_manager());
       self.saved_row(ui, fs, &show);
       self.folders_row(ui, fs, &show);
     });
@@ -1155,9 +1274,10 @@ impl Prefs {
   fn saved_row(&mut self, ui: &mut Ui, fs: &FormStyle, show: &str) {
     let export = self.shell.export_state();
     let import = self.shell.import_state();
-    let ended = |(_, size): &(PathBuf, u64)| format!("Exported · {}", size_text(*size));
-    let exported = shown(&export, "export", "Copying the history…", ended);
-    let imported = shown(&import, "import", "Reading the archive…", imported_text);
+    let ended = |(_, size): &(PathBuf, u64)| t!("Exported · {size}", size = size_text(*size));
+    let exported = shown(&export, Panel::Export, t!("Copying the history…").as_str(), ended);
+    let imported =
+      shown(&import, Panel::Import, t!("Reading the archive…").as_str(), imported_text);
     let (exporting, importing) = (exported.progress.is_some(), imported.progress.is_some());
     let progress = exported.progress.or(imported.progress);
     let off = self.settings.history_retention.in_memory();
@@ -1168,22 +1288,24 @@ impl Prefs {
 
     let not_saved = off && progress.is_none();
     let mut captions = match not_saved {
-      true => vec![NOT_SAVED.to_owned()],
+      true => vec![NOT_SAVED.to_string()],
       false => [exported.caption, imported.caption].into_iter().flatten().collect(),
     };
-    let waits = self.status.warnings.iter().any(|w| w == session::DELETE_WAITS);
+    let waits = self.status.warnings.iter().any(|w| w == session::DELETE_WAITS.as_str());
     match () {
-      _ if waits => captions.push(DELETE_WAITS.to_owned()),
-      _ if n == 0 => captions.push(NOTHING_SAVED.to_owned()),
+      _ if waits => captions.push(DELETE_WAITS.to_string()),
+      _ if n == 0 => captions.push(NOTHING_SAVED.to_string()),
       _ => {}
     }
 
     let failed = !not_saved && (exported.failed || imported.failed);
     let caption = (!captions.is_empty()).then(|| captions.join(" · "));
     let shown = Shown { caption, progress, failed };
-    let help =
-      format!("Export… {EXPORT_HELP}\n\nImport… {IMPORT_HELP}\n\nDelete All… {DELETE_HELP}");
-    let row = FormRow::new(marked("Saved history", Mark::Info(&help), None));
+    let (export_all, import_all, delete_all) = (t!("Export…"), t!("Import…"), t!("Delete All…"));
+    let help = format!(
+      "{export_all} {EXPORT_HELP}\n\n{import_all} {IMPORT_HELP}\n\n{delete_all} {DELETE_HELP}"
+    );
+    let row = FormRow::new(marked(t!("Saved history"), Mark::Info(&help), None));
     data_row(ui, fs, Id::of("saved-row"), row, &shown, |ui| {
       if let Some(Transfer::Done((file, _))) = &export
         && ui.disabled(!file.is_file()).id("export-show").button(show).clicked
@@ -1191,26 +1313,33 @@ impl Prefs {
         self.shell.reveal(file);
       }
 
-      if ui.disabled(exporting || off).id("export").button("Export…").clicked {
+      if ui.disabled(exporting || off).id("export").button(&export_all).clicked {
         let name = export_name(now_ms());
-        let panel = FileDialog::save("Export").name(&name).types(&["zip"]);
+        // Translators: the title of the save panel of Export….
+        let panel = FileDialog::save(t!("Export").as_str()).name(&name).types(&["zip"]);
         ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
         self.panel = Some(Panel::Export);
       }
 
-      if ui.disabled(importing || off).id("import").button("Import…").clicked {
-        let panel = FileDialog::open("Import").types(&["zip"]);
+      if ui.disabled(importing || off).id("import").button(&import_all).clicked {
+        // Translators: the title of the open panel of Import….
+        let panel = FileDialog::open(t!("Import").as_str()).types(&["zip"]);
         ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
         self.panel = Some(Panel::Import);
       }
 
-      let button = Button::new("Delete All…").role(ButtonRole::Destructive);
+      let button = Button::new(&delete_all).role(ButtonRole::Destructive);
       if button.show(ui.disabled(n == 0).id("delete-all")).clicked {
         let title = match n {
-          1 => "Delete 1 dictation and its recording?".to_owned(),
-          n => format!("Delete all {} dictations and their recordings?", thousands(n)),
+          1 => t!("Delete 1 dictation and its recording?").to_string(),
+          n => tn!(
+            "Delete all {count} dictations and their recordings?",
+            "Delete all {count} dictations and their recordings?",
+            n,
+            count = thousands(n)
+          ),
         };
-        let message = "This can’t be undone.".to_owned();
+        let message = t!("This can’t be undone.").to_string();
         self.ask = Some(Ask { title, message, delete: Delete::Saved });
       }
     });
@@ -1220,19 +1349,21 @@ impl Prefs {
   fn folders_row(&mut self, ui: &mut Ui, fs: &FormStyle, show: &str) {
     let models = self.hub.root().to_owned();
     let recordings = self.home.join(RECORDINGS_DIR);
-    let help = format!(
+    let help = t!(
       "Models: the downloaded models, in the Hugging Face cache, which other apps that use \
-      Hugging Face models share. Deleting a model on Models frees its space.\n{}\n\nRecordings: \
-      the audio of every dictation in the history, a folder a day. A dictation deleted from the \
-      history takes its recording with it.\n{}",
-      paths::display(&models),
-      paths::display(&recordings),
+      Hugging Face models share. Deleting a model on Models frees its space.\n{models}\n\n\
+      Recordings: the audio of every dictation in the history, a folder a day. A dictation \
+      deleted from the history takes its recording with it.\n{recordings}",
+      models = paths::display(&models),
+      recordings = paths::display(&recordings),
     );
     let row = FormRow::new(marked(show, Mark::Info(&help), None));
     ui.form_row(fs, row, |ui| {
-      for (name, dir) in [("Models", &models), ("Recordings", &recordings)] {
+      let folders =
+        [("Models", t!("Models"), &models), ("Recordings", t!("Recordings"), &recordings)];
+      for (id, name, dir) in folders {
         let ui = ui.help(&paths::display(dir)).disabled(!dir.is_dir());
-        if ui.id(("reveal", name)).button(name).clicked {
+        if ui.id(("reveal", id)).button(&name).clicked {
           self.shell.reveal(dir);
         }
       }
@@ -1256,7 +1387,7 @@ impl Prefs {
     let note = match (&login.error, &login.state) {
       (Some(e), _) => Some(e.clone()),
       (None, Ok(Autostart::RequiresApproval)) if login.busy.is_none() => {
-        Some(LOGIN_APPROVAL.to_owned())
+        Some(LOGIN_APPROVAL.to_string())
       }
       (None, Err(why)) if !why.is_empty() => Some(why.clone()),
       _ => None,
@@ -1265,7 +1396,7 @@ impl Prefs {
     let mut on = login.busy.unwrap_or(state);
     let off = login.state.is_err() || login.busy.is_some();
     let mark = note.as_deref().map_or(Mark::None, Mark::Info);
-    ui.disabled(off).form_row(fs, FormRow::new(marked("Launch at login", mark, None)), |ui| {
+    ui.disabled(off).form_row(fs, FormRow::new(marked(t!("Launch at login"), mark, None)), |ui| {
       if ui.id("login").toggle(&mut on, "").changed {
         self.login.busy = Some(on);
         self.login.error = None;
@@ -1277,11 +1408,11 @@ impl Prefs {
   /// A history request the session refused: said under the panel.
   pub fn history_failed(&mut self, req: Request, error: &str) {
     let what = match req {
-      Request::Delete(ids) if ids.len() > 1 => "Could not delete the dictations",
-      Request::Delete(_) => "Could not delete the dictation",
-      Request::Retranscribe(_) => "Could not transcribe it again",
-      Request::Restore(_) => "Could not put the previous text back",
-      Request::DeleteSaved => "Could not delete the history",
+      Request::Delete(ids) if ids.len() > 1 => t!("Could not delete the dictations"),
+      Request::Delete(_) => t!("Could not delete the dictation"),
+      Request::Retranscribe(_) => t!("Could not transcribe it again"),
+      Request::Restore(_) => t!("Could not put the previous text back"),
+      Request::DeleteSaved => t!("Could not delete the history"),
       Request::Unload | Request::Transferred | Request::Close => return,
     };
     self.history.said = Some(format!("{what}: {error}"));
@@ -1296,9 +1427,12 @@ impl Prefs {
         self.settings.autostart = on;
       }
       Err(e) => {
-        let what = if on { "on" } else { "off" };
-        warn!("launch at login {what}: {e}");
-        self.login.error = Some(format!("Couldn't turn it {what}: {e}"));
+        warn!("launch at login {}: {e}", if on { "on" } else { "off" });
+        let error = match on {
+          true => t!("Couldn’t turn it on: {e}", e),
+          false => t!("Couldn’t turn it off: {e}", e),
+        };
+        self.login.error = Some(error);
       }
     }
   }
@@ -1318,15 +1452,15 @@ pub fn microphones(
 ) -> (Vec<(String, Microphone)>, usize) {
   let default = devices.iter().find(|d| d.default);
   let automatic = match (audio::automatic(devices, lid_closed), default) {
-    (Auto::Device(i), _) => format!("Automatic ({})", devices[i].name),
+    (Auto::Device(i), _) => t!("Automatic ({device})", device = devices[i].name),
     // Only virtual ones, or a closed lid's with a virtual default: the system's.
-    (Auto::System, Some(d)) => format!("Automatic ({})", d.name),
-    (Auto::System, None) => "Automatic".to_owned(),
-    (Auto::Nothing, _) => "Automatic (none: the lid is closed)".to_owned(),
+    (Auto::System, Some(d)) => t!("Automatic ({device})", device = d.name),
+    (Auto::System, None) => t!("Automatic").to_string(),
+    (Auto::Nothing, _) => t!("Automatic (none: the lid is closed)").to_string(),
   };
   let default = match default {
-    Some(d) => format!("System Default ({})", d.name),
-    None => "System Default".to_owned(),
+    Some(d) => t!("System Default ({device})", device = d.name),
+    None => t!("System Default").to_string(),
   };
   let mut items = vec![(automatic, Microphone::Automatic), (default, Microphone::System)];
   for d in devices {
@@ -1343,7 +1477,8 @@ pub fn microphones(
     return (items, i + 2);
   }
 
-  items.push((format!("{} (not connected)", saved.name), Microphone::Device(saved.clone())));
+  let name = t!("{device} (not connected)", device = saved.name);
+  items.push((name, Microphone::Device(saved.clone())));
   let at = items.len() - 1;
   (items, at)
 }
@@ -1364,7 +1499,7 @@ pub fn not_connected<'a>(
 /// does: it hears nothing.
 pub fn mic_name(device: &audio::Device, lid_closed: bool) -> String {
   match lid_closed && device.transport == Transport::BuiltIn {
-    true => format!("{} (the lid is closed)", device.name),
+    true => t!("{device} (the lid is closed)", device = device.name),
     false => device.name.clone(),
   }
 }
@@ -1378,10 +1513,11 @@ fn mic_warning(devices: &[audio::Device], saved: &Microphone, lid_closed: bool) 
 
   Some(match instead {
     Auto::Device(i) => {
-      format!("{name} isn’t connected: Wavo records with {}", mic_name(&devices[i], lid_closed))
+      let other = mic_name(&devices[i], lid_closed);
+      t!("{name} isn’t connected: Wavo records with {other}", name, other)
     }
-    Auto::System => format!("{name} isn’t connected: Wavo records with the system’s input"),
-    Auto::Nothing => format!("{name} isn’t connected, and there is no other microphone"),
+    Auto::System => t!("{name} isn’t connected: Wavo records with the system’s input", name),
+    Auto::Nothing => t!("{name} isn’t connected, and there is no other microphone", name),
   })
 }
 
@@ -1394,7 +1530,7 @@ pub fn bluetooth_only(
   let auto = (*saved == Microphone::Automatic).then(|| audio::automatic(devices, lid_closed))?;
   match auto {
     Auto::Device(i) if devices[i].transport == Transport::Bluetooth => {
-      Some("Only a Bluetooth mic: the sound is worse")
+      Some(t!("Only a Bluetooth mic: the sound is worse").as_str())
     }
     _ => None,
   }
@@ -1404,9 +1540,9 @@ pub fn bluetooth_only(
 pub fn size_text(bytes: u64) -> String {
   let mb = bytes as f64 / 1e6;
   match mb {
-    _ if mb >= 1000.0 => format!("{:.1} GB", mb / 1000.0),
-    _ if mb >= 1.0 => format!("{mb:.0} MB"),
-    _ => format!("{} KB", bytes.div_ceil(1000)),
+    _ if mb >= 1000.0 => t!("{size} GB", size = format!("{:.1}", mb / 1000.0)),
+    _ if mb >= 1.0 => t!("{size} MB", size = format!("{mb:.0}")),
+    _ => t!("{size} KB", size = bytes.div_ceil(1000)),
   }
 }
 
@@ -1416,22 +1552,25 @@ fn share(done: u64, total: u64) -> (f32, String) {
   (k, format!("{:.0}% · {}", k * 100.0, done_text(done, total)))
 }
 
-/// A progress bar, moving without a share, and its text, as high as a caption's line.
+/// A progress bar, moving without a share, and its text, as high as a caption's line: the text
+/// ends in "…" where the row is short, never pushing the row's buttons out.
 fn progress_line(ui: &mut Ui, fs: &FormStyle, k: Option<f32>, text: &str) {
-  let line = Style::new().w(grow()).h(px(ui.line_height(fs.caption))).gap(8.0);
+  let line = Style::new().w(grow()).h(px(ui.line_height(fs.caption))).gap(8.0).clip();
   ui.row(line.align(Align::Start, Align::Center), |ui| {
     ui.col(Style::new().w(px(120.0)), |ui| ui.progress(k));
-    ui.text(text, fs.caption.nowrap());
+    ui.text(text, fs.caption.line_limit(1));
   });
 }
 
-/// `86,286`.
+/// `86,286`, the language's separator between the thousands.
 fn thousands(n: usize) -> String {
+  // Translators: what goes between the thousands of a number: 86,286 (a narrow space in some).
+  let comma = t!(",");
   let digits = n.to_string();
   let mut s = String::new();
   for (i, c) in digits.chars().enumerate() {
     if i > 0 && (digits.len() - i).is_multiple_of(3) {
-      s.push(',');
+      s.push_str(&comma);
     }
 
     s.push(c);
@@ -1444,8 +1583,14 @@ fn thousands(n: usize) -> String {
 fn done_text(done: u64, total: u64) -> String {
   let (d, t) = (done as f64, total as f64);
   match total >= 1_000_000_000 {
-    true => format!("{:.1} of {:.1} GB", d / 1e9, t / 1e9),
-    false => format!("{:.0} of {:.0} MB", d / 1e6, t / 1e6),
+    true => {
+      let (done, total) = (format!("{:.1}", d / 1e9), format!("{:.1}", t / 1e9));
+      t!("{done} of {total} GB", done, total)
+    }
+    false => {
+      let (done, total) = (format!("{:.0}", d / 1e6), format!("{:.0}", t / 1e6));
+      t!("{done} of {total} MB", done, total)
+    }
   }
 }
 
@@ -1487,16 +1632,20 @@ impl Pick {
   }
 }
 
-/// Every language of wavo's models by name, after "All languages": `(label, code)`.
-static LANGUAGES: LazyLock<Vec<(String, &'static str)>> = LazyLock::new(|| {
-  let mut codes: Vec<&str> = hub::MODELS.iter().flat_map(|m| m.langs.iter().copied()).collect();
-  codes.sort_unstable();
-  codes.dedup();
-  let mut all: Vec<(String, &str)> = codes.into_iter().map(|c| (language_name(c), c)).collect();
+/// Every language of wavo's models by its name in the app's language, after "All languages":
+/// `(label, code)`.
+fn languages() -> Vec<(String, &'static str)> {
+  static CODES: LazyLock<Vec<&str>> = LazyLock::new(|| {
+    let mut codes: Vec<&str> = hub::MODELS.iter().flat_map(|m| m.langs.iter().copied()).collect();
+    codes.sort_unstable();
+    codes.dedup();
+    codes
+  });
+  let mut all: Vec<(String, &str)> = CODES.iter().map(|&c| (language_name(c), c)).collect();
   all.sort();
-  all.insert(0, ("All languages".to_owned(), ""));
+  all.insert(0, (t!("All languages").to_string(), ""));
   all
-});
+}
 
 /// Every word of `search` is in the model's names, maker or languages, in any case.
 fn finds(search: &str, m: &ModelInfo) -> bool {
@@ -1505,7 +1654,9 @@ fn finds(search: &str, m: &ModelInfo) -> bool {
     return true;
   }
 
-  let langs: Vec<String> = m.langs.iter().map(|c| language_name(c)).collect();
+  // In the app's language and in English, as the models' own descriptions are.
+  let names = |c: &&str| [language_name(c), english_name(c)];
+  let langs: Vec<String> = m.langs.iter().flat_map(names).collect();
   let text =
     [m.full_name, m.name, m.family, m.maker, m.languages].join(" ") + " " + &langs.join(" ");
   let text = fold(&text);
@@ -1580,7 +1731,7 @@ fn recommended(lang: &str) -> Option<&'static ModelInfo> {
 
 /// `WER 4.5%` of `m` in `lang`, a decimal under 10 (`WER 32%`); `None` when not measured.
 fn wer_text(lang: &str, m: &ModelInfo) -> Option<String> {
-  Some(format!("WER {}%", figure(m.wer(lang)?)))
+  Some(t!("WER {wer}%", wer = figure(m.wer(lang)?)))
 }
 
 /// Languages written without spaces, whose WER wavo counts in characters: `BY_CHARACTER` in
@@ -1588,8 +1739,11 @@ fn wer_text(lang: &str, m: &ModelInfo) -> Option<String> {
 const BY_CHARACTER: [&str; 7] = ["zh", "yue", "ja", "th", "lo", "my", "km"];
 
 /// What a WER in `lang` counts, on its hover.
-fn errors_per(lang: &str) -> &'static str {
-  if BY_CHARACTER.contains(&lang) { "Errors per 100 characters" } else { "Errors per 100 words" }
+fn errors_per(lang: &str) -> Localized {
+  match BY_CHARACTER.contains(&lang) {
+    true => t!("Errors per 100 characters"),
+    false => t!("Errors per 100 words"),
+  }
 }
 
 /// A WER or a speed as Settings › Models shows it: a decimal under 10 (`4.5`), whole from it
@@ -1605,20 +1759,23 @@ fn figure(x: f32) -> String {
 fn best_for(lang: &str) -> Option<(&'static str, String)> {
   let name = language_name(lang);
   match (lang, recommended(lang)) {
-    ("", _) => Some((RECOMMENDED, "The default model".into())),
+    ("", _) => Some((RECOMMENDED, t!("The default model").to_string())),
     (_, Some(m)) if !m.punctuated => {
-      Some((m.name, format!("The fewest errors in {name}, but lowercase without punctuation")))
+      let why = t!("The fewest errors in {lang}, but lowercase without punctuation", lang = name);
+      Some((m.name, why))
     }
-    (_, Some(m)) => Some((m.name, format!("Best balance of accuracy and speed in {name}"))),
+    (_, Some(m)) => Some((m.name, t!("Best balance of accuracy and speed in {lang}", lang = name))),
     _ => (hub::lookup("whisper-turbo").ok())
       .filter(|m| m.langs.contains(&lang) && m.wer(lang).is_none())
-      .map(|m| (m.name, format!("No accuracy data for {name} yet: the best general model"))),
+      .map(|m| {
+        (m.name, t!("No accuracy data for {lang} yet: the best general model", lang = name))
+      }),
   }
 }
 
 /// `1 model`, `3 models`.
 fn model_count(n: usize) -> String {
-  format!("{n} model{}", if n == 1 { "" } else { "s" })
+  tn!("{n} model", "{n} models", n)
 }
 
 /// A speed as times whisper-turbo's: `22×`, a decimal under 10 (`8.5×`, `0.9×`).
@@ -1632,19 +1789,19 @@ fn speed_text(m: &ModelInfo) -> Option<String> {
   let x = m.speed()?;
   let times = times(x);
   Some(match m.name {
-    "whisper-turbo" => format!("The speed baseline ({times})"),
-    _ if times == "1.0×" => "As fast as whisper-turbo".to_owned(),
-    _ if x < 1.0 => format!("{times} the speed of whisper-turbo"),
-    _ => format!("{times} faster than whisper-turbo"),
+    "whisper-turbo" => t!("The speed baseline ({times})", times),
+    _ if times == "1.0×" => t!("As fast as whisper-turbo").to_string(),
+    _ if x < 1.0 => t!("{times} the speed of whisper-turbo", times),
+    _ => t!("{times} faster than whisper-turbo", times),
   })
 }
 
 impl Prefs {
   fn models_head(&mut self, ui: &mut Ui, s: Style) -> Response {
-    let items: Vec<Tag<usize>> =
-      LANGUAGES.iter().enumerate().map(|(i, l)| Tag::new(i, l.0.as_str())).collect();
+    let languages = languages();
+    let items: Vec<Tag<&str>> = languages.iter().map(|l| Tag::new(l.1, l.0.as_str())).collect();
     ui.id(PAGE_HEAD).row(s, |ui| {
-      ui.id("model-search").search(&mut self.model_search, "Search models");
+      ui.id("model-search").search(&mut self.model_search, t!("Search models").as_str());
       ui.id("model-lang").picker(&mut self.model_lang, &items);
     })
   }
@@ -1654,13 +1811,13 @@ impl Prefs {
   /// Every row is one line of name and one of caption in every state: the list never moves
   /// under the pointer.
   fn models(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    let lang = LANGUAGES[self.model_lang].1;
+    let lang = self.model_lang;
     if let Some(note) = self.model_note() {
       ui.text(note, fs.caption.color(ui.theme().warning));
     }
 
     if none_usable(lang) {
-      let note = format!("No model recognizes {} well yet.", language_name(lang));
+      let note = t!("No model recognizes {lang} well yet.", lang = language_name(lang));
       ui.id("no-usable-model").text(note, fs.caption);
     }
 
@@ -1703,9 +1860,9 @@ impl Prefs {
     let fit = |m: &ModelInfo| Fit { lang, best: why(m) };
     let mut acts = vec![];
     if self.found.is_empty() {
-      ui.form_section(fs, "Downloaded", |ui| {
-        let row = FormRow::new("No model yet")
-          .caption("Download the recommended one below to start dictating.")
+      ui.form_section(fs, t!("Downloaded"), |ui| {
+        let row = FormRow::new(t!("No model yet"))
+          .caption(t!("Download the recommended one below to start dictating."))
           .tile(Icon::DOWNLOAD);
         ui.form_row(fs, row, |_| {});
       });
@@ -1716,7 +1873,7 @@ impl Prefs {
     if available > 0 {
       let note = model_count(available);
       let head = |ui: &mut Ui, s: TextStyle| {
-        ui.text("Available", s);
+        ui.text(t!("Available"), s);
         ui.spacer();
         ui.text(&note, fs.note);
       };
@@ -1737,21 +1894,27 @@ impl Prefs {
           };
         if !other.is_empty() {
           let more = match lang {
-            "" => format!("{} more, not measured yet", other.len()),
-            _ => format!("{} more, not measured in {}", other.len(), language_name(lang)),
+            "" => tn!("{n} more, not measured yet", "{n} more, not measured yet", other.len()),
+            _ => tn!(
+              "{n} more, not measured in {lang}",
+              "{n} more, not measured in {lang}",
+              other.len(),
+              lang = language_name(lang)
+            ),
           };
-          folded(ui, "other-models", "Other models", &more, &other);
+          folded(ui, "other-models", t!("Other models").as_str(), &more, &other);
         }
 
         if !poor.is_empty() {
-          let title = format!("Too many errors in {}", language_name(lang));
-          folded(ui, "poor-models", &title, &format!("{} more", poor.len()), &poor);
+          let title = t!("Too many errors in {lang}", lang = language_name(lang));
+          let more = tn!("{n} more", "{n} more", poor.len());
+          folded(ui, "poor-models", &title, &more, &poor);
         }
       });
     }
 
     if downloaded.is_empty() && available == 0 {
-      ui.text("No model matches.", fs.caption);
+      ui.text(t!("No model matches."), fs.caption);
     }
 
     self.ask_delete_models(acts);
@@ -1775,7 +1938,7 @@ impl Prefs {
     // As a form section's title: the note centred on the title's line.
     let head = |ui: &mut Ui, _| {
       ui.row(Style::new().w(grow()).h(px(line)).align(Align::Start, Align::Center), |ui| {
-        ui.text("Downloaded", fs.head);
+        ui.text(t!("Downloaded"), fs.head);
         ui.spacer();
         ui.text(&note, fs.note);
       });
@@ -1797,7 +1960,7 @@ impl Prefs {
       downloaded.iter().copied().filter(|m| sel.contains(model_key(m))).collect();
     self.model_sel = sel;
     let n = chosen.iter().filter(|m| !self.in_use(m)).count();
-    let label = format!("Delete {n} Model{}…", if n == 1 { "" } else { "s" });
+    let label = tn!("Delete {n} Model…", "Delete {n} Models…", n);
     let item = match chosen.is_empty() {
       true => None,
       false => ui.context_menu(r.id, || {
@@ -1820,21 +1983,25 @@ impl Prefs {
     let (title, mut message) = match &models[..] {
       [] => return,
       [m] => (
-        format!("Delete {}?", m.name),
-        format!("It frees {size} in the Hugging Face cache. You can download it again."),
+        t!("Delete {model}?", model = m.name),
+        t!("It frees {size} in the Hugging Face cache. You can download it again.", size),
       ),
       _ => (
-        format!("Delete {} models?", models.len()),
-        format!("They free {size} in the Hugging Face cache. You can download them again."),
+        tn!("Delete {n} model?", "Delete {n} models?", models.len()),
+        t!("They free {size} in the Hugging Face cache. You can download them again.", size),
       ),
     };
-    match &kept[..] {
-      [] => {}
-      [m] => message += &format!(" {} is in use and stays.", m.name),
-      _ => {
-        let names: Vec<&str> = kept.iter().map(|m| m.name).collect();
-        message += &format!(" {} are in use and stay.", names.join(" and "));
+    let kept = match &kept[..] {
+      [] => None,
+      [m] => Some(t!("{model} is in use and stays.", model = m.name)),
+      [rest @ .., last] => {
+        let names: Vec<&str> = rest.iter().map(|m| m.name).collect();
+        let (models, last) = (names.join(", "), last.name);
+        Some(t!("{models} and {last} are in use and stay.", models, last))
       }
+    };
+    if let Some(kept) = kept {
+      message = format!("{message} {kept}");
     }
 
     self.ask = Some(Ask { title, message, delete: Delete::Models(models) });
@@ -1873,23 +2040,23 @@ impl Prefs {
         ui.row(column, |ui| {
           if in_use {
             let s = t.label().color(t.accent).font(t.font.weight(Weight::Medium)).nowrap();
-            ui.text("In use", s);
+            ui.text(t!("In use"), s);
           } else {
             let b = t.button(ButtonStyle::Bordered);
             let look = ButtonLook { frame: b.frame.w(px(w)), ..b };
-            used = Button::new("Use").look(look).show(ui.id(("use", m.name))).clicked;
+            used = Button::new(t!("Use").as_str()).look(look).show(ui.id(("use", m.name))).clicked;
           }
         });
 
         // The one in use stays, and the one a dictation goes on with after a switch.
         let busy = !in_use && self.busy(m);
         let tip = match (in_use, busy) {
-          (true, _) => "In use: choose another to delete it",
-          (_, true) => "In use until the dictation ends",
-          _ => "Delete…",
+          (true, _) => t!("In use: choose another to delete it"),
+          (_, true) => t!("In use until the dictation ends"),
+          _ => t!("Delete…"),
         };
         let off = in_use || busy;
-        if ui.help(tip).disabled(off).id(("delete", m.name)).icon_button(Icon::TRASH).clicked {
+        if ui.help(&tip).disabled(off).id(("delete", m.name)).icon_button(Icon::TRASH).clicked {
           act = Some(m);
         }
       });
@@ -1911,13 +2078,15 @@ impl Prefs {
       Some(Download::Running { done, total, rate }) => {
         let (k, mut s) = share(*done, *total);
         if let Some(rate) = rate {
-          s += &format!(" · {:.1} MB/s", rate / 1e6);
+          s += &t!(" · {rate} MB/s", rate = format!("{:.1}", rate / 1e6));
         }
 
         (None, Some((Some(k), s)))
       }
-      Some(Download::Preparing) => (None, Some((None, "Preparing for the Neural Engine…".into()))),
-      Some(Download::Failed(e)) => (Some(format!("Could not download: {e}")), None),
+      Some(Download::Preparing) => {
+        (None, Some((None, t!("Preparing for the Neural Engine…").to_string())))
+      }
+      Some(Download::Failed(e)) => (Some(t!("Could not download: {e}", e)), None),
       None => (None, None),
     };
 
@@ -1928,8 +2097,8 @@ impl Prefs {
       let slot = actions(ui, fs.gap);
       ui.row(slot, |ui| {
         if shown.progress.is_none() {
-          let label = if failed { "Retry" } else { "Download" };
-          let mut button = Button::new(label);
+          let label = if failed { t!("Retry") } else { t!("Download") };
+          let mut button = Button::new(&label);
           if fit.best.is_some() {
             button = button.style(ButtonStyle::BorderedProminent);
           }
@@ -1939,8 +2108,8 @@ impl Prefs {
           }
         } else {
           let preparing = matches!(state, Some(Download::Preparing));
-          let tip = if preparing { "Cancel" } else { "Cancel the download" };
-          if ui.help(tip).id(("cancel", m.name)).icon_button(Icon::X).clicked {
+          let tip = if preparing { t!("Cancel") } else { t!("Cancel the download") };
+          if ui.help(&tip).id(("cancel", m.name)).icon_button(Icon::X).clicked {
             self.shell.cancel_download(m.name);
           }
         }
@@ -1960,7 +2129,7 @@ impl Prefs {
   /// A model's ↗, last in its row: its card (license, languages, benchmarks) in the browser, the
   /// sign About's links have too.
   fn card(&self, ui: &mut Ui, m: &ModelInfo) {
-    let ui = ui.help("Open the model’s page on Hugging Face").id(("card", m.name));
+    let ui = ui.help(t!("Open the model’s page on Hugging Face").as_str()).id(("card", m.name));
     if ui.icon_button(Icon::EXTERNAL).clicked {
       self.shell.open_url(m.card);
     }
@@ -1976,7 +2145,7 @@ fn actions(ui: &mut Ui, gap: f32) -> Style {
   let (h, pad) = (b.frame.min[0], b.frame.pad[1] + b.frame.pad[3]);
   let column = use_w(ui).ceil();
   let mut button = |s: &str| (ui.measure(s, b.text) + pad).max(h);
-  let wide = [button("Download"), button("Retry")];
+  let wide = [button(t!("Download").as_str()), button(t!("Retry").as_str())];
   let w = wide.into_iter().fold(column + gap + h, f32::max);
   Style::new().w(px(w.ceil())).gap(gap).align(Align::End, Align::Center)
 }
@@ -1985,8 +2154,9 @@ fn actions(ui: &mut Ui, gap: f32) -> Style {
 fn use_w(ui: &mut Ui) -> f32 {
   let t = ui.theme();
   let b = t.button(ButtonStyle::Bordered);
-  let button = (ui.measure("Use", b.text) + b.frame.pad[1] + b.frame.pad[3]).max(b.frame.min[0]);
-  let in_use = ui.measure("In use", t.label().font(t.font.weight(Weight::Medium)));
+  let pad = b.frame.pad[1] + b.frame.pad[3];
+  let button = (ui.measure(t!("Use").as_str(), b.text) + pad).max(b.frame.min[0]);
+  let in_use = ui.measure(t!("In use").as_str(), t.label().font(t.font.weight(Weight::Medium)));
   in_use.max(button)
 }
 
@@ -2048,7 +2218,7 @@ fn model_row<'a>(m: &'a ModelInfo, fit: Fit<'a>) -> FormRow<'a> {
     ui.text(m.name, s.line_limit(1));
     // Why it is the one recommended for it, on the badge's hover and for assistive technology.
     if let Some(why) = fit.best {
-      ui.help(why).control_size(ControlSize::Small).badge("Recommended", Tone::Accent);
+      ui.help(why).control_size(ControlSize::Small).badge(t!("Recommended"), Tone::Accent);
     }
   };
   FormRow::new(label).tile(tile)
@@ -2064,22 +2234,43 @@ fn model_caption(ui: &mut Ui, s: TextStyle, row: Id, m: &ModelInfo, fit: Fit, an
     match wer_text(fit.lang, m) {
       Some(wer) => ui
         .with_id(row.key("wer"))
-        .help(errors_per(fit.lang))
+        .help(&errors_per(fit.lang))
         .text(wer, s.underline(LinePattern::Dot)),
-      None => ui.text(m.languages, s),
+      None => ui.text(model_languages(m), s),
     }
 
     if !m.punctuated {
-      ui.text(" · no punctuation", s);
+      ui.text(t!(" · no punctuation"), s);
     }
 
     ui.text(format!(" · {}{}", size_text(m.size), if ane { " · " } else { "" }), s);
     if ane {
       ui.with_id(row.key("ane"))
-        .help("Runs on the Apple Neural Engine")
+        .help(t!("Runs on the Apple Neural Engine").as_str())
         .text("ANE", s.underline(LinePattern::Dot));
     }
   });
+}
+
+/// What wavo says of the languages of its models, to translate: [model_languages].
+const MODEL_LANGUAGES: [Localized; 9] = [
+  // Translators: the languages a speech model knows.
+  t!("100 languages"),
+  t!("25 European languages"),
+  t!("99 languages"),
+  t!("English"),
+  t!("Hebrew"),
+  t!("Russian"),
+  t!("Russian, English, Kazakh, Kyrgyz and Uzbek"),
+  t!("Taiwanese Mandarin and English"),
+  t!("Ukrainian and English"),
+];
+
+/// The languages `m` knows as wavo says them, in the app's language: one wavo adds later in
+/// English until it is in [MODEL_LANGUAGES].
+fn model_languages(m: &ModelInfo) -> &'static str {
+  let known = MODEL_LANGUAGES.iter().find(|l| l.key() == m.languages);
+  known.map_or(m.languages, |l| l.as_str())
 }
 
 // MARK: Downloads
@@ -2236,7 +2427,7 @@ struct Shown {
 /// `starting` until it knows its total, `ended` once done; a failure says it could not `what`.
 fn shown<T>(
   state: &Option<Transfer<T>>,
-  what: &str,
+  what: Panel,
   starting: &str,
   ended: impl Fn(&T) -> String,
 ) -> Shown {
@@ -2247,7 +2438,13 @@ fn shown<T>(
       (None, Some((Some(k), text)))
     }
     Some(Transfer::Done(t)) => (Some(ended(t)), None),
-    Some(Transfer::Failed(e)) => (Some(format!("Could not {what}: {e}")), None),
+    Some(Transfer::Failed(e)) => {
+      let why = match what {
+        Panel::Export => t!("Could not export: {e}", e),
+        Panel::Import => t!("Could not import: {e}", e),
+      };
+      (Some(why), None)
+    }
     None => (None, None),
   };
   Shown { caption, progress, failed: matches!(state, Some(Transfer::Failed(_))) }
@@ -2284,12 +2481,11 @@ fn data_row<'a>(
 /// `Added 120 dictations`, and the recordings that did not come.
 fn imported_text(r: &Imported) -> String {
   let mut s = match r.added {
-    0 => "Nothing new: all of its dictations are here".to_owned(),
-    1 => "Added 1 dictation".to_owned(),
-    n => format!("Added {n} dictations"),
+    0 => t!("Nothing new: all of its dictations are here").to_string(),
+    n => tn!("Added {n} dictation", "Added {n} dictations", n),
   };
   if r.failed > 0 {
-    s += &format!(" · {} recordings not copied", r.failed);
+    s += &tn!(" · {n} recording not copied", " · {n} recordings not copied", r.failed);
   }
 
   s
@@ -2371,7 +2567,7 @@ impl HistoryPage {
     let moved = self.loaded.as_ref().is_some_and(|k| k.1 != key.1);
     self.loaded = Some(key.clone());
     let Some(history) = &self.db else {
-      self.note = Some(("Could not open the history: see the log".into(), now));
+      self.note = Some((t!("Could not open the history: see the log").to_string(), now));
       return None;
     };
 
@@ -2390,7 +2586,9 @@ impl HistoryPage {
 
         (self.days, self.entries) = (days(&entries), entries);
       }
-      Err(e) => self.note = Some((format!("Could not read the history: {e:#}"), now)),
+      Err(e) => {
+        self.note = Some((t!("Could not read the history: {e}", e = format!("{e:#}")), now))
+      }
     }
 
     None
@@ -2444,24 +2642,25 @@ fn date_of(ms: i64) -> Day {
 /// A day's plate title: `Today`, `Yesterday, October 17`, `October 3`, `March 3, 2025`.
 fn day_title(day: Day, now: i64) -> String {
   let (year, month, d) = day;
-  let date = format!("{} {d}", Local { year, month, day: d, hour: 0, minute: 0 }.month_name());
+  let local = Local { year, month, day: d, hour: 0, minute: 0 };
   if day == date_of(now) {
-    return "Today".into();
+    return t!("Today").to_string();
   }
 
   if day == date_of(now - 86_400_000) {
-    return format!("Yesterday, {date}");
+    return t!("Yesterday, {date}", date = local.day_month());
   }
 
   match year == date_of(now).0 {
-    true => date,
-    false => format!("{date}, {year}"),
+    true => local.day_month(),
+    false => local.day_month_year(),
   }
 }
 
 fn duration_text(ms: i64) -> String {
   if ms < 60_000 {
-    return format!("{:.1} s", ms as f64 / 1000.0);
+    // Translators: seconds, short: "4.2 s".
+    return t!("{seconds} s", seconds = format!("{:.1}", ms as f64 / 1000.0));
   }
 
   let s = ms / 1000;
@@ -2472,14 +2671,14 @@ fn duration_text(ms: i64) -> String {
 /// model that tried it last.
 pub fn no_text(tried_model: Option<&str>) -> String {
   match tried_model {
-    Some(model) => format!("no text · {}", label(model)),
-    None => "no text".into(),
+    Some(model) => t!("no text · {model}", model = label(model)),
+    None => t!("no text").to_string(),
   }
 }
 
 /// A row's line ([first_line]); one being recorded or transcribed has no text yet, not "no text".
 fn row_line(e: &Entry, working: bool) -> String {
-  if working && e.text.is_empty() { "Transcribing…".into() } else { first_line(e) }
+  if working && e.text.is_empty() { t!("Transcribing…").to_string() } else { first_line(e) }
 }
 
 /// A row's line: the text on one line, else [no_text].
@@ -2503,8 +2702,8 @@ fn details(e: &Entry) -> String {
 /// `3 dictations · 1:15`: of the whole day, `(count, ms)`.
 fn day_note((n, ms): (usize, i64)) -> String {
   let s = ms / 1000;
-  let what = if n == 1 { "dictation" } else { "dictations" };
-  format!("{n} {what} · {}:{:02}", s / 60, s % 60)
+  let time = format!("{}:{:02}", s / 60, s % 60);
+  tn!("{n} dictation · {time}", "{n} dictations · {time}", n, time)
 }
 
 enum Act {
@@ -2524,7 +2723,7 @@ enum Act {
 const FOOT_H: f32 = 150.0;
 /// Play's and Transcribe Again's tip on a dictation without a recording: in memory, imported
 /// without one.
-const NO_RECORDING: &str = "Its recording isn’t kept";
+const NO_RECORDING: Localized = t!("Its recording isn’t kept");
 /// The line under it with the whole history.
 const TOTAL_H: f32 = 30.0;
 
@@ -2532,7 +2731,7 @@ impl Prefs {
   fn history_head(&mut self, ui: &mut Ui, s: Style) -> Response {
     let h = &mut self.history;
     ui.id(PAGE_HEAD).row(s, |ui| {
-      if ui.id("history-search").search(&mut h.search, "Search dictations").changed {
+      if ui.id("history-search").search(&mut h.search, t!("Search dictations").as_str()).changed {
         h.typed(ui.now());
       }
     })
@@ -2553,9 +2752,9 @@ impl Prefs {
 
     if h.entries.is_empty() {
       let empty = match (h.search.trim().is_empty(), h.in_memory) {
-        (true, false) => "No dictations yet: hold the shortcut and speak.",
-        (true, true) => "No dictations since Wavo started: they’re kept only until it quits.",
-        (false, _) => "Nothing found",
+        (true, false) => t!("No dictations yet: hold the shortcut and speak."),
+        (true, true) => t!("No dictations since Wavo started: they’re kept only until it quits."),
+        (false, _) => t!("Nothing found"),
       };
       ui.col(fs.page.pads(PAGE_PAD).h(grow()), |ui| {
         ui.form_section(fs, "", |ui| ui.form_row(fs, FormRow::new(empty), |_| {}));
@@ -2624,17 +2823,19 @@ impl Prefs {
       let e = match chosen[..] {
         [] => {
           let muted = t.label().color(t.muted);
-          ui.text("Select a dictation to see all of its text.", muted);
+          ui.text(t!("Select a dictation to see all of its text."), muted);
           return;
         }
         [e] => e,
         _ => {
-          ui.id("history-chosen").text(format!("{} dictations selected", chosen.len()), t.body());
+          let n = chosen.len();
+          let chosen = tn!("{n} dictation selected", "{n} dictations selected", n);
+          ui.id("history-chosen").text(chosen, t.body());
           ui.el(Style::new().h(grow()));
           ui.row(Style::new().w(grow()), |ui| {
             ui.el(Style::new().w(grow()));
             let busy = self.selection_busy();
-            if ui.disabled(busy).id("delete-chosen").button("Delete…").clicked {
+            if ui.disabled(busy).id("delete-chosen").button(t!("Delete…").as_str()).clicked {
               act = Some(Act::Delete);
             }
           });
@@ -2651,21 +2852,28 @@ impl Prefs {
       ui.row(Style::new().w(grow()).gap(8.0), |ui| {
         let off = !st.retranscribes(e);
         if e.audio_path.is_none() {
-          ui.help(NO_RECORDING);
+          ui.help(&NO_RECORDING);
         }
 
-        if ui.disabled(off).id(("retranscribe", e.id)).button("Transcribe Again").clicked {
+        if ui
+          .disabled(off)
+          .id(("retranscribe", e.id))
+          .button(t!("Transcribe Again").as_str())
+          .clicked
+        {
           act = Some(Act::Request(Request::Retranscribe(e.id)));
         }
 
         if st.restorable
-          && ui.disabled(st.busy).id(("restore", e.id)).button("Restore the Previous Text").clicked
+          && (ui.disabled(st.busy).id(("restore", e.id)))
+            .button(t!("Restore the Previous Text").as_str())
+            .clicked
         {
           act = Some(Act::Request(Request::Restore(e.id)));
         }
 
         ui.el(Style::new().w(grow()));
-        if ui.disabled(st.busy).id(("delete", e.id)).button("Delete…").clicked {
+        if ui.disabled(st.busy).id(("delete", e.id)).button(t!("Delete…").as_str()).clicked {
           act = Some(Act::Delete);
         }
       });
@@ -2698,20 +2906,22 @@ impl Prefs {
 
   fn total_text(&self) -> Option<String> {
     let (n, ms, Some(first)) = self.history.total.filter(|t| t.0 > 0)? else { return None };
-    let what = if n == 1 { "dictation" } else { "dictations" };
     let spoken = match ms / 1000 {
-      s if s < 60 => format!("{s} s"),
-      s if s < 3600 => format!("{} min", s / 60),
-      s => format!("{} h", s / 3600),
+      s if s < 60 => t!("{seconds} s", seconds = s),
+      // Translators: minutes, short: "12 min".
+      s if s < 3600 => t!("{minutes} min", minutes = s / 60),
+      // Translators: hours, short: "312 h".
+      s => t!("{hours} h", hours = s / 3600),
     };
-    let mut text = format!("{} {what} · {spoken}", thousands(n));
+    let count = thousands(n);
+    let mut text =
+      tn!("{count} dictation · {spoken}", "{count} dictations · {spoken}", n, count, spoken);
     if self.history.in_memory {
-      return Some(text + " · kept until Wavo quits");
+      return Some(text + t!(" · kept until Wavo quits").as_str());
     }
 
-    let since = local_time(first).map(|t| format!("{} {}, {}", t.month_name(), t.day, t.year));
-    if let Some(since) = since {
-      text += &format!(" · since {since}");
+    if let Some(since) = local_time(first).map(Local::day_month_year) {
+      text += &t!(" · since {since}", since);
     }
 
     Some(text)
@@ -2722,12 +2932,12 @@ impl Prefs {
     match act {
       Some(Act::Copy(text)) => {
         ui.clipboard().write(&text);
-        h.note = Some(("Copied to the clipboard".into(), ui.now()));
+        h.note = Some((t!("Copied to the clipboard").to_string(), ui.now()));
       }
       Some(act @ (Act::Play(id) | Act::CopyPath(id) | Act::Reveal(id))) => {
         let e = h.entries.iter().find(|e| e.id == id).unwrap();
         let Some(path) = h.db.as_ref().unwrap().audio_file(e) else {
-          h.note = Some(("The recording is gone".into(), ui.now()));
+          h.note = Some((t!("The recording is gone").to_string(), ui.now()));
           return;
         };
 
@@ -2735,12 +2945,15 @@ impl Prefs {
           Act::CopyPath(_) => {
             let path = std::path::absolute(&path).unwrap_or(path);
             ui.clipboard().write(&path.to_string_lossy());
-            h.note = Some(("Copied to the clipboard".into(), ui.now()));
+            h.note = Some((t!("Copied to the clipboard").to_string(), ui.now()));
           }
           Act::Reveal(_) => self.shell.reveal(&path),
           _ => match self.shell.play(&path) {
             Ok(p) => h.playing = Some((id, p)),
-            Err(e) => h.note = Some((format!("Could not play the recording: {e:#}"), ui.now())),
+            Err(e) => {
+              let why = t!("Could not play the recording: {e}", e = format!("{e:#}"));
+              h.note = Some((why, ui.now()));
+            }
           },
         }
       }
@@ -2776,16 +2989,27 @@ impl Prefs {
     let (title, message) = match doomed[..] {
       [e] => {
         let start = crate::history::shorten(&first_line(e), 60);
-        let and = if audio { " and its recording are" } else { " is" };
-        ("Delete this dictation?".into(), format!("“{start}”{and} removed from the history."))
+        let message = match audio {
+          true => t!("“{start}” and its recording are removed from the history.", start),
+          false => t!("“{start}” is removed from the history.", start),
+        };
+        (t!("Delete this dictation?").to_string(), message)
       }
       _ => {
         let n = doomed.len();
-        let and = if audio { " and their recordings are" } else { " are" };
-        (
-          format!("Delete {n} dictations?"),
-          format!("{n} dictations{and} removed from the history."),
-        )
+        let message = match audio {
+          true => tn!(
+            "{n} dictation and its recording are removed from the history.",
+            "{n} dictations and their recordings are removed from the history.",
+            n
+          ),
+          false => tn!(
+            "{n} dictation is removed from the history.",
+            "{n} dictations are removed from the history.",
+            n
+          ),
+        };
+        (tn!("Delete {n} dictation?", "Delete {n} dictations?", n), message)
       }
     };
     self.ask = Some(Ask { title, message, delete: Delete::Entries(ids) });
@@ -2804,7 +3028,7 @@ impl Prefs {
     if let Some((_, p)) = h.playing.take_if(|(_, p)| !p.playing())
       && let Some(e) = p.error()
     {
-      h.said = Some(format!("Could not play the recording: {e}"));
+      h.said = Some(t!("Could not play the recording: {e}", e));
     }
   }
 }
@@ -2851,17 +3075,17 @@ fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, playing: bool, working: boo
 
   let mut act = None;
   let tip = match () {
-    _ if playing => "Stop",
+    _ if playing => t!("Stop"),
     _ if e.audio_path.is_none() => NO_RECORDING,
-    _ => "Play the recording",
+    _ => t!("Play the recording"),
   };
-  let r = ui.help(tip).disabled(e.audio_path.is_none()).control_size(ControlSize::Large);
+  let r = ui.help(&tip).disabled(e.audio_path.is_none()).control_size(ControlSize::Large);
   let r = r.id(("play", e.id)).icon_button(if playing { Icon::STOP } else { Icon::PLAY });
   if r.clicked {
     act = Some(if playing { Act::Stop } else { Act::Play(e.id) });
   }
 
-  let r = ui.help("Copy").disabled(e.text.is_empty()).control_size(ControlSize::Large);
+  let r = ui.help(t!("Copy").as_str()).disabled(e.text.is_empty()).control_size(ControlSize::Large);
   let r = r.id(("copy", e.id)).icon_button(Icon::COPY);
   if r.clicked {
     act = Some(Act::Copy(e.text.clone()));
@@ -2888,28 +3112,30 @@ enum RowItem {
 /// `on_disk`, its path copied and the file shown in the file manager.
 fn row_menu(e: &Entry, st: &RowState, on_disk: bool) -> Menu<RowItem> {
   let (play, label) = match st.playing {
-    true => (RowItem::Stop, "Stop"),
-    false => (RowItem::Play, "Play the Recording"),
+    true => (RowItem::Stop, t!("Stop")),
+    false => (RowItem::Play, t!("Play the Recording")),
   };
   let mut items = vec![
-    Item::button(RowItem::Copy, "Copy Text").enabled(!e.text.is_empty()),
-    Item::button(play, label).enabled(e.audio_path.is_some()),
+    Item::button(RowItem::Copy, t!("Copy Text").as_str()).enabled(!e.text.is_empty()),
+    Item::button(play, &label).enabled(e.audio_path.is_some()),
   ];
   if on_disk {
-    let show = format!("Show in {}", open::file_manager());
-    let path = Item::button(RowItem::CopyPath, "Copy Recording Path");
+    let show = t!("Show in {app}", app = open::file_manager());
+    let path = Item::button(RowItem::CopyPath, t!("Copy Recording Path").as_str());
     items.extend([path, Item::button(RowItem::Reveal, &show)]);
   }
 
   items.extend([
     Item::Divider,
-    Item::button(RowItem::Retranscribe, "Transcribe Again").enabled(st.retranscribes(e)),
+    Item::button(RowItem::Retranscribe, t!("Transcribe Again").as_str())
+      .enabled(st.retranscribes(e)),
   ]);
   if st.restorable {
-    items.push(Item::button(RowItem::Restore, "Restore the Previous Text").enabled(!st.busy));
+    let restore = Item::button(RowItem::Restore, t!("Restore the Previous Text").as_str());
+    items.push(restore.enabled(!st.busy));
   }
 
-  let delete = Item::button(RowItem::Delete, "Delete…").role(ButtonRole::Destructive);
+  let delete = Item::button(RowItem::Delete, t!("Delete…").as_str()).role(ButtonRole::Destructive);
   items.extend([Item::Divider, delete.enabled(st.deletable)]);
   Menu::new(items)
 }
@@ -2918,9 +3144,9 @@ fn row_menu(e: &Entry, st: &RowState, on_disk: bool) -> Menu<RowItem> {
 /// when the model transcribes, one of them is `recorded`, and none is busy, as with Delete.
 fn several_menu(st: &RowState, recorded: bool) -> Menu<RowItem> {
   let again = st.transcribes && st.deletable && recorded;
-  let delete = Item::button(RowItem::Delete, "Delete…").role(ButtonRole::Destructive);
+  let delete = Item::button(RowItem::Delete, t!("Delete…").as_str()).role(ButtonRole::Destructive);
   Menu::new(vec![
-    Item::button(RowItem::RetranscribeChosen, "Transcribe Again").enabled(again),
+    Item::button(RowItem::RetranscribeChosen, t!("Transcribe Again").as_str()).enabled(again),
     Item::Divider,
     delete.enabled(st.deletable),
   ])
@@ -2947,24 +3173,27 @@ fn row_act(item: RowItem, e: &Entry) -> Act {
 const SOURCE: &str = "https://github.com/vladkens/wavo-app";
 const COFFEE: &str = "https://buymeacoffee.com/vladkens";
 
+/// The last of [ACKS], the one name to translate.
+const THE_MODELS: Localized = t!("The models");
+
 /// `(name, what, url)`.
-const ACKS: [(&str, &str, &str); 6] = [
-  ("wavo", "Speech recognition on this machine", "https://github.com/vladkens/wavo"),
-  ("nimbo", "The UI toolkit Wavo is drawn with", "https://github.com/vladkens/nimbo"),
-  ("Handy", "The app that inspired Wavo", "https://github.com/cjpais/Handy"),
+const ACKS: [(&str, Localized, &str); 6] = [
+  ("wavo", t!("Speech recognition on this machine"), "https://github.com/vladkens/wavo"),
+  ("nimbo", t!("The UI toolkit Wavo is drawn with"), "https://github.com/vladkens/nimbo"),
+  ("Handy", t!("The app that inspired Wavo"), "https://github.com/cjpais/Handy"),
   (
     "transcribe.cpp",
-    "The models’ GGUF conversions",
+    t!("The models’ GGUF conversions"),
     "https://github.com/handy-computer/transcribe.cpp",
   ),
   (
     "ggml",
-    "The tensor library and model format, by Georgi Gerganov and others",
+    t!("The tensor library and model format, by Georgi Gerganov and others"),
     "https://github.com/ggml-org/ggml",
   ),
   (
-    "The models",
-    "OpenAI Whisper, NVIDIA Parakeet, Sber GigaAM, Useful Sensors Moonshine",
+    THE_MODELS.key(),
+    t!("OpenAI Whisper, NVIDIA Parakeet, Sber GigaAM, Useful Sensors Moonshine"),
     "https://huggingface.co/handy-computer",
   ),
 ];
@@ -2984,19 +3213,23 @@ impl Prefs {
       ui.el(Style::new().h(px(2.0)));
       ui.text(crate::VERSION, fs.note);
       ui.el(Style::new().h(px(8.0)));
-      ui.text("Local dictation: hold a key, speak, and the text lands where you type.", t.label());
+      // It wraps in a longer language.
+      let tagline = t!("Local dictation: hold a key, speak, and the text lands where you type.");
+      ui.text(tagline, t.body());
       ui.el(Style::new().h(px(14.0)));
       ui.row(Style::new().gap(8.0), |ui| {
-        if ui.id(("link", "source")).button("View on GitHub").clicked {
+        if ui.id(("link", "source")).button(t!("View on GitHub").as_str()).clicked {
           self.shell.open_url(SOURCE);
         }
 
-        if ui.id(("link", "coffee")).button("Buy Me a Coffee").clicked {
+        if ui.id(("link", "coffee")).button(t!("Buy Me a Coffee").as_str()).clicked {
           self.shell.open_url(COFFEE);
         }
 
         // Only where the app can update.
-        if self.shell.updates() && ui.id("updates").button("Check for Updates…").clicked {
+        if self.shell.updates()
+          && ui.id("updates").button(t!("Check for Updates…").as_str()).clicked
+        {
           self.shell.check_updates();
         }
       });
@@ -3006,9 +3239,10 @@ impl Prefs {
     let fs = &FormStyle { caption: fs.caption.line_limit(1), pad_y: 5.0, ..*fs };
     // A row's controls go on its name's line: the ↗ is centred in the whole row instead.
     let row_h = two_line_h(ui, fs);
-    ui.form_section(fs, "Acknowledgements", |ui| {
+    ui.form_section(fs, t!("Acknowledgements"), |ui| {
       for (name, what, url) in ACKS {
-        ui.form_row(fs, FormRow::new(name).caption(what), |ui| {
+        let label = if name == THE_MODELS.key() { THE_MODELS.as_str() } else { name };
+        ui.form_row(fs, FormRow::new(label).caption(what), |ui| {
           ui.col(Style::new().h(px(row_h)).align(Align::Center, Align::Center), |ui| {
             let ui = ui.help(url.trim_start_matches("https://")).control_size(ControlSize::Large);
             if ui.id(("link", name)).icon_button(Icon::EXTERNAL).clicked {
@@ -3028,7 +3262,7 @@ mod tests {
 
   use nimbo::harness::mac_titlebar;
   use nimbo::{
-    Appearance, Event, Harness, Modifiers, MouseButton, NamedKey, Os, Phase, Point, Size,
+    Appearance, Event, Harness, Locale, Modifiers, MouseButton, NamedKey, Os, Phase, Point, Size,
   };
 
   use super::*;
@@ -3228,6 +3462,7 @@ mod tests {
       let prefs = Prefs::new(shell, settings, self.hub.clone(), self.dir.path(), history);
       let cfg = config(Page::General);
       let mut h = Harness::new(prefs, cfg.size, 2.0);
+      crate::testing::shots_locale(&mut h);
       // macOS 26's, as nimbo's own shots draw it.
       h.set_titlebar(Some(mac_titlebar(cfg.title, false)));
       h.event(Event::Appearance(Appearance::LIGHT));
@@ -3280,8 +3515,13 @@ mod tests {
     h.frame();
   }
 
+  /// The page's English name, for a shot's file.
+  fn page_name(page: Page) -> String {
+    format!("{page:?}").to_lowercase()
+  }
+
   fn tab(h: &mut Harness<Prefs>, page: Page) {
-    let i = PAGES.iter().position(|p| p.value == page).unwrap();
+    let i = pages().iter().position(|p| p.value == page).unwrap();
     click(h, Id::of(TABS).key(i));
     h.frame();
     assert_eq!(h.app().page, page);
@@ -3380,7 +3620,7 @@ mod tests {
     let home = Home::new("window-keyboard", &["parakeet-v3", "parakeet-v2", "gigaam-v3"]);
     let fake = Fake::default();
     let mut h = home.harness(&fake, Settings::default());
-    assert_eq!(tip(&mut h, "lang-row"), AUTO_HELP);
+    assert_eq!(tip(&mut h, "lang-row"), AUTO_HELP.as_str());
     click(&mut h, Id::of("lang"));
     let item = |i: usize| Id::of("lang").key(("item", i));
     let items = |h: &Harness<Prefs>| (0..).take_while(|&i| h.rect(item(i)).is_some()).count();
@@ -3401,8 +3641,8 @@ mod tests {
     let started: Rows = rows(&[("en", Some("parakeet-v2")), ("ru", Some("gigaam-v3"))]);
     assert_eq!(fake.log().settings.language, KEYBOARD);
     assert_eq!(fake.log().settings.keyboard_models, started);
-    assert_eq!(tip(&mut h, "lang-row"), KEYBOARD_HELP);
-    assert_eq!(tip(&mut h, "model-row"), MODEL_KEYBOARD_HELP);
+    assert_eq!(tip(&mut h, "lang-row"), KEYBOARD_HELP.as_str());
+    assert_eq!(tip(&mut h, "model-row"), MODEL_KEYBOARD_HELP.as_str());
 
     let (en, ru) = (Id::of("keyboard-en"), Id::of("keyboard-ru"));
     assert!(h.rect(en).unwrap().y < h.rect(ru).unwrap().y, "English, then Russian");
@@ -3432,7 +3672,7 @@ mod tests {
     click(&mut h, ru);
     click(&mut h, ru.key(("item", 3)));
     assert_eq!(h.app().page, Page::Models);
-    assert_eq!(LANGUAGES[h.app().model_lang].1, "ru");
+    assert_eq!(h.app().model_lang, "ru");
 
     let alone = Settings {
       language: KEYBOARD.into(),
@@ -3502,9 +3742,9 @@ mod tests {
       fake.log().updates = true;
       let mut h = home.harness(&fake, Settings::default());
       h.event(Event::Appearance(appearance));
-      for TabItem { value: page, label: name, .. } in PAGES {
+      for TabItem { value: page, label: name, .. } in pages() {
         tab(&mut h, page);
-        shot(&mut h, &format!("{}-{look}", name.to_lowercase()));
+        shot(&mut h, &format!("{}-{look}", page_name(page)));
         let size = h.size();
         let area = match page {
           Page::History => Id::of("history-list"),
@@ -3583,7 +3823,7 @@ mod tests {
       h.event(Event::Appearance(appearance));
       tab(&mut h, Page::Models);
       for code in ["ru", "kk", "el", "he", "ka", "sq", ""] {
-        h.app_mut().model_lang = LANGUAGES.iter().position(|l| l.1 == code).unwrap();
+        h.app_mut().model_lang = code;
         h.frame();
         let name = if code.is_empty() { "all" } else { code };
         shot(&mut h, &format!("models-{name}-{look}"));
@@ -3597,7 +3837,7 @@ mod tests {
         }
       }
 
-      h.app_mut().model_lang = LANGUAGES.iter().position(|l| l.1 == "ru").unwrap();
+      h.app_mut().model_lang = "ru";
       h.frame();
       click(&mut h, Id::of(("other-models", "ru")));
       shot(&mut h, &format!("models-ru-other-{look}"));
@@ -3619,7 +3859,10 @@ mod tests {
       h.move_to(r.x + r.w / 2.0, r.y + r.h / 2.0);
       h.wait(Duration::from_millis(400));
       let tip = Id::of(("speed", RECOMMENDED)).key("tip");
-      let text = "6.7× faster than whisper-turbo";
+      // In the shots' language, when they are made in one.
+      let times = "6.7×";
+      let text = t!("{times} faster than whisper-turbo", times);
+      let text = text.as_str();
       assert_eq!(h.text(tip.nth(0)), Some(text));
       let read = format!("static text \"6.7×\" desc {text:?}");
       assert!(h.a11y().lines().any(|l| l.trim() == read), "{look}: read\n{}", h.a11y());
@@ -3633,7 +3876,7 @@ mod tests {
       let r = h.rect(wer).expect("the WER");
       h.move_to(r.x + r.w / 2.0, r.y + r.h / 2.0);
       h.wait(Duration::from_millis(400));
-      let text = "Errors per 100 words";
+      let text = t!("Errors per 100 words").as_str();
       assert_eq!(h.text(wer.key("tip").nth(0)), Some(text));
       if let Some(dir) = &dir {
         h.shot(&dir.join(format!("models-wer-tip-{look}.png"))).unwrap();
@@ -3717,9 +3960,9 @@ mod tests {
     assert!(h.rect(Id::of("updates")).is_none());
     tab(&mut h, Page::Advanced);
     assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" off disabled"#));
-    let info = format!(r#"button "Info" desc {NO_UPDATES:?}"#);
+    let info = format!(r#"button "Info" desc {:?}"#, NO_UPDATES.as_str());
     assert_eq!(a11y_line(&h, &info), Some(info), "enabled");
-    assert_eq!(tip(&mut h, "auto-update-row"), NO_UPDATES);
+    assert_eq!(tip(&mut h, "auto-update-row"), NO_UPDATES.as_str());
     click(&mut h, Id::of("auto-update"));
     assert!(fake.log().settings.auto_update, "kept");
 
@@ -3727,7 +3970,7 @@ mod tests {
     h.app_mut();
     h.frame();
     assert_eq!(switch(&h).as_deref(), Some(r#"switch "Check for updates" on"#));
-    assert_eq!(tip(&mut h, "auto-update-row"), UPDATE_HELP);
+    assert_eq!(tip(&mut h, "auto-update-row"), UPDATE_HELP.as_str());
     click(&mut h, Id::of("auto-update"));
     assert!(!fake.log().settings.auto_update);
     tab(&mut h, Page::About);
@@ -3780,7 +4023,7 @@ mod tests {
     assert_eq!(fake.log().autostarts, [true]);
     h.app_mut().autostart_set(true, Err("not permitted".into()));
     assert!(!h.app().settings.autostart);
-    assert_eq!(h.app().login.error.as_deref(), Some("Couldn't turn it on: not permitted"));
+    assert_eq!(h.app().login.error.as_deref(), Some("Couldn’t turn it on: not permitted"));
   }
 
   /// A chosen microphone that isn't connected stays the pop-up's choice, and the warning in its
@@ -3792,7 +4035,7 @@ mod tests {
     let fake = Fake::default();
     let row = |h: &Harness<Prefs>| a11y_line(h, r#"pop up button "Microphone""#);
     let mark = |h: &Harness<Prefs>| a11y_line(h, r#"button "Warning""#);
-    let info = format!(r#"button "Info" desc {MIC_HELP:?}"#);
+    let info = format!(r#"button "Info" desc {:?}"#, MIC_HELP.as_str());
     let wh = Choice { id: Some("wh-1000xm5".into()), name: "WH-1000XM5".into() };
     let wh = Microphone::Device(wh);
     let mut h = home.harness(&fake, Settings { microphone: wh.clone(), ..Settings::default() });
@@ -3809,7 +4052,7 @@ mod tests {
     assert_eq!(row(&h).as_deref(), Some(auto));
     assert_eq!(mark(&h), None, "the ⓘ alone");
     assert_eq!(a11y_line(&h, &info).as_ref(), Some(&info));
-    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP.as_str());
 
     // Under a closed lid that one hears nothing: the warning says so.
     let lid = format!("{warning} (the lid is closed)");
@@ -3850,7 +4093,7 @@ mod tests {
     fake.log().devices = None;
     assert!(h.event(Event::System(Change::AudioInputs)));
     h.frame();
-    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP.as_str());
   }
 
   /// The session's slow start warning shows in the Microphone row's ⓘ's place, saying what to do;
@@ -3862,12 +4105,12 @@ mod tests {
     let usb = Choice { id: Some("usb mic".into()), name: "USB Mic".into() };
     let settings = Settings { microphone: Microphone::Device(usb), ..Settings::default() };
     let mut h = home.harness(&fake, settings);
-    let slow = Status { warnings: vec![mic_start::SLOW.into()], ..Status::default() };
+    let slow = Status { warnings: vec![mic_start::SLOW.to_string()], ..Status::default() };
     update(&mut h, slow.clone());
-    assert_eq!(tip(&mut h, "mic-row"), SLOW_MIC);
+    assert_eq!(tip(&mut h, "mic-row"), SLOW_MIC.as_str());
 
     update(&mut h, Status::default());
-    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP.as_str());
 
     let mac = fake.devices()[0].clone();
     fake.log().devices = Some(vec![mac]);
@@ -3915,7 +4158,7 @@ mod tests {
     h.frame();
     assert_eq!(row(&h), pop("USB Mic"));
     assert_eq!(mark(&h), None);
-    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP);
+    assert_eq!(tip(&mut h, "mic-row"), MIC_HELP.as_str());
   }
 
   /// Export asks the save panel where; it is disabled while it runs; Finder shows the archive only
@@ -3959,7 +4202,7 @@ mod tests {
     let caption =
       |h: &Harness<Prefs>| h.text(Id::of("saved-row").key("caption")).map(str::to_owned);
     assert!(button(&h).contains("disabled"), "{}", button(&h));
-    assert_eq!(caption(&h).as_deref(), Some(NOTHING_SAVED));
+    assert_eq!(caption(&h).as_deref(), Some(NOTHING_SAVED.as_str()));
     click(&mut h, Id::of("delete-all"));
     assert!(h.app().ask.is_none(), "nothing to delete");
 
@@ -3980,18 +4223,20 @@ mod tests {
     }
 
     // The session waits for what runs, then deletes: the page and the row hear of it.
-    let waits = Status { warnings: vec![session::DELETE_WAITS.into()], ..Status::default() };
+    let waits = Status { warnings: vec![session::DELETE_WAITS.to_string()], ..Status::default() };
     h = home.harness(&fake, Settings::default());
     tab(&mut h, Page::History);
     assert_eq!(h.app().history.entries.len(), 2);
     tab(&mut h, Page::Advanced);
     h.app_mut().update(&Settings::default(), &waits, 0);
     h.frame();
-    assert_eq!(caption(&h).as_deref(), Some(DELETE_WAITS));
+    assert_eq!(caption(&h).as_deref(), Some(DELETE_WAITS.as_str()));
     assert_eq!(History::delete_saved(home.dir.path()).unwrap(), Some(2));
     h.app_mut().update(&Settings::default(), &Status::default(), 1);
     h.frame();
-    assert!(button(&h).contains("disabled") && caption(&h).as_deref() == Some(NOTHING_SAVED));
+    assert!(
+      button(&h).contains("disabled") && caption(&h).as_deref() == Some(NOTHING_SAVED.as_str())
+    );
     tab(&mut h, Page::History);
     assert!(h.app().history.entries.is_empty() && h.text(Id::of("history-total")).is_none());
   }
@@ -4017,7 +4262,7 @@ mod tests {
     let settings = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
     h.app_mut().update(&settings, &status, 0);
     h.frame();
-    assert_eq!(h.text(Id::of("saved-row").key("caption")), Some(NOT_SAVED));
+    assert_eq!(h.text(Id::of("saved-row").key("caption")), Some(NOT_SAVED.as_str()));
 
     click(&mut h, Id::of("export"));
     assert!(h.file_dialog(None).is_none(), "export is off");
@@ -4046,10 +4291,10 @@ mod tests {
     assert!(h.rect(row(ids[0])).is_some() && h.rect(row(ids[1])).is_some());
     assert_eq!(h.text(Id::of("history-total")), Some("2 dictations · 4 s · kept until Wavo quits"));
     let play = a11y_line(&h, "button \"Play").unwrap_or_default();
-    assert!(play.contains("disabled") && play.contains(NO_RECORDING), "{play}");
+    assert!(play.contains("disabled") && play.contains(NO_RECORDING.as_str()), "{play}");
     click(&mut h, row(ids[1]));
     let again = a11y_line(&h, "button \"Transcribe Again\"").unwrap_or_default();
-    assert!(again.contains("disabled") && again.contains(NO_RECORDING), "{again}");
+    assert!(again.contains("disabled") && again.contains(NO_RECORDING.as_str()), "{again}");
 
     let status = Status { in_memory: false, ..Status::default() };
     h.app_mut().update(&Settings::default(), &status, 0);
@@ -4351,14 +4596,14 @@ mod tests {
   /// A WER's hover says what it counts: characters in a language written without spaces.
   #[test]
   fn the_errors_count_characters_where_words_have_no_spaces() {
-    let per = |lang: &str| errors_per(lang).trim_start_matches("Errors per 100 ");
+    let per = |lang: &str| errors_per(lang).as_str().trim_start_matches("Errors per 100 ");
     assert_eq!(["zh", "yue", "ja", "th"].map(per), ["characters"; 4]);
     assert_eq!(["en", "ru", "ko", ""].map(per), ["words"; 4]);
 
     let home = Home::new("window-cer", &["parakeet-v3"]);
     let mut h = home.harness(&Fake::default(), Settings::default());
     tab(&mut h, Page::Models);
-    h.app_mut().model_lang = LANGUAGES.iter().position(|l| l.1 == "zh").unwrap();
+    h.app_mut().model_lang = "zh";
     h.frame();
     let read = r#"static text "WER 8.4%" desc "Errors per 100 characters""#;
     assert!(h.a11y().lines().any(|l| l.trim() == read), "{}", h.a11y());
@@ -4417,7 +4662,7 @@ mod tests {
     fake.log().states.insert("whisper-large-v2", Download::Preparing);
     let mut h = home.harness(&fake, Settings::default());
     tab(&mut h, Page::Models);
-    let at = |code: &str| LANGUAGES.iter().position(|l| l.1 == code).unwrap();
+    let at = |code: &'static str| code;
     h.app_mut().model_lang = at("ru");
     h.frame();
     assert!(h.rect(Id::of(("other-models", "ru"))).is_some());
@@ -4439,8 +4684,8 @@ mod tests {
     let fake = Fake::default();
     let mut h = home.harness(&fake, Settings::default());
     tab(&mut h, Page::Models);
-    let lang = |h: &mut Harness<Prefs>, code: &str| {
-      h.app_mut().model_lang = LANGUAGES.iter().position(|l| l.1 == code).unwrap();
+    let lang = |h: &mut Harness<Prefs>, code: &'static str| {
+      h.app_mut().model_lang = code;
       h.frame();
     };
     let card = |h: &Harness<Prefs>, name: &str| h.rect(Id::of(("card", name))).is_some();
@@ -4549,7 +4794,7 @@ mod tests {
 
     assert!(!none_usable("sq") && !none_usable("ru") && !none_usable(""));
     // Never one above the cutoff, in any language.
-    for (_, lang) in LANGUAGES.iter() {
+    for (_, lang) in &languages() {
       assert!(recommended(lang).is_none_or(|m| m.wer(lang).unwrap() <= USABLE), "{lang}");
     }
   }
@@ -4563,7 +4808,7 @@ mod tests {
     assert_eq!(wer_text("el", m("parakeet-ultra")).as_deref(), Some("WER 32%"));
     assert_eq!(wer_text("", m("parakeet-ultra")), None, "all languages");
     assert_eq!([9.94, 9.96, 31.6].map(figure), ["9.9", "10", "32"]);
-    for (_, lang) in LANGUAGES.iter() {
+    for (_, lang) in &languages() {
       let plain = recommended(lang).filter(|m| !m.punctuated).map(|m| m.name);
       let only = ["kk", "ky", "uz"].contains(lang);
       assert_eq!(plain, only.then_some("gigaam-multilingual"), "{lang}");
@@ -5027,7 +5272,7 @@ mod tests {
   fn a_single_key_warns_where_only_an_administrator_can_allow_it() {
     let home = Home::new("window-single-key", &TWO);
     let fake = Fake::default();
-    let warning = format!(r#"button "Warning" desc {LONE_KEY_NOTE:?}"#);
+    let warning = format!(r#"button "Warning" desc {:?}"#, LONE_KEY_NOTE.as_str());
     let admin = fake.access();
     let no_admin = Access { accessibility: false, needs_admin: true, ..admin };
     for (access, hotkey, warns) in [
@@ -5064,5 +5309,179 @@ mod tests {
     assert_eq!(fake.log().looks, 1, "not in the back");
     h.event(Event::Focus(true));
     assert_eq!(fake.log().looks, 2, "in front again, before a frame");
+  }
+
+  // MARK: Languages
+
+  /// The settings window in Russian: its tabs, sections, rows and pickers.
+  #[test]
+  fn the_settings_window_speaks_russian() {
+    let home = Home::new("window-ru", &TWO);
+    let mut h = home.harness(&Fake::default(), Settings::default());
+    h.set_locale(Locale::Tag("ru"), crate::LOCALES);
+    h.frame();
+    let tree = h.a11y();
+    for text in
+      ["Основные", "Модели", "Дополнительно", "Диктовка", "Микрофон", "Автоматически (USB Mic)"]
+    {
+      assert!(tree.contains(&format!("{text:?}")), "{text}: {tree}");
+    }
+
+    tab(&mut h, Page::Advanced);
+    let tree = h.a11y();
+    for text in ["Приложение", "Язык", "Как в системе", "Хранить историю", "Выгружать модель"]
+    {
+      assert!(tree.contains(&format!("{text:?}")), "{text}: {tree}");
+    }
+
+    assert!(!tree.contains(r#""Keep the history""#), "{tree}");
+  }
+
+  /// Advanced's Language picks the app's language, the system's or one by its own name, and
+  /// stores it; the window then draws in it, as the app tells nimbo ([Settings::locale]).
+  #[test]
+  fn the_language_picker_switches_the_language() {
+    let home = Home::new("window-language", &TWO);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    tab(&mut h, Page::Advanced);
+    let picker = r#"pop up button "Language" value "System""#;
+    assert_eq!(a11y_line(&h, picker).as_deref(), Some(picker));
+    click(&mut h, Id::of("app-language"));
+    let items = h.a11y();
+    assert!(items.contains(r#""English""#) && items.contains(r#""Русский""#), "{items}");
+    // Russian among the languages, after the system's.
+    let ru = 1 + crate::LANGUAGES.iter().position(|l| l.0 == "ru").unwrap();
+    click(&mut h, Id::of("app-language").key(("item", ru)));
+    let settings = fake.log().settings.clone();
+    assert_eq!(settings.app_language.as_deref(), Some("ru"));
+    assert_eq!(settings.locale(), Locale::Tag("ru"));
+
+    h.set_locale(settings.locale(), crate::LOCALES);
+    h.frame();
+    let picker = r#"pop up button "Язык" value "Русский""#;
+    assert_eq!(a11y_line(&h, picker).as_deref(), Some(picker));
+    assert!(h.a11y().contains(r#""Дополнительно""#));
+
+    // Back to the system's: English here, where no catalog matches the test's thread.
+    click(&mut h, Id::of("app-language"));
+    click(&mut h, Id::of("app-language").key(("item", 0)));
+    assert_eq!(fake.log().settings.app_language, None);
+    assert_eq!(fake.log().settings.locale(), Locale::System);
+  }
+
+  /// Each way wavo's models say their languages is in [MODEL_LANGUAGES], to translate.
+  #[test]
+  fn every_models_languages_are_translated() {
+    for m in hub::MODELS {
+      assert!(
+        MODEL_LANGUAGES.iter().any(|l| l.key() == m.languages),
+        "{}: {}",
+        m.name,
+        m.languages
+      );
+    }
+  }
+
+  /// The names a pseudo-locale leaves as they are: models (their files, the tiles' letters and
+  /// ANE's badge), devices and keyboard layouts, the folders, the dictations, the languages' own
+  /// names, the About page's projects and links, the app's, the OS's and the shortcuts'.
+  fn not_translated(home: &Home, dictations: &[(&str, i64)]) -> Vec<String> {
+    let mut names: Vec<String> = hub::MODELS.iter().map(|m| m.name.to_owned()).collect();
+    names.extend(hub::MODELS.iter().map(|m| m.file().trim_end_matches(".gguf").to_owned()));
+    names.extend(["P", "G", "W", "M", "ANE"].map(Into::into));
+    names.extend(["MacBook Pro Microphone", "USB Mic"].map(Into::into));
+    names.extend(layouts().into_iter().map(|l| l.1));
+    names.extend(["hub", "recordings"].map(|d| home.dir.path().join(d).display().to_string()));
+    names.extend(dictations.iter().map(|d| d.0.to_owned()));
+    names.extend(crate::LANGUAGES.map(|l| l.1.to_owned()));
+    names.push(crate::VERSION.to_owned());
+    names.extend(ACKS.iter().map(|a| a.2.trim_start_matches("https://").to_owned()));
+    let projects = ACKS.iter().filter(|a| a.0 != THE_MODELS.key());
+    names.extend(projects.map(|a| a.0.to_owned()));
+    names.extend(["Wavo", "Finder", "fn", "Space", "Ctrl", "Alt"].map(Into::into));
+    names
+  }
+
+  /// Every page and its states in the pseudo-locale: each text the window shows is marked, but
+  /// for [not_translated]'s names.
+  #[test]
+  fn every_text_on_every_page_is_marked() {
+    let home = Home::new("window-pseudo", &["parakeet-v3", "whisper-turbo", "gigaam-v3"]);
+    let dictations = [("Draft a reply to Anna.", 1500), ("", 4), ("Купить кофе.", 1)];
+    let ids = home.dictations(&dictations);
+    let fake = Fake::default();
+    fake.log().updates = true;
+    let running = Download::Running { done: 114_000_000, total: 272_000_000, rate: Some(3.2e6) };
+    fake.log().states.insert("gigaam-v3-e2e-ctc", running);
+    let allowed = not_translated(&home, &dictations);
+    let allowed: Vec<&str> = allowed.iter().map(String::as_str).collect();
+    let mut found = Vec::new();
+    let mut sweep = |h: &mut Harness<Prefs>, what: &str| {
+      for text in crate::testing::unmarked(&h.a11y(), &allowed) {
+        found.push(format!("{what}: {text:?}"));
+      }
+    };
+
+    let mut h = home.harness(&fake, Settings::default());
+    h.set_locale(Locale::Tag("pseudo"), crate::LOCALES);
+    h.frame();
+    for page in pages().map(|p| p.value) {
+      tab(&mut h, page);
+      sweep(&mut h, &page_name(page));
+    }
+
+    tab(&mut h, Page::General);
+    for id in ["activation", "mic", "model", "lang"] {
+      click(&mut h, Id::of(id));
+      sweep(&mut h, id);
+      h.key(NamedKey::Escape, Modifiers::default());
+      h.frame();
+    }
+
+    tab(&mut h, Page::Advanced);
+    for id in ["app-language", "unload", "hud", "hud-style", "retention"] {
+      click(&mut h, Id::of(id));
+      sweep(&mut h, id);
+      h.key(NamedKey::Escape, Modifiers::default());
+      h.frame();
+    }
+
+    click(&mut h, Id::of("delete-all"));
+    sweep(&mut h, "delete all");
+
+    let mut h = home.harness(&fake, Settings::default());
+    h.set_locale(Locale::Tag("pseudo"), crate::LOCALES);
+    tab(&mut h, Page::History);
+    click(&mut h, row(ids[0]));
+    sweep(&mut h, "history selected");
+    tab(&mut h, Page::Models);
+    click(&mut h, Id::of(("delete", "whisper-turbo")));
+    sweep(&mut h, "models delete");
+
+    // The keyboard's languages, a first launch and the history in memory.
+    let keyboard = Fake::default();
+    keyboard.log().layouts = layouts();
+    let settings = Settings { language: KEYBOARD.into(), ..Settings::default() };
+    let mut h = home.harness(&keyboard, settings);
+    h.set_locale(Locale::Tag("pseudo"), crate::LOCALES);
+    h.frame();
+    sweep(&mut h, "general keyboard");
+    let first = Home::new("window-pseudo-first", &[]);
+    let mut h = first.harness(&Fake::default(), Settings::default());
+    h.set_locale(Locale::Tag("pseudo"), crate::LOCALES);
+    h.frame();
+    sweep(&mut h, "first launch");
+    for page in [Page::Models, Page::History] {
+      tab(&mut h, page);
+      sweep(&mut h, &format!("first launch {}", page_name(page)));
+    }
+
+    let settings = Settings { history_retention: Retention::UntilQuit, ..Settings::default() };
+    let mut h = home.harness(&fake, settings);
+    h.set_locale(Locale::Tag("pseudo"), crate::LOCALES);
+    tab(&mut h, Page::History);
+    sweep(&mut h, "history in memory");
+    assert!(found.is_empty(), "not marked:\n{}", found.join("\n"));
   }
 }

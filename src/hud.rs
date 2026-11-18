@@ -22,11 +22,11 @@ use std::time::Duration;
 
 use nimbo::ui::widgets::icon;
 use nimbo::{
-  Anchor, App, Color, Config, Cx, Event, Font, Frame, Icon, ImageId, Quad, Rect, Size, Theme, Ui,
-  Weight, alpha, rgb,
+  Anchor, App, Color, Config, Cx, Event, Font, Frame, Icon, ImageId, Localized, Quad, Rect, Size,
+  Theme, Ui, Weight, alpha, rgb, t,
 };
 
-use crate::audio::Meter;
+use crate::audio::{self, Meter};
 use crate::live;
 use crate::session::{NoModel, Outcome, Status};
 use crate::settings::{HudPosition, HudStyle};
@@ -163,7 +163,7 @@ pub fn config(position: HudPosition, live: bool) -> Config {
 
   let (w, h) = if live { (WIDE, HEIGHT + ROOM) } else { (MAX_WIDTH, HEIGHT) };
   let cfg = Config::new(crate::INFO.name, w + 2.0 * MARGIN, h + 2.0 * MARGIN);
-  crate::with_icon(cfg.overlay(anchor).hidden())
+  crate::app_config(cfg.overlay(anchor).hidden())
 }
 
 // MARK: What it says
@@ -187,17 +187,19 @@ pub fn after(
   let error = match last.outcome {
     Outcome::Done if last.pasted => None,
     Outcome::Done => match last.not_pasted.as_deref() {
-      Some(why) if auto_paste => Some(format!("not pasted: {}", short(why))),
+      // The reason in English, as the history keeps it.
+      Some(why) if auto_paste => Some(t!("not pasted: {why}", why = short(why))),
       // Without auto-paste only a failed copy is news.
-      Some(why) if why.contains("copying failed") => Some("copy failed".into()),
+      Some(why) if why.contains("copying failed") => Some(t!("copy failed").to_string()),
       _ => None,
     },
     Outcome::NoSpeech | Outcome::Cancelled => None,
-    Outcome::NoText => Some("nothing recognized".into()),
+    Outcome::NoText => Some(t!("nothing recognized").to_string()),
     Outcome::NoModel => {
-      Some(no_model(last.error.as_deref().is_some_and(|e| e.contains("could not be loaded"))))
+      let load = t!("{model} could not be loaded: {error}");
+      Some(no_model(last.error.as_deref().is_some_and(|e| says(&e.to_lowercase(), load))))
     }
-    Outcome::Failed => Some(short(last.error.as_deref().unwrap_or("failed"))),
+    Outcome::Failed => Some(last.error.as_deref().map_or_else(|| FAILED.to_string(), short)),
   };
 
   let done = last.took_ms.filter(|_| took && last.outcome == Outcome::Done).map(took_text);
@@ -210,7 +212,8 @@ pub fn after(
 
 /// `420 ms`: whole milliseconds.
 fn took_text(ms: u64) -> String {
-  format!("{ms} ms")
+  // Translators: milliseconds, short: "420 ms".
+  t!("{ms} ms", ms)
 }
 
 /// The warning while recording when no model can transcribe: the recording is kept for later.
@@ -220,8 +223,22 @@ pub fn during(status: &Status) -> Option<String> {
 }
 
 fn no_model(load: bool) -> String {
-  let what = if load { "model failed to load" } else { "download a model" };
-  what.to_owned()
+  let what = if load { t!("model failed to load") } else { DOWNLOAD };
+  what.to_string()
+}
+
+/// What failed, when nothing says more.
+const FAILED: Localized = t!("failed");
+const DOWNLOAD: Localized = t!("download a model");
+
+/// The lowercase `text` says `message`, in English or in the app's language: the longest piece
+/// of it between its `{name}`s.
+fn says(lower: &str, message: Localized) -> bool {
+  [message.key(), message.as_str()].into_iter().any(|m| {
+    let piece = m.split(['{', '}']).step_by(2).max_by_key(|p| p.len()).unwrap_or_default();
+    let piece = piece.trim().to_lowercase();
+    !piece.is_empty() && lower.contains(&piece)
+  })
 }
 
 /// The known causes in a few words, else the first clause, lowercase.
@@ -229,32 +246,50 @@ fn short(error: &str) -> String {
   let lower = error.to_lowercase();
   // Refused by macOS's or Windows' privacy settings: a recording's error only, as a folder that
   // isn't writable says "permission denied" too.
-  let mic = lower.contains("recording") || lower.contains("microphone");
+  // The session's own, in the app's language, as English.
+  let ours = [t!("could not start recording: {e}"), t!("the recording failed: {e}")];
+  let mic = lower.contains("recording")
+    || lower.contains("microphone")
+    || ours.into_iter().any(|m| says(&lower, m));
   let refused = ["microphone access", "not authorized", "permission", "access is denied"];
   if mic && refused.iter().any(|k| lower.contains(k)) {
-    return "no microphone access".into();
+    return t!("no microphone access").to_string();
   }
 
+  // The OS's and the engine's in English; the app's own ([says]) in either.
   let known = [
-    (&["no speech model", "no model"][..], "download a model"),
+    (&["no speech model", "no model"][..], &[t!("no model is downloaded")][..], DOWNLOAD),
     // audio.rs's: none plugged in, or the chosen one gone with no default to fall back to.
     // Automatic's, when only a closed lid's microphone is there.
-    (&["the lid is closed"][..], "no microphone: lid closed"),
-    (&["no microphone found", "no default microphone"][..], "no microphone"),
-    (&["could not open the microphone"][..], "microphone failed"),
-    (&["password", "secure"][..], "password field"),
-    (&["focus moved"][..], "focus moved"),
-    (&["crash", "died", "panicked"][..], "engine crashed"),
-    (&["timed out", "took longer"][..], "engine timed out"),
+    (&["the lid is closed"], &[audio::LID_CLOSED], t!("no microphone: lid closed")),
+    (
+      &["no microphone found", "no default microphone"],
+      &[audio::NO_MICROPHONE, t!("{gave}, and there is no default microphone")],
+      t!("no microphone"),
+    ),
+    (
+      &["could not open the microphone"],
+      &[t!("could not open the microphone {name}: {e}")],
+      t!("microphone failed"),
+    ),
+    (&["password", "secure"], &[], t!("password field")),
+    (&["focus moved"], &[], t!("focus moved")),
+    // app.rs's, kept in English in the history.
+    (&["too busy", "too late"], &[], t!("the app was too busy")),
+    (&["crash", "died", "panicked"], &[], t!("engine crashed")),
+    (&["timed out", "took longer"], &[], t!("engine timed out")),
   ];
-  if let Some((_, short)) = known.iter().find(|(keys, _)| keys.iter().any(|k| lower.contains(k))) {
-    return (*short).to_owned();
+  let found = |(keys, ours, _): &&(&[&str], &[Localized], Localized)| {
+    keys.iter().any(|k| lower.contains(k)) || ours.iter().any(|m| says(&lower, *m))
+  };
+  if let Some((.., short)) = known.iter().find(found) {
+    return short.to_string();
   }
 
   let clause =
     lower.split([':', ';', '(', '\n']).next().unwrap().trim().trim_end_matches(['.', ',']);
   match clause.chars().count() {
-    0 => "failed".into(),
+    0 => FAILED.to_string(),
     n if n > 40 => clause.chars().take(39).collect::<String>() + "…",
     _ => clause.to_owned(),
   }
@@ -582,7 +617,7 @@ impl Hud {
   /// While recording: the shell's warning first, as it blocks the dictation (no model, a
   /// permission), so the pill keeps it through the recording; no sound only without one.
   fn warn(&mut self, f: &mut Frame) {
-    let silent = self.silent.then(|| format!("no sound from {}", self.device));
+    let silent = self.silent.then(|| t!("no sound from {device}", device = self.device));
     let warning = self.warning.clone().or(silent).map(|w| fit(f, w));
     if self.mode != Mode::Recording || self.text == warning {
       return;
@@ -1156,7 +1191,7 @@ mod tests {
   use std::path::PathBuf;
   use std::rc::Rc;
 
-  use nimbo::{Appearance, Harness};
+  use nimbo::{Appearance, Harness, Locale};
 
   use super::*;
   use crate::session::{Last, NotPasted};
@@ -1166,6 +1201,75 @@ mod tests {
       Show::Error(reason) => Some(reason),
       _ => Some("collapse".into()),
     }
+  }
+
+  /// Every text the HUD shows, in the pseudo-locale: the outcomes, the session's errors (made in
+  /// the app's language) and the OS's and the engine's (in English, said short), the time, the
+  /// warnings while recording. Each marked, but for the device's name.
+  #[test]
+  fn every_hud_text_is_marked() {
+    let (mut h, _) = hud();
+    h.set_locale(Locale::Tag("pseudo"), crate::LOCALES);
+    let ended = |outcome, error: Option<String>, not_pasted: Option<String>| Status {
+      last: Some(Last {
+        take: 1,
+        outcome,
+        pasted: not_pasted.is_none(),
+        error,
+        not_pasted,
+        ..Last::default()
+      }),
+      ..Status::default()
+    };
+    let refused = |why: NotPasted| ended(Outcome::Done, None, Some(why.to_string()));
+    let failed = |e: &str| ended(Outcome::Failed, Some(e.into()), None);
+    let erred = |e: String| Status { error: Some(e), ..Status::default() };
+    let mic = audio::GaveWay::NotConnected("USB Mic".into()).to_string();
+    let statuses = [
+      refused(NotPasted::FocusChanged),
+      refused(NotPasted::SecureField),
+      refused(NotPasted::Failed("the app was too busy to paste".into())),
+      refused(NotPasted::Failed("too late".into())),
+      ended(Outcome::NoText, None, None),
+      ended(Outcome::NoModel, Some(t!("no model is downloaded").to_string()), None),
+      ended(
+        Outcome::NoModel,
+        Some(t!("{model} could not be loaded: {error}", model = "x", error = "y")),
+        None,
+      ),
+      ended(Outcome::Failed, None, None),
+      failed("the engine panicked"),
+      failed("the engine timed out"),
+      erred(t!("could not start recording: {e}", e = audio::NO_MICROPHONE)),
+      erred(t!("could not start recording: {e}", e = audio::LID_CLOSED)),
+      erred(t!(
+        "could not start recording: {e}",
+        e = t!("{gave}, and there is no default microphone", gave = mic)
+      )),
+      erred(t!("the recording failed: {e}", e = "access is denied")),
+    ];
+    let mut texts = vec![took_text(420), no_model(true), no_model(false)];
+    for status in &statuses {
+      match after(status, None, true, false) {
+        Some(Show::Error(text)) => texts.push(text),
+        _ => panic!("{status:?}: no error"),
+      }
+    }
+
+    let copy = Last {
+      take: 1,
+      outcome: Outcome::Done,
+      not_pasted: Some("copying failed".into()),
+      ..Last::default()
+    };
+    let copy = Status { last: Some(copy), ..Status::default() };
+    let Some(Show::Error(text)) = after(&copy, None, false, false) else { panic!("no copy error") };
+    texts.push(text);
+    let found: Vec<String> = texts
+      .iter()
+      .flat_map(|t| crate::testing::unmarked(&format!("{t:?}"), &["USB Mic"]))
+      .collect();
+    assert!(found.is_empty(), "not marked: {found:?}");
   }
 
   #[test]
@@ -1301,6 +1405,7 @@ mod tests {
     let config = config(position, live);
     let hud = Hud::new(position, move || count.set(count.get() + 1));
     let mut h = Harness::new(hud, config.size, 2.0);
+    crate::testing::shots_locale(&mut h);
     h.set_transparent(true);
     // The gradient's starts, the same in every run.
     let mut n = 0u64;
@@ -1535,7 +1640,7 @@ mod tests {
         ("recording-language", vec![speaking("ru")]),
         ("transcribing", vec![recording(None), Show::Transcribing(None)]),
         ("transcribing-language", vec![speaking("en"), Show::Transcribing(None)]),
-        ("done", vec![Show::Done("420 ms".into())]),
+        ("done", vec![Show::Done(took_text(420))]),
         ("error", vec![Show::Error(refused(NotPasted::SecureField))]),
         ("error-short", vec![Show::Error(crashed())]),
         ("error-long", vec![Show::Error(too_busy())]),
@@ -1544,8 +1649,10 @@ mod tests {
     };
     let dir = std::env::var_os("WAVO_SHOTS").map(PathBuf::from);
     for (style, prefix) in [(HudStyle::Gradient, "hud"), (HudStyle::Plain, "hud-plain")] {
-      for (name, shows) in states() {
+      for i in 0..states().len() {
         let (mut h, _) = styled(style);
+        // Made once the harness has set the language.
+        let (name, shows) = states().into_iter().nth(i).unwrap();
         // A clock far enough on for the recording's seconds.
         h.advance(ms(60_000));
         for show in shows {

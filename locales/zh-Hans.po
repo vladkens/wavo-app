@@ -1,0 +1,2246 @@
+# Chinese (Simplified) translation of Wavo.
+# Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: Wavo\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-11-18 06:40+0200\n"
+"PO-Revision-Date: 2026-11-18 06:00+0200\n"
+"Last-Translator: vladkens\n"
+"Language-Team: Chinese (Simplified)\n"
+"Language: zh-Hans\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: src/app.rs:594
+msgid "allow the microphone to record"
+msgstr "请允许使用麦克风以录音"
+
+#: src/app.rs:596
+msgid "allow Accessibility to paste"
+msgstr "请允许辅助功能以粘贴"
+
+#: src/audio.rs:354
+msgid "no microphone: the lid is closed"
+msgstr "无麦克风：机盖已合上"
+
+#: src/audio.rs:356
+msgid "no microphone found"
+msgstr "未找到麦克风"
+
+#: src/audio.rs:371
+#, rust-format
+msgid "the microphone {name} is not connected"
+msgstr "麦克风“{name}”未连接"
+
+#: src/audio.rs:374 src/audio.rs:481 src/hud.rs:272
+#, rust-format
+msgid "could not open the microphone {name}: {e}"
+msgstr "无法打开麦克风“{name}”：{e}"
+
+#: src/audio.rs:386
+#, rust-format
+msgid "{why}; using {used}"
+msgstr "{why}；正在使用 {used}"
+
+#: src/audio.rs:463 src/hud.rs:267
+#, rust-format
+msgid "{gave}, and there is no default microphone"
+msgstr "{gave}，且没有默认麦克风"
+
+#: src/audio.rs:472
+#, rust-format
+msgid "{gave}, and the default microphone {name} failed too: {e}"
+msgstr "{gave}，默认麦克风“{name}”也失败了：{e}"
+
+#: src/audio.rs:874
+#, rust-format
+msgid "the recording stopped: {failure}"
+msgstr "录音已停止：{failure}"
+
+#: src/audio.rs:881
+#, rust-format
+msgid "No sound from {device}: check the microphone"
+msgstr "{device} 没有声音：请检查麦克风"
+
+#: src/audio.rs:976 src/audio.rs:1000
+#, rust-format
+msgid "the recording could not be saved: {e}"
+msgstr "无法保存录音：{e}"
+
+#: src/engine.rs:184
+#, rust-format
+msgid "could not load the model: {e}"
+msgstr "无法加载模型：{e}"
+
+#: src/engine.rs:185
+#, rust-format
+msgid "transcription failed: {e}"
+msgstr "识别失败：{e}"
+
+#: src/engine.rs:186
+msgid "the transcription was cancelled"
+msgstr "识别已取消"
+
+#. Translators: a month as a date says it, "October" of "October 17": a genitive in Russian.
+#: src/history.rs:62
+msgid "January"
+msgstr "1月"
+
+#: src/history.rs:63
+msgid "February"
+msgstr "2月"
+
+#: src/history.rs:64
+msgid "March"
+msgstr "3月"
+
+#: src/history.rs:65
+msgid "April"
+msgstr "4月"
+
+#: src/history.rs:66 src/history.rs:83
+msgid "May"
+msgstr "5月"
+
+#: src/history.rs:67
+msgid "June"
+msgstr "6月"
+
+#: src/history.rs:68
+msgid "July"
+msgstr "7月"
+
+#: src/history.rs:69
+msgid "August"
+msgstr "8月"
+
+#: src/history.rs:70
+msgid "September"
+msgstr "9月"
+
+#: src/history.rs:71
+msgid "October"
+msgstr "10月"
+
+#: src/history.rs:72
+msgid "November"
+msgstr "11月"
+
+#: src/history.rs:73
+msgid "December"
+msgstr "12月"
+
+#. Translators: a month short, as a date says it: "Oct" of "Oct 17".
+#: src/history.rs:79
+msgid "Jan"
+msgstr "1月"
+
+#: src/history.rs:80
+msgid "Feb"
+msgstr "2月"
+
+#: src/history.rs:81
+msgid "Mar"
+msgstr "3月"
+
+#: src/history.rs:82
+msgid "Apr"
+msgstr "4月"
+
+#: src/history.rs:84
+msgid "Jun"
+msgstr "6月"
+
+#: src/history.rs:85
+msgid "Jul"
+msgstr "7月"
+
+#: src/history.rs:86
+msgid "Aug"
+msgstr "8月"
+
+#: src/history.rs:87
+msgid "Sep"
+msgstr "9月"
+
+#: src/history.rs:88
+msgid "Oct"
+msgstr "10月"
+
+#: src/history.rs:89
+msgid "Nov"
+msgstr "11月"
+
+#: src/history.rs:90
+msgid "Dec"
+msgstr "12月"
+
+#. Translators: a date, the month as the months above name it: "October 17".
+#: src/history.rs:103 src/history.rs:109
+#, rust-format
+msgid "{month} {day}"
+msgstr "{month}{day}日"
+
+#. Translators: a date, the month as the months above name it: "October 17, 2026".
+#: src/history.rs:116
+#, rust-format
+msgid "{month} {day}, {year}"
+msgstr "{year}年{month}{day}日"
+
+#: src/hud.rs:191
+#, rust-format
+msgid "not pasted: {why}"
+msgstr "未粘贴：{why}"
+
+#: src/hud.rs:193
+msgid "copy failed"
+msgstr "拷贝失败"
+
+#: src/hud.rs:197 src/session.rs:1610
+msgid "nothing recognized"
+msgstr "未识别到内容"
+
+#: src/hud.rs:199 src/session.rs:370
+#, rust-format
+msgid "{model} could not be loaded: {error}"
+msgstr "无法加载 {model}：{error}"
+
+#. Translators: milliseconds, short: "420 ms".
+#: src/hud.rs:216
+#, rust-format
+msgid "{ms} ms"
+msgstr "{ms} 毫秒"
+
+#: src/hud.rs:226
+msgid "model failed to load"
+msgstr "模型加载失败"
+
+#: src/hud.rs:231
+msgid "failed"
+msgstr "失败"
+
+#: src/hud.rs:232
+msgid "download a model"
+msgstr "请下载模型"
+
+#: src/hud.rs:250 src/session.rs:1156
+#, rust-format
+msgid "could not start recording: {e}"
+msgstr "无法开始录音：{e}"
+
+#: src/hud.rs:250 src/session.rs:1298
+#, rust-format
+msgid "the recording failed: {e}"
+msgstr "录音失败：{e}"
+
+#: src/hud.rs:256
+msgid "no microphone access"
+msgstr "无麦克风访问权限"
+
+#: src/hud.rs:261 src/session.rs:367
+msgid "no model is downloaded"
+msgstr "未下载任何模型"
+
+#: src/hud.rs:264
+msgid "no microphone: lid closed"
+msgstr "无麦克风：机盖已合上"
+
+#: src/hud.rs:268
+msgid "no microphone"
+msgstr "无麦克风"
+
+#: src/hud.rs:273
+msgid "microphone failed"
+msgstr "麦克风故障"
+
+#: src/hud.rs:275
+msgid "password field"
+msgstr "密码栏"
+
+#: src/hud.rs:276
+msgid "focus moved"
+msgstr "焦点已移动"
+
+#: src/hud.rs:278
+msgid "the app was too busy"
+msgstr "App 过于繁忙"
+
+#: src/hud.rs:279
+msgid "engine crashed"
+msgstr "引擎崩溃"
+
+#: src/hud.rs:280
+msgid "engine timed out"
+msgstr "引擎超时"
+
+#: src/hud.rs:620
+#, rust-format
+msgid "no sound from {device}"
+msgstr "{device} 无声音"
+
+#: src/menu.rs:23
+msgid "Slow transcription: install the GPU's driver"
+msgstr "识别速度慢：请安装 GPU 驱动程序"
+
+#: src/menu.rs:112
+#, rust-format
+msgid "{name} — recording"
+msgstr "{name} — 正在录音"
+
+#: src/menu.rs:113
+#, rust-format
+msgid "{name} — transcribing"
+msgstr "{name} — 正在识别"
+
+#: src/menu.rs:114
+#, rust-format
+msgid "{name} — needs attention"
+msgstr "{name} — 需要注意"
+
+#: src/menu.rs:159
+msgid "Allow Accessibility…"
+msgstr "允许辅助功能…"
+
+#: src/menu.rs:166
+#, rust-format
+msgid "The hotkey “{label}” does not work: {e}"
+msgstr "快捷键“{label}”不起作用：{e}"
+
+#: src/menu.rs:170
+msgid "Allow the Hotkey…"
+msgstr "允许快捷键…"
+
+#: src/menu.rs:174 src/menu.rs:182
+msgid "Allow Paste…"
+msgstr "允许粘贴…"
+
+#: src/menu.rs:178
+msgid "Allow Microphone…"
+msgstr "允许麦克风…"
+
+#: src/menu.rs:186
+msgid "Secure Input is on…"
+msgstr "安全输入已打开…"
+
+#: src/menu.rs:191
+msgid "Download a Speech Model…"
+msgstr "下载语音识别模型…"
+
+#: src/menu.rs:193
+#, rust-format
+msgid "{model} is not on disk…"
+msgstr "{model} 不在磁盘上…"
+
+#: src/menu.rs:195
+#, rust-format
+msgid "{model} does not load…"
+msgstr "{model} 无法加载…"
+
+#: src/menu.rs:201
+msgid "unknown error"
+msgstr "未知错误"
+
+#: src/menu.rs:202
+#, rust-format
+msgid "The last dictation failed: {e}"
+msgstr "上次听写失败：{e}"
+
+#: src/menu.rs:203
+#, rust-format
+msgid "Error: {e}"
+msgstr "错误：{e}"
+
+#: src/menu.rs:270
+msgid "Copy Last Dictation"
+msgstr "拷贝上次听写"
+
+#: src/menu.rs:271
+msgid "Recent"
+msgstr "最近"
+
+#: src/menu.rs:281
+msgid "Unload Model"
+msgstr "释放模型"
+
+#: src/menu.rs:283
+msgid "History…"
+msgstr "历史记录…"
+
+#: src/menu.rs:286
+msgid "Settings…"
+msgstr "设置…"
+
+#: src/menu.rs:289
+#, rust-format
+msgid "Quit {name}"
+msgstr "退出 {name}"
+
+#: src/menu.rs:297
+#, rust-format
+msgid "Update Available: {version}…"
+msgstr "有可用更新：{version}…"
+
+#: src/menu.rs:298
+#, rust-format
+msgid "Downloading Update: {done}%"
+msgstr "正在下载更新：{done}%"
+
+#: src/menu.rs:299
+msgid "Restarting to Update…"
+msgstr "正在重新启动以更新…"
+
+#: src/menu.rs:300
+msgid "Update Failed…"
+msgstr "更新失败…"
+
+#: src/menu.rs:311
+msgid "Checking for Updates…"
+msgstr "正在检查更新…"
+
+#: src/menu.rs:312 src/window.rs:3230
+msgid "Check for Updates…"
+msgstr "检查更新…"
+
+#: src/menu.rs:340 src/window.rs:1463
+msgid "System Default"
+msgstr "系统默认"
+
+#: src/menu.rs:341
+msgid "No Microphone"
+msgstr "无麦克风"
+
+#: src/menu.rs:343
+#, rust-format
+msgid "{name} isn’t connected"
+msgstr "{name} 未连接"
+
+#. Translators: a model in a list of models.
+#: src/menu.rs:355 src/window.rs:852 src/window.rs:1041
+#, rust-format
+msgid "{name} (not on disk)"
+msgstr "{name}（不在磁盘上）"
+
+#: src/menu.rs:360
+msgid "No Model"
+msgstr "无模型"
+
+#: src/menu.rs:367
+msgid "No Models Downloaded"
+msgstr "未下载模型"
+
+#: src/menu.rs:370
+msgid "All Models…"
+msgstr "所有模型…"
+
+#: src/menu.rs:378
+msgid "Recording…"
+msgstr "正在录音…"
+
+#: src/menu.rs:379 src/menu.rs:381
+msgid "Loading the model…"
+msgstr "正在加载模型…"
+
+#: src/menu.rs:380 src/window.rs:2680
+msgid "Transcribing…"
+msgstr "正在识别…"
+
+#. Translators: the app's state in the menu's header, after an error.
+#: src/menu.rs:383
+msgid "Error"
+msgstr "错误"
+
+#: src/mic_start.rs:25
+msgid "Microphone is slow to start: reconnect it"
+msgstr "麦克风启动缓慢：请重新连接"
+
+#: src/session.rs:60
+msgid "couldn’t stop saving the history: dictations aren’t kept, see the log"
+msgstr "无法停止保存历史记录：听写不会被保留，请查看日志"
+
+#: src/session.rs:63
+msgid "the saved history is deleted once the dictation, export or import ends"
+msgstr "已保存的历史记录将在听写、导出或导入结束后删除"
+
+#: src/session.rs:66
+msgid "couldn’t open the saved history: dictations are kept until Wavo quits"
+msgstr "无法打开已保存的历史记录：听写将保留到 Wavo 退出"
+
+#: src/session.rs:368
+#, rust-format
+msgid "{model} is not on disk"
+msgstr "{model} 不在磁盘上"
+
+#: src/session.rs:946
+#, rust-format
+msgid "could not save the settings: {e}"
+msgstr "无法保存设置：{e}"
+
+#: src/session.rs:1008
+#, rust-format
+msgid "{chosen} is not on disk: {model} transcribes instead"
+msgstr "{chosen} 不在磁盘上，改用 {model} 识别"
+
+#: src/session.rs:1136
+msgid "the model"
+msgstr "模型"
+
+#: src/session.rs:1611
+#, rust-format
+msgid "nothing recognized: {note}"
+msgstr "未识别到内容：{note}"
+
+#: src/session.rs:1616
+#, rust-format
+msgid "entry {entry} could not be transcribed again: {why}"
+msgstr "无法重新识别条目 {entry}：{why}"
+
+#: src/session.rs:1669
+#, rust-format
+msgid "could not open the history: {e}"
+msgstr "无法打开历史记录：{e}"
+
+#: src/session.rs:1691
+#, rust-format
+msgid "could not delete the saved history: {e}"
+msgstr "无法删除已保存的历史记录：{e}"
+
+#: src/session.rs:1826
+#, rust-format
+msgid "{model} understands {lang} only"
+msgstr "{model} 仅支持{lang}"
+
+#: src/settings.rs:161
+#, rust-format
+msgid "{path}: {e}; using the defaults, the file kept as {kept}"
+msgstr "{path}：{e}；正在使用默认设置，原文件已保留为 {kept}"
+
+#: src/settings.rs:162
+#, rust-format
+msgid "{path}: {e}; using the defaults"
+msgstr "{path}：{e}；正在使用默认设置"
+
+#: src/settings.rs:175
+#, rust-format
+msgid "{path} is invalid ({e}); using the defaults, the file kept as {kept}"
+msgstr "{path} 无效（{e}）；正在使用默认设置，原文件已保留为 {kept}"
+
+#. Translators: a language, as a list of languages names it.
+#: src/settings.rs:277
+msgid "Afrikaans"
+msgstr "南非荷兰语"
+
+#: src/settings.rs:278
+msgid "Amharic"
+msgstr "阿姆哈拉语"
+
+#: src/settings.rs:279
+msgid "Arabic"
+msgstr "阿拉伯语"
+
+#: src/settings.rs:280
+msgid "Assamese"
+msgstr "阿萨姆语"
+
+#: src/settings.rs:281
+msgid "Azerbaijani"
+msgstr "阿塞拜疆语"
+
+#: src/settings.rs:282
+msgid "Bashkir"
+msgstr "巴什基尔语"
+
+#: src/settings.rs:283
+msgid "Belarusian"
+msgstr "白俄罗斯语"
+
+#: src/settings.rs:284
+msgid "Bulgarian"
+msgstr "保加利亚语"
+
+#: src/settings.rs:285
+msgid "Bengali"
+msgstr "孟加拉语"
+
+#: src/settings.rs:286
+msgid "Tibetan"
+msgstr "藏语"
+
+#: src/settings.rs:287
+msgid "Breton"
+msgstr "布列塔尼语"
+
+#: src/settings.rs:288
+msgid "Bosnian"
+msgstr "波斯尼亚语"
+
+#: src/settings.rs:289
+msgid "Catalan"
+msgstr "加泰罗尼亚语"
+
+#: src/settings.rs:290
+msgid "Czech"
+msgstr "捷克语"
+
+#: src/settings.rs:291
+msgid "Welsh"
+msgstr "威尔士语"
+
+#: src/settings.rs:292
+msgid "Danish"
+msgstr "丹麦语"
+
+#: src/settings.rs:293
+msgid "German"
+msgstr "德语"
+
+#: src/settings.rs:294
+msgid "Modern Greek"
+msgstr "希腊语"
+
+#: src/settings.rs:295 src/window.rs:2260
+msgid "English"
+msgstr "英语"
+
+#: src/settings.rs:296
+msgid "Spanish"
+msgstr "西班牙语"
+
+#: src/settings.rs:297
+msgid "Estonian"
+msgstr "爱沙尼亚语"
+
+#: src/settings.rs:298
+msgid "Basque"
+msgstr "巴斯克语"
+
+#: src/settings.rs:299
+msgid "Persian"
+msgstr "波斯语"
+
+#: src/settings.rs:300
+msgid "Finnish"
+msgstr "芬兰语"
+
+#: src/settings.rs:301
+msgid "Faroese"
+msgstr "法罗语"
+
+#: src/settings.rs:302
+msgid "French"
+msgstr "法语"
+
+#: src/settings.rs:303
+msgid "Galician"
+msgstr "加利西亚语"
+
+#: src/settings.rs:304
+msgid "Gujarati"
+msgstr "古吉拉特语"
+
+#: src/settings.rs:305
+msgid "Hausa"
+msgstr "豪萨语"
+
+#: src/settings.rs:306
+msgid "Hawaiian"
+msgstr "夏威夷语"
+
+#: src/settings.rs:307 src/window.rs:2261
+msgid "Hebrew"
+msgstr "希伯来语"
+
+#: src/settings.rs:308
+msgid "Hindi"
+msgstr "印地语"
+
+#: src/settings.rs:309
+msgid "Croatian"
+msgstr "克罗地亚语"
+
+#: src/settings.rs:310
+msgid "Haitian"
+msgstr "海地克里奥尔语"
+
+#: src/settings.rs:311
+msgid "Hungarian"
+msgstr "匈牙利语"
+
+#: src/settings.rs:312
+msgid "Armenian"
+msgstr "亚美尼亚语"
+
+#: src/settings.rs:313
+msgid "Indonesian"
+msgstr "印度尼西亚语"
+
+#: src/settings.rs:314
+msgid "Icelandic"
+msgstr "冰岛语"
+
+#: src/settings.rs:315
+msgid "Italian"
+msgstr "意大利语"
+
+#: src/settings.rs:316
+msgid "Japanese"
+msgstr "日语"
+
+#: src/settings.rs:317
+msgid "Javanese"
+msgstr "爪哇语"
+
+#: src/settings.rs:318
+msgid "Georgian"
+msgstr "格鲁吉亚语"
+
+#: src/settings.rs:319
+msgid "Kazakh"
+msgstr "哈萨克语"
+
+#: src/settings.rs:320
+msgid "Khmer"
+msgstr "高棉语"
+
+#: src/settings.rs:321
+msgid "Kannada"
+msgstr "卡纳达语"
+
+#: src/settings.rs:322
+msgid "Korean"
+msgstr "韩语"
+
+#: src/settings.rs:323
+msgid "Kirghiz"
+msgstr "吉尔吉斯语"
+
+#: src/settings.rs:324
+msgid "Latin"
+msgstr "拉丁语"
+
+#: src/settings.rs:325
+msgid "Luxembourgish"
+msgstr "卢森堡语"
+
+#: src/settings.rs:326
+msgid "Lingala"
+msgstr "林加拉语"
+
+#: src/settings.rs:327
+msgid "Lao"
+msgstr "老挝语"
+
+#: src/settings.rs:328
+msgid "Lithuanian"
+msgstr "立陶宛语"
+
+#: src/settings.rs:329
+msgid "Latvian"
+msgstr "拉脱维亚语"
+
+#: src/settings.rs:330
+msgid "Malagasy"
+msgstr "马达加斯加语"
+
+#: src/settings.rs:331
+msgid "Maori"
+msgstr "毛利语"
+
+#: src/settings.rs:332
+msgid "Macedonian"
+msgstr "马其顿语"
+
+#: src/settings.rs:333
+msgid "Malayalam"
+msgstr "马拉雅拉姆语"
+
+#: src/settings.rs:334
+msgid "Mongolian"
+msgstr "蒙古语"
+
+#: src/settings.rs:335
+msgid "Marathi"
+msgstr "马拉地语"
+
+#: src/settings.rs:336
+msgid "Malay"
+msgstr "马来语"
+
+#: src/settings.rs:337
+msgid "Maltese"
+msgstr "马耳他语"
+
+#: src/settings.rs:338
+msgid "Burmese"
+msgstr "缅甸语"
+
+#: src/settings.rs:339
+msgid "Nepali"
+msgstr "尼泊尔语"
+
+#: src/settings.rs:340
+msgid "Dutch"
+msgstr "荷兰语"
+
+#: src/settings.rs:341
+msgid "Norwegian Nynorsk"
+msgstr "新挪威语"
+
+#: src/settings.rs:342
+msgid "Norwegian"
+msgstr "挪威语"
+
+#: src/settings.rs:343
+msgid "Occitan"
+msgstr "奥克语"
+
+#: src/settings.rs:344
+msgid "Panjabi"
+msgstr "旁遮普语"
+
+#: src/settings.rs:345
+msgid "Polish"
+msgstr "波兰语"
+
+#: src/settings.rs:346
+msgid "Pushto"
+msgstr "普什图语"
+
+#: src/settings.rs:347
+msgid "Portuguese"
+msgstr "葡萄牙语"
+
+#: src/settings.rs:348
+msgid "Romanian"
+msgstr "罗马尼亚语"
+
+#: src/settings.rs:349 src/window.rs:2262
+msgid "Russian"
+msgstr "俄语"
+
+#: src/settings.rs:350
+msgid "Sanskrit"
+msgstr "梵语"
+
+#: src/settings.rs:351
+msgid "Sindhi"
+msgstr "信德语"
+
+#: src/settings.rs:352
+msgid "Sinhala"
+msgstr "僧伽罗语"
+
+#: src/settings.rs:353
+msgid "Slovak"
+msgstr "斯洛伐克语"
+
+#: src/settings.rs:354
+msgid "Slovenian"
+msgstr "斯洛文尼亚语"
+
+#: src/settings.rs:355
+msgid "Shona"
+msgstr "绍纳语"
+
+#: src/settings.rs:356
+msgid "Somali"
+msgstr "索马里语"
+
+#: src/settings.rs:357
+msgid "Albanian"
+msgstr "阿尔巴尼亚语"
+
+#: src/settings.rs:358
+msgid "Serbian"
+msgstr "塞尔维亚语"
+
+#: src/settings.rs:359
+msgid "Sundanese"
+msgstr "巽他语"
+
+#: src/settings.rs:360
+msgid "Swedish"
+msgstr "瑞典语"
+
+#: src/settings.rs:361
+msgid "Swahili"
+msgstr "斯瓦希里语"
+
+#: src/settings.rs:362
+msgid "Tamil"
+msgstr "泰米尔语"
+
+#: src/settings.rs:363
+msgid "Telugu"
+msgstr "泰卢固语"
+
+#: src/settings.rs:364
+msgid "Tajik"
+msgstr "塔吉克语"
+
+#: src/settings.rs:365
+msgid "Thai"
+msgstr "泰语"
+
+#: src/settings.rs:366
+msgid "Turkmen"
+msgstr "土库曼语"
+
+#: src/settings.rs:367
+msgid "Tagalog"
+msgstr "他加禄语"
+
+#: src/settings.rs:368
+msgid "Turkish"
+msgstr "土耳其语"
+
+#: src/settings.rs:369
+msgid "Tatar"
+msgstr "鞑靼语"
+
+#: src/settings.rs:370
+msgid "Ukrainian"
+msgstr "乌克兰语"
+
+#: src/settings.rs:371
+msgid "Urdu"
+msgstr "乌尔都语"
+
+#: src/settings.rs:372
+msgid "Uzbek"
+msgstr "乌兹别克语"
+
+#: src/settings.rs:373
+msgid "Vietnamese"
+msgstr "越南语"
+
+#: src/settings.rs:374
+msgid "Yiddish"
+msgstr "意第绪语"
+
+#: src/settings.rs:375
+msgid "Yoruba"
+msgstr "约鲁巴语"
+
+#: src/settings.rs:376
+msgid "Yue Chinese"
+msgstr "粤语"
+
+#: src/settings.rs:377
+msgid "Chinese"
+msgstr "中文"
+
+#: src/transfer.rs:79
+#, rust-format
+msgid "no history in {folder}"
+msgstr "{folder} 中没有历史记录"
+
+#: src/transfer.rs:161
+#, rust-format
+msgid "{file} is not an archive of Wavo’s Export"
+msgstr "{file} 不是 Wavo 导出的归档"
+
+#: src/transfer.rs:169
+#, rust-format
+msgid "{file} is from a newer Wavo ({version}): update this one first"
+msgstr "{file} 来自更新版本的 Wavo（{version}）：请先更新此 Wavo"
+
+#: src/transfer.rs:176
+#, rust-format
+msgid "{why}: no history in it"
+msgstr "{why}：其中没有历史记录"
+
+#: src/updater.rs:285
+msgid "Software Update"
+msgstr "软件更新"
+
+#: src/updater.rs:315
+msgid "Checking for updates…"
+msgstr "正在检查更新…"
+
+#: src/updater.rs:317
+#, rust-format
+msgid "Wavo {current} is the newest version."
+msgstr "Wavo {current} 是最新版本。"
+
+#: src/updater.rs:317
+msgid "You’re up to date!"
+msgstr "已是最新版本"
+
+#: src/updater.rs:320
+msgid "A new version of Wavo is available!"
+msgstr "Wavo 有新版本可用"
+
+#: src/updater.rs:322
+#, rust-format
+msgid "Wavo {new} is out, you have {current}. Install it now?"
+msgstr "Wavo {new} 已发布，你的版本是 {current}。要现在安装吗？"
+
+#: src/updater.rs:327
+msgid "Downloading the update…"
+msgstr "正在下载更新…"
+
+#: src/updater.rs:329
+msgid "Installing the update…"
+msgstr "正在安装更新…"
+
+#: src/updater.rs:330
+#, rust-format
+msgid "Wavo restarts as {new} once it can."
+msgstr "Wavo 将尽快以 {new} 版本重新启动。"
+
+#: src/updater.rs:333
+msgid "The update failed"
+msgstr "更新失败"
+
+#: src/updater.rs:335
+msgid "Couldn’t check for updates"
+msgstr "无法检查更新"
+
+#: src/updater.rs:354 src/window.rs:1544
+#, rust-format
+msgid "{size} MB"
+msgstr "{size} MB"
+
+#: src/updater.rs:356
+#, rust-format
+msgid "{done} of {total}"
+msgstr "{done}/{total}"
+
+#: src/updater.rs:365
+msgid "Release notes"
+msgstr "发行说明"
+
+#: src/updater.rs:392
+msgid "Skip This Version"
+msgstr "跳过此版本"
+
+#: src/updater.rs:394
+msgid "Remind Me Later"
+msgstr "以后提醒我"
+
+#: src/updater.rs:395
+msgid "Install Update"
+msgstr "安装更新"
+
+#: src/updater.rs:399
+msgid "Close"
+msgstr "关闭"
+
+#: src/updater.rs:400 src/window.rs:2099 src/window.rs:2147
+msgid "Retry"
+msgstr "重试"
+
+#: src/updater.rs:404
+msgid "OK"
+msgstr "好"
+
+#: src/updater.rs:408 src/window.rs:2110
+msgid "Cancel"
+msgstr "取消"
+
+#: src/updater.rs:412
+msgid "Hide"
+msgstr "隐藏"
+
+#: src/window.rs:71
+msgid "General"
+msgstr "通用"
+
+#: src/window.rs:72 src/window.rs:1363
+msgid "Models"
+msgstr "模型"
+
+#: src/window.rs:73 src/window.rs:1246
+msgid "History"
+msgstr "历史记录"
+
+#: src/window.rs:74
+msgid "Advanced"
+msgstr "高级"
+
+#: src/window.rs:75
+msgid "About"
+msgstr "关于"
+
+#: src/window.rs:346
+#, rust-format
+msgid "{chosen} is not on disk: {model} transcribes instead."
+msgstr "{chosen} 不在磁盘上，改用 {model} 识别。"
+
+#: src/window.rs:349
+#, rust-format
+msgid "{chosen} is not on disk: download it again in Models, or pick another."
+msgstr "{chosen} 不在磁盘上：请在“模型”中重新下载，或选择其他模型。"
+
+#: src/window.rs:364
+msgid "Delete"
+msgstr "删除"
+
+#: src/window.rs:585
+msgid ""
+"Set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”, or macOS "
+"acts on it too."
+msgstr ""
+"请在系统设置 › 键盘中将“按下 🌐 键以”设为“不执行任何操作”，否则 macOS 也会响"
+"应。"
+
+#: src/window.rs:588
+msgid ""
+"Secure Input is on (a password field, or a terminal’s Secure Keyboard "
+"Entry): the shortcut works through a backup path, and Esc may not cancel."
+msgstr ""
+"安全输入已打开（密码栏或终端的“安全键盘输入”）：快捷键将通过备用方式工作，"
+"Esc 可能无法取消。"
+
+#: src/window.rs:592
+msgid ""
+"How the hotkey records: while you hold it, from one press to the next, or "
+"both (a short tap latches the recording on)."
+msgstr ""
+"快捷键的录音方式：按住期间录音、按一下开始再按一下停止，或两者兼有（轻按一下"
+"会保持录音）。"
+
+#: src/window.rs:601
+msgid ""
+"Automatic takes a USB microphone first, then the built-in one while the lid "
+"is open, then a wired one, and a Bluetooth headset only when there is no "
+"other: it records at call quality and loses the first words. System Default "
+"uses whatever the system picks."
+msgstr ""
+"“自动”会先选 USB 麦克风，其次是机盖打开时的内建麦克风，再次是有线麦克风；只有"
+"没有其他麦克风时才用蓝牙耳机，因为它以通话音质录音，且会丢失开头的词语。“系统"
+"默认”使用系统所选的麦克风。"
+
+#: src/window.rs:608
+msgid ""
+"Automatic takes a USB microphone first, then the computer’s own or a wired "
+"one, and a Bluetooth headset only when there is no other: it records at call "
+"quality and loses the first words. System Default uses whatever the system "
+"picks."
+msgstr ""
+"“自动”会先选 USB 麦克风，其次是电脑自带或有线麦克风；只有没有其他麦克风时才用"
+"蓝牙耳机，因为它以通话音质录音，且会丢失开头的词语。“系统默认”使用系统所选的"
+"麦克风。"
+
+#: src/window.rs:615
+msgid ""
+"Automatic and System Default both use the system’s input. Linux doesn’t tell "
+"Wavo how a microphone is attached, so neither skips a Bluetooth headset."
+msgstr ""
+"“自动”和“系统默认”都使用系统的输入设备。Linux 不会告诉 Wavo 麦克风的连接方"
+"式，因此两者都不会跳过蓝牙耳机。"
+
+#: src/window.rs:622
+msgid ""
+"The microphone takes longer and longer to start, so the first words get "
+"lost. Unplug it and plug it back in."
+msgstr "麦克风启动越来越慢，导致开头的词语丢失。请拔下后重新插上。"
+
+#: src/window.rs:627
+msgid "Turn Wavo on in Task Manager › Startup apps."
+msgstr "请在任务管理器 › 启动应用中启用 Wavo。"
+
+#: src/window.rs:629
+msgid "Allow Wavo in System Settings › General › Login Items."
+msgstr "请在系统设置 › 通用 › 登录项中允许 Wavo。"
+
+#: src/window.rs:632
+msgid ""
+"On: the dictated text stays on the clipboard, pasted or not. Off: after a "
+"paste the clipboard gets back what it held; with pasting off, the text is "
+"only in History."
+msgstr ""
+"打开：无论是否粘贴，听写的文本都会留在剪贴板中。关闭：粘贴后剪贴板会恢复原有"
+"内容；若关闭了粘贴，文本只保存在历史记录中。"
+
+#: src/window.rs:636
+msgid ""
+"The model tells the language of each dictation by itself. Short phrases, an "
+"accent or two languages mixed can mislead it: choose the language you speak, "
+"or Keyboard layout to follow the layout you type with."
+msgstr ""
+"模型会自行判断每次听写的语言。短语、口音或混用两种语言可能会让它判断错误：请"
+"选择你说的语言，或选择“输入法”以跟随你正在使用的输入法。"
+
+#: src/window.rs:641
+msgid ""
+"With Keyboard layout, each language under Language goes to the model chosen "
+"there. This one takes a language set to it, one no model knows, and a layout "
+"of any other language."
+msgstr ""
+"选择“输入法”后，“语言”下的每种语言都由那里所选的模型识别。此模型负责分配给它"
+"的语言、没有模型支持的语言，以及其他任何语言的输入法。"
+
+#: src/window.rs:648
+msgid ""
+"Each dictation is in the language of the keyboard layout in use when it "
+"ends, with the model chosen for that language below. Switch the layout while "
+"you speak and the whole dictation follows it; the HUD shows the language."
+msgstr ""
+"每次听写都按结束时所用输入法的语言，由下方为该语言选择的模型识别。说话时切换"
+"输入法，整段听写都会随之改变；悬浮窗会显示语言。"
+
+#: src/window.rs:653
+msgid ""
+"Adds a space after each paste. A paste into the same window less than 20 s "
+"after one that ended mid-sentence starts in lower case, unless its first "
+"word is in Latin letters. Hesitation sounds like “э-э” and “um” are left out "
+"in Russian and English, when you choose the language or the model has only "
+"one. In Russian, a number of more than one word, or from 11 to 19, is "
+"written in digits: “семьдесят шестой” becomes “76-й”, and “1 000” becomes "
+"“1000”."
+msgstr ""
+"每次粘贴后添加一个空格。若上一次粘贴在句中结束，20 秒内再向同一窗口粘贴时以小"
+"写字母开头，除非第一个词是拉丁字母。选择了语言或模型只支持一种语言时，俄语和"
+"英语中的“э-э”“um”等犹豫声会被去掉。在俄语中，多于一个词或 11 到 19 的数会写成"
+"数字：“семьдесят шестой”变为“76-й”，“1 000”变为“1000”。"
+
+#: src/window.rs:661
+msgid ""
+"Wavo can’t put the clipboard back after a paste: allow it in System "
+"Settings › Privacy & Security › Paste from Other Apps."
+msgstr ""
+"Wavo 无法在粘贴后恢复剪贴板：请在系统设置 › 隐私与安全性 › 从其他 App 粘贴中"
+"允许。"
+
+#: src/window.rs:665
+msgid ""
+"Wavo records your voice through it while you hold the shortcut; the "
+"recording stays on this Mac."
+msgstr "按住快捷键时，Wavo 会通过麦克风录下你的声音；录音只保留在这台 Mac 上。"
+
+#: src/window.rs:669
+msgid ""
+"Wavo hears the shortcut in every app and pastes the text where you type "
+"through it."
+msgstr "借此 Wavo 可在任何 App 中响应快捷键，并将文本粘贴到你正在输入的位置。"
+
+#: src/window.rs:673
+msgid ""
+"You’re not an administrator on this Mac, so Wavo can’t paste for you. You "
+"can turn on Keep the text on the clipboard and paste with ⌘V."
+msgstr ""
+"你不是这台 Mac 的管理员，因此 Wavo 无法替你粘贴。你可以打开“将文本保留在剪贴"
+"板”，然后用 ⌘V 粘贴。"
+
+#: src/window.rs:677
+msgid ""
+"A single key needs Accessibility, which only an administrator can allow on "
+"this Mac. Use a combination like ⌥Space."
+msgstr ""
+"单个按键需要辅助功能权限，而在这台 Mac 上只有管理员可以允许。请使用组合键，"
+"如 ⌥Space。"
+
+#: src/window.rs:686
+msgid "Hold to talk, or tap to start and stop"
+msgstr "按住说话，或轻按开始/停止"
+
+#: src/window.rs:687
+msgid "Hold to talk"
+msgstr "按住说话"
+
+#: src/window.rs:688
+msgid "Tap to start and stop"
+msgstr "轻按开始/停止"
+
+#: src/window.rs:697
+msgid "Dictation"
+msgstr "听写"
+
+#: src/window.rs:710 src/window.rs:804
+msgid "Microphone"
+msgstr "麦克风"
+
+#: src/window.rs:735
+msgid "Activation"
+msgstr "触发方式"
+
+#: src/window.rs:742
+msgid "Shortcut"
+msgstr "快捷键"
+
+#: src/window.rs:746
+msgid "Output"
+msgstr "输出"
+
+#: src/window.rs:748
+msgid "Paste the text into the app you dictate in"
+msgstr "将文本粘贴到听写所在的 App"
+
+#: src/window.rs:761
+msgid "Keep the text on the clipboard"
+msgstr "将文本保留在剪贴板"
+
+#: src/window.rs:770
+msgid "Clean up the text"
+msgstr "整理文本"
+
+#: src/window.rs:779
+msgid "Startup"
+msgstr "启动"
+
+#: src/window.rs:797
+msgid "Wavo needs two permissions"
+msgstr "Wavo 需要两项权限"
+
+#: src/window.rs:798
+msgid "Wavo needs a permission"
+msgstr "Wavo 需要一项权限"
+
+#: src/window.rs:805
+msgid "Accessibility"
+msgstr "辅助功能"
+
+#: src/window.rs:812
+msgid "Allow"
+msgstr "允许"
+
+#: src/window.rs:814
+msgid "Open Settings"
+msgstr "打开设置"
+
+#: src/window.rs:839
+msgid "Back to the default shortcut"
+msgstr "恢复默认快捷键"
+
+#: src/window.rs:860 src/window.rs:1047
+msgid "Download more…"
+msgstr "下载更多…"
+
+#: src/window.rs:871
+msgid "Auto-detect"
+msgstr "自动检测"
+
+#: src/window.rs:874
+msgid "Keyboard layout"
+msgstr "输入法"
+
+#: src/window.rs:888
+#, rust-format
+msgid "{lang} (not one the model is meant for)"
+msgstr "{lang}（此模型不适用）"
+
+#: src/window.rs:899
+msgid "Default model"
+msgstr "默认模型"
+
+#: src/window.rs:899
+msgid "Model"
+msgstr "模型"
+
+#: src/window.rs:907
+msgid "Download a Model…"
+msgstr "下载模型…"
+
+#: src/window.rs:935 src/window.rs:1158
+msgid "Language"
+msgstr "语言"
+
+#: src/window.rs:1001
+#, rust-format
+msgid "{model} knows {lang} only, so every dictation is in {lang}."
+msgstr "{model} 仅支持{lang}，因此所有听写都按{lang}识别。"
+
+#. Translators: no model, as the default model of a keyboard language.
+#: src/window.rs:1031
+msgid "none"
+msgstr "无"
+
+#. Translators: a model in a list of models.
+#: src/window.rs:1034
+#, rust-format
+msgid "{default} (default)"
+msgstr "{default}（默认）"
+
+#: src/window.rs:1055
+msgid ""
+"After each dictation the HUD shows for a second how long the text took after "
+"the stop."
+msgstr "每次听写后，悬浮窗会显示 1 秒钟，告诉你停止后生成文本用了多长时间。"
+
+#: src/window.rs:1059
+msgid ""
+"The HUD shows the words as you speak, recognized again every half second. "
+"The text pasted is still recognized from the whole recording after the stop. "
+"On by default on a Mac or with a discrete GPU: an integrated one is kept "
+"busy while you speak."
+msgstr ""
+"说话时悬浮窗会显示文字，每半秒重新识别一次。粘贴的文本仍会在停止后根据完整录"
+"音识别。在 Mac 或配有独立 GPU 的电脑上默认打开：集成 GPU 会在你说话时一直被占"
+"用。"
+
+#: src/window.rs:1064
+msgid ""
+"Frees the model's memory after Wavo has been idle this long. The next "
+"dictation loads it again, which takes a moment."
+msgstr ""
+"Wavo 闲置达到此时长后，释放模型占用的内存。下次听写时会重新加载，需要片刻。"
+
+#: src/window.rs:1068
+msgid ""
+"Models marked ANE run on the Neural Engine: as fast as on the GPU at a "
+"fraction of the energy. Each new version of Wavo prepares such a model once, "
+"in the background (10–30 s); meanwhile it runs on the GPU. Other models "
+"always run on the GPU."
+msgstr ""
+"标有 ANE 的模型在 Neural Engine 上运行：速度与 GPU 相当，能耗却低得多。每个新"
+"版本的 Wavo 会在后台为此类模型准备一次（10–30 秒），在此期间它在 GPU 上运行。"
+"其他模型始终在 GPU 上运行。"
+
+#: src/window.rs:1073
+msgid ""
+"A .zip that Wavo exported, here or on another computer: the dictations this "
+"history does not have are added with their recordings; the settings stay as "
+"they are."
+msgstr ""
+"Wavo 在本机或其他电脑上导出的 .zip：此历史记录中没有的听写会连同录音一起添"
+"加；设置保持不变。"
+
+#: src/window.rs:1077
+msgid ""
+"The history, its recordings and the settings, into a .zip archive: Import "
+"brings it back, here or on another computer."
+msgstr ""
+"将历史记录、录音和设置导出为 .zip 归档：用“导入”可在本机或其他电脑上恢复。"
+
+#: src/window.rs:1081
+msgid "Off while the history is kept until Wavo quits"
+msgstr "历史记录仅保留到 Wavo 退出时不可用"
+
+#: src/window.rs:1083
+msgid ""
+"Deletes every dictation saved on disk and its recording. The ones kept until "
+"Wavo quits stay."
+msgstr "删除磁盘上保存的所有听写及其录音。保留到 Wavo 退出的听写不受影响。"
+
+#: src/window.rs:1087
+msgid "No dictations saved"
+msgstr "没有已保存的听写"
+
+#: src/window.rs:1089
+msgid "Deleted once the dictation, export or import ends"
+msgstr "将在听写、导出或导入结束后删除"
+
+#: src/window.rs:1092
+msgid ""
+"Wavo looks for a new version at launch and once a day; the menu says when "
+"there is one. Off, it looks only when you choose Check for Updates."
+msgstr ""
+"Wavo 会在启动时及每天检查一次新版本，有新版本时菜单会提示。关闭后，只在你选择"
+"“检查更新”时检查。"
+
+#: src/window.rs:1095
+msgid "This copy of Wavo doesn’t update itself."
+msgstr "此 Wavo 副本不会自动更新。"
+
+#: src/window.rs:1099
+msgid "Bottom of the screen"
+msgstr "屏幕底部"
+
+#: src/window.rs:1100
+msgid "Top of the screen"
+msgstr "屏幕顶部"
+
+#. Translators: a look of the HUD, its background a gradient.
+#: src/window.rs:1107
+msgid "Gradient"
+msgstr "渐变"
+
+#. Translators: a look of the HUD, its background one colour.
+#: src/window.rs:1109
+msgid "Plain"
+msgstr "纯色"
+
+#. Translators: when to unload the model.
+#: src/window.rs:1116
+msgid "Never"
+msgstr "永不"
+
+#: src/window.rs:1117
+msgid "Right after each dictation"
+msgstr "每次听写后立即"
+
+#: src/window.rs:1118
+msgid "After 2 minutes"
+msgstr "2 分钟后"
+
+#: src/window.rs:1119
+msgid "After 5 minutes"
+msgstr "5 分钟后"
+
+#: src/window.rs:1120
+msgid "After 10 minutes"
+msgstr "10 分钟后"
+
+#: src/window.rs:1121
+msgid "After 15 minutes"
+msgstr "15 分钟后"
+
+#: src/window.rs:1122
+msgid "After 60 minutes"
+msgstr "60 分钟后"
+
+#: src/window.rs:1128
+msgid "Until Wavo quits"
+msgstr "直到 Wavo 退出"
+
+#. Translators: how long to keep the history.
+#: src/window.rs:1134
+msgid "Forever"
+msgstr "永久"
+
+#: src/window.rs:1135
+msgid "The last 100 dictations"
+msgstr "最近 100 条"
+
+#: src/window.rs:1136
+msgid "The last 1,000 dictations"
+msgstr "最近 1,000 条"
+
+#: src/window.rs:1137
+msgid "The last 10,000 dictations"
+msgstr "最近 10,000 条"
+
+#: src/window.rs:1138
+msgid "3 days"
+msgstr "3 天"
+
+#: src/window.rs:1139
+msgid "2 weeks"
+msgstr "2 周"
+
+#: src/window.rs:1140
+msgid "3 months"
+msgstr "3 个月"
+
+#. Translators: the app's language, the system's.
+#: src/window.rs:1148
+msgid "System"
+msgstr "跟随系统"
+
+#: src/window.rs:1156
+msgid "App"
+msgstr "App"
+
+#: src/window.rs:1170
+msgid "Unload the model"
+msgstr "释放模型"
+
+#: src/window.rs:1183
+msgid "Use the Neural Engine"
+msgstr "使用 Neural Engine"
+
+#: src/window.rs:1196
+msgid "Check for updates"
+msgstr "检查更新"
+
+#: src/window.rs:1205
+msgid "HUD"
+msgstr "悬浮窗"
+
+#: src/window.rs:1206
+msgid "Show the HUD at"
+msgstr "悬浮窗位置"
+
+#: src/window.rs:1213
+msgid "HUD style"
+msgstr "悬浮窗样式"
+
+#: src/window.rs:1221
+msgid "Show the text while speaking"
+msgstr "说话时显示文字"
+
+#: src/window.rs:1233
+msgid "Show the transcription time"
+msgstr "显示识别用时"
+
+#: src/window.rs:1248
+#, rust-format
+msgid ""
+"Until Wavo quits: the last {n} dictation stays in memory for History and the "
+"menu, without its audio, and nothing is saved to disk."
+msgid_plural ""
+"Until Wavo quits: the last {n} dictations stay in memory for History and the "
+"menu, without their audio, and nothing is saved to disk."
+msgstr[0] ""
+"直到 Wavo 退出：最近 {n} 条听写会保留在内存中，供历史记录和菜单使用，不含音"
+"频，也不会存储到磁盘。"
+
+#: src/window.rs:1254
+msgid "Keep the history"
+msgstr "保留历史记录"
+
+#: src/window.rs:1263 src/window.rs:3122
+#, rust-format
+msgid "Show in {app}"
+msgstr "在 {app} 中显示"
+
+#: src/window.rs:1277
+#, rust-format
+msgid "Exported · {size}"
+msgstr "已导出 · {size}"
+
+#: src/window.rs:1278
+msgid "Copying the history…"
+msgstr "正在拷贝历史记录…"
+
+#: src/window.rs:1280
+msgid "Reading the archive…"
+msgstr "正在读取归档…"
+
+#: src/window.rs:1304
+msgid "Delete All…"
+msgstr "全部删除…"
+
+#: src/window.rs:1304
+msgid "Export…"
+msgstr "导出…"
+
+#: src/window.rs:1304
+msgid "Import…"
+msgstr "导入…"
+
+#: src/window.rs:1308
+msgid "Saved history"
+msgstr "已保存的历史记录"
+
+#. Translators: the title of the save panel of Export….
+#: src/window.rs:1319
+msgid "Export"
+msgstr "导出"
+
+#. Translators: the title of the open panel of Import….
+#: src/window.rs:1326
+msgid "Import"
+msgstr "导入"
+
+#: src/window.rs:1334
+msgid "Delete 1 dictation and its recording?"
+msgstr "要删除 1 条听写及其录音吗？"
+
+#: src/window.rs:1336
+#, rust-format
+msgid "Delete all {count} dictations and their recordings?"
+msgid_plural "Delete all {count} dictations and their recordings?"
+msgstr[0] "要删除全部 {count} 条听写及其录音吗？"
+
+#: src/window.rs:1342
+msgid "This can’t be undone."
+msgstr "此操作无法撤销。"
+
+#: src/window.rs:1353
+#, rust-format
+msgid ""
+"Models: the downloaded models, in the Hugging Face cache, which other apps "
+"that use Hugging Face models share. Deleting a model on Models frees its "
+"space.\n"
+"{models}\n"
+"\n"
+"Recordings: the audio of every dictation in the history, a folder a day. A "
+"dictation deleted from the history takes its recording with it.\n"
+"{recordings}"
+msgstr ""
+"模型：已下载的模型，位于 Hugging Face 缓存中，与其他使用 Hugging Face 模型的 "
+"App 共享。在“模型”中删除模型即可释放其空间。\n"
+"{models}\n"
+"\n"
+"录音：历史记录中每条听写的音频，每天一个文件夹。从历史记录中删除听写时，其录"
+"音也会一并删除。\n"
+"{recordings}"
+
+#: src/window.rs:1363
+msgid "Recordings"
+msgstr "录音"
+
+#: src/window.rs:1399
+msgid "Launch at login"
+msgstr "登录时打开"
+
+#: src/window.rs:1411
+msgid "Could not delete the dictations"
+msgstr "无法删除听写"
+
+#: src/window.rs:1412
+msgid "Could not delete the dictation"
+msgstr "无法删除听写"
+
+#: src/window.rs:1413
+msgid "Could not transcribe it again"
+msgstr "无法重新识别"
+
+#: src/window.rs:1414
+msgid "Could not put the previous text back"
+msgstr "无法恢复之前的文本"
+
+#: src/window.rs:1415
+msgid "Could not delete the history"
+msgstr "无法删除历史记录"
+
+#: src/window.rs:1432
+#, rust-format
+msgid "Couldn’t turn it on: {e}"
+msgstr "无法打开：{e}"
+
+#: src/window.rs:1433
+#, rust-format
+msgid "Couldn’t turn it off: {e}"
+msgstr "无法关闭：{e}"
+
+#: src/window.rs:1455 src/window.rs:1457
+#, rust-format
+msgid "Automatic ({device})"
+msgstr "自动（{device}）"
+
+#: src/window.rs:1458
+msgid "Automatic"
+msgstr "自动"
+
+#: src/window.rs:1459
+msgid "Automatic (none: the lid is closed)"
+msgstr "自动（无：机盖已合上）"
+
+#: src/window.rs:1462
+#, rust-format
+msgid "System Default ({device})"
+msgstr "系统默认（{device}）"
+
+#: src/window.rs:1480
+#, rust-format
+msgid "{device} (not connected)"
+msgstr "{device}（未连接）"
+
+#: src/window.rs:1502
+#, rust-format
+msgid "{device} (the lid is closed)"
+msgstr "{device}（机盖已合上）"
+
+#: src/window.rs:1517
+#, rust-format
+msgid "{name} isn’t connected: Wavo records with {other}"
+msgstr "{name} 未连接：Wavo 将使用 {other} 录音"
+
+#: src/window.rs:1519
+#, rust-format
+msgid "{name} isn’t connected: Wavo records with the system’s input"
+msgstr "{name} 未连接：Wavo 将使用系统输入设备录音"
+
+#: src/window.rs:1520
+#, rust-format
+msgid "{name} isn’t connected, and there is no other microphone"
+msgstr "{name} 未连接，且没有其他麦克风"
+
+#: src/window.rs:1533
+msgid "Only a Bluetooth mic: the sound is worse"
+msgstr "只有蓝牙麦克风：音质较差"
+
+#: src/window.rs:1543
+#, rust-format
+msgid "{size} GB"
+msgstr "{size} GB"
+
+#: src/window.rs:1545
+#, rust-format
+msgid "{size} KB"
+msgstr "{size} KB"
+
+#. Translators: what goes between the thousands of a number: 86,286 (a narrow space in some).
+#: src/window.rs:1567
+msgid ","
+msgstr ","
+
+#: src/window.rs:1587
+#, rust-format
+msgid "{done} of {total} GB"
+msgstr "{done}/{total} GB"
+
+#: src/window.rs:1591
+#, rust-format
+msgid "{done} of {total} MB"
+msgstr "{done}/{total} MB"
+
+#: src/window.rs:1645
+msgid "All languages"
+msgstr "所有语言"
+
+#: src/window.rs:1733
+#, rust-format
+msgid "WER {wer}%"
+msgstr "WER {wer}%"
+
+#: src/window.rs:1743
+msgid "Errors per 100 characters"
+msgstr "每 100 个字符的错误数"
+
+#: src/window.rs:1744
+msgid "Errors per 100 words"
+msgstr "每 100 个词的错误数"
+
+#: src/window.rs:1761
+msgid "The default model"
+msgstr "默认模型"
+
+#: src/window.rs:1763
+#, rust-format
+msgid "The fewest errors in {lang}, but lowercase without punctuation"
+msgstr "{lang}错误最少，但全为小写且无标点"
+
+#: src/window.rs:1766
+#, rust-format
+msgid "Best balance of accuracy and speed in {lang}"
+msgstr "{lang}准确率与速度的最佳平衡"
+
+#: src/window.rs:1770
+#, rust-format
+msgid "No accuracy data for {lang} yet: the best general model"
+msgstr "暂无{lang}的准确率数据：最佳通用模型"
+
+#: src/window.rs:1777
+#, rust-format
+msgid "{n} model"
+msgid_plural "{n} models"
+msgstr[0] "{n} 个模型"
+
+#: src/window.rs:1791
+#, rust-format
+msgid "The speed baseline ({times})"
+msgstr "速度基准（{times}）"
+
+#: src/window.rs:1792
+msgid "As fast as whisper-turbo"
+msgstr "与 whisper-turbo 一样快"
+
+#: src/window.rs:1793
+#, rust-format
+msgid "{times} the speed of whisper-turbo"
+msgstr "whisper-turbo 速度的 {times}"
+
+#: src/window.rs:1794
+#, rust-format
+msgid "{times} faster than whisper-turbo"
+msgstr "比 whisper-turbo 快 {times}"
+
+#: src/window.rs:1803
+msgid "Search models"
+msgstr "搜索模型"
+
+#: src/window.rs:1819
+#, rust-format
+msgid "No model recognizes {lang} well yet."
+msgstr "目前还没有能很好识别{lang}的模型。"
+
+#: src/window.rs:1862 src/window.rs:1940
+msgid "Downloaded"
+msgstr "已下载"
+
+#: src/window.rs:1863
+msgid "No model yet"
+msgstr "尚无模型"
+
+#: src/window.rs:1864
+msgid "Download the recommended one below to start dictating."
+msgstr "下载下方推荐的模型即可开始听写。"
+
+#: src/window.rs:1875
+msgid "Available"
+msgstr "可用"
+
+#: src/window.rs:1896
+#, rust-format
+msgid "{n} more, not measured yet"
+msgid_plural "{n} more, not measured yet"
+msgstr[0] "另有 {n} 个，尚未测量"
+
+#: src/window.rs:1898
+#, rust-format
+msgid "{n} more, not measured in {lang}"
+msgid_plural "{n} more, not measured in {lang}"
+msgstr[0] "另有 {n} 个，未针对{lang}测量"
+
+#: src/window.rs:1904
+msgid "Other models"
+msgstr "其他模型"
+
+#: src/window.rs:1908
+#, rust-format
+msgid "Too many errors in {lang}"
+msgstr "{lang}错误过多"
+
+#: src/window.rs:1909
+#, rust-format
+msgid "{n} more"
+msgid_plural "{n} more"
+msgstr[0] "另有 {n} 个"
+
+#: src/window.rs:1916
+msgid "No model matches."
+msgstr "没有匹配的模型。"
+
+#: src/window.rs:1962
+#, rust-format
+msgid "Delete {n} Model…"
+msgid_plural "Delete {n} Models…"
+msgstr[0] "删除 {n} 个模型…"
+
+#: src/window.rs:1985
+#, rust-format
+msgid "Delete {model}?"
+msgstr "要删除 {model} 吗？"
+
+#: src/window.rs:1986
+#, rust-format
+msgid "It frees {size} in the Hugging Face cache. You can download it again."
+msgstr "这将释放 Hugging Face 缓存中的 {size}。你可以再次下载。"
+
+#: src/window.rs:1989
+#, rust-format
+msgid "Delete {n} model?"
+msgid_plural "Delete {n} models?"
+msgstr[0] "要删除 {n} 个模型吗？"
+
+#: src/window.rs:1990
+#, rust-format
+msgid ""
+"They free {size} in the Hugging Face cache. You can download them again."
+msgstr "这将释放 Hugging Face 缓存中的 {size}。你可以再次下载。"
+
+#: src/window.rs:1995
+#, rust-format
+msgid "{model} is in use and stays."
+msgstr "{model} 正在使用，将保留。"
+
+#: src/window.rs:1999
+#, rust-format
+msgid "{models} and {last} are in use and stay."
+msgstr "{models} 和 {last} 正在使用，将保留。"
+
+#: src/window.rs:2042 src/window.rs:2158
+msgid "In use"
+msgstr "使用中"
+
+#: src/window.rs:2046 src/window.rs:2157
+msgid "Use"
+msgstr "使用"
+
+#: src/window.rs:2053
+msgid "In use: choose another to delete it"
+msgstr "使用中：如需删除，请选择其他模型"
+
+#: src/window.rs:2054
+msgid "In use until the dictation ends"
+msgstr "使用中，直到听写结束"
+
+#: src/window.rs:2055 src/window.rs:2837 src/window.rs:2875 src/window.rs:3137
+#: src/window.rs:3146
+msgid "Delete…"
+msgstr "删除…"
+
+#: src/window.rs:2080
+#, rust-format
+msgid " · {rate} MB/s"
+msgstr " · {rate} MB/s"
+
+#: src/window.rs:2086
+msgid "Preparing for the Neural Engine…"
+msgstr "正在为 Neural Engine 准备…"
+
+#: src/window.rs:2088
+#, rust-format
+msgid "Could not download: {e}"
+msgstr "无法下载：{e}"
+
+#: src/window.rs:2099 src/window.rs:2147
+msgid "Download"
+msgstr "下载"
+
+#: src/window.rs:2110
+msgid "Cancel the download"
+msgstr "取消下载"
+
+#: src/window.rs:2131
+msgid "Open the model’s page on Hugging Face"
+msgstr "在 Hugging Face 上打开模型页面"
+
+#: src/window.rs:2220
+msgid "Recommended"
+msgstr "推荐"
+
+#: src/window.rs:2242
+msgid " · no punctuation"
+msgstr " · 无标点"
+
+#: src/window.rs:2248
+msgid "Runs on the Apple Neural Engine"
+msgstr "在 Apple Neural Engine 上运行"
+
+#. Translators: the languages a speech model knows.
+#: src/window.rs:2257
+msgid "100 languages"
+msgstr "100 种语言"
+
+#: src/window.rs:2258
+msgid "25 European languages"
+msgstr "25 种欧洲语言"
+
+#: src/window.rs:2259
+msgid "99 languages"
+msgstr "99 种语言"
+
+#: src/window.rs:2263
+msgid "Russian, English, Kazakh, Kyrgyz and Uzbek"
+msgstr "俄语、英语、哈萨克语、吉尔吉斯语和乌兹别克语"
+
+#: src/window.rs:2264
+msgid "Taiwanese Mandarin and English"
+msgstr "台湾华语和英语"
+
+#: src/window.rs:2265
+msgid "Ukrainian and English"
+msgstr "乌克兰语和英语"
+
+#: src/window.rs:2442
+#, rust-format
+msgid "Could not export: {e}"
+msgstr "无法导出：{e}"
+
+#: src/window.rs:2443
+#, rust-format
+msgid "Could not import: {e}"
+msgstr "无法导入：{e}"
+
+#: src/window.rs:2483
+msgid "Nothing new: all of its dictations are here"
+msgstr "没有新内容：其中的听写都已存在"
+
+#: src/window.rs:2484
+#, rust-format
+msgid "Added {n} dictation"
+msgid_plural "Added {n} dictations"
+msgstr[0] "已添加 {n} 条听写"
+
+#: src/window.rs:2487
+#, rust-format
+msgid " · {n} recording not copied"
+msgid_plural " · {n} recordings not copied"
+msgstr[0] " · {n} 段录音未拷贝"
+
+#: src/window.rs:2569
+msgid "Could not open the history: see the log"
+msgstr "无法打开历史记录：请查看日志"
+
+#: src/window.rs:2589
+#, rust-format
+msgid "Could not read the history: {e}"
+msgstr "无法读取历史记录：{e}"
+
+#: src/window.rs:2646
+msgid "Today"
+msgstr "今天"
+
+#: src/window.rs:2650
+#, rust-format
+msgid "Yesterday, {date}"
+msgstr "昨天，{date}"
+
+#. Translators: seconds, short: "4.2 s".
+#: src/window.rs:2662 src/window.rs:2909
+#, rust-format
+msgid "{seconds} s"
+msgstr "{seconds} 秒"
+
+#: src/window.rs:2673
+#, rust-format
+msgid "no text · {model}"
+msgstr "无文本 · {model}"
+
+#: src/window.rs:2674
+msgid "no text"
+msgstr "无文本"
+
+#: src/window.rs:2705
+#, rust-format
+msgid "{n} dictation · {time}"
+msgid_plural "{n} dictations · {time}"
+msgstr[0] "{n} 条听写 · {time}"
+
+#: src/window.rs:2725
+msgid "Its recording isn’t kept"
+msgstr "录音未保留"
+
+#: src/window.rs:2733
+msgid "Search dictations"
+msgstr "搜索听写"
+
+#: src/window.rs:2754
+msgid "No dictations yet: hold the shortcut and speak."
+msgstr "还没有听写：按住快捷键并说话。"
+
+#: src/window.rs:2755
+msgid "No dictations since Wavo started: they’re kept only until it quits."
+msgstr "Wavo 启动后还没有听写：听写只保留到 Wavo 退出。"
+
+#: src/window.rs:2756
+msgid "Nothing found"
+msgstr "未找到"
+
+#: src/window.rs:2825
+msgid "Select a dictation to see all of its text."
+msgstr "选择一条听写以查看全部文本。"
+
+#: src/window.rs:2831
+#, rust-format
+msgid "{n} dictation selected"
+msgid_plural "{n} dictations selected"
+msgstr[0] "已选择 {n} 条听写"
+
+#: src/window.rs:2860 src/window.rs:3129 src/window.rs:3148
+msgid "Transcribe Again"
+msgstr "重新识别"
+
+#: src/window.rs:2868 src/window.rs:3133
+msgid "Restore the Previous Text"
+msgstr "恢复之前的文本"
+
+#. Translators: minutes, short: "12 min".
+#: src/window.rs:2911
+#, rust-format
+msgid "{minutes} min"
+msgstr "{minutes} 分钟"
+
+#. Translators: hours, short: "312 h".
+#: src/window.rs:2913
+#, rust-format
+msgid "{hours} h"
+msgstr "{hours} 小时"
+
+#: src/window.rs:2917
+#, rust-format
+msgid "{count} dictation · {spoken}"
+msgid_plural "{count} dictations · {spoken}"
+msgstr[0] "{count} 条听写 · {spoken}"
+
+#: src/window.rs:2919
+msgid " · kept until Wavo quits"
+msgstr " · 保留到 Wavo 退出"
+
+#: src/window.rs:2923
+#, rust-format
+msgid " · since {since}"
+msgstr " · 自{since}起"
+
+#: src/window.rs:2934 src/window.rs:2947
+msgid "Copied to the clipboard"
+msgstr "已拷贝到剪贴板"
+
+#: src/window.rs:2939
+msgid "The recording is gone"
+msgstr "录音已不存在"
+
+#: src/window.rs:2953 src/window.rs:3030
+#, rust-format
+msgid "Could not play the recording: {e}"
+msgstr "无法播放录音：{e}"
+
+#: src/window.rs:2992
+#, rust-format
+msgid "“{start}” and its recording are removed from the history."
+msgstr "“{start}”及其录音将从历史记录中删除。"
+
+#: src/window.rs:2993
+#, rust-format
+msgid "“{start}” is removed from the history."
+msgstr "“{start}”将从历史记录中删除。"
+
+#: src/window.rs:2995
+msgid "Delete this dictation?"
+msgstr "要删除这条听写吗？"
+
+#: src/window.rs:3001
+#, rust-format
+msgid "{n} dictation and its recording are removed from the history."
+msgid_plural ""
+"{n} dictations and their recordings are removed from the history."
+msgstr[0] "{n} 条听写及其录音将从历史记录中删除。"
+
+#: src/window.rs:3006
+#, rust-format
+msgid "{n} dictation is removed from the history."
+msgid_plural "{n} dictations are removed from the history."
+msgstr[0] "{n} 条听写将从历史记录中删除。"
+
+#: src/window.rs:3011
+#, rust-format
+msgid "Delete {n} dictation?"
+msgid_plural "Delete {n} dictations?"
+msgstr[0] "要删除 {n} 条听写吗？"
+
+#: src/window.rs:3077 src/window.rs:3114
+msgid "Stop"
+msgstr "停止"
+
+#: src/window.rs:3079
+msgid "Play the recording"
+msgstr "播放录音"
+
+#: src/window.rs:3087
+msgid "Copy"
+msgstr "拷贝"
+
+#: src/window.rs:3115
+msgid "Play the Recording"
+msgstr "播放录音"
+
+#: src/window.rs:3118
+msgid "Copy Text"
+msgstr "拷贝文本"
+
+#: src/window.rs:3123
+msgid "Copy Recording Path"
+msgstr "拷贝录音路径"
+
+#: src/window.rs:3176
+msgid "The models"
+msgstr "模型"
+
+#: src/window.rs:3180
+msgid "Speech recognition on this machine"
+msgstr "在本机上进行语音识别"
+
+#: src/window.rs:3181
+msgid "The UI toolkit Wavo is drawn with"
+msgstr "绘制 Wavo 界面的 UI 工具包"
+
+#: src/window.rs:3182
+msgid "The app that inspired Wavo"
+msgstr "启发了 Wavo 的 App"
+
+#: src/window.rs:3185
+msgid "The models’ GGUF conversions"
+msgstr "模型的 GGUF 转换版本"
+
+#: src/window.rs:3190
+msgid "The tensor library and model format, by Georgi Gerganov and others"
+msgstr "张量库和模型格式，由 Georgi Gerganov 等人开发"
+
+#: src/window.rs:3195
+msgid "OpenAI Whisper, NVIDIA Parakeet, Sber GigaAM, Useful Sensors Moonshine"
+msgstr "OpenAI Whisper, NVIDIA Parakeet, Sber GigaAM, Useful Sensors Moonshine"
+
+#: src/window.rs:3216
+msgid "Local dictation: hold a key, speak, and the text lands where you type."
+msgstr "本地听写：按住按键说话，文字就会出现在你输入的位置。"
+
+#: src/window.rs:3220
+msgid "View on GitHub"
+msgstr "在 GitHub 上查看"
+
+#: src/window.rs:3224
+msgid "Buy Me a Coffee"
+msgstr "Buy Me a Coffee"
+
+#: src/window.rs:3241
+msgid "Acknowledgements"
+msgstr "致谢"

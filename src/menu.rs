@@ -6,7 +6,7 @@
 //! Quit.
 
 use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
-use nimbo::{Hotkey, Shortcut};
+use nimbo::{Hotkey, Localized, Shortcut, t};
 
 use crate::audio::{Auto, Device, Microphone};
 use crate::engine::Phase as EnginePhase;
@@ -20,7 +20,7 @@ use crate::window::{
 pub const RECENT: usize = 10;
 
 /// A model on a GPU emulated on the CPU; wavo's whole warning is in the log.
-pub const SOFTWARE_GPU: &str = "Slow transcription: install the GPU's driver";
+pub const SOFTWARE_GPU: Localized = t!("Slow transcription: install the GPU's driver");
 
 /// What the tray menu's items do ([crate::app] runs them); the header and the notes do nothing.
 #[derive(Clone, Debug, PartialEq)]
@@ -109,9 +109,9 @@ impl Icon {
     let name = crate::INFO.name;
     match self {
       Icon::Idle => name.into(),
-      Icon::Recording => format!("{name} — recording"),
-      Icon::Transcribing => format!("{name} — transcribing"),
-      Icon::Warning => format!("{name} — needs attention"),
+      Icon::Recording => t!("{name} — recording", name),
+      Icon::Transcribing => t!("{name} — transcribing", name),
+      Icon::Warning => t!("{name} — needs attention", name),
     }
   }
 }
@@ -156,50 +156,52 @@ pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> 
   let mut list = Vec::new();
   let mut add = |id, text: String, action| list.push(Warning { id, text, action });
   if !system.accessibility {
-    add(Warn::Accessibility, "Allow Accessibility…".into(), true);
+    add(Warn::Accessibility, t!("Allow Accessibility…").to_string(), true);
   }
 
   if let Some(e) = &system.hotkey_error {
     // As the platform names its keys (Ctrl+Alt+K, not the stored ctrl+option+k); a click opens
     // General, where it changes.
     let label = Hotkey::parse(hotkey).map_or_else(|_| hotkey.to_owned(), |h| h.label());
-    add(Warn::Hotkey, format!("The hotkey “{label}” does not work: {e}"), true);
+    add(Warn::Hotkey, t!("The hotkey “{label}” does not work: {e}", label, e), true);
   }
 
   if system.hotkey_portal {
-    add(Warn::HotkeyPortal, "Allow the Hotkey…".into(), true);
+    add(Warn::HotkeyPortal, t!("Allow the Hotkey…").to_string(), true);
   }
 
   if system.paste_portal {
-    add(Warn::PastePortal, "Allow Paste…".into(), true);
+    add(Warn::PastePortal, t!("Allow Paste…").to_string(), true);
   }
 
   if system.no_microphone {
-    add(Warn::Microphone, "Allow Microphone…".into(), true);
+    add(Warn::Microphone, t!("Allow Microphone…").to_string(), true);
   }
 
   if system.clipboard_unread {
-    add(Warn::Clipboard, "Allow Paste…".into(), true);
+    add(Warn::Clipboard, t!("Allow Paste…").to_string(), true);
   }
 
   if system.secure_input {
-    add(Warn::SecureInput, "Secure Input is on…".into(), true);
+    add(Warn::SecureInput, t!("Secure Input is on…").to_string(), true);
   }
 
   match &status.no_model {
-    Some(NoModel::NoneDownloaded) => add(Warn::Download, "Download a Speech Model…".into(), true),
-    Some(NoModel::Gone { model }) => add(Warn::Model, format!("{model} is not on disk…"), true),
+    Some(NoModel::NoneDownloaded) => {
+      add(Warn::Download, t!("Download a Speech Model…").to_string(), true)
+    }
+    Some(NoModel::Gone { model }) => add(Warn::Model, t!("{model} is not on disk…", model), true),
     Some(NoModel::LoadFailed { model, .. }) => {
-      add(Warn::Model, format!("{model} does not load…"), true)
+      add(Warn::Model, t!("{model} does not load…", model), true)
     }
     None => {}
   }
 
   let failed = status.last.as_ref().filter(|l| l.outcome == Outcome::Failed);
-  let failed = failed.map(|l| l.error.as_deref().unwrap_or("unknown error"));
-  let failed = failed.map(|e| format!("The last dictation failed: {e}"));
-  let error = status.error.as_ref().map(|e| format!("Error: {e}"));
-  let device = status.engine.software_gpu.then(|| SOFTWARE_GPU.to_owned());
+  let failed = failed.map(|l| l.error.clone().unwrap_or_else(|| t!("unknown error").to_string()));
+  let failed = failed.map(|e| t!("The last dictation failed: {e}", e));
+  let error = status.error.as_ref().map(|e| t!("Error: {e}", e));
+  let device = status.engine.software_gpu.then(|| SOFTWARE_GPU.to_string());
   let warnings = status.warnings.iter().map(|w| capitalized(w));
   for text in error.into_iter().chain(failed).chain(device).chain(warnings) {
     add(Warn::Status, text, false);
@@ -222,7 +224,7 @@ pub fn recent_title(text: &str, created_at: i64, now: i64) -> String {
   };
   let when = match t.date() == today.date() {
     true => t.hm(),
-    false => format!("{} {}", &t.month_name()[..3], t.day),
+    false => t.short_day_month(),
   };
   // Within the menu's width with its time, so the item isn't cut a second time.
   let preview = shorten(text, LABEL - when.chars().count() - 3);
@@ -265,8 +267,8 @@ pub fn menu(
   let empty = recent.is_empty();
   items.extend([
     Item::Divider,
-    Item::button(Action::CopyLast, "Copy Last Dictation").enabled(last),
-    Item::submenu("Recent", Menu::new(recent)).enabled(!empty),
+    Item::button(Action::CopyLast, &t!("Copy Last Dictation")).enabled(last),
+    Item::submenu(&t!("Recent"), Menu::new(recent)).enabled(!empty),
     Item::Divider,
     Item::submenu(&mic, mics),
   ]);
@@ -276,15 +278,15 @@ pub fn menu(
 
   items.extend([
     Item::submenu(&model, models),
-    Item::button(Action::Unload, "Unload Model").enabled(loaded),
+    Item::button(Action::Unload, &t!("Unload Model")).enabled(loaded),
     Item::Divider,
-    Item::button(Action::History, "History…"),
+    Item::button(Action::History, &t!("History…")),
     // A tray menu's keys work only in macOS's; Windows' and Linux's would show keys that do
     // nothing.
-    with_key(Item::button(Action::Settings, "Settings…"), Shortcut::char(',').cmd()),
+    with_key(Item::button(Action::Settings, &t!("Settings…")), Shortcut::char(',').cmd()),
   ]);
   items.extend(update.map(check_item));
-  let quit = Item::button(Action::Quit, &format!("Quit {}", crate::INFO.name));
+  let quit = Item::button(Action::Quit, &t!("Quit {name}", name = crate::INFO.name));
   items.extend([Item::Divider, with_key(quit, Shortcut::char('q').cmd())]);
   Menu::new(items)
 }
@@ -292,10 +294,10 @@ pub fn menu(
 /// The update's row while it has news: a release on offer, its download, the restart, a failure.
 fn update_item(state: &State) -> Option<Item<Action>> {
   let label = match state {
-    State::Available(r) => format!("Update Available: {}…", updater::shown(&r.version)),
-    State::Downloading(_, done) => format!("Downloading Update: {done}%"),
-    State::Restarting(_) => "Restarting to Update…".to_owned(),
-    State::Failed(..) | State::Relaunched(_) => "Update Failed…".to_owned(),
+    State::Available(r) => t!("Update Available: {version}…", version = updater::shown(&r.version)),
+    State::Downloading(_, done) => t!("Downloading Update: {done}%", done),
+    State::Restarting(_) => t!("Restarting to Update…").to_string(),
+    State::Failed(..) | State::Relaunched(_) => t!("Update Failed…").to_string(),
     State::Idle | State::Checking | State::UpToDate => return None,
   };
 
@@ -305,9 +307,11 @@ fn update_item(state: &State) -> Option<Item<Action>> {
 /// Check for Updates…, which opens the window ([updater::Updater::open]): Checking while the
 /// person's check runs.
 fn check_item(state: &State) -> Item<Action> {
-  let label =
-    if *state == State::Checking { "Checking for Updates…" } else { "Check for Updates…" };
-  Item::button(Action::CheckUpdates, label)
+  let label = match *state == State::Checking {
+    true => t!("Checking for Updates…"),
+    false => t!("Check for Updates…"),
+  };
+  Item::button(Action::CheckUpdates, &label)
 }
 
 fn with_key(item: Item<Action>, key: Shortcut) -> Item<Action> {
@@ -333,10 +337,10 @@ fn microphones(
 
   let title = match instead {
     Auto::Device(i) => mic_name(&devices[i], lid_closed),
-    Auto::System => "System Default".to_owned(),
-    Auto::Nothing => "No Microphone".to_owned(),
+    Auto::System => t!("System Default").to_string(),
+    Auto::Nothing => t!("No Microphone").to_string(),
   };
-  (title, menu, Some(format!("{name} isn’t connected")))
+  (title, menu, Some(t!("{name} isn’t connected", name)))
 }
 
 /// The model in use, and the submenu: the models downloaded with the one that transcribes checked,
@@ -348,22 +352,22 @@ fn models(found: &[Found], pick: &Pick) -> (String, Menu<Action>) {
     .collect();
   let other = pick.other.as_ref().map(|(name, there)| match there {
     true => name.clone(),
-    false => format!("{name} (not on disk)"),
+    false => t!("{name} (not on disk)", name),
   });
   let title = match (&other, pick.active) {
     (Some(other), _) => other.clone(),
     (None, Some(i)) => found[i].0.name.to_owned(),
-    (None, None) => "No Model".to_owned(),
+    (None, None) => t!("No Model").to_string(),
   };
   if let Some(other) = other {
     items.push(Item::toggle(Action::ModelChosen, &other, pick.gone().is_none()));
   }
 
   if items.is_empty() {
-    items.push(Item::button(Action::NoModels, "No Models Downloaded").enabled(false));
+    items.push(Item::button(Action::NoModels, &t!("No Models Downloaded")).enabled(false));
   }
 
-  items.extend([Item::Divider, Item::button(Action::Models, "All Models…")]);
+  items.extend([Item::Divider, Item::button(Action::Models, &t!("All Models…"))]);
   (title, Menu::new(items))
 }
 
@@ -371,11 +375,12 @@ fn models(found: &[Found], pick: &Pick) -> (String, Menu<Action>) {
 fn state(status: &Status) -> Option<&'static str> {
   let loading = status.engine.phase == EnginePhase::Loading;
   match status.state {
-    Phase::Recording => Some("Recording…"),
-    Phase::Transcribing if loading => Some("Loading the model…"),
-    Phase::Transcribing => Some("Transcribing…"),
-    Phase::Idle if loading => Some("Loading the model…"),
-    Phase::Idle if status.error.is_some() => Some("Error"),
+    Phase::Recording => Some(t!("Recording…").as_str()),
+    Phase::Transcribing if loading => Some(t!("Loading the model…").as_str()),
+    Phase::Transcribing => Some(t!("Transcribing…").as_str()),
+    Phase::Idle if loading => Some(t!("Loading the model…").as_str()),
+    // Translators: the app's state in the menu's header, after an error.
+    Phase::Idle if status.error.is_some() => Some(t!("Error").as_str()),
     Phase::Idle => None,
   }
 }

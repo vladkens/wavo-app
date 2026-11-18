@@ -1,0 +1,2279 @@
+# Korean translation of Wavo.
+# Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: Wavo\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-11-18 06:40+0200\n"
+"PO-Revision-Date: 2026-11-18 06:00+0200\n"
+"Last-Translator: vladkens\n"
+"Language-Team: Korean\n"
+"Language: ko\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: src/app.rs:594
+msgid "allow the microphone to record"
+msgstr "녹음하려면 마이크를 허용하세요"
+
+#: src/app.rs:596
+msgid "allow Accessibility to paste"
+msgstr "붙여넣으려면 손쉬운 사용을 허용하세요"
+
+#: src/audio.rs:354
+msgid "no microphone: the lid is closed"
+msgstr "마이크 없음: 덮개가 닫혀 있음"
+
+#: src/audio.rs:356
+msgid "no microphone found"
+msgstr "마이크를 찾을 수 없음"
+
+#: src/audio.rs:371
+#, rust-format
+msgid "the microphone {name} is not connected"
+msgstr "마이크 {name}이(가) 연결되어 있지 않음"
+
+#: src/audio.rs:374 src/audio.rs:481 src/hud.rs:272
+#, rust-format
+msgid "could not open the microphone {name}: {e}"
+msgstr "마이크 {name}을(를) 열 수 없음: {e}"
+
+#: src/audio.rs:386
+#, rust-format
+msgid "{why}; using {used}"
+msgstr "{why}. {used} 사용 중"
+
+#: src/audio.rs:463 src/hud.rs:267
+#, rust-format
+msgid "{gave}, and there is no default microphone"
+msgstr "{gave}, 기본 마이크도 없음"
+
+#: src/audio.rs:472
+#, rust-format
+msgid "{gave}, and the default microphone {name} failed too: {e}"
+msgstr "{gave}, 기본 마이크 {name}도 실패함: {e}"
+
+#: src/audio.rs:874
+#, rust-format
+msgid "the recording stopped: {failure}"
+msgstr "녹음이 중단됨: {failure}"
+
+#: src/audio.rs:881
+#, rust-format
+msgid "No sound from {device}: check the microphone"
+msgstr "{device}에서 소리가 없음: 마이크를 확인하세요"
+
+#: src/audio.rs:976 src/audio.rs:1000
+#, rust-format
+msgid "the recording could not be saved: {e}"
+msgstr "녹음을 저장할 수 없음: {e}"
+
+#: src/engine.rs:184
+#, rust-format
+msgid "could not load the model: {e}"
+msgstr "모델을 불러올 수 없음: {e}"
+
+#: src/engine.rs:185
+#, rust-format
+msgid "transcription failed: {e}"
+msgstr "인식 실패: {e}"
+
+#: src/engine.rs:186
+msgid "the transcription was cancelled"
+msgstr "인식이 취소됨"
+
+#. Translators: a month as a date says it, "October" of "October 17": a genitive in Russian.
+#: src/history.rs:62
+msgid "January"
+msgstr "1월"
+
+#: src/history.rs:63
+msgid "February"
+msgstr "2월"
+
+#: src/history.rs:64
+msgid "March"
+msgstr "3월"
+
+#: src/history.rs:65
+msgid "April"
+msgstr "4월"
+
+#: src/history.rs:66 src/history.rs:83
+msgid "May"
+msgstr "5월"
+
+#: src/history.rs:67
+msgid "June"
+msgstr "6월"
+
+#: src/history.rs:68
+msgid "July"
+msgstr "7월"
+
+#: src/history.rs:69
+msgid "August"
+msgstr "8월"
+
+#: src/history.rs:70
+msgid "September"
+msgstr "9월"
+
+#: src/history.rs:71
+msgid "October"
+msgstr "10월"
+
+#: src/history.rs:72
+msgid "November"
+msgstr "11월"
+
+#: src/history.rs:73
+msgid "December"
+msgstr "12월"
+
+#. Translators: a month short, as a date says it: "Oct" of "Oct 17".
+#: src/history.rs:79
+msgid "Jan"
+msgstr "1월"
+
+#: src/history.rs:80
+msgid "Feb"
+msgstr "2월"
+
+#: src/history.rs:81
+msgid "Mar"
+msgstr "3월"
+
+#: src/history.rs:82
+msgid "Apr"
+msgstr "4월"
+
+#: src/history.rs:84
+msgid "Jun"
+msgstr "6월"
+
+#: src/history.rs:85
+msgid "Jul"
+msgstr "7월"
+
+#: src/history.rs:86
+msgid "Aug"
+msgstr "8월"
+
+#: src/history.rs:87
+msgid "Sep"
+msgstr "9월"
+
+#: src/history.rs:88
+msgid "Oct"
+msgstr "10월"
+
+#: src/history.rs:89
+msgid "Nov"
+msgstr "11월"
+
+#: src/history.rs:90
+msgid "Dec"
+msgstr "12월"
+
+#. Translators: a date, the month as the months above name it: "October 17".
+#: src/history.rs:103 src/history.rs:109
+#, rust-format
+msgid "{month} {day}"
+msgstr "{month} {day}일"
+
+#. Translators: a date, the month as the months above name it: "October 17, 2026".
+#: src/history.rs:116
+#, rust-format
+msgid "{month} {day}, {year}"
+msgstr "{year}년 {month} {day}일"
+
+#: src/hud.rs:191
+#, rust-format
+msgid "not pasted: {why}"
+msgstr "붙여넣지 못함: {why}"
+
+#: src/hud.rs:193
+msgid "copy failed"
+msgstr "복사 실패"
+
+#: src/hud.rs:197 src/session.rs:1610
+msgid "nothing recognized"
+msgstr "인식된 내용 없음"
+
+#: src/hud.rs:199 src/session.rs:370
+#, rust-format
+msgid "{model} could not be loaded: {error}"
+msgstr "{model}을(를) 불러올 수 없음: {error}"
+
+#. Translators: milliseconds, short: "420 ms".
+#: src/hud.rs:216
+#, rust-format
+msgid "{ms} ms"
+msgstr "{ms}ms"
+
+#: src/hud.rs:226
+msgid "model failed to load"
+msgstr "모델 불러오기 실패"
+
+#: src/hud.rs:231
+msgid "failed"
+msgstr "실패"
+
+#: src/hud.rs:232
+msgid "download a model"
+msgstr "모델을 다운로드하세요"
+
+#: src/hud.rs:250 src/session.rs:1156
+#, rust-format
+msgid "could not start recording: {e}"
+msgstr "녹음을 시작할 수 없음: {e}"
+
+#: src/hud.rs:250 src/session.rs:1298
+#, rust-format
+msgid "the recording failed: {e}"
+msgstr "녹음 실패: {e}"
+
+#: src/hud.rs:256
+msgid "no microphone access"
+msgstr "마이크 접근 권한 없음"
+
+#: src/hud.rs:261 src/session.rs:367
+msgid "no model is downloaded"
+msgstr "다운로드된 모델 없음"
+
+#: src/hud.rs:264
+msgid "no microphone: lid closed"
+msgstr "마이크 없음: 덮개 닫힘"
+
+#: src/hud.rs:268
+msgid "no microphone"
+msgstr "마이크 없음"
+
+#: src/hud.rs:273
+msgid "microphone failed"
+msgstr "마이크 오류"
+
+#: src/hud.rs:275
+msgid "password field"
+msgstr "암호 필드"
+
+#: src/hud.rs:276
+msgid "focus moved"
+msgstr "포커스가 이동됨"
+
+#: src/hud.rs:278
+msgid "the app was too busy"
+msgstr "앱이 응답할 수 없었음"
+
+#: src/hud.rs:279
+msgid "engine crashed"
+msgstr "엔진이 비정상 종료됨"
+
+#: src/hud.rs:280
+msgid "engine timed out"
+msgstr "엔진 시간 초과"
+
+#: src/hud.rs:620
+#, rust-format
+msgid "no sound from {device}"
+msgstr "{device}에서 소리 없음"
+
+#: src/menu.rs:23
+msgid "Slow transcription: install the GPU's driver"
+msgstr "인식 속도 느림: GPU 드라이버를 설치하세요"
+
+#: src/menu.rs:112
+#, rust-format
+msgid "{name} — recording"
+msgstr "{name} — 녹음 중"
+
+#: src/menu.rs:113
+#, rust-format
+msgid "{name} — transcribing"
+msgstr "{name} — 인식 중"
+
+#: src/menu.rs:114
+#, rust-format
+msgid "{name} — needs attention"
+msgstr "{name} — 확인 필요"
+
+#: src/menu.rs:159
+msgid "Allow Accessibility…"
+msgstr "손쉬운 사용 허용…"
+
+#: src/menu.rs:166
+#, rust-format
+msgid "The hotkey “{label}” does not work: {e}"
+msgstr "단축키 ‘{label}’이(가) 작동하지 않음: {e}"
+
+#: src/menu.rs:170
+msgid "Allow the Hotkey…"
+msgstr "단축키 허용…"
+
+#: src/menu.rs:174 src/menu.rs:182
+msgid "Allow Paste…"
+msgstr "붙여넣기 허용…"
+
+#: src/menu.rs:178
+msgid "Allow Microphone…"
+msgstr "마이크 허용…"
+
+#: src/menu.rs:186
+msgid "Secure Input is on…"
+msgstr "보안 입력이 켜져 있음…"
+
+#: src/menu.rs:191
+msgid "Download a Speech Model…"
+msgstr "음성 인식 모델 다운로드…"
+
+#: src/menu.rs:193
+#, rust-format
+msgid "{model} is not on disk…"
+msgstr "{model}이(가) 디스크에 없음…"
+
+#: src/menu.rs:195
+#, rust-format
+msgid "{model} does not load…"
+msgstr "{model}을(를) 불러올 수 없음…"
+
+#: src/menu.rs:201
+msgid "unknown error"
+msgstr "알 수 없는 오류"
+
+#: src/menu.rs:202
+#, rust-format
+msgid "The last dictation failed: {e}"
+msgstr "마지막 받아쓰기 실패: {e}"
+
+#: src/menu.rs:203
+#, rust-format
+msgid "Error: {e}"
+msgstr "오류: {e}"
+
+#: src/menu.rs:270
+msgid "Copy Last Dictation"
+msgstr "마지막 받아쓰기 복사"
+
+#: src/menu.rs:271
+msgid "Recent"
+msgstr "최근 항목"
+
+#: src/menu.rs:281
+msgid "Unload Model"
+msgstr "모델 해제"
+
+#: src/menu.rs:283
+msgid "History…"
+msgstr "기록…"
+
+#: src/menu.rs:286
+msgid "Settings…"
+msgstr "설정…"
+
+#: src/menu.rs:289
+#, rust-format
+msgid "Quit {name}"
+msgstr "{name} 종료"
+
+#: src/menu.rs:297
+#, rust-format
+msgid "Update Available: {version}…"
+msgstr "업데이트 사용 가능: {version}…"
+
+#: src/menu.rs:298
+#, rust-format
+msgid "Downloading Update: {done}%"
+msgstr "업데이트 다운로드 중: {done}%"
+
+#: src/menu.rs:299
+msgid "Restarting to Update…"
+msgstr "업데이트를 위해 재시작 중…"
+
+#: src/menu.rs:300
+msgid "Update Failed…"
+msgstr "업데이트 실패…"
+
+#: src/menu.rs:311
+msgid "Checking for Updates…"
+msgstr "업데이트 확인 중…"
+
+#: src/menu.rs:312 src/window.rs:3230
+msgid "Check for Updates…"
+msgstr "업데이트 확인…"
+
+#: src/menu.rs:340 src/window.rs:1463
+msgid "System Default"
+msgstr "시스템 기본값"
+
+#: src/menu.rs:341
+msgid "No Microphone"
+msgstr "마이크 없음"
+
+#: src/menu.rs:343
+#, rust-format
+msgid "{name} isn’t connected"
+msgstr "{name} 연결 안 됨"
+
+#. Translators: a model in a list of models.
+#: src/menu.rs:355 src/window.rs:852 src/window.rs:1041
+#, rust-format
+msgid "{name} (not on disk)"
+msgstr "{name} (디스크에 없음)"
+
+#: src/menu.rs:360
+msgid "No Model"
+msgstr "모델 없음"
+
+#: src/menu.rs:367
+msgid "No Models Downloaded"
+msgstr "다운로드된 모델 없음"
+
+#: src/menu.rs:370
+msgid "All Models…"
+msgstr "모든 모델…"
+
+#: src/menu.rs:378
+msgid "Recording…"
+msgstr "녹음 중…"
+
+#: src/menu.rs:379 src/menu.rs:381
+msgid "Loading the model…"
+msgstr "모델 불러오는 중…"
+
+#: src/menu.rs:380 src/window.rs:2680
+msgid "Transcribing…"
+msgstr "인식 중…"
+
+#. Translators: the app's state in the menu's header, after an error.
+#: src/menu.rs:383
+msgid "Error"
+msgstr "오류"
+
+#: src/mic_start.rs:25
+msgid "Microphone is slow to start: reconnect it"
+msgstr "마이크 시작이 느림: 다시 연결하세요"
+
+#: src/session.rs:60
+msgid "couldn’t stop saving the history: dictations aren’t kept, see the log"
+msgstr "기록 저장을 중단할 수 없음: 받아쓰기가 보관되지 않음, 로그 참조"
+
+#: src/session.rs:63
+msgid "the saved history is deleted once the dictation, export or import ends"
+msgstr "저장된 기록은 받아쓰기, 내보내기 또는 가져오기가 끝나면 삭제됨"
+
+#: src/session.rs:66
+msgid "couldn’t open the saved history: dictations are kept until Wavo quits"
+msgstr "저장된 기록을 열 수 없음: 받아쓰기는 Wavo 종료 시까지 보관됨"
+
+#: src/session.rs:368
+#, rust-format
+msgid "{model} is not on disk"
+msgstr "{model}이(가) 디스크에 없음"
+
+#: src/session.rs:946
+#, rust-format
+msgid "could not save the settings: {e}"
+msgstr "설정을 저장할 수 없음: {e}"
+
+#: src/session.rs:1008
+#, rust-format
+msgid "{chosen} is not on disk: {model} transcribes instead"
+msgstr "{chosen}이(가) 디스크에 없어 {model}(으)로 인식함"
+
+#: src/session.rs:1136
+msgid "the model"
+msgstr "모델"
+
+#: src/session.rs:1611
+#, rust-format
+msgid "nothing recognized: {note}"
+msgstr "인식된 내용 없음: {note}"
+
+#: src/session.rs:1616
+#, rust-format
+msgid "entry {entry} could not be transcribed again: {why}"
+msgstr "항목 {entry}을(를) 다시 인식할 수 없음: {why}"
+
+#: src/session.rs:1669
+#, rust-format
+msgid "could not open the history: {e}"
+msgstr "기록을 열 수 없음: {e}"
+
+#: src/session.rs:1691
+#, rust-format
+msgid "could not delete the saved history: {e}"
+msgstr "저장된 기록을 삭제할 수 없음: {e}"
+
+#: src/session.rs:1826
+#, rust-format
+msgid "{model} understands {lang} only"
+msgstr "{model}은(는) {lang}만 지원"
+
+#: src/settings.rs:161
+#, rust-format
+msgid "{path}: {e}; using the defaults, the file kept as {kept}"
+msgstr "{path}: {e}. 기본 설정을 사용하며 파일은 {kept}(으)로 보관됨"
+
+#: src/settings.rs:162
+#, rust-format
+msgid "{path}: {e}; using the defaults"
+msgstr "{path}: {e}. 기본 설정을 사용함"
+
+#: src/settings.rs:175
+#, rust-format
+msgid "{path} is invalid ({e}); using the defaults, the file kept as {kept}"
+msgstr ""
+"{path}이(가) 잘못됨({e}). 기본 설정을 사용하며 파일은 {kept}(으)로 보관됨"
+
+#. Translators: a language, as a list of languages names it.
+#: src/settings.rs:277
+msgid "Afrikaans"
+msgstr "아프리칸스어"
+
+#: src/settings.rs:278
+msgid "Amharic"
+msgstr "암하라어"
+
+#: src/settings.rs:279
+msgid "Arabic"
+msgstr "아랍어"
+
+#: src/settings.rs:280
+msgid "Assamese"
+msgstr "아삼어"
+
+#: src/settings.rs:281
+msgid "Azerbaijani"
+msgstr "아제르바이잔어"
+
+#: src/settings.rs:282
+msgid "Bashkir"
+msgstr "바시키르어"
+
+#: src/settings.rs:283
+msgid "Belarusian"
+msgstr "벨라루스어"
+
+#: src/settings.rs:284
+msgid "Bulgarian"
+msgstr "불가리아어"
+
+#: src/settings.rs:285
+msgid "Bengali"
+msgstr "벵골어"
+
+#: src/settings.rs:286
+msgid "Tibetan"
+msgstr "티베트어"
+
+#: src/settings.rs:287
+msgid "Breton"
+msgstr "브르타뉴어"
+
+#: src/settings.rs:288
+msgid "Bosnian"
+msgstr "보스니아어"
+
+#: src/settings.rs:289
+msgid "Catalan"
+msgstr "카탈로니아어"
+
+#: src/settings.rs:290
+msgid "Czech"
+msgstr "체코어"
+
+#: src/settings.rs:291
+msgid "Welsh"
+msgstr "웨일스어"
+
+#: src/settings.rs:292
+msgid "Danish"
+msgstr "덴마크어"
+
+#: src/settings.rs:293
+msgid "German"
+msgstr "독일어"
+
+#: src/settings.rs:294
+msgid "Modern Greek"
+msgstr "그리스어"
+
+#: src/settings.rs:295 src/window.rs:2260
+msgid "English"
+msgstr "영어"
+
+#: src/settings.rs:296
+msgid "Spanish"
+msgstr "스페인어"
+
+#: src/settings.rs:297
+msgid "Estonian"
+msgstr "에스토니아어"
+
+#: src/settings.rs:298
+msgid "Basque"
+msgstr "바스크어"
+
+#: src/settings.rs:299
+msgid "Persian"
+msgstr "페르시아어"
+
+#: src/settings.rs:300
+msgid "Finnish"
+msgstr "핀란드어"
+
+#: src/settings.rs:301
+msgid "Faroese"
+msgstr "페로어"
+
+#: src/settings.rs:302
+msgid "French"
+msgstr "프랑스어"
+
+#: src/settings.rs:303
+msgid "Galician"
+msgstr "갈리시아어"
+
+#: src/settings.rs:304
+msgid "Gujarati"
+msgstr "구자라트어"
+
+#: src/settings.rs:305
+msgid "Hausa"
+msgstr "하우사어"
+
+#: src/settings.rs:306
+msgid "Hawaiian"
+msgstr "하와이어"
+
+#: src/settings.rs:307 src/window.rs:2261
+msgid "Hebrew"
+msgstr "히브리어"
+
+#: src/settings.rs:308
+msgid "Hindi"
+msgstr "힌디어"
+
+#: src/settings.rs:309
+msgid "Croatian"
+msgstr "크로아티아어"
+
+#: src/settings.rs:310
+msgid "Haitian"
+msgstr "아이티어"
+
+#: src/settings.rs:311
+msgid "Hungarian"
+msgstr "헝가리어"
+
+#: src/settings.rs:312
+msgid "Armenian"
+msgstr "아르메니아어"
+
+#: src/settings.rs:313
+msgid "Indonesian"
+msgstr "인도네시아어"
+
+#: src/settings.rs:314
+msgid "Icelandic"
+msgstr "아이슬란드어"
+
+#: src/settings.rs:315
+msgid "Italian"
+msgstr "이탈리아어"
+
+#: src/settings.rs:316
+msgid "Japanese"
+msgstr "일본어"
+
+#: src/settings.rs:317
+msgid "Javanese"
+msgstr "자바어"
+
+#: src/settings.rs:318
+msgid "Georgian"
+msgstr "조지아어"
+
+#: src/settings.rs:319
+msgid "Kazakh"
+msgstr "카자흐어"
+
+#: src/settings.rs:320
+msgid "Khmer"
+msgstr "크메르어"
+
+#: src/settings.rs:321
+msgid "Kannada"
+msgstr "칸나다어"
+
+#: src/settings.rs:322
+msgid "Korean"
+msgstr "한국어"
+
+#: src/settings.rs:323
+msgid "Kirghiz"
+msgstr "키르기스어"
+
+#: src/settings.rs:324
+msgid "Latin"
+msgstr "라틴어"
+
+#: src/settings.rs:325
+msgid "Luxembourgish"
+msgstr "룩셈부르크어"
+
+#: src/settings.rs:326
+msgid "Lingala"
+msgstr "링갈라어"
+
+#: src/settings.rs:327
+msgid "Lao"
+msgstr "라오어"
+
+#: src/settings.rs:328
+msgid "Lithuanian"
+msgstr "리투아니아어"
+
+#: src/settings.rs:329
+msgid "Latvian"
+msgstr "라트비아어"
+
+#: src/settings.rs:330
+msgid "Malagasy"
+msgstr "말라가시어"
+
+#: src/settings.rs:331
+msgid "Maori"
+msgstr "마오리어"
+
+#: src/settings.rs:332
+msgid "Macedonian"
+msgstr "마케도니아어"
+
+#: src/settings.rs:333
+msgid "Malayalam"
+msgstr "말라얄람어"
+
+#: src/settings.rs:334
+msgid "Mongolian"
+msgstr "몽골어"
+
+#: src/settings.rs:335
+msgid "Marathi"
+msgstr "마라티어"
+
+#: src/settings.rs:336
+msgid "Malay"
+msgstr "말레이어"
+
+#: src/settings.rs:337
+msgid "Maltese"
+msgstr "몰타어"
+
+#: src/settings.rs:338
+msgid "Burmese"
+msgstr "미얀마어"
+
+#: src/settings.rs:339
+msgid "Nepali"
+msgstr "네팔어"
+
+#: src/settings.rs:340
+msgid "Dutch"
+msgstr "네덜란드어"
+
+#: src/settings.rs:341
+msgid "Norwegian Nynorsk"
+msgstr "뉘노르스크"
+
+#: src/settings.rs:342
+msgid "Norwegian"
+msgstr "노르웨이어"
+
+#: src/settings.rs:343
+msgid "Occitan"
+msgstr "오크어"
+
+#: src/settings.rs:344
+msgid "Panjabi"
+msgstr "펀자브어"
+
+#: src/settings.rs:345
+msgid "Polish"
+msgstr "폴란드어"
+
+#: src/settings.rs:346
+msgid "Pushto"
+msgstr "파슈토어"
+
+#: src/settings.rs:347
+msgid "Portuguese"
+msgstr "포르투갈어"
+
+#: src/settings.rs:348
+msgid "Romanian"
+msgstr "루마니아어"
+
+#: src/settings.rs:349 src/window.rs:2262
+msgid "Russian"
+msgstr "러시아어"
+
+#: src/settings.rs:350
+msgid "Sanskrit"
+msgstr "산스크리트어"
+
+#: src/settings.rs:351
+msgid "Sindhi"
+msgstr "신디어"
+
+#: src/settings.rs:352
+msgid "Sinhala"
+msgstr "싱할라어"
+
+#: src/settings.rs:353
+msgid "Slovak"
+msgstr "슬로바키아어"
+
+#: src/settings.rs:354
+msgid "Slovenian"
+msgstr "슬로베니아어"
+
+#: src/settings.rs:355
+msgid "Shona"
+msgstr "쇼나어"
+
+#: src/settings.rs:356
+msgid "Somali"
+msgstr "소말리어"
+
+#: src/settings.rs:357
+msgid "Albanian"
+msgstr "알바니아어"
+
+#: src/settings.rs:358
+msgid "Serbian"
+msgstr "세르비아어"
+
+#: src/settings.rs:359
+msgid "Sundanese"
+msgstr "순다어"
+
+#: src/settings.rs:360
+msgid "Swedish"
+msgstr "스웨덴어"
+
+#: src/settings.rs:361
+msgid "Swahili"
+msgstr "스와힐리어"
+
+#: src/settings.rs:362
+msgid "Tamil"
+msgstr "타밀어"
+
+#: src/settings.rs:363
+msgid "Telugu"
+msgstr "텔루구어"
+
+#: src/settings.rs:364
+msgid "Tajik"
+msgstr "타지크어"
+
+#: src/settings.rs:365
+msgid "Thai"
+msgstr "태국어"
+
+#: src/settings.rs:366
+msgid "Turkmen"
+msgstr "투르크멘어"
+
+#: src/settings.rs:367
+msgid "Tagalog"
+msgstr "타갈로그어"
+
+#: src/settings.rs:368
+msgid "Turkish"
+msgstr "터키어"
+
+#: src/settings.rs:369
+msgid "Tatar"
+msgstr "타타르어"
+
+#: src/settings.rs:370
+msgid "Ukrainian"
+msgstr "우크라이나어"
+
+#: src/settings.rs:371
+msgid "Urdu"
+msgstr "우르두어"
+
+#: src/settings.rs:372
+msgid "Uzbek"
+msgstr "우즈베크어"
+
+#: src/settings.rs:373
+msgid "Vietnamese"
+msgstr "베트남어"
+
+#: src/settings.rs:374
+msgid "Yiddish"
+msgstr "이디시어"
+
+#: src/settings.rs:375
+msgid "Yoruba"
+msgstr "요루바어"
+
+#: src/settings.rs:376
+msgid "Yue Chinese"
+msgstr "광둥어"
+
+#: src/settings.rs:377
+msgid "Chinese"
+msgstr "중국어"
+
+#: src/transfer.rs:79
+#, rust-format
+msgid "no history in {folder}"
+msgstr "{folder}에 기록이 없음"
+
+#: src/transfer.rs:161
+#, rust-format
+msgid "{file} is not an archive of Wavo’s Export"
+msgstr "{file}은(는) Wavo에서 내보낸 아카이브가 아님"
+
+#: src/transfer.rs:169
+#, rust-format
+msgid "{file} is from a newer Wavo ({version}): update this one first"
+msgstr ""
+"{file}은(는) 최신 Wavo({version})에서 만들어짐: 먼저 이 Wavo를 업데이트하세요"
+
+#: src/transfer.rs:176
+#, rust-format
+msgid "{why}: no history in it"
+msgstr "{why}: 기록이 없음"
+
+#: src/updater.rs:285
+msgid "Software Update"
+msgstr "소프트웨어 업데이트"
+
+#: src/updater.rs:315
+msgid "Checking for updates…"
+msgstr "업데이트 확인 중…"
+
+#: src/updater.rs:317
+#, rust-format
+msgid "Wavo {current} is the newest version."
+msgstr "Wavo {current}은(는) 최신 버전입니다."
+
+#: src/updater.rs:317
+msgid "You’re up to date!"
+msgstr "최신 상태입니다"
+
+#: src/updater.rs:320
+msgid "A new version of Wavo is available!"
+msgstr "새로운 버전의 Wavo가 있습니다"
+
+#: src/updater.rs:322
+#, rust-format
+msgid "Wavo {new} is out, you have {current}. Install it now?"
+msgstr ""
+"Wavo {new}이(가) 출시되었습니다(현재 {current}). 지금 설치하시겠습니까?"
+
+#: src/updater.rs:327
+msgid "Downloading the update…"
+msgstr "업데이트 다운로드 중…"
+
+#: src/updater.rs:329
+msgid "Installing the update…"
+msgstr "업데이트 설치 중…"
+
+#: src/updater.rs:330
+#, rust-format
+msgid "Wavo restarts as {new} once it can."
+msgstr "가능해지면 Wavo가 {new}(으)로 재시작됩니다."
+
+#: src/updater.rs:333
+msgid "The update failed"
+msgstr "업데이트 실패"
+
+#: src/updater.rs:335
+msgid "Couldn’t check for updates"
+msgstr "업데이트를 확인할 수 없음"
+
+#: src/updater.rs:354 src/window.rs:1544
+#, rust-format
+msgid "{size} MB"
+msgstr "{size}MB"
+
+#: src/updater.rs:356
+#, rust-format
+msgid "{done} of {total}"
+msgstr "{done}/{total}"
+
+#: src/updater.rs:365
+msgid "Release notes"
+msgstr "릴리스 노트"
+
+#: src/updater.rs:392
+msgid "Skip This Version"
+msgstr "이 버전 건너뛰기"
+
+#: src/updater.rs:394
+msgid "Remind Me Later"
+msgstr "나중에 알림"
+
+#: src/updater.rs:395
+msgid "Install Update"
+msgstr "업데이트 설치"
+
+#: src/updater.rs:399
+msgid "Close"
+msgstr "닫기"
+
+#: src/updater.rs:400 src/window.rs:2099 src/window.rs:2147
+msgid "Retry"
+msgstr "재시도"
+
+#: src/updater.rs:404
+msgid "OK"
+msgstr "확인"
+
+#: src/updater.rs:408 src/window.rs:2110
+msgid "Cancel"
+msgstr "취소"
+
+#: src/updater.rs:412
+msgid "Hide"
+msgstr "가리기"
+
+#: src/window.rs:71
+msgid "General"
+msgstr "일반"
+
+#: src/window.rs:72 src/window.rs:1363
+msgid "Models"
+msgstr "모델"
+
+#: src/window.rs:73 src/window.rs:1246
+msgid "History"
+msgstr "기록"
+
+#: src/window.rs:74
+msgid "Advanced"
+msgstr "고급"
+
+#: src/window.rs:75
+msgid "About"
+msgstr "정보"
+
+#: src/window.rs:346
+#, rust-format
+msgid "{chosen} is not on disk: {model} transcribes instead."
+msgstr "{chosen}이(가) 디스크에 없어 {model}(으)로 인식합니다."
+
+#: src/window.rs:349
+#, rust-format
+msgid "{chosen} is not on disk: download it again in Models, or pick another."
+msgstr ""
+"{chosen}이(가) 디스크에 없습니다. ‘모델’에서 다시 다운로드하거나 다른 모델을 "
+"선택하세요."
+
+#: src/window.rs:364
+msgid "Delete"
+msgstr "삭제"
+
+#: src/window.rs:585
+msgid ""
+"Set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”, or macOS "
+"acts on it too."
+msgstr ""
+"시스템 설정 › 키보드 › ‘🌐 키를 눌러’를 ‘아무것도 안 함’으로 설정하세요. 그렇"
+"지 않으면 macOS도 반응합니다."
+
+#: src/window.rs:588
+msgid ""
+"Secure Input is on (a password field, or a terminal’s Secure Keyboard "
+"Entry): the shortcut works through a backup path, and Esc may not cancel."
+msgstr ""
+"보안 입력이 켜져 있습니다(암호 필드 또는 터미널의 ‘보안 키보드 입력’). 단축키"
+"는 예비 경로로 작동하며 Esc로 취소되지 않을 수 있습니다."
+
+#: src/window.rs:592
+msgid ""
+"How the hotkey records: while you hold it, from one press to the next, or "
+"both (a short tap latches the recording on)."
+msgstr ""
+"단축키로 녹음하는 방식: 누르고 있는 동안, 한 번 누를 때부터 다음에 누를 때까"
+"지, 또는 둘 다(짧게 누르면 녹음이 계속됨)."
+
+#: src/window.rs:601
+msgid ""
+"Automatic takes a USB microphone first, then the built-in one while the lid "
+"is open, then a wired one, and a Bluetooth headset only when there is no "
+"other: it records at call quality and loses the first words. System Default "
+"uses whatever the system picks."
+msgstr ""
+"‘자동’은 USB 마이크를 먼저, 그다음 덮개가 열려 있으면 내장 마이크, 그다음 유"
+"선 마이크를 선택하며, Bluetooth 헤드셋은 다른 마이크가 없을 때만 사용합니다. "
+"헤드셋은 통화 품질로 녹음되고 첫 단어가 누락되기 때문입니다. ‘시스템 기본값’"
+"은 시스템이 선택한 마이크를 사용합니다."
+
+#: src/window.rs:608
+msgid ""
+"Automatic takes a USB microphone first, then the computer’s own or a wired "
+"one, and a Bluetooth headset only when there is no other: it records at call "
+"quality and loses the first words. System Default uses whatever the system "
+"picks."
+msgstr ""
+"‘자동’은 USB 마이크를 먼저, 그다음 컴퓨터 내장 마이크나 유선 마이크를 선택하"
+"며, Bluetooth 헤드셋은 다른 마이크가 없을 때만 사용합니다. 헤드셋은 통화 품질"
+"로 녹음되고 첫 단어가 누락되기 때문입니다. ‘시스템 기본값’은 시스템이 선택한 "
+"마이크를 사용합니다."
+
+#: src/window.rs:615
+msgid ""
+"Automatic and System Default both use the system’s input. Linux doesn’t tell "
+"Wavo how a microphone is attached, so neither skips a Bluetooth headset."
+msgstr ""
+"‘자동’과 ‘시스템 기본값’ 모두 시스템 입력을 사용합니다. Linux는 마이크 연결 "
+"방식을 Wavo에 알려 주지 않으므로 둘 다 Bluetooth 헤드셋을 건너뛰지 않습니다."
+
+#: src/window.rs:622
+msgid ""
+"The microphone takes longer and longer to start, so the first words get "
+"lost. Unplug it and plug it back in."
+msgstr ""
+"마이크가 시작되는 데 점점 더 오래 걸려 첫 단어가 누락됩니다. 마이크를 뽑았다"
+"가 다시 연결하세요."
+
+#: src/window.rs:627
+msgid "Turn Wavo on in Task Manager › Startup apps."
+msgstr "작업 관리자 › 시작 앱에서 Wavo를 사용으로 설정하세요."
+
+#: src/window.rs:629
+msgid "Allow Wavo in System Settings › General › Login Items."
+msgstr "시스템 설정 › 일반 › 로그인 항목에서 Wavo를 허용하세요."
+
+#: src/window.rs:632
+msgid ""
+"On: the dictated text stays on the clipboard, pasted or not. Off: after a "
+"paste the clipboard gets back what it held; with pasting off, the text is "
+"only in History."
+msgstr ""
+"켬: 받아쓴 텍스트가 붙여넣기 여부와 관계없이 클립보드에 남습니다. 끔: 붙여넣"
+"은 후 클립보드가 이전 내용으로 돌아가며, 붙여넣기가 꺼져 있으면 텍스트는 기록"
+"에만 남습니다."
+
+#: src/window.rs:636
+msgid ""
+"The model tells the language of each dictation by itself. Short phrases, an "
+"accent or two languages mixed can mislead it: choose the language you speak, "
+"or Keyboard layout to follow the layout you type with."
+msgstr ""
+"모델이 받아쓰기마다 언어를 스스로 판단합니다. 짧은 문구, 억양, 두 언어가 섞"
+"인 말은 판단을 흐릴 수 있습니다. 말하는 언어를 선택하거나, ‘입력 소스’를 선택"
+"해 사용 중인 입력 소스를 따르게 하세요."
+
+#: src/window.rs:641
+msgid ""
+"With Keyboard layout, each language under Language goes to the model chosen "
+"there. This one takes a language set to it, one no model knows, and a layout "
+"of any other language."
+msgstr ""
+"‘입력 소스’를 선택하면 ‘언어’ 아래의 각 언어는 그곳에서 선택한 모델이 맡습니"
+"다. 이 모델은 자신에게 지정된 언어, 어떤 모델도 지원하지 않는 언어, 그 밖의 "
+"모든 언어의 입력 소스를 맡습니다."
+
+#: src/window.rs:648
+msgid ""
+"Each dictation is in the language of the keyboard layout in use when it "
+"ends, with the model chosen for that language below. Switch the layout while "
+"you speak and the whole dictation follows it; the HUD shows the language."
+msgstr ""
+"각 받아쓰기는 끝날 때 사용 중인 입력 소스의 언어로, 아래에서 그 언어에 선택"
+"한 모델이 인식합니다. 말하는 도중 입력 소스를 바꾸면 받아쓰기 전체가 그 언어"
+"를 따르며, 언어는 표시기에 나타납니다."
+
+#: src/window.rs:653
+msgid ""
+"Adds a space after each paste. A paste into the same window less than 20 s "
+"after one that ended mid-sentence starts in lower case, unless its first "
+"word is in Latin letters. Hesitation sounds like “э-э” and “um” are left out "
+"in Russian and English, when you choose the language or the model has only "
+"one. In Russian, a number of more than one word, or from 11 to 19, is "
+"written in digits: “семьдесят шестой” becomes “76-й”, and “1 000” becomes "
+"“1000”."
+msgstr ""
+"붙여넣을 때마다 뒤에 공백을 추가합니다. 문장 중간에 끝난 붙여넣기 후 20초 이"
+"내에 같은 윈도우에 붙여넣으면, 첫 단어가 라틴 문자가 아닌 한 소문자로 시작합"
+"니다. 언어를 선택했거나 모델이 한 언어만 지원하면 러시아어와 영어에서 ‘э-э’, "
+"‘um’ 같은 머뭇거리는 소리를 뺍니다. 러시아어에서는 두 단어 이상이거나 11부터 "
+"19까지의 수를 숫자로 씁니다. ‘семьдесят шестой’는 ‘76-й’로, ‘1 000’은 "
+"‘1000’으로 바뀝니다."
+
+#: src/window.rs:661
+msgid ""
+"Wavo can’t put the clipboard back after a paste: allow it in System "
+"Settings › Privacy & Security › Paste from Other Apps."
+msgstr ""
+"Wavo가 붙여넣은 후 클립보드를 복원할 수 없습니다. 시스템 설정 › 개인정보 보"
+"호 및 보안 › 다른 앱에서 붙여넣기에서 허용하세요."
+
+#: src/window.rs:665
+msgid ""
+"Wavo records your voice through it while you hold the shortcut; the "
+"recording stays on this Mac."
+msgstr ""
+"단축키를 누르고 있는 동안 Wavo가 마이크로 음성을 녹음합니다. 녹음은 이 Mac에"
+"만 남습니다."
+
+#: src/window.rs:669
+msgid ""
+"Wavo hears the shortcut in every app and pastes the text where you type "
+"through it."
+msgstr ""
+"이를 통해 Wavo가 모든 앱에서 단축키를 감지하고 입력 중인 곳에 텍스트를 붙여넣"
+"습니다."
+
+#: src/window.rs:673
+msgid ""
+"You’re not an administrator on this Mac, so Wavo can’t paste for you. You "
+"can turn on Keep the text on the clipboard and paste with ⌘V."
+msgstr ""
+"이 Mac의 관리자가 아니므로 Wavo가 대신 붙여넣을 수 없습니다. ‘텍스트를 클립보"
+"드에 유지’를 켜고 ⌘V로 붙여넣을 수 있습니다."
+
+#: src/window.rs:677
+msgid ""
+"A single key needs Accessibility, which only an administrator can allow on "
+"this Mac. Use a combination like ⌥Space."
+msgstr ""
+"단일 키에는 손쉬운 사용 권한이 필요하며, 이 Mac에서는 관리자만 허용할 수 있습"
+"니다. ⌥Space 같은 조합을 사용하세요."
+
+#: src/window.rs:686
+msgid "Hold to talk, or tap to start and stop"
+msgstr "누른 채 말하기 또는 탭하여 시작/중지"
+
+#: src/window.rs:687
+msgid "Hold to talk"
+msgstr "누른 채 말하기"
+
+#: src/window.rs:688
+msgid "Tap to start and stop"
+msgstr "탭하여 시작/중지"
+
+#: src/window.rs:697
+msgid "Dictation"
+msgstr "받아쓰기"
+
+#: src/window.rs:710 src/window.rs:804
+msgid "Microphone"
+msgstr "마이크"
+
+#: src/window.rs:735
+msgid "Activation"
+msgstr "작동 방식"
+
+#: src/window.rs:742
+msgid "Shortcut"
+msgstr "단축키"
+
+#: src/window.rs:746
+msgid "Output"
+msgstr "출력"
+
+#: src/window.rs:748
+msgid "Paste the text into the app you dictate in"
+msgstr "받아쓰는 앱에 텍스트 붙여넣기"
+
+#: src/window.rs:761
+msgid "Keep the text on the clipboard"
+msgstr "텍스트를 클립보드에 유지"
+
+#: src/window.rs:770
+msgid "Clean up the text"
+msgstr "텍스트 정리"
+
+#: src/window.rs:779
+msgid "Startup"
+msgstr "시작"
+
+#: src/window.rs:797
+msgid "Wavo needs two permissions"
+msgstr "Wavo에 두 가지 권한이 필요합니다"
+
+#: src/window.rs:798
+msgid "Wavo needs a permission"
+msgstr "Wavo에 권한이 필요합니다"
+
+#: src/window.rs:805
+msgid "Accessibility"
+msgstr "손쉬운 사용"
+
+#: src/window.rs:812
+msgid "Allow"
+msgstr "허용"
+
+#: src/window.rs:814
+msgid "Open Settings"
+msgstr "설정 열기"
+
+#: src/window.rs:839
+msgid "Back to the default shortcut"
+msgstr "기본 단축키로 되돌리기"
+
+#: src/window.rs:860 src/window.rs:1047
+msgid "Download more…"
+msgstr "더 다운로드…"
+
+#: src/window.rs:871
+msgid "Auto-detect"
+msgstr "자동 감지"
+
+#: src/window.rs:874
+msgid "Keyboard layout"
+msgstr "입력 소스"
+
+#: src/window.rs:888
+#, rust-format
+msgid "{lang} (not one the model is meant for)"
+msgstr "{lang}(이 모델의 대상 언어 아님)"
+
+#: src/window.rs:899
+msgid "Default model"
+msgstr "기본 모델"
+
+#: src/window.rs:899
+msgid "Model"
+msgstr "모델"
+
+#: src/window.rs:907
+msgid "Download a Model…"
+msgstr "모델 다운로드…"
+
+#: src/window.rs:935 src/window.rs:1158
+msgid "Language"
+msgstr "언어"
+
+#: src/window.rs:1001
+#, rust-format
+msgid "{model} knows {lang} only, so every dictation is in {lang}."
+msgstr ""
+"{model}은(는) {lang}만 지원하므로 모든 받아쓰기가 {lang}(으)로 처리됩니다."
+
+#. Translators: no model, as the default model of a keyboard language.
+#: src/window.rs:1031
+msgid "none"
+msgstr "없음"
+
+#. Translators: a model in a list of models.
+#: src/window.rs:1034
+#, rust-format
+msgid "{default} (default)"
+msgstr "{default} (기본값)"
+
+#: src/window.rs:1055
+msgid ""
+"After each dictation the HUD shows for a second how long the text took after "
+"the stop."
+msgstr ""
+"받아쓰기가 끝날 때마다 중지 후 텍스트가 나오기까지 걸린 시간을 표시기에 1초 "
+"동안 보여 줍니다."
+
+#: src/window.rs:1059
+msgid ""
+"The HUD shows the words as you speak, recognized again every half second. "
+"The text pasted is still recognized from the whole recording after the stop. "
+"On by default on a Mac or with a discrete GPU: an integrated one is kept "
+"busy while you speak."
+msgstr ""
+"말하는 동안 표시기에 단어를 보여 주며 0.5초마다 다시 인식합니다. 붙여넣는 텍"
+"스트는 중지 후 전체 녹음에서 다시 인식됩니다. Mac이나 외장 GPU에서는 기본적으"
+"로 켜져 있습니다. 내장 GPU는 말하는 동안 계속 사용되기 때문입니다."
+
+#: src/window.rs:1064
+msgid ""
+"Frees the model's memory after Wavo has been idle this long. The next "
+"dictation loads it again, which takes a moment."
+msgstr ""
+"Wavo를 이 시간 동안 사용하지 않으면 모델의 메모리를 해제합니다. 다음 받아쓰"
+"기 때 다시 불러오므로 잠시 시간이 걸립니다."
+
+#: src/window.rs:1068
+msgid ""
+"Models marked ANE run on the Neural Engine: as fast as on the GPU at a "
+"fraction of the energy. Each new version of Wavo prepares such a model once, "
+"in the background (10–30 s); meanwhile it runs on the GPU. Other models "
+"always run on the GPU."
+msgstr ""
+"ANE 표시가 있는 모델은 Neural Engine에서 실행됩니다. GPU만큼 빠르면서 에너지"
+"는 훨씬 적게 씁니다. Wavo의 새 버전마다 이런 모델을 백그라운드에서 한 번 준비"
+"하며(10~30초), 그동안은 GPU에서 실행됩니다. 다른 모델은 항상 GPU에서 실행됩니"
+"다."
+
+#: src/window.rs:1073
+msgid ""
+"A .zip that Wavo exported, here or on another computer: the dictations this "
+"history does not have are added with their recordings; the settings stay as "
+"they are."
+msgstr ""
+"이 컴퓨터나 다른 컴퓨터에서 Wavo가 내보낸 .zip 파일: 이 기록에 없는 받아쓰기"
+"가 녹음과 함께 추가되며, 설정은 그대로 유지됩니다."
+
+#: src/window.rs:1077
+msgid ""
+"The history, its recordings and the settings, into a .zip archive: Import "
+"brings it back, here or on another computer."
+msgstr ""
+"기록과 녹음, 설정을 .zip 아카이브로 내보냅니다. ‘가져오기’로 이 컴퓨터나 다"
+"른 컴퓨터에서 되살릴 수 있습니다."
+
+#: src/window.rs:1081
+msgid "Off while the history is kept until Wavo quits"
+msgstr "기록을 Wavo 종료 시까지 보관하는 동안에는 사용할 수 없음"
+
+#: src/window.rs:1083
+msgid ""
+"Deletes every dictation saved on disk and its recording. The ones kept until "
+"Wavo quits stay."
+msgstr ""
+"디스크에 저장된 모든 받아쓰기와 녹음을 삭제합니다. Wavo 종료 시까지 보관 중"
+"인 항목은 남습니다."
+
+#: src/window.rs:1087
+msgid "No dictations saved"
+msgstr "저장된 받아쓰기 없음"
+
+#: src/window.rs:1089
+msgid "Deleted once the dictation, export or import ends"
+msgstr "받아쓰기, 내보내기 또는 가져오기가 끝나면 삭제됨"
+
+#: src/window.rs:1092
+msgid ""
+"Wavo looks for a new version at launch and once a day; the menu says when "
+"there is one. Off, it looks only when you choose Check for Updates."
+msgstr ""
+"Wavo는 실행 시와 하루에 한 번 새 버전을 확인하며, 새 버전이 있으면 메뉴에 표"
+"시합니다. 끄면 ‘업데이트 확인’을 선택할 때만 확인합니다."
+
+#: src/window.rs:1095
+msgid "This copy of Wavo doesn’t update itself."
+msgstr "이 Wavo는 자동으로 업데이트되지 않습니다."
+
+#: src/window.rs:1099
+msgid "Bottom of the screen"
+msgstr "화면 하단"
+
+#: src/window.rs:1100
+msgid "Top of the screen"
+msgstr "화면 상단"
+
+#. Translators: a look of the HUD, its background a gradient.
+#: src/window.rs:1107
+msgid "Gradient"
+msgstr "그라디언트"
+
+#. Translators: a look of the HUD, its background one colour.
+#: src/window.rs:1109
+msgid "Plain"
+msgstr "단색"
+
+#. Translators: when to unload the model.
+#: src/window.rs:1116
+msgid "Never"
+msgstr "안 함"
+
+#: src/window.rs:1117
+msgid "Right after each dictation"
+msgstr "받아쓰기 직후"
+
+#: src/window.rs:1118
+msgid "After 2 minutes"
+msgstr "2분 후"
+
+#: src/window.rs:1119
+msgid "After 5 minutes"
+msgstr "5분 후"
+
+#: src/window.rs:1120
+msgid "After 10 minutes"
+msgstr "10분 후"
+
+#: src/window.rs:1121
+msgid "After 15 minutes"
+msgstr "15분 후"
+
+#: src/window.rs:1122
+msgid "After 60 minutes"
+msgstr "60분 후"
+
+#: src/window.rs:1128
+msgid "Until Wavo quits"
+msgstr "Wavo 종료 시까지"
+
+#. Translators: how long to keep the history.
+#: src/window.rs:1134
+msgid "Forever"
+msgstr "영구"
+
+#: src/window.rs:1135
+msgid "The last 100 dictations"
+msgstr "최근 100개"
+
+#: src/window.rs:1136
+msgid "The last 1,000 dictations"
+msgstr "최근 1,000개"
+
+#: src/window.rs:1137
+msgid "The last 10,000 dictations"
+msgstr "최근 10,000개"
+
+#: src/window.rs:1138
+msgid "3 days"
+msgstr "3일"
+
+#: src/window.rs:1139
+msgid "2 weeks"
+msgstr "2주"
+
+#: src/window.rs:1140
+msgid "3 months"
+msgstr "3개월"
+
+#. Translators: the app's language, the system's.
+#: src/window.rs:1148
+msgid "System"
+msgstr "시스템 설정"
+
+#: src/window.rs:1156
+msgid "App"
+msgstr "앱"
+
+#: src/window.rs:1170
+msgid "Unload the model"
+msgstr "모델 해제"
+
+#: src/window.rs:1183
+msgid "Use the Neural Engine"
+msgstr "Neural Engine 사용"
+
+#: src/window.rs:1196
+msgid "Check for updates"
+msgstr "업데이트 확인"
+
+#: src/window.rs:1205
+msgid "HUD"
+msgstr "표시기"
+
+#: src/window.rs:1206
+msgid "Show the HUD at"
+msgstr "표시기 위치"
+
+#: src/window.rs:1213
+msgid "HUD style"
+msgstr "표시기 스타일"
+
+#: src/window.rs:1221
+msgid "Show the text while speaking"
+msgstr "말하는 동안 텍스트 표시"
+
+#: src/window.rs:1233
+msgid "Show the transcription time"
+msgstr "인식 시간 표시"
+
+#: src/window.rs:1248
+#, rust-format
+msgid ""
+"Until Wavo quits: the last {n} dictation stays in memory for History and the "
+"menu, without its audio, and nothing is saved to disk."
+msgid_plural ""
+"Until Wavo quits: the last {n} dictations stay in memory for History and the "
+"menu, without their audio, and nothing is saved to disk."
+msgstr[0] ""
+"Wavo 종료 시까지: 최근 받아쓰기 {n}개를 기록과 메뉴를 위해 메모리에 보관하며"
+"(오디오 제외), 디스크에는 아무것도 저장하지 않습니다."
+
+#: src/window.rs:1254
+msgid "Keep the history"
+msgstr "기록 보관"
+
+#: src/window.rs:1263 src/window.rs:3122
+#, rust-format
+msgid "Show in {app}"
+msgstr "{app}에서 보기"
+
+#: src/window.rs:1277
+#, rust-format
+msgid "Exported · {size}"
+msgstr "내보냄 · {size}"
+
+#: src/window.rs:1278
+msgid "Copying the history…"
+msgstr "기록 복사 중…"
+
+#: src/window.rs:1280
+msgid "Reading the archive…"
+msgstr "아카이브 읽는 중…"
+
+#: src/window.rs:1304
+msgid "Delete All…"
+msgstr "모두 삭제…"
+
+#: src/window.rs:1304
+msgid "Export…"
+msgstr "내보내기…"
+
+#: src/window.rs:1304
+msgid "Import…"
+msgstr "가져오기…"
+
+#: src/window.rs:1308
+msgid "Saved history"
+msgstr "저장된 기록"
+
+#. Translators: the title of the save panel of Export….
+#: src/window.rs:1319
+msgid "Export"
+msgstr "내보내기"
+
+#. Translators: the title of the open panel of Import….
+#: src/window.rs:1326
+msgid "Import"
+msgstr "가져오기"
+
+#: src/window.rs:1334
+msgid "Delete 1 dictation and its recording?"
+msgstr "받아쓰기 1개와 녹음을 삭제하시겠습니까?"
+
+#: src/window.rs:1336
+#, rust-format
+msgid "Delete all {count} dictations and their recordings?"
+msgid_plural "Delete all {count} dictations and their recordings?"
+msgstr[0] "받아쓰기 {count}개와 녹음을 모두 삭제하시겠습니까?"
+
+#: src/window.rs:1342
+msgid "This can’t be undone."
+msgstr "이 작업은 실행 취소할 수 없습니다."
+
+#: src/window.rs:1353
+#, rust-format
+msgid ""
+"Models: the downloaded models, in the Hugging Face cache, which other apps "
+"that use Hugging Face models share. Deleting a model on Models frees its "
+"space.\n"
+"{models}\n"
+"\n"
+"Recordings: the audio of every dictation in the history, a folder a day. A "
+"dictation deleted from the history takes its recording with it.\n"
+"{recordings}"
+msgstr ""
+"모델: 다운로드한 모델로, Hugging Face 모델을 사용하는 다른 앱과 함께 쓰는 "
+"Hugging Face 캐시에 있습니다. ‘모델’에서 모델을 삭제하면 그만큼 공간이 확보됩"
+"니다.\n"
+"{models}\n"
+"\n"
+"녹음: 기록에 있는 모든 받아쓰기의 오디오로, 하루에 폴더 하나씩 저장됩니다. 기"
+"록에서 받아쓰기를 삭제하면 녹음도 함께 삭제됩니다.\n"
+"{recordings}"
+
+#: src/window.rs:1363
+msgid "Recordings"
+msgstr "녹음"
+
+#: src/window.rs:1399
+msgid "Launch at login"
+msgstr "로그인 시 열기"
+
+#: src/window.rs:1411
+msgid "Could not delete the dictations"
+msgstr "받아쓰기를 삭제할 수 없음"
+
+#: src/window.rs:1412
+msgid "Could not delete the dictation"
+msgstr "받아쓰기를 삭제할 수 없음"
+
+#: src/window.rs:1413
+msgid "Could not transcribe it again"
+msgstr "다시 인식할 수 없음"
+
+#: src/window.rs:1414
+msgid "Could not put the previous text back"
+msgstr "이전 텍스트로 되돌릴 수 없음"
+
+#: src/window.rs:1415
+msgid "Could not delete the history"
+msgstr "기록을 삭제할 수 없음"
+
+#: src/window.rs:1432
+#, rust-format
+msgid "Couldn’t turn it on: {e}"
+msgstr "켤 수 없음: {e}"
+
+#: src/window.rs:1433
+#, rust-format
+msgid "Couldn’t turn it off: {e}"
+msgstr "끌 수 없음: {e}"
+
+#: src/window.rs:1455 src/window.rs:1457
+#, rust-format
+msgid "Automatic ({device})"
+msgstr "자동({device})"
+
+#: src/window.rs:1458
+msgid "Automatic"
+msgstr "자동"
+
+#: src/window.rs:1459
+msgid "Automatic (none: the lid is closed)"
+msgstr "자동(없음: 덮개 닫힘)"
+
+#: src/window.rs:1462
+#, rust-format
+msgid "System Default ({device})"
+msgstr "시스템 기본값({device})"
+
+#: src/window.rs:1480
+#, rust-format
+msgid "{device} (not connected)"
+msgstr "{device} (연결 안 됨)"
+
+#: src/window.rs:1502
+#, rust-format
+msgid "{device} (the lid is closed)"
+msgstr "{device} (덮개 닫힘)"
+
+#: src/window.rs:1517
+#, rust-format
+msgid "{name} isn’t connected: Wavo records with {other}"
+msgstr "{name} 연결 안 됨: Wavo가 {other}(으)로 녹음함"
+
+#: src/window.rs:1519
+#, rust-format
+msgid "{name} isn’t connected: Wavo records with the system’s input"
+msgstr "{name} 연결 안 됨: Wavo가 시스템 입력으로 녹음함"
+
+#: src/window.rs:1520
+#, rust-format
+msgid "{name} isn’t connected, and there is no other microphone"
+msgstr "{name} 연결 안 됨, 다른 마이크도 없음"
+
+#: src/window.rs:1533
+msgid "Only a Bluetooth mic: the sound is worse"
+msgstr "Bluetooth 마이크만 있음: 음질이 떨어짐"
+
+#: src/window.rs:1543
+#, rust-format
+msgid "{size} GB"
+msgstr "{size}GB"
+
+#: src/window.rs:1545
+#, rust-format
+msgid "{size} KB"
+msgstr "{size}KB"
+
+#. Translators: what goes between the thousands of a number: 86,286 (a narrow space in some).
+#: src/window.rs:1567
+msgid ","
+msgstr ","
+
+#: src/window.rs:1587
+#, rust-format
+msgid "{done} of {total} GB"
+msgstr "{done}/{total}GB"
+
+#: src/window.rs:1591
+#, rust-format
+msgid "{done} of {total} MB"
+msgstr "{done}/{total}MB"
+
+#: src/window.rs:1645
+msgid "All languages"
+msgstr "모든 언어"
+
+#: src/window.rs:1733
+#, rust-format
+msgid "WER {wer}%"
+msgstr "WER {wer}%"
+
+#: src/window.rs:1743
+msgid "Errors per 100 characters"
+msgstr "100자당 오류"
+
+#: src/window.rs:1744
+msgid "Errors per 100 words"
+msgstr "100단어당 오류"
+
+#: src/window.rs:1761
+msgid "The default model"
+msgstr "기본 모델"
+
+#: src/window.rs:1763
+#, rust-format
+msgid "The fewest errors in {lang}, but lowercase without punctuation"
+msgstr "{lang}에서 오류가 가장 적지만 소문자만, 문장 부호 없음"
+
+#: src/window.rs:1766
+#, rust-format
+msgid "Best balance of accuracy and speed in {lang}"
+msgstr "{lang}에서 정확도와 속도의 균형이 가장 좋음"
+
+#: src/window.rs:1770
+#, rust-format
+msgid "No accuracy data for {lang} yet: the best general model"
+msgstr "{lang} 정확도 데이터 아직 없음: 최고의 범용 모델"
+
+#: src/window.rs:1777
+#, rust-format
+msgid "{n} model"
+msgid_plural "{n} models"
+msgstr[0] "모델 {n}개"
+
+#: src/window.rs:1791
+#, rust-format
+msgid "The speed baseline ({times})"
+msgstr "속도 기준({times})"
+
+#: src/window.rs:1792
+msgid "As fast as whisper-turbo"
+msgstr "whisper-turbo와 같은 속도"
+
+#: src/window.rs:1793
+#, rust-format
+msgid "{times} the speed of whisper-turbo"
+msgstr "whisper-turbo 대비 {times} 속도"
+
+#: src/window.rs:1794
+#, rust-format
+msgid "{times} faster than whisper-turbo"
+msgstr "whisper-turbo보다 {times} 빠름"
+
+#: src/window.rs:1803
+msgid "Search models"
+msgstr "모델 검색"
+
+#: src/window.rs:1819
+#, rust-format
+msgid "No model recognizes {lang} well yet."
+msgstr "아직 {lang}을(를) 잘 인식하는 모델이 없습니다."
+
+#: src/window.rs:1862 src/window.rs:1940
+msgid "Downloaded"
+msgstr "다운로드됨"
+
+#: src/window.rs:1863
+msgid "No model yet"
+msgstr "아직 모델 없음"
+
+#: src/window.rs:1864
+msgid "Download the recommended one below to start dictating."
+msgstr "받아쓰기를 시작하려면 아래 추천 모델을 다운로드하세요."
+
+#: src/window.rs:1875
+msgid "Available"
+msgstr "사용 가능"
+
+#: src/window.rs:1896
+#, rust-format
+msgid "{n} more, not measured yet"
+msgid_plural "{n} more, not measured yet"
+msgstr[0] "그 외 {n}개, 아직 측정 안 됨"
+
+#: src/window.rs:1898
+#, rust-format
+msgid "{n} more, not measured in {lang}"
+msgid_plural "{n} more, not measured in {lang}"
+msgstr[0] "그 외 {n}개, {lang} 측정 안 됨"
+
+#: src/window.rs:1904
+msgid "Other models"
+msgstr "다른 모델"
+
+#: src/window.rs:1908
+#, rust-format
+msgid "Too many errors in {lang}"
+msgstr "{lang}에서 오류가 너무 많음"
+
+#: src/window.rs:1909
+#, rust-format
+msgid "{n} more"
+msgid_plural "{n} more"
+msgstr[0] "그 외 {n}개"
+
+#: src/window.rs:1916
+msgid "No model matches."
+msgstr "일치하는 모델이 없습니다."
+
+#: src/window.rs:1962
+#, rust-format
+msgid "Delete {n} Model…"
+msgid_plural "Delete {n} Models…"
+msgstr[0] "모델 {n}개 삭제…"
+
+#: src/window.rs:1985
+#, rust-format
+msgid "Delete {model}?"
+msgstr "{model}을(를) 삭제하시겠습니까?"
+
+#: src/window.rs:1986
+#, rust-format
+msgid "It frees {size} in the Hugging Face cache. You can download it again."
+msgstr ""
+"Hugging Face 캐시에서 {size}의 공간이 확보됩니다. 다시 다운로드할 수 있습니"
+"다."
+
+#: src/window.rs:1989
+#, rust-format
+msgid "Delete {n} model?"
+msgid_plural "Delete {n} models?"
+msgstr[0] "모델 {n}개를 삭제하시겠습니까?"
+
+#: src/window.rs:1990
+#, rust-format
+msgid ""
+"They free {size} in the Hugging Face cache. You can download them again."
+msgstr ""
+"Hugging Face 캐시에서 {size}의 공간이 확보됩니다. 다시 다운로드할 수 있습니"
+"다."
+
+#: src/window.rs:1995
+#, rust-format
+msgid "{model} is in use and stays."
+msgstr "{model}은(는) 사용 중이므로 유지됩니다."
+
+#: src/window.rs:1999
+#, rust-format
+msgid "{models} and {last} are in use and stay."
+msgstr "{models} 및 {last}은(는) 사용 중이므로 유지됩니다."
+
+#: src/window.rs:2042 src/window.rs:2158
+msgid "In use"
+msgstr "사용 중"
+
+#: src/window.rs:2046 src/window.rs:2157
+msgid "Use"
+msgstr "사용"
+
+#: src/window.rs:2053
+msgid "In use: choose another to delete it"
+msgstr "사용 중: 삭제하려면 다른 모델을 선택하세요"
+
+#: src/window.rs:2054
+msgid "In use until the dictation ends"
+msgstr "받아쓰기가 끝날 때까지 사용 중"
+
+#: src/window.rs:2055 src/window.rs:2837 src/window.rs:2875 src/window.rs:3137
+#: src/window.rs:3146
+msgid "Delete…"
+msgstr "삭제…"
+
+#: src/window.rs:2080
+#, rust-format
+msgid " · {rate} MB/s"
+msgstr " · {rate}MB/s"
+
+#: src/window.rs:2086
+msgid "Preparing for the Neural Engine…"
+msgstr "Neural Engine용으로 준비 중…"
+
+#: src/window.rs:2088
+#, rust-format
+msgid "Could not download: {e}"
+msgstr "다운로드할 수 없음: {e}"
+
+#: src/window.rs:2099 src/window.rs:2147
+msgid "Download"
+msgstr "다운로드"
+
+#: src/window.rs:2110
+msgid "Cancel the download"
+msgstr "다운로드 취소"
+
+#: src/window.rs:2131
+msgid "Open the model’s page on Hugging Face"
+msgstr "Hugging Face에서 모델 페이지 열기"
+
+#: src/window.rs:2220
+msgid "Recommended"
+msgstr "추천"
+
+#: src/window.rs:2242
+msgid " · no punctuation"
+msgstr " · 문장 부호 없음"
+
+#: src/window.rs:2248
+msgid "Runs on the Apple Neural Engine"
+msgstr "Apple Neural Engine에서 실행"
+
+#. Translators: the languages a speech model knows.
+#: src/window.rs:2257
+msgid "100 languages"
+msgstr "100개 언어"
+
+#: src/window.rs:2258
+msgid "25 European languages"
+msgstr "유럽 언어 25개"
+
+#: src/window.rs:2259
+msgid "99 languages"
+msgstr "99개 언어"
+
+#: src/window.rs:2263
+msgid "Russian, English, Kazakh, Kyrgyz and Uzbek"
+msgstr "러시아어, 영어, 카자흐어, 키르기스어, 우즈베크어"
+
+#: src/window.rs:2264
+msgid "Taiwanese Mandarin and English"
+msgstr "대만 표준중국어와 영어"
+
+#: src/window.rs:2265
+msgid "Ukrainian and English"
+msgstr "우크라이나어와 영어"
+
+#: src/window.rs:2442
+#, rust-format
+msgid "Could not export: {e}"
+msgstr "내보낼 수 없음: {e}"
+
+#: src/window.rs:2443
+#, rust-format
+msgid "Could not import: {e}"
+msgstr "가져올 수 없음: {e}"
+
+#: src/window.rs:2483
+msgid "Nothing new: all of its dictations are here"
+msgstr "새 항목 없음: 모든 받아쓰기가 이미 있음"
+
+#: src/window.rs:2484
+#, rust-format
+msgid "Added {n} dictation"
+msgid_plural "Added {n} dictations"
+msgstr[0] "받아쓰기 {n}개 추가됨"
+
+#: src/window.rs:2487
+#, rust-format
+msgid " · {n} recording not copied"
+msgid_plural " · {n} recordings not copied"
+msgstr[0] " · 녹음 {n}개 복사 안 됨"
+
+#: src/window.rs:2569
+msgid "Could not open the history: see the log"
+msgstr "기록을 열 수 없음: 로그를 확인하세요"
+
+#: src/window.rs:2589
+#, rust-format
+msgid "Could not read the history: {e}"
+msgstr "기록을 읽을 수 없음: {e}"
+
+#: src/window.rs:2646
+msgid "Today"
+msgstr "오늘"
+
+#: src/window.rs:2650
+#, rust-format
+msgid "Yesterday, {date}"
+msgstr "어제, {date}"
+
+#. Translators: seconds, short: "4.2 s".
+#: src/window.rs:2662 src/window.rs:2909
+#, rust-format
+msgid "{seconds} s"
+msgstr "{seconds}초"
+
+#: src/window.rs:2673
+#, rust-format
+msgid "no text · {model}"
+msgstr "텍스트 없음 · {model}"
+
+#: src/window.rs:2674
+msgid "no text"
+msgstr "텍스트 없음"
+
+#: src/window.rs:2705
+#, rust-format
+msgid "{n} dictation · {time}"
+msgid_plural "{n} dictations · {time}"
+msgstr[0] "받아쓰기 {n}개 · {time}"
+
+#: src/window.rs:2725
+msgid "Its recording isn’t kept"
+msgstr "녹음이 보관되지 않음"
+
+#: src/window.rs:2733
+msgid "Search dictations"
+msgstr "받아쓰기 검색"
+
+#: src/window.rs:2754
+msgid "No dictations yet: hold the shortcut and speak."
+msgstr "아직 받아쓰기가 없습니다. 단축키를 누른 채 말하세요."
+
+#: src/window.rs:2755
+msgid "No dictations since Wavo started: they’re kept only until it quits."
+msgstr ""
+"Wavo 시작 이후 받아쓰기가 없습니다. 받아쓰기는 Wavo 종료 시까지만 보관됩니다."
+
+#: src/window.rs:2756
+msgid "Nothing found"
+msgstr "결과 없음"
+
+#: src/window.rs:2825
+msgid "Select a dictation to see all of its text."
+msgstr "받아쓰기를 선택하면 전체 텍스트를 볼 수 있습니다."
+
+#: src/window.rs:2831
+#, rust-format
+msgid "{n} dictation selected"
+msgid_plural "{n} dictations selected"
+msgstr[0] "받아쓰기 {n}개 선택됨"
+
+#: src/window.rs:2860 src/window.rs:3129 src/window.rs:3148
+msgid "Transcribe Again"
+msgstr "다시 인식"
+
+#: src/window.rs:2868 src/window.rs:3133
+msgid "Restore the Previous Text"
+msgstr "이전 텍스트로 복원"
+
+#. Translators: minutes, short: "12 min".
+#: src/window.rs:2911
+#, rust-format
+msgid "{minutes} min"
+msgstr "{minutes}분"
+
+#. Translators: hours, short: "312 h".
+#: src/window.rs:2913
+#, rust-format
+msgid "{hours} h"
+msgstr "{hours}시간"
+
+#: src/window.rs:2917
+#, rust-format
+msgid "{count} dictation · {spoken}"
+msgid_plural "{count} dictations · {spoken}"
+msgstr[0] "받아쓰기 {count}개 · {spoken}"
+
+#: src/window.rs:2919
+msgid " · kept until Wavo quits"
+msgstr " · Wavo 종료 시까지 보관"
+
+#: src/window.rs:2923
+#, rust-format
+msgid " · since {since}"
+msgstr " · {since}부터"
+
+#: src/window.rs:2934 src/window.rs:2947
+msgid "Copied to the clipboard"
+msgstr "클립보드에 복사됨"
+
+#: src/window.rs:2939
+msgid "The recording is gone"
+msgstr "녹음이 없음"
+
+#: src/window.rs:2953 src/window.rs:3030
+#, rust-format
+msgid "Could not play the recording: {e}"
+msgstr "녹음을 재생할 수 없음: {e}"
+
+#: src/window.rs:2992
+#, rust-format
+msgid "“{start}” and its recording are removed from the history."
+msgstr "“{start}” 및 해당 녹음이 기록에서 삭제됩니다."
+
+#: src/window.rs:2993
+#, rust-format
+msgid "“{start}” is removed from the history."
+msgstr "“{start}”이(가) 기록에서 삭제됩니다."
+
+#: src/window.rs:2995
+msgid "Delete this dictation?"
+msgstr "이 받아쓰기를 삭제하시겠습니까?"
+
+#: src/window.rs:3001
+#, rust-format
+msgid "{n} dictation and its recording are removed from the history."
+msgid_plural ""
+"{n} dictations and their recordings are removed from the history."
+msgstr[0] "받아쓰기 {n}개와 녹음이 기록에서 삭제됩니다."
+
+#: src/window.rs:3006
+#, rust-format
+msgid "{n} dictation is removed from the history."
+msgid_plural "{n} dictations are removed from the history."
+msgstr[0] "받아쓰기 {n}개가 기록에서 삭제됩니다."
+
+#: src/window.rs:3011
+#, rust-format
+msgid "Delete {n} dictation?"
+msgid_plural "Delete {n} dictations?"
+msgstr[0] "받아쓰기 {n}개를 삭제하시겠습니까?"
+
+#: src/window.rs:3077 src/window.rs:3114
+msgid "Stop"
+msgstr "중지"
+
+#: src/window.rs:3079
+msgid "Play the recording"
+msgstr "녹음 재생"
+
+#: src/window.rs:3087
+msgid "Copy"
+msgstr "복사"
+
+#: src/window.rs:3115
+msgid "Play the Recording"
+msgstr "녹음 재생"
+
+#: src/window.rs:3118
+msgid "Copy Text"
+msgstr "텍스트 복사"
+
+#: src/window.rs:3123
+msgid "Copy Recording Path"
+msgstr "녹음 경로 복사"
+
+#: src/window.rs:3176
+msgid "The models"
+msgstr "모델"
+
+#: src/window.rs:3180
+msgid "Speech recognition on this machine"
+msgstr "이 컴퓨터에서 하는 음성 인식"
+
+#: src/window.rs:3181
+msgid "The UI toolkit Wavo is drawn with"
+msgstr "Wavo를 그리는 UI 툴킷"
+
+#: src/window.rs:3182
+msgid "The app that inspired Wavo"
+msgstr "Wavo에 영감을 준 앱"
+
+#: src/window.rs:3185
+msgid "The models’ GGUF conversions"
+msgstr "모델의 GGUF 변환"
+
+#: src/window.rs:3190
+msgid "The tensor library and model format, by Georgi Gerganov and others"
+msgstr "Georgi Gerganov 외 개발자의 텐서 라이브러리 및 모델 형식"
+
+#: src/window.rs:3195
+msgid "OpenAI Whisper, NVIDIA Parakeet, Sber GigaAM, Useful Sensors Moonshine"
+msgstr "OpenAI Whisper, NVIDIA Parakeet, Sber GigaAM, Useful Sensors Moonshine"
+
+#: src/window.rs:3216
+msgid "Local dictation: hold a key, speak, and the text lands where you type."
+msgstr "로컬 받아쓰기: 키를 누른 채 말하면 입력 중인 곳에 텍스트가 들어갑니다."
+
+#: src/window.rs:3220
+msgid "View on GitHub"
+msgstr "GitHub에서 보기"
+
+#: src/window.rs:3224
+msgid "Buy Me a Coffee"
+msgstr "Buy Me a Coffee"
+
+#: src/window.rs:3241
+msgid "Acknowledgements"
+msgstr "감사의 말"

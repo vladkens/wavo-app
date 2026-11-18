@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
 
 //! Test helpers: temp dirs, polling, audio and history files, speech fixtures, real models and
-//! fake ones in a cache, a fake engine, and WER.
+//! fake ones in a cache, a fake engine, WER, and the language a harness draws in.
 
 use std::f32::consts::TAU;
 use std::ops::ControlFlow;
@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use crossbeam_channel::{Receiver, Sender, bounded};
+use nimbo::{App, Harness, Locale};
 use rusqlite::Connection;
 use wavo::Backend;
 
@@ -384,9 +385,105 @@ fn words(text: &str) -> Vec<String> {
     .collect()
 }
 
+// MARK: Languages
+
+/// The language `make shots LOCALE=…` draws in (`WAVO_SHOTS_LOCALE`: `ru`, `pseudo`), on `h`'s
+/// thread; the English texts without it.
+pub fn shots_locale<A: App>(h: &mut Harness<A>) {
+  if let Ok(tag) = env::var("WAVO_SHOTS_LOCALE") {
+    h.set_locale(Locale::Tag(tag.leak()), crate::LOCALES);
+  }
+}
+
+/// The texts of an accessibility tree ([Harness::a11y]) drawn in nimbo's pseudo-locale that
+/// carry words no `t!` marked: a marked text shows as `[Ţéxţ ~~]`, its arguments inside it. What
+/// is left once those and the `allowed` names (models, devices, dictations) are cut out may hold
+/// no letters, only numbers, signs and shortcut glyphs.
+pub fn unmarked(a11y: &str, allowed: &[&str]) -> Vec<String> {
+  let mut allowed: Vec<&str> = allowed.iter().copied().filter(|a| !a.is_empty()).collect();
+  allowed.sort_by_key(|a| std::cmp::Reverse(a.len()));
+  let mut out: Vec<String> = Vec::new();
+  for text in a11y.lines().flat_map(quoted) {
+    let mut rest = text.clone();
+    // The innermost marked text first: an argument may be one too.
+    while let Some(end) = rest.find(" ~").and_then(|i| rest[i..].find(']').map(|j| i + j)) {
+      let Some(start) = rest[..end].rfind('[') else { break };
+      rest.replace_range(start..=end, " ");
+    }
+
+    for a in &allowed {
+      rest = cut_word(&rest, a);
+    }
+
+    if rest.chars().any(char::is_alphabetic) && !out.contains(&text) {
+      out.push(text);
+    }
+  }
+
+  out
+}
+
+/// `text` without `word` where it stands whole: not "P" in "Paste".
+fn cut_word(text: &str, word: &str) -> String {
+  let (mut out, mut rest) = (String::new(), text);
+  while let Some(at) = rest.find(word) {
+    let (before, after) = (&rest[..at], &rest[at + word.len()..]);
+    let edge = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric());
+    out.push_str(before);
+    match edge(before.chars().next_back()) && edge(after.chars().next()) {
+      true => out.push(' '),
+      false => out.push_str(word),
+    }
+
+    rest = after;
+  }
+
+  out + rest
+}
+
+/// The strings quoted in a line of the accessibility tree, as `{:?}` writes them.
+fn quoted(line: &str) -> Vec<String> {
+  let (mut out, mut cur, mut chars) = (Vec::new(), None::<String>, line.chars());
+  while let Some(c) = chars.next() {
+    let Some(s) = &mut cur else {
+      if c == '"' {
+        cur = Some(String::new());
+      }
+      continue;
+    };
+
+    match c {
+      '"' => out.extend(cur.take()),
+      '\\' => match chars.next() {
+        Some('n') => s.push('\n'),
+        Some(e) => s.push(e),
+        None => {}
+      },
+      c => s.push(c),
+    }
+  }
+
+  out
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// A text marked whole, its arguments inside, passes; one made by hand around it does not.
+  #[test]
+  fn unmarked_finds_the_texts_no_t_marked() {
+    let tree =
+      "static text \"[Ðéļéţé [ŵĥîšþéŕ-ţîñý ~]? ~~]\"\nbutton \"Copy\" desc \"42% · [ĝö ~]\"";
+    assert_eq!(unmarked(tree, &["whisper-tiny"]), ["Copy"]);
+    assert_eq!(
+      unmarked("static text \"whisper-tiny · 1.2 GB\"", &["whisper-tiny"]),
+      ["whisper-tiny · 1.2 GB"]
+    );
+    assert!(unmarked("static text \"⌥Space · 12:04\"", &["Space"]).is_empty());
+    assert!(unmarked("static text \"Ctrl+Alt+Space\"", &["Ctrl", "Alt", "Space"]).is_empty());
+    assert_eq!(unmarked("static text \"P Paste\"", &["P"]), ["P Paste"]);
+  }
 
   #[test]
   fn wer_counts_substitutions_insertions_deletions() {

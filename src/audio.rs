@@ -6,12 +6,12 @@
 
 use std::fs::{self, File};
 use std::io::BufWriter;
-use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use std::{fmt, mem};
 
 use anyhow::{Context, Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -20,6 +20,7 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 use earshot::Detector;
 use hound::{WavReader, WavSpec, WavWriter};
 pub use nimbo::hardware::Transport;
+use nimbo::{Localized, t};
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler};
@@ -344,24 +345,45 @@ fn automatic_input(host: &cpal::Host, default: Option<Input>) -> Result<Option<I
   match automatic(&devices, lid) {
     Auto::Device(i) => Ok(inputs.into_iter().nth(i)),
     Auto::System => Ok(default),
-    Auto::Nothing => bail!("no microphone: the lid is closed"),
+    Auto::Nothing => bail!("{LID_CLOSED}"),
   }
 }
 
 /// Why a chosen microphone, by its name, gave way to the system's input.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// Automatic's error when only a closed lid's microphone is there.
+pub const LID_CLOSED: Localized = t!("no microphone: the lid is closed");
+/// None plugged in.
+pub const NO_MICROPHONE: Localized = t!("no microphone found");
+
+/// Why the microphone chosen gave way to the default; said in the app's language.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaveWay {
-  #[error("the microphone {0:?} is not connected")]
   NotConnected(String),
-  #[error("could not open the microphone {0:?}: {1}")]
   Failed(String, String),
 }
+
+// By hand, not thiserror's: xgettext reads no texts in attributes.
+impl fmt::Display for GaveWay {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let quoted = |name: &str| format!("{name:?}");
+    f.write_str(&match self {
+      Self::NotConnected(name) => {
+        t!("the microphone {name} is not connected", name = quoted(name))
+      }
+      Self::Failed(name, e) => {
+        t!("could not open the microphone {name}: {e}", name = quoted(name), e)
+      }
+    })
+  }
+}
+
+impl std::error::Error for GaveWay {}
 
 impl GaveWay {
   /// The recording's warning with `used` in its place; none when it isn't connected, which the
   /// menu and the settings tell with the one that records: only the log keeps that.
   pub fn warning(&self, used: &str) -> Option<String> {
-    let text = format!("{self}; using {used:?}");
+    let text = t!("{why}; using {used}", why = self, used = format!("{used:?}"));
     match self {
       Self::NotConnected(_) => {
         info!("{text}");
@@ -438,14 +460,29 @@ fn open_input<D: Clone, T>(
 
   let Some(Input { name, device, .. }) = instead(default)? else {
     match gave_way {
-      Some(w) => bail!("{w}, and there is no default microphone"),
-      None => bail!("no microphone found"),
+      Some(gave) => bail!("{}", t!("{gave}, and there is no default microphone", gave)),
+      None => bail!("{NO_MICROPHONE}"),
     }
   };
 
   let value = open(&device).map_err(|e| match &gave_way {
-    Some(w) => anyhow!("{w}, and the default microphone {name:?} failed too: {e:#}"),
-    None => anyhow!("could not open the microphone {name:?}: {e:#}"),
+    Some(gave) => anyhow!(
+      "{}",
+      t!(
+        "{gave}, and the default microphone {name} failed too: {e}",
+        gave,
+        name = format!("{name:?}"),
+        e = format!("{e:#}")
+      )
+    ),
+    None => anyhow!(
+      "{}",
+      t!(
+        "could not open the microphone {name}: {e}",
+        name = format!("{name:?}"),
+        e = format!("{e:#}")
+      )
+    ),
   })?;
   let warning = gave_way.and_then(|w| w.warning(&name));
   Ok((name, value, warning))
@@ -834,14 +871,14 @@ impl Recorder {
 
     let mut rec = self.join()?;
     if let Some(failure) = self.failure.get() {
-      warnings.push(format!("the recording stopped: {failure}"));
+      warnings.push(t!("the recording stopped: {failure}", failure));
     }
 
     warnings.append(&mut rec.warnings);
     let pcm = &rec.clip.pcm;
     if pcm.len() >= SAMPLE_RATE as usize / 2 && pcm.iter().all(|&s| s == 0.0) {
       // A closed laptop lid, privacy settings, or the wrong microphone.
-      warnings.push(format!("No sound from {device}: check the microphone"));
+      warnings.push(t!("No sound from {device}: check the microphone", device));
     }
 
     rec.warnings = warnings;
@@ -936,7 +973,7 @@ impl Processor {
     if let Some(wav) = &mut self.wav
       && let Err(e) = wav.write(&self.out)
     {
-      self.warnings.push(format!("the recording could not be saved: {e:#}"));
+      self.warnings.push(t!("the recording could not be saved: {e}", e = format!("{e:#}")));
       self.wav = None;
     }
 
@@ -960,7 +997,7 @@ impl Processor {
     self.emit();
     let saved = match self.wav.take().map(WavSink::finalize) {
       Some(Err(e)) => {
-        self.warnings.push(format!("the recording could not be saved: {e:#}"));
+        self.warnings.push(t!("the recording could not be saved: {e}", e = format!("{e:#}")));
         false
       }
       done => done.is_some(),
@@ -1236,8 +1273,8 @@ impl Clip {
     let runs = |below: f32| {
       let mut runs = Vec::new();
       let mut start = None;
-      for i in min..n {
-        match (self.scores[i] < below, start) {
+      for (i, &score) in self.scores.iter().enumerate().skip(min) {
+        match (score < below, start) {
           (true, None) => start = Some(i),
           (false, Some(a)) => {
             runs.push(a..i);
@@ -1284,7 +1321,7 @@ impl Clip {
     let mut cut = Vec::new();
     let mut start = None;
     for i in 0..=n {
-      let pause = i < n && self.scores[i] < PAUSE;
+      let pause = self.scores.get(i).is_some_and(|&s| s < PAUSE);
       match (pause, start) {
         (true, None) => start = Some(i),
         (false, Some(a)) => {

@@ -1,0 +1,2314 @@
+# German translation of Wavo.
+# Copyright (c) vladkens | MIT License | https://github.com/vladkens/wavo-app
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: Wavo\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-11-18 06:40+0200\n"
+"PO-Revision-Date: 2026-11-18 06:00+0200\n"
+"Last-Translator: vladkens\n"
+"Language-Team: German\n"
+"Language: de\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: src/app.rs:594
+msgid "allow the microphone to record"
+msgstr "Mikrofon erlauben, um aufzunehmen"
+
+#: src/app.rs:596
+msgid "allow Accessibility to paste"
+msgstr "Bedienungshilfen erlauben, um einzusetzen"
+
+#: src/audio.rs:354
+msgid "no microphone: the lid is closed"
+msgstr "kein Mikrofon: der Deckel ist geschlossen"
+
+#: src/audio.rs:356
+msgid "no microphone found"
+msgstr "kein Mikrofon gefunden"
+
+#: src/audio.rs:371
+#, rust-format
+msgid "the microphone {name} is not connected"
+msgstr "das Mikrofon {name} ist nicht verbunden"
+
+#: src/audio.rs:374 src/audio.rs:481 src/hud.rs:272
+#, rust-format
+msgid "could not open the microphone {name}: {e}"
+msgstr "Mikrofon {name} konnte nicht geöffnet werden: {e}"
+
+#: src/audio.rs:386
+#, rust-format
+msgid "{why}; using {used}"
+msgstr "{why}; verwendet wird {used}"
+
+#: src/audio.rs:463 src/hud.rs:267
+#, rust-format
+msgid "{gave}, and there is no default microphone"
+msgstr "{gave}, und es gibt kein Standardmikrofon"
+
+#: src/audio.rs:472
+#, rust-format
+msgid "{gave}, and the default microphone {name} failed too: {e}"
+msgstr "{gave}, und auch das Standardmikrofon {name} ist ausgefallen: {e}"
+
+#: src/audio.rs:874
+#, rust-format
+msgid "the recording stopped: {failure}"
+msgstr "die Aufnahme brach ab: {failure}"
+
+#: src/audio.rs:881
+#, rust-format
+msgid "No sound from {device}: check the microphone"
+msgstr "Kein Ton von {device}: Mikrofon überprüfen"
+
+#: src/audio.rs:976 src/audio.rs:1000
+#, rust-format
+msgid "the recording could not be saved: {e}"
+msgstr "die Aufnahme konnte nicht gespeichert werden: {e}"
+
+#: src/engine.rs:184
+#, rust-format
+msgid "could not load the model: {e}"
+msgstr "das Modell konnte nicht geladen werden: {e}"
+
+#: src/engine.rs:185
+#, rust-format
+msgid "transcription failed: {e}"
+msgstr "Transkription fehlgeschlagen: {e}"
+
+#: src/engine.rs:186
+msgid "the transcription was cancelled"
+msgstr "die Transkription wurde abgebrochen"
+
+#. Translators: a month as a date says it, "October" of "October 17": a genitive in Russian.
+#: src/history.rs:62
+msgid "January"
+msgstr "Januar"
+
+#: src/history.rs:63
+msgid "February"
+msgstr "Februar"
+
+#: src/history.rs:64
+msgid "March"
+msgstr "März"
+
+#: src/history.rs:65
+msgid "April"
+msgstr "April"
+
+#: src/history.rs:66 src/history.rs:83
+msgid "May"
+msgstr "Mai"
+
+#: src/history.rs:67
+msgid "June"
+msgstr "Juni"
+
+#: src/history.rs:68
+msgid "July"
+msgstr "Juli"
+
+#: src/history.rs:69
+msgid "August"
+msgstr "August"
+
+#: src/history.rs:70
+msgid "September"
+msgstr "September"
+
+#: src/history.rs:71
+msgid "October"
+msgstr "Oktober"
+
+#: src/history.rs:72
+msgid "November"
+msgstr "November"
+
+#: src/history.rs:73
+msgid "December"
+msgstr "Dezember"
+
+#. Translators: a month short, as a date says it: "Oct" of "Oct 17".
+#: src/history.rs:79
+msgid "Jan"
+msgstr "Jan."
+
+#: src/history.rs:80
+msgid "Feb"
+msgstr "Feb."
+
+#: src/history.rs:81
+msgid "Mar"
+msgstr "März"
+
+#: src/history.rs:82
+msgid "Apr"
+msgstr "Apr."
+
+#: src/history.rs:84
+msgid "Jun"
+msgstr "Juni"
+
+#: src/history.rs:85
+msgid "Jul"
+msgstr "Juli"
+
+#: src/history.rs:86
+msgid "Aug"
+msgstr "Aug."
+
+#: src/history.rs:87
+msgid "Sep"
+msgstr "Sept."
+
+#: src/history.rs:88
+msgid "Oct"
+msgstr "Okt."
+
+#: src/history.rs:89
+msgid "Nov"
+msgstr "Nov."
+
+#: src/history.rs:90
+msgid "Dec"
+msgstr "Dez."
+
+#. Translators: a date, the month as the months above name it: "October 17".
+#: src/history.rs:103 src/history.rs:109
+#, rust-format
+msgid "{month} {day}"
+msgstr "{day}. {month}"
+
+#. Translators: a date, the month as the months above name it: "October 17, 2026".
+#: src/history.rs:116
+#, rust-format
+msgid "{month} {day}, {year}"
+msgstr "{day}. {month} {year}"
+
+#: src/hud.rs:191
+#, rust-format
+msgid "not pasted: {why}"
+msgstr "nicht eingesetzt: {why}"
+
+#: src/hud.rs:193
+msgid "copy failed"
+msgstr "Kopieren fehlgeschlagen"
+
+#: src/hud.rs:197 src/session.rs:1610
+msgid "nothing recognized"
+msgstr "nichts erkannt"
+
+#: src/hud.rs:199 src/session.rs:370
+#, rust-format
+msgid "{model} could not be loaded: {error}"
+msgstr "{model} konnte nicht geladen werden: {error}"
+
+#. Translators: milliseconds, short: "420 ms".
+#: src/hud.rs:216
+#, rust-format
+msgid "{ms} ms"
+msgstr "{ms} ms"
+
+#: src/hud.rs:226
+msgid "model failed to load"
+msgstr "Modell lädt nicht"
+
+#: src/hud.rs:231
+msgid "failed"
+msgstr "fehlgeschlagen"
+
+#: src/hud.rs:232
+msgid "download a model"
+msgstr "Modell herunterladen"
+
+#: src/hud.rs:250 src/session.rs:1156
+#, rust-format
+msgid "could not start recording: {e}"
+msgstr "Aufnahme konnte nicht starten: {e}"
+
+#: src/hud.rs:250 src/session.rs:1298
+#, rust-format
+msgid "the recording failed: {e}"
+msgstr "Aufnahme fehlgeschlagen: {e}"
+
+#: src/hud.rs:256
+msgid "no microphone access"
+msgstr "kein Mikrofonzugriff"
+
+#: src/hud.rs:261 src/session.rs:367
+msgid "no model is downloaded"
+msgstr "kein Modell heruntergeladen"
+
+#: src/hud.rs:264
+msgid "no microphone: lid closed"
+msgstr "kein Mikrofon: Deckel zu"
+
+#: src/hud.rs:268
+msgid "no microphone"
+msgstr "kein Mikrofon"
+
+#: src/hud.rs:273
+msgid "microphone failed"
+msgstr "Mikrofonfehler"
+
+#: src/hud.rs:275
+msgid "password field"
+msgstr "Passwortfeld"
+
+#: src/hud.rs:276
+msgid "focus moved"
+msgstr "Fokus gewechselt"
+
+#: src/hud.rs:278
+msgid "the app was too busy"
+msgstr "App war ausgelastet"
+
+#: src/hud.rs:279
+msgid "engine crashed"
+msgstr "Engine abgestürzt"
+
+#: src/hud.rs:280
+msgid "engine timed out"
+msgstr "Engine antwortet nicht"
+
+#: src/hud.rs:620
+#, rust-format
+msgid "no sound from {device}"
+msgstr "kein Ton von {device}"
+
+#: src/menu.rs:23
+msgid "Slow transcription: install the GPU's driver"
+msgstr "Langsame Transkription: Grafiktreiber installieren"
+
+#: src/menu.rs:112
+#, rust-format
+msgid "{name} — recording"
+msgstr "{name} — Aufnahme"
+
+#: src/menu.rs:113
+#, rust-format
+msgid "{name} — transcribing"
+msgstr "{name} — Transkription"
+
+#: src/menu.rs:114
+#, rust-format
+msgid "{name} — needs attention"
+msgstr "{name} — Aktion erforderlich"
+
+#: src/menu.rs:159
+msgid "Allow Accessibility…"
+msgstr "Bedienungshilfen erlauben…"
+
+#: src/menu.rs:166
+#, rust-format
+msgid "The hotkey “{label}” does not work: {e}"
+msgstr "Das Tastenkürzel „{label}“ funktioniert nicht: {e}"
+
+#: src/menu.rs:170
+msgid "Allow the Hotkey…"
+msgstr "Tastenkürzel erlauben…"
+
+#: src/menu.rs:174 src/menu.rs:182
+msgid "Allow Paste…"
+msgstr "Einsetzen erlauben…"
+
+#: src/menu.rs:178
+msgid "Allow Microphone…"
+msgstr "Mikrofon erlauben…"
+
+#: src/menu.rs:186
+msgid "Secure Input is on…"
+msgstr "Sichere Eingabe ist aktiv…"
+
+#: src/menu.rs:191
+msgid "Download a Speech Model…"
+msgstr "Sprachmodell herunterladen…"
+
+#: src/menu.rs:193
+#, rust-format
+msgid "{model} is not on disk…"
+msgstr "{model} ist nicht vorhanden…"
+
+#: src/menu.rs:195
+#, rust-format
+msgid "{model} does not load…"
+msgstr "{model} lädt nicht…"
+
+#: src/menu.rs:201
+msgid "unknown error"
+msgstr "unbekannter Fehler"
+
+#: src/menu.rs:202
+#, rust-format
+msgid "The last dictation failed: {e}"
+msgstr "Das letzte Diktat ist fehlgeschlagen: {e}"
+
+#: src/menu.rs:203
+#, rust-format
+msgid "Error: {e}"
+msgstr "Fehler: {e}"
+
+#: src/menu.rs:270
+msgid "Copy Last Dictation"
+msgstr "Letztes Diktat kopieren"
+
+#: src/menu.rs:271
+msgid "Recent"
+msgstr "Letzte Diktate"
+
+#: src/menu.rs:281
+msgid "Unload Model"
+msgstr "Modell entladen"
+
+#: src/menu.rs:283
+msgid "History…"
+msgstr "Verlauf…"
+
+#: src/menu.rs:286
+msgid "Settings…"
+msgstr "Einstellungen…"
+
+#: src/menu.rs:289
+#, rust-format
+msgid "Quit {name}"
+msgstr "{name} beenden"
+
+#: src/menu.rs:297
+#, rust-format
+msgid "Update Available: {version}…"
+msgstr "Update verfügbar: {version}…"
+
+#: src/menu.rs:298
+#, rust-format
+msgid "Downloading Update: {done}%"
+msgstr "Update wird geladen: {done} %"
+
+#: src/menu.rs:299
+msgid "Restarting to Update…"
+msgstr "Neustart für Update…"
+
+#: src/menu.rs:300
+msgid "Update Failed…"
+msgstr "Update fehlgeschlagen…"
+
+#: src/menu.rs:311
+msgid "Checking for Updates…"
+msgstr "Suche nach Updates…"
+
+#: src/menu.rs:312 src/window.rs:3230
+msgid "Check for Updates…"
+msgstr "Nach Updates suchen…"
+
+#: src/menu.rs:340 src/window.rs:1463
+msgid "System Default"
+msgstr "Systemstandard"
+
+#: src/menu.rs:341
+msgid "No Microphone"
+msgstr "Kein Mikrofon"
+
+#: src/menu.rs:343
+#, rust-format
+msgid "{name} isn’t connected"
+msgstr "{name} ist nicht verbunden"
+
+#. Translators: a model in a list of models.
+#: src/menu.rs:355 src/window.rs:852 src/window.rs:1041
+#, rust-format
+msgid "{name} (not on disk)"
+msgstr "{name} (nicht vorhanden)"
+
+#: src/menu.rs:360
+msgid "No Model"
+msgstr "Kein Modell"
+
+#: src/menu.rs:367
+msgid "No Models Downloaded"
+msgstr "Keine Modelle heruntergeladen"
+
+#: src/menu.rs:370
+msgid "All Models…"
+msgstr "Alle Modelle…"
+
+#: src/menu.rs:378
+msgid "Recording…"
+msgstr "Aufnahme…"
+
+#: src/menu.rs:379 src/menu.rs:381
+msgid "Loading the model…"
+msgstr "Modell wird geladen…"
+
+#: src/menu.rs:380 src/window.rs:2680
+msgid "Transcribing…"
+msgstr "Wird transkribiert…"
+
+#. Translators: the app's state in the menu's header, after an error.
+#: src/menu.rs:383
+msgid "Error"
+msgstr "Fehler"
+
+#: src/mic_start.rs:25
+msgid "Microphone is slow to start: reconnect it"
+msgstr "Mikrofon startet langsam: neu anschließen"
+
+#: src/session.rs:60
+msgid "couldn’t stop saving the history: dictations aren’t kept, see the log"
+msgstr ""
+"Speichern des Verlaufs ließ sich nicht beenden: Diktate werden nicht "
+"behalten, siehe Protokoll"
+
+#: src/session.rs:63
+msgid "the saved history is deleted once the dictation, export or import ends"
+msgstr ""
+"der gespeicherte Verlauf wird gelöscht, sobald Diktat, Export oder Import "
+"enden"
+
+#: src/session.rs:66
+msgid "couldn’t open the saved history: dictations are kept until Wavo quits"
+msgstr ""
+"gespeicherter Verlauf ließ sich nicht öffnen: Diktate bleiben nur bis zum "
+"Beenden von Wavo"
+
+#: src/session.rs:368
+#, rust-format
+msgid "{model} is not on disk"
+msgstr "{model} ist nicht vorhanden"
+
+#: src/session.rs:946
+#, rust-format
+msgid "could not save the settings: {e}"
+msgstr "Einstellungen konnten nicht gespeichert werden: {e}"
+
+#: src/session.rs:1008
+#, rust-format
+msgid "{chosen} is not on disk: {model} transcribes instead"
+msgstr "{chosen} ist nicht vorhanden: {model} transkribiert stattdessen"
+
+#: src/session.rs:1136
+msgid "the model"
+msgstr "das Modell"
+
+#: src/session.rs:1611
+#, rust-format
+msgid "nothing recognized: {note}"
+msgstr "nichts erkannt: {note}"
+
+#: src/session.rs:1616
+#, rust-format
+msgid "entry {entry} could not be transcribed again: {why}"
+msgstr "Eintrag {entry} konnte nicht erneut transkribiert werden: {why}"
+
+#: src/session.rs:1669
+#, rust-format
+msgid "could not open the history: {e}"
+msgstr "Verlauf konnte nicht geöffnet werden: {e}"
+
+#: src/session.rs:1691
+#, rust-format
+msgid "could not delete the saved history: {e}"
+msgstr "gespeicherter Verlauf konnte nicht gelöscht werden: {e}"
+
+#: src/session.rs:1826
+#, rust-format
+msgid "{model} understands {lang} only"
+msgstr "{model} versteht nur {lang}"
+
+#: src/settings.rs:161
+#, rust-format
+msgid "{path}: {e}; using the defaults, the file kept as {kept}"
+msgstr ""
+"{path}: {e}; Standardwerte werden verwendet, die Datei bleibt als {kept} "
+"erhalten"
+
+#: src/settings.rs:162
+#, rust-format
+msgid "{path}: {e}; using the defaults"
+msgstr "{path}: {e}; Standardwerte werden verwendet"
+
+#: src/settings.rs:175
+#, rust-format
+msgid "{path} is invalid ({e}); using the defaults, the file kept as {kept}"
+msgstr ""
+"{path} ist ungültig ({e}); Standardwerte werden verwendet, die Datei bleibt "
+"als {kept} erhalten"
+
+#. Translators: a language, as a list of languages names it.
+#: src/settings.rs:277
+msgid "Afrikaans"
+msgstr "Afrikaans"
+
+#: src/settings.rs:278
+msgid "Amharic"
+msgstr "Amharisch"
+
+#: src/settings.rs:279
+msgid "Arabic"
+msgstr "Arabisch"
+
+#: src/settings.rs:280
+msgid "Assamese"
+msgstr "Assamesisch"
+
+#: src/settings.rs:281
+msgid "Azerbaijani"
+msgstr "Aserbaidschanisch"
+
+#: src/settings.rs:282
+msgid "Bashkir"
+msgstr "Baschkirisch"
+
+#: src/settings.rs:283
+msgid "Belarusian"
+msgstr "Belarussisch"
+
+#: src/settings.rs:284
+msgid "Bulgarian"
+msgstr "Bulgarisch"
+
+#: src/settings.rs:285
+msgid "Bengali"
+msgstr "Bengalisch"
+
+#: src/settings.rs:286
+msgid "Tibetan"
+msgstr "Tibetisch"
+
+#: src/settings.rs:287
+msgid "Breton"
+msgstr "Bretonisch"
+
+#: src/settings.rs:288
+msgid "Bosnian"
+msgstr "Bosnisch"
+
+#: src/settings.rs:289
+msgid "Catalan"
+msgstr "Katalanisch"
+
+#: src/settings.rs:290
+msgid "Czech"
+msgstr "Tschechisch"
+
+#: src/settings.rs:291
+msgid "Welsh"
+msgstr "Walisisch"
+
+#: src/settings.rs:292
+msgid "Danish"
+msgstr "Dänisch"
+
+#: src/settings.rs:293
+msgid "German"
+msgstr "Deutsch"
+
+#: src/settings.rs:294
+msgid "Modern Greek"
+msgstr "Griechisch"
+
+#: src/settings.rs:295 src/window.rs:2260
+msgid "English"
+msgstr "Englisch"
+
+#: src/settings.rs:296
+msgid "Spanish"
+msgstr "Spanisch"
+
+#: src/settings.rs:297
+msgid "Estonian"
+msgstr "Estnisch"
+
+#: src/settings.rs:298
+msgid "Basque"
+msgstr "Baskisch"
+
+#: src/settings.rs:299
+msgid "Persian"
+msgstr "Persisch"
+
+#: src/settings.rs:300
+msgid "Finnish"
+msgstr "Finnisch"
+
+#: src/settings.rs:301
+msgid "Faroese"
+msgstr "Färöisch"
+
+#: src/settings.rs:302
+msgid "French"
+msgstr "Französisch"
+
+#: src/settings.rs:303
+msgid "Galician"
+msgstr "Galicisch"
+
+#: src/settings.rs:304
+msgid "Gujarati"
+msgstr "Gujarati"
+
+#: src/settings.rs:305
+msgid "Hausa"
+msgstr "Hausa"
+
+#: src/settings.rs:306
+msgid "Hawaiian"
+msgstr "Hawaiisch"
+
+#: src/settings.rs:307 src/window.rs:2261
+msgid "Hebrew"
+msgstr "Hebräisch"
+
+#: src/settings.rs:308
+msgid "Hindi"
+msgstr "Hindi"
+
+#: src/settings.rs:309
+msgid "Croatian"
+msgstr "Kroatisch"
+
+#: src/settings.rs:310
+msgid "Haitian"
+msgstr "Haitianisch"
+
+#: src/settings.rs:311
+msgid "Hungarian"
+msgstr "Ungarisch"
+
+#: src/settings.rs:312
+msgid "Armenian"
+msgstr "Armenisch"
+
+#: src/settings.rs:313
+msgid "Indonesian"
+msgstr "Indonesisch"
+
+#: src/settings.rs:314
+msgid "Icelandic"
+msgstr "Isländisch"
+
+#: src/settings.rs:315
+msgid "Italian"
+msgstr "Italienisch"
+
+#: src/settings.rs:316
+msgid "Japanese"
+msgstr "Japanisch"
+
+#: src/settings.rs:317
+msgid "Javanese"
+msgstr "Javanisch"
+
+#: src/settings.rs:318
+msgid "Georgian"
+msgstr "Georgisch"
+
+#: src/settings.rs:319
+msgid "Kazakh"
+msgstr "Kasachisch"
+
+#: src/settings.rs:320
+msgid "Khmer"
+msgstr "Khmer"
+
+#: src/settings.rs:321
+msgid "Kannada"
+msgstr "Kannada"
+
+#: src/settings.rs:322
+msgid "Korean"
+msgstr "Koreanisch"
+
+#: src/settings.rs:323
+msgid "Kirghiz"
+msgstr "Kirgisisch"
+
+#: src/settings.rs:324
+msgid "Latin"
+msgstr "Latein"
+
+#: src/settings.rs:325
+msgid "Luxembourgish"
+msgstr "Luxemburgisch"
+
+#: src/settings.rs:326
+msgid "Lingala"
+msgstr "Lingala"
+
+#: src/settings.rs:327
+msgid "Lao"
+msgstr "Laotisch"
+
+#: src/settings.rs:328
+msgid "Lithuanian"
+msgstr "Litauisch"
+
+#: src/settings.rs:329
+msgid "Latvian"
+msgstr "Lettisch"
+
+#: src/settings.rs:330
+msgid "Malagasy"
+msgstr "Malagasy"
+
+#: src/settings.rs:331
+msgid "Maori"
+msgstr "Maori"
+
+#: src/settings.rs:332
+msgid "Macedonian"
+msgstr "Mazedonisch"
+
+#: src/settings.rs:333
+msgid "Malayalam"
+msgstr "Malayalam"
+
+#: src/settings.rs:334
+msgid "Mongolian"
+msgstr "Mongolisch"
+
+#: src/settings.rs:335
+msgid "Marathi"
+msgstr "Marathi"
+
+#: src/settings.rs:336
+msgid "Malay"
+msgstr "Malaiisch"
+
+#: src/settings.rs:337
+msgid "Maltese"
+msgstr "Maltesisch"
+
+#: src/settings.rs:338
+msgid "Burmese"
+msgstr "Birmanisch"
+
+#: src/settings.rs:339
+msgid "Nepali"
+msgstr "Nepalesisch"
+
+#: src/settings.rs:340
+msgid "Dutch"
+msgstr "Niederländisch"
+
+#: src/settings.rs:341
+msgid "Norwegian Nynorsk"
+msgstr "Nynorsk"
+
+#: src/settings.rs:342
+msgid "Norwegian"
+msgstr "Norwegisch"
+
+#: src/settings.rs:343
+msgid "Occitan"
+msgstr "Okzitanisch"
+
+#: src/settings.rs:344
+msgid "Panjabi"
+msgstr "Panjabi"
+
+#: src/settings.rs:345
+msgid "Polish"
+msgstr "Polnisch"
+
+#: src/settings.rs:346
+msgid "Pushto"
+msgstr "Paschtu"
+
+#: src/settings.rs:347
+msgid "Portuguese"
+msgstr "Portugiesisch"
+
+#: src/settings.rs:348
+msgid "Romanian"
+msgstr "Rumänisch"
+
+#: src/settings.rs:349 src/window.rs:2262
+msgid "Russian"
+msgstr "Russisch"
+
+#: src/settings.rs:350
+msgid "Sanskrit"
+msgstr "Sanskrit"
+
+#: src/settings.rs:351
+msgid "Sindhi"
+msgstr "Sindhi"
+
+#: src/settings.rs:352
+msgid "Sinhala"
+msgstr "Singhalesisch"
+
+#: src/settings.rs:353
+msgid "Slovak"
+msgstr "Slowakisch"
+
+#: src/settings.rs:354
+msgid "Slovenian"
+msgstr "Slowenisch"
+
+#: src/settings.rs:355
+msgid "Shona"
+msgstr "Shona"
+
+#: src/settings.rs:356
+msgid "Somali"
+msgstr "Somali"
+
+#: src/settings.rs:357
+msgid "Albanian"
+msgstr "Albanisch"
+
+#: src/settings.rs:358
+msgid "Serbian"
+msgstr "Serbisch"
+
+#: src/settings.rs:359
+msgid "Sundanese"
+msgstr "Sundanesisch"
+
+#: src/settings.rs:360
+msgid "Swedish"
+msgstr "Schwedisch"
+
+#: src/settings.rs:361
+msgid "Swahili"
+msgstr "Swahili"
+
+#: src/settings.rs:362
+msgid "Tamil"
+msgstr "Tamil"
+
+#: src/settings.rs:363
+msgid "Telugu"
+msgstr "Telugu"
+
+#: src/settings.rs:364
+msgid "Tajik"
+msgstr "Tadschikisch"
+
+#: src/settings.rs:365
+msgid "Thai"
+msgstr "Thailändisch"
+
+#: src/settings.rs:366
+msgid "Turkmen"
+msgstr "Turkmenisch"
+
+#: src/settings.rs:367
+msgid "Tagalog"
+msgstr "Tagalog"
+
+#: src/settings.rs:368
+msgid "Turkish"
+msgstr "Türkisch"
+
+#: src/settings.rs:369
+msgid "Tatar"
+msgstr "Tatarisch"
+
+#: src/settings.rs:370
+msgid "Ukrainian"
+msgstr "Ukrainisch"
+
+#: src/settings.rs:371
+msgid "Urdu"
+msgstr "Urdu"
+
+#: src/settings.rs:372
+msgid "Uzbek"
+msgstr "Usbekisch"
+
+#: src/settings.rs:373
+msgid "Vietnamese"
+msgstr "Vietnamesisch"
+
+#: src/settings.rs:374
+msgid "Yiddish"
+msgstr "Jiddisch"
+
+#: src/settings.rs:375
+msgid "Yoruba"
+msgstr "Yoruba"
+
+#: src/settings.rs:376
+msgid "Yue Chinese"
+msgstr "Kantonesisch"
+
+#: src/settings.rs:377
+msgid "Chinese"
+msgstr "Chinesisch"
+
+#: src/transfer.rs:79
+#, rust-format
+msgid "no history in {folder}"
+msgstr "kein Verlauf in {folder}"
+
+#: src/transfer.rs:161
+#, rust-format
+msgid "{file} is not an archive of Wavo’s Export"
+msgstr "{file} ist kein Exportarchiv von Wavo"
+
+#: src/transfer.rs:169
+#, rust-format
+msgid "{file} is from a newer Wavo ({version}): update this one first"
+msgstr ""
+"{file} stammt von einem neueren Wavo ({version}): zuerst dieses aktualisieren"
+
+#: src/transfer.rs:176
+#, rust-format
+msgid "{why}: no history in it"
+msgstr "{why}: kein Verlauf darin"
+
+#: src/updater.rs:285
+msgid "Software Update"
+msgstr "Softwareupdate"
+
+#: src/updater.rs:315
+msgid "Checking for updates…"
+msgstr "Suche nach Updates…"
+
+#: src/updater.rs:317
+#, rust-format
+msgid "Wavo {current} is the newest version."
+msgstr "Wavo {current} ist die neueste Version."
+
+#: src/updater.rs:317
+msgid "You’re up to date!"
+msgstr "Alles auf dem neuesten Stand!"
+
+#: src/updater.rs:320
+msgid "A new version of Wavo is available!"
+msgstr "Eine neue Version von Wavo ist verfügbar!"
+
+#: src/updater.rs:322
+#, rust-format
+msgid "Wavo {new} is out, you have {current}. Install it now?"
+msgstr "Wavo {new} ist da, du hast {current}. Jetzt installieren?"
+
+#: src/updater.rs:327
+msgid "Downloading the update…"
+msgstr "Update wird geladen…"
+
+#: src/updater.rs:329
+msgid "Installing the update…"
+msgstr "Update wird installiert…"
+
+#: src/updater.rs:330
+#, rust-format
+msgid "Wavo restarts as {new} once it can."
+msgstr "Wavo startet als {new} neu, sobald es geht."
+
+#: src/updater.rs:333
+msgid "The update failed"
+msgstr "Das Update ist fehlgeschlagen"
+
+#: src/updater.rs:335
+msgid "Couldn’t check for updates"
+msgstr "Suche nach Updates fehlgeschlagen"
+
+#: src/updater.rs:354 src/window.rs:1544
+#, rust-format
+msgid "{size} MB"
+msgstr "{size} MB"
+
+#: src/updater.rs:356
+#, rust-format
+msgid "{done} of {total}"
+msgstr "{done} von {total}"
+
+#: src/updater.rs:365
+msgid "Release notes"
+msgstr "Versionshinweise"
+
+#: src/updater.rs:392
+msgid "Skip This Version"
+msgstr "Diese Version überspringen"
+
+#: src/updater.rs:394
+msgid "Remind Me Later"
+msgstr "Später erinnern"
+
+#: src/updater.rs:395
+msgid "Install Update"
+msgstr "Installieren"
+
+#: src/updater.rs:399
+msgid "Close"
+msgstr "Schließen"
+
+#: src/updater.rs:400 src/window.rs:2099 src/window.rs:2147
+msgid "Retry"
+msgstr "Wiederholen"
+
+#: src/updater.rs:404
+msgid "OK"
+msgstr "OK"
+
+#: src/updater.rs:408 src/window.rs:2110
+msgid "Cancel"
+msgstr "Abbrechen"
+
+#: src/updater.rs:412
+msgid "Hide"
+msgstr "Ausblenden"
+
+#: src/window.rs:71
+msgid "General"
+msgstr "Allgemein"
+
+#: src/window.rs:72 src/window.rs:1363
+msgid "Models"
+msgstr "Modelle"
+
+#: src/window.rs:73 src/window.rs:1246
+msgid "History"
+msgstr "Verlauf"
+
+#: src/window.rs:74
+msgid "Advanced"
+msgstr "Erweitert"
+
+#: src/window.rs:75
+msgid "About"
+msgstr "Über"
+
+#: src/window.rs:346
+#, rust-format
+msgid "{chosen} is not on disk: {model} transcribes instead."
+msgstr "{chosen} ist nicht vorhanden: {model} transkribiert stattdessen."
+
+#: src/window.rs:349
+#, rust-format
+msgid "{chosen} is not on disk: download it again in Models, or pick another."
+msgstr ""
+"{chosen} ist nicht vorhanden: Lade es unter „Modelle“ erneut oder wähle ein "
+"anderes."
+
+#: src/window.rs:364
+msgid "Delete"
+msgstr "Löschen"
+
+#: src/window.rs:585
+msgid ""
+"Set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”, or macOS "
+"acts on it too."
+msgstr ""
+"Stelle in Systemeinstellungen › Tastatur „Taste 🌐 drücken für“ auf „Keine "
+"Aktion“, sonst reagiert auch macOS darauf."
+
+#: src/window.rs:588
+msgid ""
+"Secure Input is on (a password field, or a terminal’s Secure Keyboard "
+"Entry): the shortcut works through a backup path, and Esc may not cancel."
+msgstr ""
+"Sichere Eingabe ist aktiv (ein Passwortfeld oder „Sichere Tastatureingabe“ "
+"in einem Terminal): Das Tastenkürzel funktioniert über einen Ersatzweg und "
+"Esc bricht eventuell nicht ab."
+
+#: src/window.rs:592
+msgid ""
+"How the hotkey records: while you hold it, from one press to the next, or "
+"both (a short tap latches the recording on)."
+msgstr ""
+"Wie das Tastenkürzel aufnimmt: solange du es hältst, von einem Drücken bis "
+"zum nächsten oder beides (kurzes Tippen lässt die Aufnahme weiterlaufen)."
+
+#: src/window.rs:601
+msgid ""
+"Automatic takes a USB microphone first, then the built-in one while the lid "
+"is open, then a wired one, and a Bluetooth headset only when there is no "
+"other: it records at call quality and loses the first words. System Default "
+"uses whatever the system picks."
+msgstr ""
+"„Automatisch“ nimmt zuerst ein USB-Mikrofon, dann das eingebaute, solange "
+"der Deckel offen ist, dann ein kabelgebundenes und ein Bluetooth-Headset "
+"nur, wenn es kein anderes gibt: Es nimmt in Telefonqualität auf und verliert "
+"die ersten Wörter. „Systemstandard“ nutzt, was das System wählt."
+
+#: src/window.rs:608
+msgid ""
+"Automatic takes a USB microphone first, then the computer’s own or a wired "
+"one, and a Bluetooth headset only when there is no other: it records at call "
+"quality and loses the first words. System Default uses whatever the system "
+"picks."
+msgstr ""
+"„Automatisch“ nimmt zuerst ein USB-Mikrofon, dann das des Computers oder ein "
+"kabelgebundenes und ein Bluetooth-Headset nur, wenn es kein anderes gibt: Es "
+"nimmt in Telefonqualität auf und verliert die ersten Wörter. "
+"„Systemstandard“ nutzt, was das System wählt."
+
+#: src/window.rs:615
+msgid ""
+"Automatic and System Default both use the system’s input. Linux doesn’t tell "
+"Wavo how a microphone is attached, so neither skips a Bluetooth headset."
+msgstr ""
+"„Automatisch“ und „Systemstandard“ nutzen beide den Eingang des Systems. "
+"Linux teilt Wavo nicht mit, wie ein Mikrofon angeschlossen ist, daher "
+"überspringt keines von beiden ein Bluetooth-Headset."
+
+#: src/window.rs:622
+msgid ""
+"The microphone takes longer and longer to start, so the first words get "
+"lost. Unplug it and plug it back in."
+msgstr ""
+"Das Mikrofon braucht immer länger zum Starten, daher gehen die ersten Wörter "
+"verloren. Trenne es und schließe es wieder an."
+
+#: src/window.rs:627
+msgid "Turn Wavo on in Task Manager › Startup apps."
+msgstr "Aktiviere Wavo in Task-Manager › Autostart-Apps."
+
+#: src/window.rs:629
+msgid "Allow Wavo in System Settings › General › Login Items."
+msgstr "Erlaube Wavo in Systemeinstellungen › Allgemein › Anmeldeobjekte."
+
+#: src/window.rs:632
+msgid ""
+"On: the dictated text stays on the clipboard, pasted or not. Off: after a "
+"paste the clipboard gets back what it held; with pasting off, the text is "
+"only in History."
+msgstr ""
+"Ein: Der diktierte Text bleibt in der Zwischenablage, ob eingesetzt oder "
+"nicht. Aus: Nach dem Einsetzen erhält die Zwischenablage ihren vorherigen "
+"Inhalt zurück; ist Einsetzen aus, steht der Text nur im Verlauf."
+
+#: src/window.rs:636
+msgid ""
+"The model tells the language of each dictation by itself. Short phrases, an "
+"accent or two languages mixed can mislead it: choose the language you speak, "
+"or Keyboard layout to follow the layout you type with."
+msgstr ""
+"Das Modell erkennt die Sprache jedes Diktats selbst. Kurze Sätze, ein Akzent "
+"oder zwei gemischte Sprachen können es täuschen: Wähle die Sprache, die du "
+"sprichst, oder „Tastaturlayout“, um dem Layout zu folgen, mit dem du tippst."
+
+#: src/window.rs:641
+msgid ""
+"With Keyboard layout, each language under Language goes to the model chosen "
+"there. This one takes a language set to it, one no model knows, and a layout "
+"of any other language."
+msgstr ""
+"Mit „Tastaturlayout“ geht jede Sprache unter „Sprache“ an das dort gewählte "
+"Modell. Dieses hier übernimmt die ihm zugewiesenen Sprachen, Sprachen, die "
+"kein Modell kennt, und die Layouts aller anderen Sprachen."
+
+#: src/window.rs:648
+msgid ""
+"Each dictation is in the language of the keyboard layout in use when it "
+"ends, with the model chosen for that language below. Switch the layout while "
+"you speak and the whole dictation follows it; the HUD shows the language."
+msgstr ""
+"Jedes Diktat ist in der Sprache des Tastaturlayouts, das bei seinem Ende "
+"aktiv ist, mit dem unten für diese Sprache gewählten Modell. Wechselst du "
+"beim Sprechen das Layout, folgt ihm das ganze Diktat; die Anzeige zeigt die "
+"Sprache."
+
+#: src/window.rs:653
+msgid ""
+"Adds a space after each paste. A paste into the same window less than 20 s "
+"after one that ended mid-sentence starts in lower case, unless its first "
+"word is in Latin letters. Hesitation sounds like “э-э” and “um” are left out "
+"in Russian and English, when you choose the language or the model has only "
+"one. In Russian, a number of more than one word, or from 11 to 19, is "
+"written in digits: “семьдесят шестой” becomes “76-й”, and “1 000” becomes "
+"“1000”."
+msgstr ""
+"Fügt nach jedem Einsetzen ein Leerzeichen hinzu. Ein Einsetzen ins selbe "
+"Fenster weniger als 20 s nach einem, das mitten im Satz endete, beginnt mit "
+"Kleinbuchstaben, außer sein erstes Wort ist in lateinischen Buchstaben. "
+"Füllgeräusche wie „э-э“ und „um“ werden im Russischen und Englischen "
+"weggelassen, wenn du die Sprache wählst oder das Modell nur eine kennt. Im "
+"Russischen wird eine Zahl aus mehr als einem Wort oder von 11 bis 19 in "
+"Ziffern geschrieben: „семьдесят шестой“ wird zu „76-й“ und „1 000“ zu „1000“."
+
+#: src/window.rs:661
+msgid ""
+"Wavo can’t put the clipboard back after a paste: allow it in System "
+"Settings › Privacy & Security › Paste from Other Apps."
+msgstr ""
+"Wavo kann die Zwischenablage nach dem Einsetzen nicht wiederherstellen: "
+"Erlaube es in Systemeinstellungen › Datenschutz & Sicherheit › Einsetzen aus "
+"anderen Apps."
+
+#: src/window.rs:665
+msgid ""
+"Wavo records your voice through it while you hold the shortcut; the "
+"recording stays on this Mac."
+msgstr ""
+"Darüber nimmt Wavo deine Stimme auf, während du das Tastenkürzel hältst; die "
+"Aufnahme bleibt auf diesem Mac."
+
+#: src/window.rs:669
+msgid ""
+"Wavo hears the shortcut in every app and pastes the text where you type "
+"through it."
+msgstr ""
+"Damit erkennt Wavo das Tastenkürzel in jeder App und setzt den Text dort "
+"ein, wo du tippst."
+
+#: src/window.rs:673
+msgid ""
+"You’re not an administrator on this Mac, so Wavo can’t paste for you. You "
+"can turn on Keep the text on the clipboard and paste with ⌘V."
+msgstr ""
+"Du bist kein Administrator auf diesem Mac, daher kann Wavo nicht für dich "
+"einsetzen. Du kannst „Text in Zwischenablage behalten“ aktivieren und mit ⌘V "
+"einsetzen."
+
+#: src/window.rs:677
+msgid ""
+"A single key needs Accessibility, which only an administrator can allow on "
+"this Mac. Use a combination like ⌥Space."
+msgstr ""
+"Eine einzelne Taste braucht die Bedienungshilfen, die auf diesem Mac nur ein "
+"Administrator erlauben kann. Nutze eine Kombination wie ⌥Space."
+
+#: src/window.rs:686
+msgid "Hold to talk, or tap to start and stop"
+msgstr "Halten oder zum Starten/Stoppen tippen"
+
+#: src/window.rs:687
+msgid "Hold to talk"
+msgstr "Halten zum Sprechen"
+
+#: src/window.rs:688
+msgid "Tap to start and stop"
+msgstr "Zum Starten/Stoppen tippen"
+
+#: src/window.rs:697
+msgid "Dictation"
+msgstr "Diktat"
+
+#: src/window.rs:710 src/window.rs:804
+msgid "Microphone"
+msgstr "Mikrofon"
+
+#: src/window.rs:735
+msgid "Activation"
+msgstr "Aktivierung"
+
+#: src/window.rs:742
+msgid "Shortcut"
+msgstr "Tastenkürzel"
+
+#: src/window.rs:746
+msgid "Output"
+msgstr "Ausgabe"
+
+#: src/window.rs:748
+msgid "Paste the text into the app you dictate in"
+msgstr "Text in die App einsetzen, in der du diktierst"
+
+#: src/window.rs:761
+msgid "Keep the text on the clipboard"
+msgstr "Text in Zwischenablage behalten"
+
+#: src/window.rs:770
+msgid "Clean up the text"
+msgstr "Text bereinigen"
+
+#: src/window.rs:779
+msgid "Startup"
+msgstr "Start"
+
+#: src/window.rs:797
+msgid "Wavo needs two permissions"
+msgstr "Wavo braucht zwei Berechtigungen"
+
+#: src/window.rs:798
+msgid "Wavo needs a permission"
+msgstr "Wavo braucht eine Berechtigung"
+
+#: src/window.rs:805
+msgid "Accessibility"
+msgstr "Bedienungshilfen"
+
+#: src/window.rs:812
+msgid "Allow"
+msgstr "Erlauben"
+
+#: src/window.rs:814
+msgid "Open Settings"
+msgstr "Einstellungen öffnen"
+
+#: src/window.rs:839
+msgid "Back to the default shortcut"
+msgstr "Standard-Tastenkürzel wiederherstellen"
+
+#: src/window.rs:860 src/window.rs:1047
+msgid "Download more…"
+msgstr "Weitere laden…"
+
+#: src/window.rs:871
+msgid "Auto-detect"
+msgstr "Automatisch erkennen"
+
+#: src/window.rs:874
+msgid "Keyboard layout"
+msgstr "Tastaturlayout"
+
+#: src/window.rs:888
+#, rust-format
+msgid "{lang} (not one the model is meant for)"
+msgstr "{lang} (nicht für dieses Modell gedacht)"
+
+#: src/window.rs:899
+msgid "Default model"
+msgstr "Standardmodell"
+
+#: src/window.rs:899
+msgid "Model"
+msgstr "Modell"
+
+#: src/window.rs:907
+msgid "Download a Model…"
+msgstr "Modell herunterladen…"
+
+#: src/window.rs:935 src/window.rs:1158
+msgid "Language"
+msgstr "Sprache"
+
+#: src/window.rs:1001
+#, rust-format
+msgid "{model} knows {lang} only, so every dictation is in {lang}."
+msgstr "{model} kennt nur {lang}, daher ist jedes Diktat auf {lang}."
+
+#. Translators: no model, as the default model of a keyboard language.
+#: src/window.rs:1031
+msgid "none"
+msgstr "keins"
+
+#. Translators: a model in a list of models.
+#: src/window.rs:1034
+#, rust-format
+msgid "{default} (default)"
+msgstr "{default} (Standard)"
+
+#: src/window.rs:1055
+msgid ""
+"After each dictation the HUD shows for a second how long the text took after "
+"the stop."
+msgstr ""
+"Nach jedem Diktat zeigt die Anzeige eine Sekunde lang, wie lange der Text "
+"nach dem Stopp gebraucht hat."
+
+#: src/window.rs:1059
+msgid ""
+"The HUD shows the words as you speak, recognized again every half second. "
+"The text pasted is still recognized from the whole recording after the stop. "
+"On by default on a Mac or with a discrete GPU: an integrated one is kept "
+"busy while you speak."
+msgstr ""
+"Die Anzeige zeigt die Wörter beim Sprechen, jede halbe Sekunde neu erkannt. "
+"Der eingesetzte Text wird trotzdem nach dem Stopp aus der ganzen Aufnahme "
+"erkannt. Standardmäßig an auf einem Mac oder mit eigener Grafikkarte: Eine "
+"integrierte wäre beim Sprechen ausgelastet."
+
+#: src/window.rs:1064
+msgid ""
+"Frees the model's memory after Wavo has been idle this long. The next "
+"dictation loads it again, which takes a moment."
+msgstr ""
+"Gibt den Speicher des Modells frei, wenn Wavo so lange unbenutzt war. Das "
+"nächste Diktat lädt es erneut, was einen Moment dauert."
+
+#: src/window.rs:1068
+msgid ""
+"Models marked ANE run on the Neural Engine: as fast as on the GPU at a "
+"fraction of the energy. Each new version of Wavo prepares such a model once, "
+"in the background (10–30 s); meanwhile it runs on the GPU. Other models "
+"always run on the GPU."
+msgstr ""
+"Mit ANE markierte Modelle laufen auf der Neural Engine: so schnell wie auf "
+"der GPU bei einem Bruchteil der Energie. Jede neue Wavo-Version bereitet ein "
+"solches Modell einmal im Hintergrund vor (10–30 s); bis dahin läuft es auf "
+"der GPU. Andere Modelle laufen immer auf der GPU."
+
+#: src/window.rs:1073
+msgid ""
+"A .zip that Wavo exported, here or on another computer: the dictations this "
+"history does not have are added with their recordings; the settings stay as "
+"they are."
+msgstr ""
+"Eine von Wavo exportierte .zip-Datei, von hier oder einem anderen Computer: "
+"Diktate, die in diesem Verlauf fehlen, werden mit ihren Aufnahmen "
+"hinzugefügt; die Einstellungen bleiben, wie sie sind."
+
+#: src/window.rs:1077
+msgid ""
+"The history, its recordings and the settings, into a .zip archive: Import "
+"brings it back, here or on another computer."
+msgstr ""
+"Der Verlauf, seine Aufnahmen und die Einstellungen in einem .zip-Archiv: "
+"„Import“ holt sie zurück, hier oder auf einem anderen Computer."
+
+#: src/window.rs:1081
+msgid "Off while the history is kept until Wavo quits"
+msgstr "Aus, solange der Verlauf nur bis zum Beenden von Wavo bleibt"
+
+#: src/window.rs:1083
+msgid ""
+"Deletes every dictation saved on disk and its recording. The ones kept until "
+"Wavo quits stay."
+msgstr ""
+"Löscht alle auf dem Datenträger gespeicherten Diktate und ihre Aufnahmen. "
+"Die bis zum Beenden von Wavo behaltenen bleiben."
+
+#: src/window.rs:1087
+msgid "No dictations saved"
+msgstr "Keine Diktate gespeichert"
+
+#: src/window.rs:1089
+msgid "Deleted once the dictation, export or import ends"
+msgstr "Wird gelöscht, sobald Diktat, Export oder Import enden"
+
+#: src/window.rs:1092
+msgid ""
+"Wavo looks for a new version at launch and once a day; the menu says when "
+"there is one. Off, it looks only when you choose Check for Updates."
+msgstr ""
+"Wavo sucht beim Start und einmal täglich nach einer neuen Version; das Menü "
+"zeigt, wenn es eine gibt. Ist dies aus, sucht Wavo nur, wenn du „Nach "
+"Updates suchen“ wählst."
+
+#: src/window.rs:1095
+msgid "This copy of Wavo doesn’t update itself."
+msgstr "Diese Kopie von Wavo aktualisiert sich nicht selbst."
+
+#: src/window.rs:1099
+msgid "Bottom of the screen"
+msgstr "Unten am Bildschirm"
+
+#: src/window.rs:1100
+msgid "Top of the screen"
+msgstr "Oben am Bildschirm"
+
+#. Translators: a look of the HUD, its background a gradient.
+#: src/window.rs:1107
+msgid "Gradient"
+msgstr "Farbverlauf"
+
+#. Translators: a look of the HUD, its background one colour.
+#: src/window.rs:1109
+msgid "Plain"
+msgstr "Einfarbig"
+
+#. Translators: when to unload the model.
+#: src/window.rs:1116
+msgid "Never"
+msgstr "Nie"
+
+#: src/window.rs:1117
+msgid "Right after each dictation"
+msgstr "Gleich nach jedem Diktat"
+
+#: src/window.rs:1118
+msgid "After 2 minutes"
+msgstr "Nach 2 Minuten"
+
+#: src/window.rs:1119
+msgid "After 5 minutes"
+msgstr "Nach 5 Minuten"
+
+#: src/window.rs:1120
+msgid "After 10 minutes"
+msgstr "Nach 10 Minuten"
+
+#: src/window.rs:1121
+msgid "After 15 minutes"
+msgstr "Nach 15 Minuten"
+
+#: src/window.rs:1122
+msgid "After 60 minutes"
+msgstr "Nach 60 Minuten"
+
+#: src/window.rs:1128
+msgid "Until Wavo quits"
+msgstr "Bis Wavo beendet wird"
+
+#. Translators: how long to keep the history.
+#: src/window.rs:1134
+msgid "Forever"
+msgstr "Für immer"
+
+#: src/window.rs:1135
+msgid "The last 100 dictations"
+msgstr "Die letzten 100 Diktate"
+
+#: src/window.rs:1136
+msgid "The last 1,000 dictations"
+msgstr "Die letzten 1.000 Diktate"
+
+#: src/window.rs:1137
+msgid "The last 10,000 dictations"
+msgstr "Die letzten 10.000 Diktate"
+
+#: src/window.rs:1138
+msgid "3 days"
+msgstr "3 Tage"
+
+#: src/window.rs:1139
+msgid "2 weeks"
+msgstr "2 Wochen"
+
+#: src/window.rs:1140
+msgid "3 months"
+msgstr "3 Monate"
+
+#. Translators: the app's language, the system's.
+#: src/window.rs:1148
+msgid "System"
+msgstr "Systemsprache"
+
+#: src/window.rs:1156
+msgid "App"
+msgstr "App"
+
+#: src/window.rs:1170
+msgid "Unload the model"
+msgstr "Modell entladen"
+
+#: src/window.rs:1183
+msgid "Use the Neural Engine"
+msgstr "Neural Engine verwenden"
+
+#: src/window.rs:1196
+msgid "Check for updates"
+msgstr "Nach Updates suchen"
+
+#: src/window.rs:1205
+msgid "HUD"
+msgstr "Anzeige"
+
+#: src/window.rs:1206
+msgid "Show the HUD at"
+msgstr "Position"
+
+#: src/window.rs:1213
+msgid "HUD style"
+msgstr "Stil"
+
+#: src/window.rs:1221
+msgid "Show the text while speaking"
+msgstr "Text beim Sprechen zeigen"
+
+#: src/window.rs:1233
+msgid "Show the transcription time"
+msgstr "Transkriptionsdauer zeigen"
+
+#: src/window.rs:1248
+#, rust-format
+msgid ""
+"Until Wavo quits: the last {n} dictation stays in memory for History and the "
+"menu, without its audio, and nothing is saved to disk."
+msgid_plural ""
+"Until Wavo quits: the last {n} dictations stay in memory for History and the "
+"menu, without their audio, and nothing is saved to disk."
+msgstr[0] ""
+"Bis Wavo beendet wird: {n} letztes Diktat bleibt ohne Ton im Speicher für "
+"Verlauf und Menü, auf dem Datenträger wird nichts gespeichert."
+msgstr[1] ""
+"Bis Wavo beendet wird: Die letzten {n} Diktate bleiben ohne Ton im Speicher "
+"für Verlauf und Menü, auf dem Datenträger wird nichts gespeichert."
+
+#: src/window.rs:1254
+msgid "Keep the history"
+msgstr "Verlauf behalten"
+
+#: src/window.rs:1263 src/window.rs:3122
+#, rust-format
+msgid "Show in {app}"
+msgstr "In {app} anzeigen"
+
+#: src/window.rs:1277
+#, rust-format
+msgid "Exported · {size}"
+msgstr "Exportiert · {size}"
+
+#: src/window.rs:1278
+msgid "Copying the history…"
+msgstr "Verlauf wird kopiert…"
+
+#: src/window.rs:1280
+msgid "Reading the archive…"
+msgstr "Archiv wird gelesen…"
+
+#: src/window.rs:1304
+msgid "Delete All…"
+msgstr "Alle löschen…"
+
+#: src/window.rs:1304
+msgid "Export…"
+msgstr "Export…"
+
+#: src/window.rs:1304
+msgid "Import…"
+msgstr "Import…"
+
+#: src/window.rs:1308
+msgid "Saved history"
+msgstr "Gespeicherter Verlauf"
+
+#. Translators: the title of the save panel of Export….
+#: src/window.rs:1319
+msgid "Export"
+msgstr "Exportieren"
+
+#. Translators: the title of the open panel of Import….
+#: src/window.rs:1326
+msgid "Import"
+msgstr "Importieren"
+
+#: src/window.rs:1334
+msgid "Delete 1 dictation and its recording?"
+msgstr "1 Diktat und seine Aufnahme löschen?"
+
+#: src/window.rs:1336
+#, rust-format
+msgid "Delete all {count} dictations and their recordings?"
+msgid_plural "Delete all {count} dictations and their recordings?"
+msgstr[0] "{count} Diktat und seine Aufnahme löschen?"
+msgstr[1] "Alle {count} Diktate und ihre Aufnahmen löschen?"
+
+#: src/window.rs:1342
+msgid "This can’t be undone."
+msgstr "Dies kann nicht widerrufen werden."
+
+#: src/window.rs:1353
+#, rust-format
+msgid ""
+"Models: the downloaded models, in the Hugging Face cache, which other apps "
+"that use Hugging Face models share. Deleting a model on Models frees its "
+"space.\n"
+"{models}\n"
+"\n"
+"Recordings: the audio of every dictation in the history, a folder a day. A "
+"dictation deleted from the history takes its recording with it.\n"
+"{recordings}"
+msgstr ""
+"Modelle: die heruntergeladenen Modelle im Hugging-Face-Cache, den andere "
+"Apps mit Hugging-Face-Modellen mitnutzen. Ein Modell unter „Modelle“ zu "
+"löschen, gibt seinen Platz frei.\n"
+"{models}\n"
+"\n"
+"Aufnahmen: der Ton jedes Diktats im Verlauf, ein Ordner pro Tag. Ein aus dem "
+"Verlauf gelöschtes Diktat nimmt seine Aufnahme mit.\n"
+"{recordings}"
+
+#: src/window.rs:1363
+msgid "Recordings"
+msgstr "Aufnahmen"
+
+#: src/window.rs:1399
+msgid "Launch at login"
+msgstr "Bei Anmeldung öffnen"
+
+#: src/window.rs:1411
+msgid "Could not delete the dictations"
+msgstr "Diktate konnten nicht gelöscht werden"
+
+#: src/window.rs:1412
+msgid "Could not delete the dictation"
+msgstr "Diktat konnte nicht gelöscht werden"
+
+#: src/window.rs:1413
+msgid "Could not transcribe it again"
+msgstr "Erneute Transkription fehlgeschlagen"
+
+#: src/window.rs:1414
+msgid "Could not put the previous text back"
+msgstr "Vorheriger Text konnte nicht wiederhergestellt werden"
+
+#: src/window.rs:1415
+msgid "Could not delete the history"
+msgstr "Verlauf konnte nicht gelöscht werden"
+
+#: src/window.rs:1432
+#, rust-format
+msgid "Couldn’t turn it on: {e}"
+msgstr "Einschalten fehlgeschlagen: {e}"
+
+#: src/window.rs:1433
+#, rust-format
+msgid "Couldn’t turn it off: {e}"
+msgstr "Ausschalten fehlgeschlagen: {e}"
+
+#: src/window.rs:1455 src/window.rs:1457
+#, rust-format
+msgid "Automatic ({device})"
+msgstr "Automatisch ({device})"
+
+#: src/window.rs:1458
+msgid "Automatic"
+msgstr "Automatisch"
+
+#: src/window.rs:1459
+msgid "Automatic (none: the lid is closed)"
+msgstr "Automatisch (keins: Deckel geschlossen)"
+
+#: src/window.rs:1462
+#, rust-format
+msgid "System Default ({device})"
+msgstr "Systemstandard ({device})"
+
+#: src/window.rs:1480
+#, rust-format
+msgid "{device} (not connected)"
+msgstr "{device} (nicht verbunden)"
+
+#: src/window.rs:1502
+#, rust-format
+msgid "{device} (the lid is closed)"
+msgstr "{device} (Deckel geschlossen)"
+
+#: src/window.rs:1517
+#, rust-format
+msgid "{name} isn’t connected: Wavo records with {other}"
+msgstr "{name} ist nicht verbunden: Wavo nimmt mit {other} auf"
+
+#: src/window.rs:1519
+#, rust-format
+msgid "{name} isn’t connected: Wavo records with the system’s input"
+msgstr "{name} ist nicht verbunden: Wavo nimmt über den Systemeingang auf"
+
+#: src/window.rs:1520
+#, rust-format
+msgid "{name} isn’t connected, and there is no other microphone"
+msgstr "{name} ist nicht verbunden und es gibt kein anderes Mikrofon"
+
+#: src/window.rs:1533
+msgid "Only a Bluetooth mic: the sound is worse"
+msgstr "Nur ein Bluetooth-Mikrofon: schlechterer Ton"
+
+#: src/window.rs:1543
+#, rust-format
+msgid "{size} GB"
+msgstr "{size} GB"
+
+#: src/window.rs:1545
+#, rust-format
+msgid "{size} KB"
+msgstr "{size} KB"
+
+#. Translators: what goes between the thousands of a number: 86,286 (a narrow space in some).
+#: src/window.rs:1567
+msgid ","
+msgstr "."
+
+#: src/window.rs:1587
+#, rust-format
+msgid "{done} of {total} GB"
+msgstr "{done} von {total} GB"
+
+#: src/window.rs:1591
+#, rust-format
+msgid "{done} of {total} MB"
+msgstr "{done} von {total} MB"
+
+#: src/window.rs:1645
+msgid "All languages"
+msgstr "Alle Sprachen"
+
+#: src/window.rs:1733
+#, rust-format
+msgid "WER {wer}%"
+msgstr "WER {wer} %"
+
+#: src/window.rs:1743
+msgid "Errors per 100 characters"
+msgstr "Fehler pro 100 Zeichen"
+
+#: src/window.rs:1744
+msgid "Errors per 100 words"
+msgstr "Fehler pro 100 Wörter"
+
+#: src/window.rs:1761
+msgid "The default model"
+msgstr "Das Standardmodell"
+
+#: src/window.rs:1763
+#, rust-format
+msgid "The fewest errors in {lang}, but lowercase without punctuation"
+msgstr ""
+"Die wenigsten Fehler auf {lang}, aber kleingeschrieben ohne Satzzeichen"
+
+#: src/window.rs:1766
+#, rust-format
+msgid "Best balance of accuracy and speed in {lang}"
+msgstr "Beste Balance aus Genauigkeit und Tempo auf {lang}"
+
+#: src/window.rs:1770
+#, rust-format
+msgid "No accuracy data for {lang} yet: the best general model"
+msgstr "Noch keine Genauigkeitsdaten für {lang}: das beste allgemeine Modell"
+
+#: src/window.rs:1777
+#, rust-format
+msgid "{n} model"
+msgid_plural "{n} models"
+msgstr[0] "{n} Modell"
+msgstr[1] "{n} Modelle"
+
+#: src/window.rs:1791
+#, rust-format
+msgid "The speed baseline ({times})"
+msgstr "Tempo-Referenz ({times})"
+
+#: src/window.rs:1792
+msgid "As fast as whisper-turbo"
+msgstr "So schnell wie whisper-turbo"
+
+#: src/window.rs:1793
+#, rust-format
+msgid "{times} the speed of whisper-turbo"
+msgstr "{times} des Tempos von whisper-turbo"
+
+#: src/window.rs:1794
+#, rust-format
+msgid "{times} faster than whisper-turbo"
+msgstr "{times} schneller als whisper-turbo"
+
+#: src/window.rs:1803
+msgid "Search models"
+msgstr "Modelle durchsuchen"
+
+#: src/window.rs:1819
+#, rust-format
+msgid "No model recognizes {lang} well yet."
+msgstr "Noch erkennt kein Modell {lang} gut."
+
+#: src/window.rs:1862 src/window.rs:1940
+msgid "Downloaded"
+msgstr "Heruntergeladen"
+
+#: src/window.rs:1863
+msgid "No model yet"
+msgstr "Noch kein Modell"
+
+#: src/window.rs:1864
+msgid "Download the recommended one below to start dictating."
+msgstr "Lade unten das empfohlene herunter, um mit dem Diktieren zu beginnen."
+
+#: src/window.rs:1875
+msgid "Available"
+msgstr "Verfügbar"
+
+#: src/window.rs:1896
+#, rust-format
+msgid "{n} more, not measured yet"
+msgid_plural "{n} more, not measured yet"
+msgstr[0] "{n} weiteres, noch nicht gemessen"
+msgstr[1] "{n} weitere, noch nicht gemessen"
+
+#: src/window.rs:1898
+#, rust-format
+msgid "{n} more, not measured in {lang}"
+msgid_plural "{n} more, not measured in {lang}"
+msgstr[0] "{n} weiteres, nicht auf {lang} gemessen"
+msgstr[1] "{n} weitere, nicht auf {lang} gemessen"
+
+#: src/window.rs:1904
+msgid "Other models"
+msgstr "Andere Modelle"
+
+#: src/window.rs:1908
+#, rust-format
+msgid "Too many errors in {lang}"
+msgstr "Zu viele Fehler auf {lang}"
+
+#: src/window.rs:1909
+#, rust-format
+msgid "{n} more"
+msgid_plural "{n} more"
+msgstr[0] "{n} weiteres"
+msgstr[1] "{n} weitere"
+
+#: src/window.rs:1916
+msgid "No model matches."
+msgstr "Kein passendes Modell."
+
+#: src/window.rs:1962
+#, rust-format
+msgid "Delete {n} Model…"
+msgid_plural "Delete {n} Models…"
+msgstr[0] "{n} Modell löschen…"
+msgstr[1] "{n} Modelle löschen…"
+
+#: src/window.rs:1985
+#, rust-format
+msgid "Delete {model}?"
+msgstr "{model} löschen?"
+
+#: src/window.rs:1986
+#, rust-format
+msgid "It frees {size} in the Hugging Face cache. You can download it again."
+msgstr "Das gibt {size} im Hugging-Face-Cache frei. Du kannst es erneut laden."
+
+#: src/window.rs:1989
+#, rust-format
+msgid "Delete {n} model?"
+msgid_plural "Delete {n} models?"
+msgstr[0] "{n} Modell löschen?"
+msgstr[1] "{n} Modelle löschen?"
+
+#: src/window.rs:1990
+#, rust-format
+msgid ""
+"They free {size} in the Hugging Face cache. You can download them again."
+msgstr ""
+"Das gibt {size} im Hugging-Face-Cache frei. Du kannst sie erneut laden."
+
+#: src/window.rs:1995
+#, rust-format
+msgid "{model} is in use and stays."
+msgstr "{model} wird verwendet und bleibt."
+
+#: src/window.rs:1999
+#, rust-format
+msgid "{models} and {last} are in use and stay."
+msgstr "{models} und {last} werden verwendet und bleiben."
+
+#: src/window.rs:2042 src/window.rs:2158
+msgid "In use"
+msgstr "Aktiv"
+
+#: src/window.rs:2046 src/window.rs:2157
+msgid "Use"
+msgstr "Verwenden"
+
+#: src/window.rs:2053
+msgid "In use: choose another to delete it"
+msgstr "Aktiv: Wähle ein anderes, um es zu löschen"
+
+#: src/window.rs:2054
+msgid "In use until the dictation ends"
+msgstr "Aktiv bis zum Ende des Diktats"
+
+#: src/window.rs:2055 src/window.rs:2837 src/window.rs:2875 src/window.rs:3137
+#: src/window.rs:3146
+msgid "Delete…"
+msgstr "Löschen…"
+
+#: src/window.rs:2080
+#, rust-format
+msgid " · {rate} MB/s"
+msgstr " · {rate} MB/s"
+
+#: src/window.rs:2086
+msgid "Preparing for the Neural Engine…"
+msgstr "Wird für die Neural Engine vorbereitet…"
+
+#: src/window.rs:2088
+#, rust-format
+msgid "Could not download: {e}"
+msgstr "Download fehlgeschlagen: {e}"
+
+#: src/window.rs:2099 src/window.rs:2147
+msgid "Download"
+msgstr "Laden"
+
+#: src/window.rs:2110
+msgid "Cancel the download"
+msgstr "Download abbrechen"
+
+#: src/window.rs:2131
+msgid "Open the model’s page on Hugging Face"
+msgstr "Seite des Modells auf Hugging Face öffnen"
+
+#: src/window.rs:2220
+msgid "Recommended"
+msgstr "Empfohlen"
+
+#: src/window.rs:2242
+msgid " · no punctuation"
+msgstr " · ohne Satzzeichen"
+
+#: src/window.rs:2248
+msgid "Runs on the Apple Neural Engine"
+msgstr "Läuft auf der Apple Neural Engine"
+
+#. Translators: the languages a speech model knows.
+#: src/window.rs:2257
+msgid "100 languages"
+msgstr "100 Sprachen"
+
+#: src/window.rs:2258
+msgid "25 European languages"
+msgstr "25 europäische Sprachen"
+
+#: src/window.rs:2259
+msgid "99 languages"
+msgstr "99 Sprachen"
+
+#: src/window.rs:2263
+msgid "Russian, English, Kazakh, Kyrgyz and Uzbek"
+msgstr "Russisch, Englisch, Kasachisch, Kirgisisch und Usbekisch"
+
+#: src/window.rs:2264
+msgid "Taiwanese Mandarin and English"
+msgstr "Taiwanisches Mandarin und Englisch"
+
+#: src/window.rs:2265
+msgid "Ukrainian and English"
+msgstr "Ukrainisch und Englisch"
+
+#: src/window.rs:2442
+#, rust-format
+msgid "Could not export: {e}"
+msgstr "Export fehlgeschlagen: {e}"
+
+#: src/window.rs:2443
+#, rust-format
+msgid "Could not import: {e}"
+msgstr "Import fehlgeschlagen: {e}"
+
+#: src/window.rs:2483
+msgid "Nothing new: all of its dictations are here"
+msgstr "Nichts Neues: Alle Diktate daraus sind schon hier"
+
+#: src/window.rs:2484
+#, rust-format
+msgid "Added {n} dictation"
+msgid_plural "Added {n} dictations"
+msgstr[0] "{n} Diktat hinzugefügt"
+msgstr[1] "{n} Diktate hinzugefügt"
+
+#: src/window.rs:2487
+#, rust-format
+msgid " · {n} recording not copied"
+msgid_plural " · {n} recordings not copied"
+msgstr[0] " · {n} Aufnahme nicht kopiert"
+msgstr[1] " · {n} Aufnahmen nicht kopiert"
+
+#: src/window.rs:2569
+msgid "Could not open the history: see the log"
+msgstr "Verlauf konnte nicht geöffnet werden: siehe Protokoll"
+
+#: src/window.rs:2589
+#, rust-format
+msgid "Could not read the history: {e}"
+msgstr "Verlauf konnte nicht gelesen werden: {e}"
+
+#: src/window.rs:2646
+msgid "Today"
+msgstr "Heute"
+
+#: src/window.rs:2650
+#, rust-format
+msgid "Yesterday, {date}"
+msgstr "Gestern, {date}"
+
+#. Translators: seconds, short: "4.2 s".
+#: src/window.rs:2662 src/window.rs:2909
+#, rust-format
+msgid "{seconds} s"
+msgstr "{seconds} s"
+
+#: src/window.rs:2673
+#, rust-format
+msgid "no text · {model}"
+msgstr "kein Text · {model}"
+
+#: src/window.rs:2674
+msgid "no text"
+msgstr "kein Text"
+
+#: src/window.rs:2705
+#, rust-format
+msgid "{n} dictation · {time}"
+msgid_plural "{n} dictations · {time}"
+msgstr[0] "{n} Diktat · {time}"
+msgstr[1] "{n} Diktate · {time}"
+
+#: src/window.rs:2725
+msgid "Its recording isn’t kept"
+msgstr "Die Aufnahme wurde nicht behalten"
+
+#: src/window.rs:2733
+msgid "Search dictations"
+msgstr "Diktate durchsuchen"
+
+#: src/window.rs:2754
+msgid "No dictations yet: hold the shortcut and speak."
+msgstr "Noch keine Diktate: Halte das Tastenkürzel und sprich."
+
+#: src/window.rs:2755
+msgid "No dictations since Wavo started: they’re kept only until it quits."
+msgstr ""
+"Keine Diktate seit dem Start von Wavo: Sie bleiben nur bis zum Beenden."
+
+#: src/window.rs:2756
+msgid "Nothing found"
+msgstr "Nichts gefunden"
+
+#: src/window.rs:2825
+msgid "Select a dictation to see all of its text."
+msgstr "Wähle ein Diktat, um seinen ganzen Text zu sehen."
+
+#: src/window.rs:2831
+#, rust-format
+msgid "{n} dictation selected"
+msgid_plural "{n} dictations selected"
+msgstr[0] "{n} Diktat ausgewählt"
+msgstr[1] "{n} Diktate ausgewählt"
+
+#: src/window.rs:2860 src/window.rs:3129 src/window.rs:3148
+msgid "Transcribe Again"
+msgstr "Erneut transkribieren"
+
+#: src/window.rs:2868 src/window.rs:3133
+msgid "Restore the Previous Text"
+msgstr "Vorherigen Text wiederherstellen"
+
+#. Translators: minutes, short: "12 min".
+#: src/window.rs:2911
+#, rust-format
+msgid "{minutes} min"
+msgstr "{minutes} min"
+
+#. Translators: hours, short: "312 h".
+#: src/window.rs:2913
+#, rust-format
+msgid "{hours} h"
+msgstr "{hours} h"
+
+#: src/window.rs:2917
+#, rust-format
+msgid "{count} dictation · {spoken}"
+msgid_plural "{count} dictations · {spoken}"
+msgstr[0] "{count} Diktat · {spoken}"
+msgstr[1] "{count} Diktate · {spoken}"
+
+#: src/window.rs:2919
+msgid " · kept until Wavo quits"
+msgstr " · bis zum Beenden von Wavo"
+
+#: src/window.rs:2923
+#, rust-format
+msgid " · since {since}"
+msgstr " · seit dem {since}"
+
+#: src/window.rs:2934 src/window.rs:2947
+msgid "Copied to the clipboard"
+msgstr "In die Zwischenablage kopiert"
+
+#: src/window.rs:2939
+msgid "The recording is gone"
+msgstr "Die Aufnahme ist nicht mehr da"
+
+#: src/window.rs:2953 src/window.rs:3030
+#, rust-format
+msgid "Could not play the recording: {e}"
+msgstr "Aufnahme konnte nicht abgespielt werden: {e}"
+
+#: src/window.rs:2992
+#, rust-format
+msgid "“{start}” and its recording are removed from the history."
+msgstr ""
+"Das Diktat „{start}“ und seine Aufnahme werden aus dem Verlauf entfernt."
+
+#: src/window.rs:2993
+#, rust-format
+msgid "“{start}” is removed from the history."
+msgstr "Das Diktat „{start}“ wird aus dem Verlauf entfernt."
+
+#: src/window.rs:2995
+msgid "Delete this dictation?"
+msgstr "Dieses Diktat löschen?"
+
+#: src/window.rs:3001
+#, rust-format
+msgid "{n} dictation and its recording are removed from the history."
+msgid_plural ""
+"{n} dictations and their recordings are removed from the history."
+msgstr[0] "{n} Diktat und seine Aufnahme werden aus dem Verlauf entfernt."
+msgstr[1] "{n} Diktate und ihre Aufnahmen werden aus dem Verlauf entfernt."
+
+#: src/window.rs:3006
+#, rust-format
+msgid "{n} dictation is removed from the history."
+msgid_plural "{n} dictations are removed from the history."
+msgstr[0] "{n} Diktat wird aus dem Verlauf entfernt."
+msgstr[1] "{n} Diktate werden aus dem Verlauf entfernt."
+
+#: src/window.rs:3011
+#, rust-format
+msgid "Delete {n} dictation?"
+msgid_plural "Delete {n} dictations?"
+msgstr[0] "{n} Diktat löschen?"
+msgstr[1] "{n} Diktate löschen?"
+
+#: src/window.rs:3077 src/window.rs:3114
+msgid "Stop"
+msgstr "Stoppen"
+
+#: src/window.rs:3079
+msgid "Play the recording"
+msgstr "Aufnahme abspielen"
+
+#: src/window.rs:3087
+msgid "Copy"
+msgstr "Kopieren"
+
+#: src/window.rs:3115
+msgid "Play the Recording"
+msgstr "Aufnahme abspielen"
+
+#: src/window.rs:3118
+msgid "Copy Text"
+msgstr "Text kopieren"
+
+#: src/window.rs:3123
+msgid "Copy Recording Path"
+msgstr "Pfad der Aufnahme kopieren"
+
+#: src/window.rs:3176
+msgid "The models"
+msgstr "Die Modelle"
+
+#: src/window.rs:3180
+msgid "Speech recognition on this machine"
+msgstr "Spracherkennung auf diesem Computer"
+
+#: src/window.rs:3181
+msgid "The UI toolkit Wavo is drawn with"
+msgstr "Das UI-Toolkit, mit dem Wavo gezeichnet ist"
+
+#: src/window.rs:3182
+msgid "The app that inspired Wavo"
+msgstr "Die App, die Wavo inspiriert hat"
+
+#: src/window.rs:3185
+msgid "The models’ GGUF conversions"
+msgstr "Die GGUF-Konvertierungen der Modelle"
+
+#: src/window.rs:3190
+msgid "The tensor library and model format, by Georgi Gerganov and others"
+msgstr ""
+"Die Tensor-Bibliothek und das Modellformat von Georgi Gerganov und anderen"
+
+#: src/window.rs:3195
+msgid "OpenAI Whisper, NVIDIA Parakeet, Sber GigaAM, Useful Sensors Moonshine"
+msgstr "OpenAI Whisper, NVIDIA Parakeet, Sber GigaAM, Useful Sensors Moonshine"
+
+#: src/window.rs:3216
+msgid "Local dictation: hold a key, speak, and the text lands where you type."
+msgstr ""
+"Lokales Diktieren: Taste halten, sprechen, und der Text landet, wo du tippst."
+
+#: src/window.rs:3220
+msgid "View on GitHub"
+msgstr "Auf GitHub ansehen"
+
+#: src/window.rs:3224
+msgid "Buy Me a Coffee"
+msgstr "Buy Me a Coffee"
+
+#: src/window.rs:3241
+msgid "Acknowledgements"
+msgstr "Danksagungen"

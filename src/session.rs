@@ -21,6 +21,7 @@
 //!   into it meanwhile.
 
 use std::collections::BTreeMap;
+use std::fmt::{self, Display};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -30,6 +31,7 @@ use std::{fs, mem};
 use anyhow::{Context, Result, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender, at, bounded, never, select, unbounded};
 use nimbo::hotkey::Edge;
+use nimbo::{Localized, t};
 use tracing::{debug, info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
@@ -54,12 +56,14 @@ const TAIL_MAX: Duration = Duration::from_millis(450);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// While the history in memory could not open: dictations are kept nowhere, the saved one being
 /// what the person turned off.
-const NOT_IN_MEMORY: &str = "couldn’t stop saving the history: dictations aren’t kept, see the log";
+const NOT_IN_MEMORY: Localized =
+  t!("couldn’t stop saving the history: dictations aren’t kept, see the log");
 /// A delete of the saved history waits for the dictation, the export or the import to end.
-pub const DELETE_WAITS: &str =
-  "the saved history is deleted once the dictation, export or import ends";
+pub const DELETE_WAITS: Localized =
+  t!("the saved history is deleted once the dictation, export or import ends");
 /// While the saved history could not open: the one in memory goes on.
-const NOT_SAVED: &str = "couldn’t open the saved history: dictations are kept until Wavo quits";
+const NOT_SAVED: Localized =
+  t!("couldn’t open the saved history: dictations are kept until Wavo quits");
 /// A paste goes on the sentence the one before it left open, into the same target, only this soon.
 const GOING_ON: Duration = Duration::from_secs(20);
 
@@ -349,15 +353,27 @@ pub struct Status {
   pub in_memory: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// Why no model transcribes; said in the app's language.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoModel {
-  #[error("no model is downloaded")]
   NoneDownloaded,
-  #[error("{model} is not on disk")]
   Gone { model: String },
-  #[error("{model} could not be loaded: {error}")]
   LoadFailed { model: String, error: String },
 }
+
+impl Display for NoModel {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    match self {
+      Self::NoneDownloaded => t!("no model is downloaded").fmt(f),
+      Self::Gone { model } => f.write_str(&t!("{model} is not on disk", model)),
+      Self::LoadFailed { model, error } => {
+        f.write_str(&t!("{model} could not be loaded: {error}", model, error))
+      }
+    }
+  }
+}
+
+impl std::error::Error for NoModel {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Phase {
@@ -927,7 +943,7 @@ impl<O: TextOutput> Controller<O> {
 
     if let Err(e) = new.save(&self.config.home.join(settings::FILE)) {
       warn!("{e:#}");
-      self.error = Some(format!("could not save the settings: {e:#}"));
+      self.error = Some(t!("could not save the settings: {e}", e = format!("{e:#}")));
     }
 
     let old = mem::replace(&mut self.settings, new);
@@ -987,8 +1003,13 @@ impl<O: TextOutput> Controller<O> {
 
     let error = match (self.config.hub.downloaded().into_iter().next(), chosen) {
       (Some((info, path)), chosen) => {
-        let note = chosen
-          .map(|c| format!("{} is not on disk: {} transcribes instead", label(&c), info.name));
+        let note = chosen.map(|c| {
+          t!(
+            "{chosen} is not on disk: {model} transcribes instead",
+            chosen = label(&c),
+            model = info.name
+          )
+        });
         (self.model_error, self.model_fallback) = (None, note);
         return Ok((self.found_model(path), Some(info)));
       }
@@ -1109,8 +1130,10 @@ impl<O: TextOutput> Controller<O> {
       }
       Ok(text) => (Outcome::Done, text.trim().to_owned(), None),
       Err(EngineError::Load(error)) => {
-        let model =
-          self.engine.as_ref().map_or("the model".into(), |l| loaded_label(l.info, &l.name));
+        let model = self
+          .engine
+          .as_ref()
+          .map_or(t!("the model").to_string(), |l| loaded_label(l.info, &l.name));
         (Outcome::NoModel, String::new(), Some(NoModel::LoadFailed { model, error }.to_string()))
       }
       Err(e) => (Outcome::Failed, String::new(), Some(e.to_string())),
@@ -1130,7 +1153,7 @@ impl<O: TextOutput> Controller<O> {
     let recorder = match Recorder::start(&source, file.as_ref().map(|(_, wav)| wav.as_path())) {
       Ok(recorder) => recorder,
       Err(e) => {
-        let error = format!("could not start recording: {e:#}");
+        let error = t!("could not start recording: {e}", e = format!("{e:#}"));
         warn!("dictation {take}: {error}");
         self.error = Some(error);
         // Its day folder goes if nothing else is in it.
@@ -1272,7 +1295,8 @@ impl<O: TextOutput> Controller<O> {
       Ok(rec) => rec,
       Err(e) => {
         self.discard();
-        return self.end(Outcome::Failed, Some(format!("the recording failed: {e:#}")));
+        let error = t!("the recording failed: {e}", e = format!("{e:#}"));
+        return self.end(Outcome::Failed, Some(error));
       }
     };
 
@@ -1583,12 +1607,13 @@ impl<O: TextOutput> Controller<O> {
       self.cleanup();
     } else if outcome != Outcome::Done {
       let why = match (outcome, error) {
-        (Outcome::NoText, None) => "nothing recognized".into(),
-        (Outcome::NoText, Some(note)) => format!("nothing recognized: {note}"),
+        (Outcome::NoText, None) => t!("nothing recognized").to_string(),
+        (Outcome::NoText, Some(note)) => t!("nothing recognized: {note}", note),
         (_, error) => error.unwrap_or_default(),
       };
 
-      self.error = Some(format!("entry {} could not be transcribed again: {why}", r.entry));
+      let entry = r.entry;
+      self.error = Some(t!("entry {entry} could not be transcribed again: {why}", entry, why));
     }
   }
 
@@ -1641,7 +1666,7 @@ impl<O: TextOutput> Controller<O> {
         Ok(history) => self.use_history(history),
         Err(e) => {
           warn!("history: {e:#}");
-          self.error = Some(format!("could not open the history: {e:#}"));
+          self.error = Some(t!("could not open the history: {e}", e = format!("{e:#}")));
           // Not tried again until the next change.
           self.switch_failed = Some(retention);
         }
@@ -1663,7 +1688,7 @@ impl<O: TextOutput> Controller<O> {
       Ok(Some(n)) => info!("history: the saved history deleted, {n} entries"),
       Err(e) => {
         warn!("history: delete the saved history: {e:#}");
-        self.error = Some(format!("could not delete the saved history: {e:#}"));
+        self.error = Some(t!("could not delete the saved history: {e}", e = format!("{e:#}")));
       }
     }
 
@@ -1727,11 +1752,11 @@ impl<O: TextOutput> Controller<O> {
     warnings.extend(d.map_or(&self.last_warnings, |d| &d.warnings).iter().cloned());
     warnings.extend(self.slow_start.warning());
     if self.delete_saved {
-      warnings.push(DELETE_WAITS.to_owned());
+      warnings.push(DELETE_WAITS.to_string());
     }
 
     if let Some(r) = self.switch_failed {
-      warnings.push(if r.in_memory() { NOT_IN_MEMORY } else { NOT_SAVED }.to_owned());
+      warnings.push(if r.in_memory() { NOT_IN_MEMORY } else { NOT_SAVED }.to_string());
     }
 
     let engine = self.engine.as_ref().map_or_else(EngineStatus::default, |l| {
@@ -1798,7 +1823,7 @@ fn loaded_label(info: Option<&ModelInfo>, name: &str) -> String {
 /// `parakeet-v2 understands English only`, for a model meant for one language.
 fn understands_only(info: &ModelInfo) -> Option<String> {
   let [code] = info.langs else { return None };
-  Some(format!("{} understands {} only", info.name, language_name(code)))
+  Some(t!("{model} understands {lang} only", model = info.name, lang = language_name(code)))
 }
 
 #[cfg(test)]
@@ -2707,7 +2732,7 @@ mod tests {
 
     let export = Transferring::begin(s.home.path());
     s.handle.request(Request::DeleteSaved).unwrap();
-    let waits = |u: &Update| u.status.warnings.iter().any(|w| w == DELETE_WAITS);
+    let waits = |u: &Update| u.status.warnings.iter().any(|w| w == DELETE_WAITS.as_str());
     let waiting = s.update_where("the delete waits", waits);
     assert_eq!((entry_ids(s.home.path()), s.recordings()), (vec![saved], 1), "not under it");
     drop(export);
@@ -2736,7 +2761,7 @@ mod tests {
 
     s.record(0.3);
     s.handle.request(Request::DeleteSaved).unwrap();
-    let waits = |u: &Update| u.status.warnings.iter().any(|w| w == DELETE_WAITS);
+    let waits = |u: &Update| u.status.warnings.iter().any(|w| w == DELETE_WAITS.as_str());
     s.update_where("the delete waits", waits);
     thread::sleep(Duration::from_millis(300));
     s.press();
@@ -2805,13 +2830,13 @@ mod tests {
     fs::write(&db, "not a database, not even close to one, long enough to be read").unwrap();
     s.handle.edit_settings(|s| s.history_retention = Retention::Unlimited);
     let failed =
-      s.update_where("the warning", |u| u.status.warnings.iter().any(|w| w == NOT_SAVED));
+      s.update_where("the warning", |u| u.status.warnings.iter().any(|w| w == NOT_SAVED.as_str()));
     assert!(failed.status.in_memory);
 
     fs::remove_file(&db).unwrap();
     s.handle.edit_settings(|s| s.history_retention = Retention::Count(100));
     let saved = s.update_where("saved", |u| !u.status.in_memory);
-    assert!(!saved.status.warnings.iter().any(|w| w == NOT_SAVED));
+    assert!(!saved.status.warnings.iter().any(|w| w == NOT_SAVED.as_str()));
   }
 
   #[test]
@@ -2842,7 +2867,7 @@ mod tests {
     let status = s.finished(1);
     let system = menu::System { accessibility: true, ..menu::System::default() };
     let shown = menu::warnings(&system, "f5", &status);
-    let text = menu::SOFTWARE_GPU.to_owned();
+    let text = menu::SOFTWARE_GPU.to_string();
     assert_eq!(shown, [menu::Warning { id: menu::Warn::Status, text, action: false }]);
     let mics = (&[][..], &audio::Microphone::Automatic, false);
     let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;

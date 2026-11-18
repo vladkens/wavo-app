@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use isolang::Language;
+use nimbo::{Locale, Localized, t};
 use serde::{Deserialize, Serialize};
 
 use crate::audio::Microphone;
@@ -66,6 +67,9 @@ pub struct Settings {
   pub auto_update: bool,
   /// The version Skip This Version passed over: automatic checks don't offer it.
   pub skipped_update: Option<String>,
+  /// The language of Wavo's own texts, a tag of [crate::LANGUAGES] (`ru`); `None` is the
+  /// system's.
+  pub app_language: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -132,6 +136,7 @@ impl Default for Settings {
       hotkey_portal: false,
       auto_update: true,
       skipped_update: None,
+      app_language: None,
     }
   }
 }
@@ -150,9 +155,13 @@ impl Settings {
       // Moved aside, as one that does not parse: the next save must not write over it.
       Err(e) => {
         let bad = path.with_extension("json.bad");
-        let kept = fs::rename(path, &bad)
-          .map_or_else(|_| String::new(), |_| format!(", kept as {}", bad.display()));
-        return (Self::default(), Some(format!("{}: {e}; using defaults{kept}", path.display())));
+        let moved = fs::rename(path, &bad);
+        let (path, kept) = (path.display(), bad.display());
+        let warning = match moved {
+          Ok(()) => t!("{path}: {e}; using the defaults, the file kept as {kept}", path, e, kept),
+          Err(_) => t!("{path}: {e}; using the defaults", path, e),
+        };
+        return (Self::default(), Some(warning));
       }
     };
 
@@ -161,8 +170,9 @@ impl Settings {
       Err(e) => {
         let bad = path.with_extension("json.bad");
         let _ = fs::write(&bad, &bytes);
+        let (path, kept) = (path.display(), bad.display());
         let warning =
-          format!("{} is invalid ({e}); using defaults, kept as {}", path.display(), bad.display());
+          t!("{path} is invalid ({e}); using the defaults, the file kept as {kept}", path, e, kept);
         (Self::default(), Some(warning))
       }
     }
@@ -214,6 +224,21 @@ impl Settings {
     (model.cloned(), keyboard.map(str::to_owned))
   }
 
+  /// The language of the app's texts: [Settings::app_language], the system's when it is none of
+  /// [crate::LANGUAGES].
+  pub fn locale(&self) -> Locale {
+    let tag = self.app_language.as_deref();
+    let known = crate::LANGUAGES.iter().find(|l| Some(l.0) == tag);
+    known.map_or(Locale::System, |l| Locale::Tag(l.0))
+  }
+
+  /// [Settings::locale] of the file at `path`, read without a word: [Settings::load]'s warning
+  /// and its copy aside are the session's.
+  pub fn locale_at(path: &Path) -> Locale {
+    let settings = fs::read(path).ok().and_then(|b| serde_json::from_slice::<Self>(&b).ok());
+    settings.unwrap_or_default().locale()
+  }
+
   pub fn unload_after(&self) -> Option<Duration> {
     self.unload_after_minutes.map(|m| Duration::from_secs(u64::from(m) * 60))
   }
@@ -221,14 +246,136 @@ impl Settings {
 
 // MARK: Languages
 
-/// A language's English name by the code wavo's models list it under (`ru`: `Russian`): ISO 639-1,
-/// else 639-3, and Whisper's `jw` for Javanese; an unknown code as it is.
+/// A language's name in the app's language by the code wavo's models list it under (`ru`:
+/// `Russian`): ISO 639-1, else 639-3, and Whisper's `jw` for Javanese; a code the table misses by
+/// its English name, an unknown one as it is.
 pub fn language_name(code: &str) -> String {
+  language(code).map_or_else(|| english_name(code), |l| l.as_str().to_owned())
+}
+
+/// A language's English name by its code, as [language_name] takes it: for a search in either.
+pub fn english_name(code: &str) -> String {
+  if let Some(l) = language(code) {
+    return l.key().to_owned();
+  }
+
   let lower = code.to_ascii_lowercase();
-  let lower = if lower == "jw" { "jv" } else { lower.as_str() };
-  let language = Language::from_639_1(lower).or_else(|| Language::from_639_3(lower));
+  let language = Language::from_639_1(&lower).or_else(|| Language::from_639_3(&lower));
   language.map_or_else(|| code.to_owned(), |l| l.to_name().to_owned())
 }
+
+/// The name of the language `code` (any case, `jw` for `jv`) to translate.
+fn language(code: &str) -> Option<Localized> {
+  let lower = code.to_ascii_lowercase();
+  let lower = if lower == "jw" { "jv" } else { lower.as_str() };
+  NAMES.iter().find(|n| n.0 == lower).map(|n| n.1)
+}
+
+/// The names of the languages of wavo's models, in English as isolang names them.
+const NAMES: [(&str, Localized); 101] = [
+  // Translators: a language, as a list of languages names it.
+  ("af", t!("Afrikaans")),
+  ("am", t!("Amharic")),
+  ("ar", t!("Arabic")),
+  ("as", t!("Assamese")),
+  ("az", t!("Azerbaijani")),
+  ("ba", t!("Bashkir")),
+  ("be", t!("Belarusian")),
+  ("bg", t!("Bulgarian")),
+  ("bn", t!("Bengali")),
+  ("bo", t!("Tibetan")),
+  ("br", t!("Breton")),
+  ("bs", t!("Bosnian")),
+  ("ca", t!("Catalan")),
+  ("cs", t!("Czech")),
+  ("cy", t!("Welsh")),
+  ("da", t!("Danish")),
+  ("de", t!("German")),
+  ("el", t!("Modern Greek")),
+  ("en", t!("English")),
+  ("es", t!("Spanish")),
+  ("et", t!("Estonian")),
+  ("eu", t!("Basque")),
+  ("fa", t!("Persian")),
+  ("fi", t!("Finnish")),
+  ("fo", t!("Faroese")),
+  ("fr", t!("French")),
+  ("gl", t!("Galician")),
+  ("gu", t!("Gujarati")),
+  ("ha", t!("Hausa")),
+  ("haw", t!("Hawaiian")),
+  ("he", t!("Hebrew")),
+  ("hi", t!("Hindi")),
+  ("hr", t!("Croatian")),
+  ("ht", t!("Haitian")),
+  ("hu", t!("Hungarian")),
+  ("hy", t!("Armenian")),
+  ("id", t!("Indonesian")),
+  ("is", t!("Icelandic")),
+  ("it", t!("Italian")),
+  ("ja", t!("Japanese")),
+  ("jv", t!("Javanese")),
+  ("ka", t!("Georgian")),
+  ("kk", t!("Kazakh")),
+  ("km", t!("Khmer")),
+  ("kn", t!("Kannada")),
+  ("ko", t!("Korean")),
+  ("ky", t!("Kirghiz")),
+  ("la", t!("Latin")),
+  ("lb", t!("Luxembourgish")),
+  ("ln", t!("Lingala")),
+  ("lo", t!("Lao")),
+  ("lt", t!("Lithuanian")),
+  ("lv", t!("Latvian")),
+  ("mg", t!("Malagasy")),
+  ("mi", t!("Maori")),
+  ("mk", t!("Macedonian")),
+  ("ml", t!("Malayalam")),
+  ("mn", t!("Mongolian")),
+  ("mr", t!("Marathi")),
+  ("ms", t!("Malay")),
+  ("mt", t!("Maltese")),
+  ("my", t!("Burmese")),
+  ("ne", t!("Nepali")),
+  ("nl", t!("Dutch")),
+  ("nn", t!("Norwegian Nynorsk")),
+  ("no", t!("Norwegian")),
+  ("oc", t!("Occitan")),
+  ("pa", t!("Panjabi")),
+  ("pl", t!("Polish")),
+  ("ps", t!("Pushto")),
+  ("pt", t!("Portuguese")),
+  ("ro", t!("Romanian")),
+  ("ru", t!("Russian")),
+  ("sa", t!("Sanskrit")),
+  ("sd", t!("Sindhi")),
+  ("si", t!("Sinhala")),
+  ("sk", t!("Slovak")),
+  ("sl", t!("Slovenian")),
+  ("sn", t!("Shona")),
+  ("so", t!("Somali")),
+  ("sq", t!("Albanian")),
+  ("sr", t!("Serbian")),
+  ("su", t!("Sundanese")),
+  ("sv", t!("Swedish")),
+  ("sw", t!("Swahili")),
+  ("ta", t!("Tamil")),
+  ("te", t!("Telugu")),
+  ("tg", t!("Tajik")),
+  ("th", t!("Thai")),
+  ("tk", t!("Turkmen")),
+  ("tl", t!("Tagalog")),
+  ("tr", t!("Turkish")),
+  ("tt", t!("Tatar")),
+  ("uk", t!("Ukrainian")),
+  ("ur", t!("Urdu")),
+  ("uz", t!("Uzbek")),
+  ("vi", t!("Vietnamese")),
+  ("yi", t!("Yiddish")),
+  ("yo", t!("Yoruba")),
+  ("yue", t!("Yue Chinese")),
+  ("zh", t!("Chinese")),
+];
 
 /// The code wavo's models list a language under, from a language tag's (`ru`): Whisper's `jw` for
 /// Javanese's `jv`.
@@ -322,11 +469,34 @@ mod tests {
     }
   }
 
+  /// The app's language: one of [crate::LANGUAGES] by its tag, else the system's.
+  #[test]
+  fn the_locale_is_the_app_language_set() {
+    let locale = |tag: Option<&str>| {
+      Settings { app_language: tag.map(str::to_owned), ..Settings::default() }.locale()
+    };
+    assert_eq!(locale(None), Locale::System);
+    assert_eq!(locale(Some("ru")), Locale::Tag("ru"));
+    assert_eq!(locale(Some("en")), Locale::Tag("en"));
+    assert_eq!(locale(Some("xx")), Locale::System, "a language the app has no catalog for");
+    let dir = crate::testing::TempDir::new("settings-locale");
+    let path = dir.path().join(FILE);
+    assert_eq!(Settings::locale_at(&path), Locale::System, "no file");
+    fs::write(&path, r#"{"app_language": "ru"}"#).unwrap();
+    assert_eq!(Settings::locale_at(&path), Locale::Tag("ru"));
+  }
+
   #[test]
   fn every_language_of_wavos_models_has_a_name() {
     assert_eq!((language_name("EN"), language_name("jw")), ("English".into(), "Javanese".into()));
     for code in wavo::hub::MODELS.iter().flat_map(|m| m.langs) {
-      assert_ne!(language_name(code), *code, "{code} has no name");
+      assert!(language(code).is_some(), "{code} has no name to translate");
+    }
+
+    // The English names are isolang's, which named them before.
+    for (code, name) in NAMES {
+      let language = Language::from_639_1(code).or_else(|| Language::from_639_3(code));
+      assert_eq!(language.map(|l| l.to_name()), Some(name.key()), "{code}");
     }
 
     // A layout's Javanese is the models' `jw`; the rest as they are.
