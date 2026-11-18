@@ -42,11 +42,12 @@ pub fn dev(version: &str) -> bool {
   version.contains('-')
 }
 
-/// A check's answer as the [Updater] takes it: a missing feed (404) and one whose content or
-/// signature is wrong are nothing newer; another error is its text ([why]).
+/// A check's answer as the [Updater] takes it: a missing feed (404), as before the first release,
+/// is nothing newer; another error is its text ([why]), a feed whose content or signature is wrong
+/// too, so that a broken release shows to the person who checks.
 pub fn found(checked: shipo::Result<Option<Release>>) -> Result<Option<Release>, String> {
   checked.or_else(|e| match e {
-    Error::Http { status: Some(404), .. } | Error::Feed(_) | Error::Signature(_) => Ok(None),
+    Error::Http { status: Some(404), .. } => Ok(None),
     _ => Err(why(&e)),
   })
 }
@@ -461,21 +462,19 @@ mod tests {
     assert!(!dev("v0.1.0") && !dev("1.2.0"));
   }
 
-  /// A missing feed and one whose content or signature is wrong are nothing newer; another error
-  /// shows its text.
+  /// A missing feed is nothing newer; another error shows its text, a bad feed's too.
   #[test]
-  fn a_missing_or_bad_feed_is_nothing_newer() {
+  fn a_missing_feed_is_nothing_newer() {
     let url = FEED.url.to_owned();
     let http =
       |status, message: &str| Error::Http { url: url.clone(), status, message: message.into() };
-    let quiet = [
-      http(Some(404), "HTTP 404"),
-      Error::Feed("no version, or a bad one".into()),
-      Error::Signature("no key of the app verifies it".into()),
+    assert_eq!(found(Err(http(Some(404), "HTTP 404"))), Ok(None));
+    let bad = [
+      (Error::Feed("its version line is repeated".into()), "invalid feed: its version line"),
+      (Error::Signature("no key of the app verifies it".into()), "bad feed signature: no key"),
     ];
-    for e in quiet {
-      let what = e.to_string();
-      assert_eq!(found(Err(e)), Ok(None), "{what}");
+    for (e, want) in bad {
+      assert!(found(Err(e)).is_err_and(|e| e.starts_with(want)), "{want}");
     }
 
     let errors = [
