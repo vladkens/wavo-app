@@ -15,7 +15,7 @@ Goal: more shortcuts besides the main one, each dictating in its own language wi
 
 ## Tasks
 
-- [ ] 1. nimbo: several hotkeys (its plan, `docs/plans/20261123-hotkey-slots.md` there).
+- [x] 1. nimbo: several hotkeys (its plan, `docs/plans/20261123-hotkey-slots.md` there): vladkens/nimbo#90.
 - [x] 2. Settings and session: `Shortcut`, `Settings::route(which, keyboard)`, `Input` with `which`, the machine's starter, the dictation's place, the HUD language. Tests: the route, the machine with two places, a session dictating with a second shortcut (`WAVO_FAKE_MIC`-like fake input) in its model and language.
 - [x] 3. App: the places to nimbo, a menu warning per hotkey that does not work, the recorder's pause for any recorder.
 - [x] 4. Window: More Shortcuts. Tests: add, pick a language (the model follows), record, remove; the model in use; a refused hotkey's warning; shots.
