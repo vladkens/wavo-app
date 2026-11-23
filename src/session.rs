@@ -287,9 +287,17 @@ impl Machine {
   }
 
   /// The `i`th of More Shortcuts (place `1 + i`) is removed: the places after it move down one,
-  /// and a dictation of its own goes on by the Shortcut's, as a place with no shortcut does.
+  /// and a dictation of its own goes on by the Shortcut's, as a place with no shortcut does. A
+  /// recording held by a key that moved or went latches: nimbo arms the key anew, and its release
+  /// may never come; a press stops it.
   fn shortcut_removed(&mut self, i: usize) {
     let gone = 1 + i;
+    if self.hotkey >= gone
+      && let State::Recording { take, hold: Hold::Held(_) } = self.state
+    {
+      (self.state, self.pressed) = (State::Recording { take, hold: Hold::Latched }, None);
+    }
+
     let moved = |which: usize| match which.cmp(&gone) {
       Ordering::Greater => which - 1,
       Ordering::Equal => 0,
@@ -2086,7 +2094,7 @@ mod tests {
 
   /// The place of the last dictation stays its own: a press that was a chord gives it back, and a
   /// removed shortcut moves the places after it down one; a dictation of the removed one's own
-  /// goes on by the Shortcut's.
+  /// goes on by the Shortcut's. A recording held by a key that moved latches.
   #[test]
   fn the_last_dictation_keeps_its_place() {
     let mut d = Drive::new(Activation::HoldOrToggle);
@@ -2102,6 +2110,12 @@ mod tests {
       d.m.shortcut_removed(i);
       assert_eq!(d.m.hotkey, moved, "place {hotkey}, the shortcut {i} removed");
     }
+
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    assert_eq!(d.press(2, 0), Some(StartRecording(1)));
+    d.m.shortcut_removed(0);
+    assert_eq!(d.release(2, 900), None, "the release of the place it had");
+    assert_eq!(d.press(0, 1_000), Some(StopRecording(1)), "a held one latched: a press stops it");
 
     let shortcut =
       |hotkey: &str| settings::Shortcut { hotkey: hotkey.into(), ..Default::default() };
