@@ -78,6 +78,8 @@ The [dev pre-release](https://github.com/vladkens/wavo-app/releases/tag/dev) has
 
 On Wayland the desktop asks once to let Wavo paste (at the first paste, or earlier from the menu's "Allow Paste…") and once for the hotkey (from the menu's "Allow the Hotkey…"). The hotkey needs a desktop that offers global shortcuts: KDE Plasma 6, GNOME 48 and later, Hyprland. Elsewhere, as on GNOME before 48 (Ubuntu 24.04) or Sway, add a shortcut in the desktop's keyboard settings that runs `/path/to/Wavo-<version>-linux-<arch>.AppImage toggle` (with the .deb, `wavo-app toggle`): one press starts a dictation, the next stops it.
 
+GNOME before 43 (Ubuntu 22.04) asks to let Wavo paste at each start of Wavo: turn on "Allow remote interaction" in its dialog, then Share. A terminal there gets Ctrl+V, not Ctrl+Shift+V: paste into it by hand.
+
 Wavo's icon goes in the tray, which GNOME needs the AppIndicator extension for (Ubuntu ships it); KDE, Xfce, Cinnamon and MATE have a tray of their own.
 
 The GPU needs a Vulkan driver (`mesa-vulkan-drivers` on Debian and Ubuntu); without one Wavo runs on the CPU, much slower.
