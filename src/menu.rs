@@ -132,8 +132,9 @@ pub fn icon(status: &Status, warnings: &[Warning]) -> Icon {
 #[derive(Debug, Clone, Default)]
 pub struct System {
   pub accessibility: bool,
-  /// The hotkey does not parse, or the OS refused it.
-  pub hotkey_error: Option<String>,
+  /// Each hotkey that does not work, as stored, and why: it does not parse, the app or the OS
+  /// refused it, the listener failed.
+  pub hotkey_errors: Vec<(String, String)>,
   /// The hotkey waits for the person to let the desktop's portal ask them (Wayland).
   pub hotkey_portal: bool,
   /// The paste waits for the person to let the desktop's RemoteDesktop portal ask them (Wayland).
@@ -152,14 +153,14 @@ pub struct Warning {
   pub action: bool,
 }
 
-pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> {
+pub fn warnings(system: &System, status: &Status) -> Vec<Warning> {
   let mut list = Vec::new();
   let mut add = |id, text: String, action| list.push(Warning { id, text, action });
   if !system.accessibility {
     add(Warn::Accessibility, t!("Allow Accessibility…").to_string(), true);
   }
 
-  if let Some(e) = &system.hotkey_error {
+  for (hotkey, e) in &system.hotkey_errors {
     // As the platform names its keys (Ctrl+Alt+K, not the stored ctrl+option+k); a click opens
     // General, where it changes.
     let label = Hotkey::parse(hotkey).map_or_else(|_| hotkey.to_owned(), |h| h.label());
@@ -437,10 +438,13 @@ mod tests {
   fn warnings_open_what_fixes_them_and_turn_the_icon() {
     let mut s = Status::default();
     let fine = System { accessibility: true, ..System::default() };
-    assert_eq!((warnings(&fine, "f5", &s), icon(&s, &[])), (vec![], Icon::Idle));
+    assert_eq!((warnings(&fine, &s), icon(&s, &[])), (vec![], Icon::Idle));
 
     let system = System {
-      hotkey_error: Some("taken".into()),
+      hotkey_errors: vec![
+        ("f5".into(), "taken".into()),
+        ("ctrl+option+space".into(), "the app has this hotkey already".into()),
+      ],
       hotkey_portal: true,
       paste_portal: true,
       no_microphone: true,
@@ -450,10 +454,11 @@ mod tests {
     };
     s.no_model = Some(NoModel::NoneDownloaded);
     s.warnings = vec!["no sound from USB Mic".into()];
-    let list = warnings(&system, "f5", &s);
+    let list = warnings(&system, &s);
     let ids: Vec<_> = list.iter().map(|w| (w.id, w.action)).collect();
     let expected = [
       (Warn::Accessibility, true),
+      (Warn::Hotkey, true),
       (Warn::Hotkey, true),
       (Warn::HotkeyPortal, true),
       (Warn::PastePortal, true),
@@ -464,7 +469,13 @@ mod tests {
       (Warn::Status, false),
     ];
     assert_eq!(ids, expected);
-    assert_eq!(list[8].text, "No sound from USB Mic");
+    let label = Hotkey::parse("ctrl+option+space").unwrap().label();
+    assert_eq!(list[1].text, "The hotkey “F5” does not work: taken");
+    assert_eq!(
+      list[2].text,
+      format!("The hotkey “{label}” does not work: the app has this hotkey already")
+    );
+    assert_eq!(list[9].text, "No sound from USB Mic");
     assert_eq!(icon(&s, &list), Icon::Warning);
     s.state = Phase::Recording;
     assert_eq!(icon(&s, &list), Icon::Recording, "the phase first");
@@ -490,11 +501,11 @@ mod tests {
       false => assert!(label.starts_with("Wavo v") && label.contains("⌥Space"), "{label}"),
     }
     assert_eq!(
-      (items[1].label(), items[8].label()),
+      (items[1].label(), items[9].label()),
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")
     );
-    // The hotkey's warning opens General too, its key as the platform names it.
-    assert!(items[1].is_enabled() && items[2].is_enabled());
+    // Each hotkey's warning opens General too, its key as the platform names it.
+    assert!(items[1].is_enabled() && items[2].is_enabled() && items[3].is_enabled());
     assert!(items[2].label().contains("“F5” does not work"), "{}", items[2].label());
     // One name in the menu and its submenu.
     let (mic, sub) = mic_menu(&items);

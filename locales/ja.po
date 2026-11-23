@@ -5,7 +5,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Wavo\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-18 06:40+0200\n"
+"POT-Creation-Date: 2026-11-23 22:13+0200\n"
 "PO-Revision-Date: 2026-11-18 06:00+0200\n"
 "Last-Translator: vladkens\n"
 "Language-Team: Japanese\n"
@@ -15,11 +15,11 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 
-#: src/app.rs:594
+#: src/app.rs:603
 msgid "allow the microphone to record"
 msgstr "録音するにはマイクを許可してください"
 
-#: src/app.rs:596
+#: src/app.rs:605
 msgid "allow Accessibility to paste"
 msgstr "ペーストするにはアクセシビリティを許可してください"
 
@@ -200,11 +200,11 @@ msgstr "ペーストできません：{why}"
 msgid "copy failed"
 msgstr "コピーに失敗"
 
-#: src/hud.rs:197 src/session.rs:1610
+#: src/hud.rs:197 src/session.rs:1644
 msgid "nothing recognized"
 msgstr "何も認識されませんでした"
 
-#: src/hud.rs:199 src/session.rs:370
+#: src/hud.rs:199 src/session.rs:394
 #, rust-format
 msgid "{model} could not be loaded: {error}"
 msgstr "{model}を読み込めませんでした：{error}"
@@ -227,12 +227,12 @@ msgstr "失敗"
 msgid "download a model"
 msgstr "モデルをダウンロードしてください"
 
-#: src/hud.rs:250 src/session.rs:1156
+#: src/hud.rs:250 src/session.rs:1190
 #, rust-format
 msgid "could not start recording: {e}"
 msgstr "録音を開始できませんでした：{e}"
 
-#: src/hud.rs:250 src/session.rs:1298
+#: src/hud.rs:250 src/session.rs:1332
 #, rust-format
 msgid "the recording failed: {e}"
 msgstr "録音に失敗しました：{e}"
@@ -241,7 +241,7 @@ msgstr "録音に失敗しました：{e}"
 msgid "no microphone access"
 msgstr "マイクへのアクセス権がありません"
 
-#: src/hud.rs:261 src/session.rs:367
+#: src/hud.rs:261 src/session.rs:391
 msgid "no model is downloaded"
 msgstr "モデルがダウンロードされていません"
 
@@ -301,155 +301,155 @@ msgstr "{name} — 文字起こし中"
 msgid "{name} — needs attention"
 msgstr "{name} — 要確認"
 
-#: src/menu.rs:159
+#: src/menu.rs:160
 msgid "Allow Accessibility…"
 msgstr "アクセシビリティを許可…"
 
-#: src/menu.rs:166
+#: src/menu.rs:167
 #, rust-format
 msgid "The hotkey “{label}” does not work: {e}"
 msgstr "ショートカット「{label}」が機能しません：{e}"
 
-#: src/menu.rs:170
+#: src/menu.rs:171
 msgid "Allow the Hotkey…"
 msgstr "ショートカットを許可…"
 
-#: src/menu.rs:174 src/menu.rs:182
+#: src/menu.rs:175 src/menu.rs:183
 msgid "Allow Paste…"
 msgstr "ペーストを許可…"
 
-#: src/menu.rs:178
+#: src/menu.rs:179
 msgid "Allow Microphone…"
 msgstr "マイクを許可…"
 
-#: src/menu.rs:186
+#: src/menu.rs:187
 msgid "Secure Input is on…"
 msgstr "セキュア入力がオンです…"
 
-#: src/menu.rs:191
+#: src/menu.rs:192
 msgid "Download a Speech Model…"
 msgstr "音声認識モデルをダウンロード…"
 
-#: src/menu.rs:193
+#: src/menu.rs:194
 #, rust-format
 msgid "{model} is not on disk…"
 msgstr "{model}がディスクにありません…"
 
-#: src/menu.rs:195
+#: src/menu.rs:196
 #, rust-format
 msgid "{model} does not load…"
 msgstr "{model}を読み込めません…"
 
-#: src/menu.rs:201
+#: src/menu.rs:202
 msgid "unknown error"
 msgstr "不明なエラー"
 
-#: src/menu.rs:202
+#: src/menu.rs:203
 #, rust-format
 msgid "The last dictation failed: {e}"
 msgstr "前回の音声入力に失敗しました：{e}"
 
-#: src/menu.rs:203
+#: src/menu.rs:204
 #, rust-format
 msgid "Error: {e}"
 msgstr "エラー：{e}"
 
-#: src/menu.rs:270
+#: src/menu.rs:271
 msgid "Copy Last Dictation"
 msgstr "最後の音声入力をコピー"
 
-#: src/menu.rs:271
+#: src/menu.rs:272
 msgid "Recent"
 msgstr "最近"
 
-#: src/menu.rs:281
+#: src/menu.rs:282
 msgid "Unload Model"
 msgstr "モデルを解放"
 
-#: src/menu.rs:283
+#: src/menu.rs:284
 msgid "History…"
 msgstr "履歴…"
 
-#: src/menu.rs:286
+#: src/menu.rs:287
 msgid "Settings…"
 msgstr "設定…"
 
-#: src/menu.rs:289
+#: src/menu.rs:290
 #, rust-format
 msgid "Quit {name}"
 msgstr "{name}を終了"
 
-#: src/menu.rs:297
+#: src/menu.rs:298
 #, rust-format
 msgid "Update Available: {version}…"
 msgstr "アップデートあり：{version}…"
 
-#: src/menu.rs:298
+#: src/menu.rs:299
 #, rust-format
 msgid "Downloading Update: {done}%"
 msgstr "アップデートをダウンロード中：{done}%"
 
-#: src/menu.rs:299
+#: src/menu.rs:300
 msgid "Restarting to Update…"
 msgstr "アップデートのため再起動中…"
 
-#: src/menu.rs:300
+#: src/menu.rs:301
 msgid "Update Failed…"
 msgstr "アップデートに失敗しました…"
 
-#: src/menu.rs:311
+#: src/menu.rs:312
 msgid "Checking for Updates…"
 msgstr "アップデートを確認中…"
 
-#: src/menu.rs:312 src/window.rs:3230
+#: src/menu.rs:313 src/window.rs:3396
 msgid "Check for Updates…"
 msgstr "アップデートを確認…"
 
-#: src/menu.rs:340 src/window.rs:1463
+#: src/menu.rs:341 src/window.rs:1628
 msgid "System Default"
 msgstr "システムのデフォルト"
 
-#: src/menu.rs:341
+#: src/menu.rs:342
 msgid "No Microphone"
 msgstr "マイクなし"
 
-#: src/menu.rs:343
+#: src/menu.rs:344
 #, rust-format
 msgid "{name} isn’t connected"
 msgstr "{name}が接続されていません"
 
 #. Translators: a model in a list of models.
-#: src/menu.rs:355 src/window.rs:852 src/window.rs:1041
+#: src/menu.rs:356 src/window.rs:1006 src/window.rs:1206
 #, rust-format
 msgid "{name} (not on disk)"
 msgstr "{name}（ディスクにありません）"
 
-#: src/menu.rs:360
+#: src/menu.rs:361
 msgid "No Model"
 msgstr "モデルなし"
 
-#: src/menu.rs:367
+#: src/menu.rs:368
 msgid "No Models Downloaded"
 msgstr "ダウンロード済みのモデルなし"
 
-#: src/menu.rs:370
+#: src/menu.rs:371
 msgid "All Models…"
 msgstr "すべてのモデル…"
 
-#: src/menu.rs:378
+#: src/menu.rs:379
 msgid "Recording…"
 msgstr "録音中…"
 
-#: src/menu.rs:379 src/menu.rs:381
+#: src/menu.rs:380 src/menu.rs:382
 msgid "Loading the model…"
 msgstr "モデルを読み込み中…"
 
-#: src/menu.rs:380 src/window.rs:2680
+#: src/menu.rs:381 src/window.rs:2846
 msgid "Transcribing…"
 msgstr "文字起こし中…"
 
 #. Translators: the app's state in the menu's header, after an error.
-#: src/menu.rs:383
+#: src/menu.rs:384
 msgid "Error"
 msgstr "エラー"
 
@@ -471,63 +471,63 @@ msgstr "保存された履歴は、音声入力・書き出し・読み込みが
 msgid "couldn’t open the saved history: dictations are kept until Wavo quits"
 msgstr "保存された履歴を開けませんでした：音声入力はWavoの終了まで保持されます"
 
-#: src/session.rs:368
+#: src/session.rs:392
 #, rust-format
 msgid "{model} is not on disk"
 msgstr "{model}がディスクにありません"
 
-#: src/session.rs:946
+#: src/session.rs:957
 #, rust-format
 msgid "could not save the settings: {e}"
 msgstr "設定を保存できませんでした：{e}"
 
-#: src/session.rs:1008
+#: src/session.rs:1042
 #, rust-format
 msgid "{chosen} is not on disk: {model} transcribes instead"
 msgstr "{chosen}がディスクにないため、{model}で文字起こしします"
 
-#: src/session.rs:1136
+#: src/session.rs:1170
 msgid "the model"
 msgstr "モデル"
 
-#: src/session.rs:1611
+#: src/session.rs:1645
 #, rust-format
 msgid "nothing recognized: {note}"
 msgstr "何も認識されませんでした：{note}"
 
-#: src/session.rs:1616
+#: src/session.rs:1650
 #, rust-format
 msgid "entry {entry} could not be transcribed again: {why}"
 msgstr "項目{entry}を再度文字起こしできませんでした：{why}"
 
-#: src/session.rs:1669
+#: src/session.rs:1703
 #, rust-format
 msgid "could not open the history: {e}"
 msgstr "履歴を開けませんでした：{e}"
 
-#: src/session.rs:1691
+#: src/session.rs:1725
 #, rust-format
 msgid "could not delete the saved history: {e}"
 msgstr "保存された履歴を削除できませんでした：{e}"
 
-#: src/session.rs:1826
+#: src/session.rs:1863
 #, rust-format
 msgid "{model} understands {lang} only"
 msgstr "{model}は{lang}のみ対応"
 
-#: src/settings.rs:161
+#: src/settings.rs:183
 #, rust-format
 msgid "{path}: {e}; using the defaults, the file kept as {kept}"
 msgstr ""
 "{path}：{e}。デフォルト設定を使用します。ファイルは{kept}として保存されていま"
 "す"
 
-#: src/settings.rs:162
+#: src/settings.rs:184
 #, rust-format
 msgid "{path}: {e}; using the defaults"
 msgstr "{path}：{e}。デフォルト設定を使用します"
 
-#: src/settings.rs:175
+#: src/settings.rs:197
 #, rust-format
 msgid "{path} is invalid ({e}); using the defaults, the file kept as {kept}"
 msgstr ""
@@ -535,407 +535,407 @@ msgstr ""
 "存されています"
 
 #. Translators: a language, as a list of languages names it.
-#: src/settings.rs:277
+#: src/settings.rs:316
 msgid "Afrikaans"
 msgstr "アフリカーンス語"
 
-#: src/settings.rs:278
+#: src/settings.rs:317
 msgid "Amharic"
 msgstr "アムハラ語"
 
-#: src/settings.rs:279
+#: src/settings.rs:318
 msgid "Arabic"
 msgstr "アラビア語"
 
-#: src/settings.rs:280
+#: src/settings.rs:319
 msgid "Assamese"
 msgstr "アッサム語"
 
-#: src/settings.rs:281
+#: src/settings.rs:320
 msgid "Azerbaijani"
 msgstr "アゼルバイジャン語"
 
-#: src/settings.rs:282
+#: src/settings.rs:321
 msgid "Bashkir"
 msgstr "バシキール語"
 
-#: src/settings.rs:283
+#: src/settings.rs:322
 msgid "Belarusian"
 msgstr "ベラルーシ語"
 
-#: src/settings.rs:284
+#: src/settings.rs:323
 msgid "Bulgarian"
 msgstr "ブルガリア語"
 
-#: src/settings.rs:285
+#: src/settings.rs:324
 msgid "Bengali"
 msgstr "ベンガル語"
 
-#: src/settings.rs:286
+#: src/settings.rs:325
 msgid "Tibetan"
 msgstr "チベット語"
 
-#: src/settings.rs:287
+#: src/settings.rs:326
 msgid "Breton"
 msgstr "ブルトン語"
 
-#: src/settings.rs:288
+#: src/settings.rs:327
 msgid "Bosnian"
 msgstr "ボスニア語"
 
-#: src/settings.rs:289
+#: src/settings.rs:328
 msgid "Catalan"
 msgstr "カタロニア語"
 
-#: src/settings.rs:290
+#: src/settings.rs:329
 msgid "Czech"
 msgstr "チェコ語"
 
-#: src/settings.rs:291
+#: src/settings.rs:330
 msgid "Welsh"
 msgstr "ウェールズ語"
 
-#: src/settings.rs:292
+#: src/settings.rs:331
 msgid "Danish"
 msgstr "デンマーク語"
 
-#: src/settings.rs:293
+#: src/settings.rs:332
 msgid "German"
 msgstr "ドイツ語"
 
-#: src/settings.rs:294
+#: src/settings.rs:333
 msgid "Modern Greek"
 msgstr "ギリシャ語"
 
-#: src/settings.rs:295 src/window.rs:2260
+#: src/settings.rs:334 src/window.rs:2426
 msgid "English"
 msgstr "英語"
 
-#: src/settings.rs:296
+#: src/settings.rs:335
 msgid "Spanish"
 msgstr "スペイン語"
 
-#: src/settings.rs:297
+#: src/settings.rs:336
 msgid "Estonian"
 msgstr "エストニア語"
 
-#: src/settings.rs:298
+#: src/settings.rs:337
 msgid "Basque"
 msgstr "バスク語"
 
-#: src/settings.rs:299
+#: src/settings.rs:338
 msgid "Persian"
 msgstr "ペルシャ語"
 
-#: src/settings.rs:300
+#: src/settings.rs:339
 msgid "Finnish"
 msgstr "フィンランド語"
 
-#: src/settings.rs:301
+#: src/settings.rs:340
 msgid "Faroese"
 msgstr "フェロー語"
 
-#: src/settings.rs:302
+#: src/settings.rs:341
 msgid "French"
 msgstr "フランス語"
 
-#: src/settings.rs:303
+#: src/settings.rs:342
 msgid "Galician"
 msgstr "ガリシア語"
 
-#: src/settings.rs:304
+#: src/settings.rs:343
 msgid "Gujarati"
 msgstr "グジャラート語"
 
-#: src/settings.rs:305
+#: src/settings.rs:344
 msgid "Hausa"
 msgstr "ハウサ語"
 
-#: src/settings.rs:306
+#: src/settings.rs:345
 msgid "Hawaiian"
 msgstr "ハワイ語"
 
-#: src/settings.rs:307 src/window.rs:2261
+#: src/settings.rs:346 src/window.rs:2427
 msgid "Hebrew"
 msgstr "ヘブライ語"
 
-#: src/settings.rs:308
+#: src/settings.rs:347
 msgid "Hindi"
 msgstr "ヒンディー語"
 
-#: src/settings.rs:309
+#: src/settings.rs:348
 msgid "Croatian"
 msgstr "クロアチア語"
 
-#: src/settings.rs:310
+#: src/settings.rs:349
 msgid "Haitian"
 msgstr "ハイチ語"
 
-#: src/settings.rs:311
+#: src/settings.rs:350
 msgid "Hungarian"
 msgstr "ハンガリー語"
 
-#: src/settings.rs:312
+#: src/settings.rs:351
 msgid "Armenian"
 msgstr "アルメニア語"
 
-#: src/settings.rs:313
+#: src/settings.rs:352
 msgid "Indonesian"
 msgstr "インドネシア語"
 
-#: src/settings.rs:314
+#: src/settings.rs:353
 msgid "Icelandic"
 msgstr "アイスランド語"
 
-#: src/settings.rs:315
+#: src/settings.rs:354
 msgid "Italian"
 msgstr "イタリア語"
 
-#: src/settings.rs:316
+#: src/settings.rs:355
 msgid "Japanese"
 msgstr "日本語"
 
-#: src/settings.rs:317
+#: src/settings.rs:356
 msgid "Javanese"
 msgstr "ジャワ語"
 
-#: src/settings.rs:318
+#: src/settings.rs:357
 msgid "Georgian"
 msgstr "ジョージア語"
 
-#: src/settings.rs:319
+#: src/settings.rs:358
 msgid "Kazakh"
 msgstr "カザフ語"
 
-#: src/settings.rs:320
+#: src/settings.rs:359
 msgid "Khmer"
 msgstr "クメール語"
 
-#: src/settings.rs:321
+#: src/settings.rs:360
 msgid "Kannada"
 msgstr "カンナダ語"
 
-#: src/settings.rs:322
+#: src/settings.rs:361
 msgid "Korean"
 msgstr "韓国語"
 
-#: src/settings.rs:323
+#: src/settings.rs:362
 msgid "Kirghiz"
 msgstr "キルギス語"
 
-#: src/settings.rs:324
+#: src/settings.rs:363
 msgid "Latin"
 msgstr "ラテン語"
 
-#: src/settings.rs:325
+#: src/settings.rs:364
 msgid "Luxembourgish"
 msgstr "ルクセンブルク語"
 
-#: src/settings.rs:326
+#: src/settings.rs:365
 msgid "Lingala"
 msgstr "リンガラ語"
 
-#: src/settings.rs:327
+#: src/settings.rs:366
 msgid "Lao"
 msgstr "ラオ語"
 
-#: src/settings.rs:328
+#: src/settings.rs:367
 msgid "Lithuanian"
 msgstr "リトアニア語"
 
-#: src/settings.rs:329
+#: src/settings.rs:368
 msgid "Latvian"
 msgstr "ラトビア語"
 
-#: src/settings.rs:330
+#: src/settings.rs:369
 msgid "Malagasy"
 msgstr "マダガスカル語"
 
-#: src/settings.rs:331
+#: src/settings.rs:370
 msgid "Maori"
 msgstr "マオリ語"
 
-#: src/settings.rs:332
+#: src/settings.rs:371
 msgid "Macedonian"
 msgstr "マケドニア語"
 
-#: src/settings.rs:333
+#: src/settings.rs:372
 msgid "Malayalam"
 msgstr "マラヤーラム語"
 
-#: src/settings.rs:334
+#: src/settings.rs:373
 msgid "Mongolian"
 msgstr "モンゴル語"
 
-#: src/settings.rs:335
+#: src/settings.rs:374
 msgid "Marathi"
 msgstr "マラーティー語"
 
-#: src/settings.rs:336
+#: src/settings.rs:375
 msgid "Malay"
 msgstr "マレー語"
 
-#: src/settings.rs:337
+#: src/settings.rs:376
 msgid "Maltese"
 msgstr "マルタ語"
 
-#: src/settings.rs:338
+#: src/settings.rs:377
 msgid "Burmese"
 msgstr "ミャンマー語"
 
-#: src/settings.rs:339
+#: src/settings.rs:378
 msgid "Nepali"
 msgstr "ネパール語"
 
-#: src/settings.rs:340
+#: src/settings.rs:379
 msgid "Dutch"
 msgstr "オランダ語"
 
-#: src/settings.rs:341
+#: src/settings.rs:380
 msgid "Norwegian Nynorsk"
 msgstr "ニーノシュク"
 
-#: src/settings.rs:342
+#: src/settings.rs:381
 msgid "Norwegian"
 msgstr "ノルウェー語"
 
-#: src/settings.rs:343
+#: src/settings.rs:382
 msgid "Occitan"
 msgstr "オック語"
 
-#: src/settings.rs:344
+#: src/settings.rs:383
 msgid "Panjabi"
 msgstr "パンジャブ語"
 
-#: src/settings.rs:345
+#: src/settings.rs:384
 msgid "Polish"
 msgstr "ポーランド語"
 
-#: src/settings.rs:346
+#: src/settings.rs:385
 msgid "Pushto"
 msgstr "パシュトゥー語"
 
-#: src/settings.rs:347
+#: src/settings.rs:386
 msgid "Portuguese"
 msgstr "ポルトガル語"
 
-#: src/settings.rs:348
+#: src/settings.rs:387
 msgid "Romanian"
 msgstr "ルーマニア語"
 
-#: src/settings.rs:349 src/window.rs:2262
+#: src/settings.rs:388 src/window.rs:2428
 msgid "Russian"
 msgstr "ロシア語"
 
-#: src/settings.rs:350
+#: src/settings.rs:389
 msgid "Sanskrit"
 msgstr "サンスクリット語"
 
-#: src/settings.rs:351
+#: src/settings.rs:390
 msgid "Sindhi"
 msgstr "シンド語"
 
-#: src/settings.rs:352
+#: src/settings.rs:391
 msgid "Sinhala"
 msgstr "シンハラ語"
 
-#: src/settings.rs:353
+#: src/settings.rs:392
 msgid "Slovak"
 msgstr "スロバキア語"
 
-#: src/settings.rs:354
+#: src/settings.rs:393
 msgid "Slovenian"
 msgstr "スロベニア語"
 
-#: src/settings.rs:355
+#: src/settings.rs:394
 msgid "Shona"
 msgstr "ショナ語"
 
-#: src/settings.rs:356
+#: src/settings.rs:395
 msgid "Somali"
 msgstr "ソマリ語"
 
-#: src/settings.rs:357
+#: src/settings.rs:396
 msgid "Albanian"
 msgstr "アルバニア語"
 
-#: src/settings.rs:358
+#: src/settings.rs:397
 msgid "Serbian"
 msgstr "セルビア語"
 
-#: src/settings.rs:359
+#: src/settings.rs:398
 msgid "Sundanese"
 msgstr "スンダ語"
 
-#: src/settings.rs:360
+#: src/settings.rs:399
 msgid "Swedish"
 msgstr "スウェーデン語"
 
-#: src/settings.rs:361
+#: src/settings.rs:400
 msgid "Swahili"
 msgstr "スワヒリ語"
 
-#: src/settings.rs:362
+#: src/settings.rs:401
 msgid "Tamil"
 msgstr "タミル語"
 
-#: src/settings.rs:363
+#: src/settings.rs:402
 msgid "Telugu"
 msgstr "テルグ語"
 
-#: src/settings.rs:364
+#: src/settings.rs:403
 msgid "Tajik"
 msgstr "タジク語"
 
-#: src/settings.rs:365
+#: src/settings.rs:404
 msgid "Thai"
 msgstr "タイ語"
 
-#: src/settings.rs:366
+#: src/settings.rs:405
 msgid "Turkmen"
 msgstr "トルクメン語"
 
-#: src/settings.rs:367
+#: src/settings.rs:406
 msgid "Tagalog"
 msgstr "タガログ語"
 
-#: src/settings.rs:368
+#: src/settings.rs:407
 msgid "Turkish"
 msgstr "トルコ語"
 
-#: src/settings.rs:369
+#: src/settings.rs:408
 msgid "Tatar"
 msgstr "タタール語"
 
-#: src/settings.rs:370
+#: src/settings.rs:409
 msgid "Ukrainian"
 msgstr "ウクライナ語"
 
-#: src/settings.rs:371
+#: src/settings.rs:410
 msgid "Urdu"
 msgstr "ウルドゥー語"
 
-#: src/settings.rs:372
+#: src/settings.rs:411
 msgid "Uzbek"
 msgstr "ウズベク語"
 
-#: src/settings.rs:373
+#: src/settings.rs:412
 msgid "Vietnamese"
 msgstr "ベトナム語"
 
-#: src/settings.rs:374
+#: src/settings.rs:413
 msgid "Yiddish"
 msgstr "イディッシュ語"
 
-#: src/settings.rs:375
+#: src/settings.rs:414
 msgid "Yoruba"
 msgstr "ヨルバ語"
 
-#: src/settings.rs:376
+#: src/settings.rs:415
 msgid "Yue Chinese"
 msgstr "広東語"
 
-#: src/settings.rs:377
+#: src/settings.rs:416
 msgid "Chinese"
 msgstr "中国語"
 
@@ -961,138 +961,138 @@ msgstr ""
 msgid "{why}: no history in it"
 msgstr "{why}：履歴が含まれていません"
 
-#: src/updater.rs:285
+#: src/updater.rs:286
 msgid "Software Update"
 msgstr "ソフトウェアアップデート"
 
-#: src/updater.rs:315
+#: src/updater.rs:316
 msgid "Checking for updates…"
 msgstr "アップデートを確認中…"
 
-#: src/updater.rs:317
+#: src/updater.rs:318
 #, rust-format
 msgid "Wavo {current} is the newest version."
 msgstr "Wavo {current}は最新バージョンです。"
 
-#: src/updater.rs:317
+#: src/updater.rs:318
 msgid "You’re up to date!"
 msgstr "最新の状態です"
 
-#: src/updater.rs:320
+#: src/updater.rs:321
 msgid "A new version of Wavo is available!"
 msgstr "Wavoの新しいバージョンがあります"
 
-#: src/updater.rs:322
+#: src/updater.rs:323
 #, rust-format
 msgid "Wavo {new} is out, you have {current}. Install it now?"
 msgstr ""
 "新しいバージョン{new}が公開されました。現在は {current} です。今すぐインス"
 "トールしますか？"
 
-#: src/updater.rs:327
+#: src/updater.rs:328
 msgid "Downloading the update…"
 msgstr "アップデートをダウンロード中…"
 
-#: src/updater.rs:329
+#: src/updater.rs:330
 msgid "Installing the update…"
 msgstr "アップデートをインストール中…"
 
-#: src/updater.rs:330
+#: src/updater.rs:331
 #, rust-format
 msgid "Wavo restarts as {new} once it can."
 msgstr "準備ができしだい、Wavoは{new}として再起動します。"
 
-#: src/updater.rs:333
+#: src/updater.rs:334
 msgid "The update failed"
 msgstr "アップデートに失敗しました"
 
-#: src/updater.rs:335
+#: src/updater.rs:336
 msgid "Couldn’t check for updates"
 msgstr "アップデートを確認できませんでした"
 
-#: src/updater.rs:354 src/window.rs:1544
+#: src/updater.rs:355 src/window.rs:1709
 #, rust-format
 msgid "{size} MB"
 msgstr "{size} MB"
 
-#: src/updater.rs:356
+#: src/updater.rs:357
 #, rust-format
 msgid "{done} of {total}"
 msgstr "{done}/{total}"
 
-#: src/updater.rs:365
+#: src/updater.rs:366
 msgid "Release notes"
 msgstr "リリースノート"
 
-#: src/updater.rs:392
+#: src/updater.rs:393
 msgid "Skip This Version"
 msgstr "このバージョンをスキップ"
 
-#: src/updater.rs:394
+#: src/updater.rs:395
 msgid "Remind Me Later"
 msgstr "後で通知"
 
-#: src/updater.rs:395
+#: src/updater.rs:396
 msgid "Install Update"
 msgstr "インストール"
 
-#: src/updater.rs:399
+#: src/updater.rs:400
 msgid "Close"
 msgstr "閉じる"
 
-#: src/updater.rs:400 src/window.rs:2099 src/window.rs:2147
+#: src/updater.rs:401 src/window.rs:2265 src/window.rs:2313
 msgid "Retry"
 msgstr "再試行"
 
-#: src/updater.rs:404
+#: src/updater.rs:405
 msgid "OK"
 msgstr "OK"
 
-#: src/updater.rs:408 src/window.rs:2110
+#: src/updater.rs:409 src/window.rs:2276
 msgid "Cancel"
 msgstr "キャンセル"
 
-#: src/updater.rs:412
+#: src/updater.rs:413
 msgid "Hide"
 msgstr "隠す"
 
-#: src/window.rs:71
+#: src/window.rs:72
 msgid "General"
 msgstr "一般"
 
-#: src/window.rs:72 src/window.rs:1363
+#: src/window.rs:73 src/window.rs:1528
 msgid "Models"
 msgstr "モデル"
 
-#: src/window.rs:73 src/window.rs:1246
+#: src/window.rs:74 src/window.rs:1411
 msgid "History"
 msgstr "履歴"
 
-#: src/window.rs:74
+#: src/window.rs:75
 msgid "Advanced"
 msgstr "詳細"
 
-#: src/window.rs:75
+#: src/window.rs:76
 msgid "About"
 msgstr "情報"
 
-#: src/window.rs:346
+#: src/window.rs:357
 #, rust-format
 msgid "{chosen} is not on disk: {model} transcribes instead."
 msgstr "{chosen}がディスクにないため、{model}で文字起こしします。"
 
-#: src/window.rs:349
+#: src/window.rs:360
 #, rust-format
 msgid "{chosen} is not on disk: download it again in Models, or pick another."
 msgstr ""
 "{chosen}がディスクにありません。「モデル」で再ダウンロードするか、別のモデル"
 "を選んでください。"
 
-#: src/window.rs:364
+#: src/window.rs:375
 msgid "Delete"
 msgstr "削除"
 
-#: src/window.rs:585
+#: src/window.rs:616
 msgid ""
 "Set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”, or macOS "
 "acts on it too."
@@ -1100,7 +1100,7 @@ msgstr ""
 "システム設定 › キーボード › 「🌐キーを押して」を「何もしない」に設定してくだ"
 "さい。そうしないとmacOSも反応します。"
 
-#: src/window.rs:588
+#: src/window.rs:619
 msgid ""
 "Secure Input is on (a password field, or a terminal’s Secure Keyboard "
 "Entry): the shortcut works through a backup path, and Esc may not cancel."
@@ -1109,7 +1109,7 @@ msgstr ""
 "キーボード入力」）：ショートカットは予備の方法で動作し、Escでキャンセルできな"
 "い場合があります。"
 
-#: src/window.rs:592
+#: src/window.rs:623
 msgid ""
 "How the hotkey records: while you hold it, from one press to the next, or "
 "both (a short tap latches the recording on)."
@@ -1117,7 +1117,7 @@ msgstr ""
 "ショートカットでの録音方法：押している間だけ、押すたびに開始・停止、またはそ"
 "の両方（短く押すと録音が続きます）。"
 
-#: src/window.rs:601
+#: src/window.rs:632
 msgid ""
 "Automatic takes a USB microphone first, then the built-in one while the lid "
 "is open, then a wired one, and a Bluetooth headset only when there is no "
@@ -1129,7 +1129,7 @@ msgstr ""
 "初の言葉が欠けるため）。「システムのデフォルト」はシステムが選んだマイクを使"
 "います。"
 
-#: src/window.rs:608
+#: src/window.rs:639
 msgid ""
 "Automatic takes a USB microphone first, then the computer’s own or a wired "
 "one, and a Bluetooth headset only when there is no other: it records at call "
@@ -1141,7 +1141,7 @@ msgstr ""
 "言葉が欠けるため）。「システムのデフォルト」はシステムが選んだマイクを使いま"
 "す。"
 
-#: src/window.rs:615
+#: src/window.rs:646
 msgid ""
 "Automatic and System Default both use the system’s input. Linux doesn’t tell "
 "Wavo how a microphone is attached, so neither skips a Bluetooth headset."
@@ -1150,7 +1150,7 @@ msgstr ""
 "はマイクの接続方法がWavoに伝わらないため、どちらもBluetoothヘッドセットを除外"
 "しません。"
 
-#: src/window.rs:622
+#: src/window.rs:653
 msgid ""
 "The microphone takes longer and longer to start, so the first words get "
 "lost. Unplug it and plug it back in."
@@ -1158,16 +1158,16 @@ msgstr ""
 "マイクの起動に時間がかかるようになり、最初の言葉が欠けています。いったん取り"
 "外して、接続し直してください。"
 
-#: src/window.rs:627
+#: src/window.rs:658
 msgid "Turn Wavo on in Task Manager › Startup apps."
 msgstr ""
 "タスク マネージャー › スタートアップ アプリでWavoを有効にしてください。"
 
-#: src/window.rs:629
+#: src/window.rs:660
 msgid "Allow Wavo in System Settings › General › Login Items."
 msgstr "システム設定 › 一般 › ログイン項目でWavoを許可してください。"
 
-#: src/window.rs:632
+#: src/window.rs:663
 msgid ""
 "On: the dictated text stays on the clipboard, pasted or not. Off: after a "
 "paste the clipboard gets back what it held; with pasting off, the text is "
@@ -1177,7 +1177,7 @@ msgstr ""
 "に残ります。オフ：ペースト後、クリップボードは元の内容に戻ります。ペーストが"
 "オフの場合、テキストは履歴にのみ残ります。"
 
-#: src/window.rs:636
+#: src/window.rs:667
 msgid ""
 "The model tells the language of each dictation by itself. Short phrases, an "
 "accent or two languages mixed can mislead it: choose the language you speak, "
@@ -1187,7 +1187,7 @@ msgstr ""
 "の混在で判別を誤ることがあります：話す言語を選ぶか、「入力ソース」を選んで使"
 "用中の入力ソースに合わせてください。"
 
-#: src/window.rs:641
+#: src/window.rs:672
 msgid ""
 "With Keyboard layout, each language under Language goes to the model chosen "
 "there. This one takes a language set to it, one no model knows, and a layout "
@@ -1197,7 +1197,7 @@ msgstr ""
 "す。このモデルは、割り当てられた言語、どのモデルも対応していない言語、そのほ"
 "かの言語の入力ソースを担当します。"
 
-#: src/window.rs:648
+#: src/window.rs:679
 msgid ""
 "Each dictation is in the language of the keyboard layout in use when it "
 "ends, with the model chosen for that language below. Switch the layout while "
@@ -1207,7 +1207,7 @@ msgstr ""
 "により文字起こしされます。話している間に入力ソースを切り替えると音声入力全体"
 "がそれに従い、言語はインジケータに表示されます。"
 
-#: src/window.rs:653
+#: src/window.rs:684
 msgid ""
 "Adds a space after each paste. A paste into the same window less than 20 s "
 "after one that ended mid-sentence starts in lower case, unless its first "
@@ -1224,7 +1224,7 @@ msgstr ""
 "数や11から19までの数が数字で書かれます：「семьдесят шестой」は「76-й」に、"
 "「1 000」は「1000」になります。"
 
-#: src/window.rs:661
+#: src/window.rs:692
 msgid ""
 "Wavo can’t put the clipboard back after a paste: allow it in System "
 "Settings › Privacy & Security › Paste from Other Apps."
@@ -1232,7 +1232,7 @@ msgstr ""
 "Wavoはペースト後にクリップボードを元に戻せません：システム設定 › プライバシー"
 "とセキュリティ › ほかのAppからのペーストで許可してください。"
 
-#: src/window.rs:665
+#: src/window.rs:696
 msgid ""
 "Wavo records your voice through it while you hold the shortcut; the "
 "recording stays on this Mac."
@@ -1240,7 +1240,7 @@ msgstr ""
 "ショートカットを押している間、Wavoはマイクで声を録音します。録音はこのMacの外"
 "に出ません。"
 
-#: src/window.rs:669
+#: src/window.rs:700
 msgid ""
 "Wavo hears the shortcut in every app and pastes the text where you type "
 "through it."
@@ -1248,7 +1248,7 @@ msgstr ""
 "これにより、WavoはどのAppでもショートカットを検知し、入力中の場所にテキストを"
 "ペーストできます。"
 
-#: src/window.rs:673
+#: src/window.rs:704
 msgid ""
 "You’re not an administrator on this Mac, so Wavo can’t paste for you. You "
 "can turn on Keep the text on the clipboard and paste with ⌘V."
@@ -1256,7 +1256,7 @@ msgstr ""
 "このMacの管理者ではないため、Wavoはペーストを代行できません。「テキストをク"
 "リップボードに残す」をオンにして、⌘Vでペーストできます。"
 
-#: src/window.rs:677
+#: src/window.rs:708
 msgid ""
 "A single key needs Accessibility, which only an administrator can allow on "
 "this Mac. Use a combination like ⌥Space."
@@ -1264,128 +1264,154 @@ msgstr ""
 "単独のキーにはアクセシビリティが必要ですが、このMacでは管理者しか許可できませ"
 "ん。⌥Spaceのような組み合わせを使ってください。"
 
-#: src/window.rs:686
+#: src/window.rs:717
 msgid "Hold to talk, or tap to start and stop"
 msgstr "押して話す、またはタップで開始・停止"
 
-#: src/window.rs:687
+#: src/window.rs:718
 msgid "Hold to talk"
 msgstr "押して話す"
 
-#: src/window.rs:688
+#: src/window.rs:719
 msgid "Tap to start and stop"
 msgstr "タップで開始・停止"
 
-#: src/window.rs:697
+#: src/window.rs:728
 msgid "Dictation"
 msgstr "音声入力"
 
-#: src/window.rs:710 src/window.rs:804
+#: src/window.rs:741 src/window.rs:840
 msgid "Microphone"
 msgstr "マイク"
 
-#: src/window.rs:735
+#: src/window.rs:761
+#, rust-format
+msgid "The shortcut does not work: {e}"
+msgstr "ショートカットが機能しません：{e}"
+
+#: src/window.rs:769
 msgid "Activation"
 msgstr "起動方法"
 
-#: src/window.rs:742
+#: src/window.rs:776
 msgid "Shortcut"
 msgstr "ショートカット"
 
-#: src/window.rs:746
+#: src/window.rs:782
 msgid "Output"
 msgstr "出力"
 
-#: src/window.rs:748
+#: src/window.rs:784
 msgid "Paste the text into the app you dictate in"
 msgstr "音声入力中のAppにテキストをペースト"
 
-#: src/window.rs:761
+#: src/window.rs:797
 msgid "Keep the text on the clipboard"
 msgstr "テキストをクリップボードに残す"
 
-#: src/window.rs:770
+#: src/window.rs:806
 msgid "Clean up the text"
 msgstr "テキストを整える"
 
-#: src/window.rs:779
+#: src/window.rs:815
 msgid "Startup"
 msgstr "起動"
 
-#: src/window.rs:797
+#: src/window.rs:833
 msgid "Wavo needs two permissions"
 msgstr "Wavoには2つの許可が必要です"
 
-#: src/window.rs:798
+#: src/window.rs:834
 msgid "Wavo needs a permission"
 msgstr "Wavoには許可が必要です"
 
-#: src/window.rs:805
+#: src/window.rs:841
 msgid "Accessibility"
 msgstr "アクセシビリティ"
 
-#: src/window.rs:812
+#: src/window.rs:848
 msgid "Allow"
 msgstr "許可"
 
-#: src/window.rs:814
+#: src/window.rs:850
 msgid "Open Settings"
 msgstr "設定を開く"
 
-#: src/window.rs:839
+#: src/window.rs:873
 msgid "Back to the default shortcut"
 msgstr "デフォルトのショートカットに戻す"
 
-#: src/window.rs:860 src/window.rs:1047
-msgid "Download more…"
-msgstr "さらにダウンロード…"
+#: src/window.rs:891
+msgid "More Shortcuts"
+msgstr "その他のショートカット"
 
-#: src/window.rs:871
+#: src/window.rs:907
+#, rust-format
+msgid "Does not work: {e}"
+msgstr "機能しません：{e}"
+
+#: src/window.rs:927
+msgid "Remove the shortcut"
+msgstr "ショートカットを削除"
+
+#: src/window.rs:935
+msgid "Dictate in another language or with another model"
+msgstr "別の言語やモデルで音声入力"
+
+#: src/window.rs:937
+msgid "Add Shortcut"
+msgstr "ショートカットを追加"
+
+#: src/window.rs:985 src/window.rs:1025
 msgid "Auto-detect"
 msgstr "自動検出"
 
-#: src/window.rs:874
+#: src/window.rs:1014 src/window.rs:1212
+msgid "Download more…"
+msgstr "さらにダウンロード…"
+
+#: src/window.rs:1028
 msgid "Keyboard layout"
 msgstr "入力ソース"
 
-#: src/window.rs:888
+#: src/window.rs:1042
 #, rust-format
 msgid "{lang} (not one the model is meant for)"
 msgstr "{lang}（このモデルの対象外）"
 
-#: src/window.rs:899
+#: src/window.rs:1053
 msgid "Default model"
 msgstr "デフォルトのモデル"
 
-#: src/window.rs:899
+#: src/window.rs:1053
 msgid "Model"
 msgstr "モデル"
 
-#: src/window.rs:907
+#: src/window.rs:1061
 msgid "Download a Model…"
 msgstr "モデルをダウンロード…"
 
-#: src/window.rs:935 src/window.rs:1158
+#: src/window.rs:1089 src/window.rs:1323
 msgid "Language"
 msgstr "言語"
 
-#: src/window.rs:1001
+#: src/window.rs:1158
 #, rust-format
 msgid "{model} knows {lang} only, so every dictation is in {lang}."
 msgstr "{model}は{lang}のみ対応のため、すべての音声入力が{lang}になります。"
 
 #. Translators: no model, as the default model of a keyboard language.
-#: src/window.rs:1031
+#: src/window.rs:1196
 msgid "none"
 msgstr "なし"
 
 #. Translators: a model in a list of models.
-#: src/window.rs:1034
+#: src/window.rs:1199
 #, rust-format
 msgid "{default} (default)"
 msgstr "{default}（デフォルト）"
 
-#: src/window.rs:1055
+#: src/window.rs:1220
 msgid ""
 "After each dictation the HUD shows for a second how long the text took after "
 "the stop."
@@ -1393,7 +1419,7 @@ msgstr ""
 "音声入力のたびに、停止からテキストができるまでの時間をインジケータに1秒間表示"
 "します。"
 
-#: src/window.rs:1059
+#: src/window.rs:1224
 msgid ""
 "The HUD shows the words as you speak, recognized again every half second. "
 "The text pasted is still recognized from the whole recording after the stop. "
@@ -1405,7 +1431,7 @@ msgstr ""
 "リートGPUではデフォルトでオンです（内蔵GPUは話している間ずっと負荷がかかるた"
 "め）。"
 
-#: src/window.rs:1064
+#: src/window.rs:1229
 msgid ""
 "Frees the model's memory after Wavo has been idle this long. The next "
 "dictation loads it again, which takes a moment."
@@ -1413,7 +1439,7 @@ msgstr ""
 "Wavoがこの時間使われないと、モデルのメモリを解放します。次の音声入力で再び読"
 "み込むため、少し時間がかかります。"
 
-#: src/window.rs:1068
+#: src/window.rs:1233
 msgid ""
 "Models marked ANE run on the Neural Engine: as fast as on the GPU at a "
 "fraction of the energy. Each new version of Wavo prepares such a model once, "
@@ -1425,7 +1451,7 @@ msgstr ""
 "グラウンドで一度だけ準備します（10〜30秒）。その間はGPUで動作します。ほかのモ"
 "デルは常にGPUで動作します。"
 
-#: src/window.rs:1073
+#: src/window.rs:1238
 msgid ""
 "A .zip that Wavo exported, here or on another computer: the dictations this "
 "history does not have are added with their recordings; the settings stay as "
@@ -1434,7 +1460,7 @@ msgstr ""
 "このコンピュータまたは別のコンピュータでWavoが書き出した.zip：この履歴にない"
 "音声入力が録音とともに追加されます。設定は変わりません。"
 
-#: src/window.rs:1077
+#: src/window.rs:1242
 msgid ""
 "The history, its recordings and the settings, into a .zip archive: Import "
 "brings it back, here or on another computer."
@@ -1442,11 +1468,11 @@ msgstr ""
 "履歴、その録音、設定を.zipアーカイブに書き出します：「読み込む」で、このコン"
 "ピュータまたは別のコンピュータに戻せます。"
 
-#: src/window.rs:1081
+#: src/window.rs:1246
 msgid "Off while the history is kept until Wavo quits"
 msgstr "履歴をWavoの終了まで保持する設定の間は使えません"
 
-#: src/window.rs:1083
+#: src/window.rs:1248
 msgid ""
 "Deletes every dictation saved on disk and its recording. The ones kept until "
 "Wavo quits stay."
@@ -1454,15 +1480,15 @@ msgstr ""
 "ディスクに保存されたすべての音声入力とその録音を削除します。Wavoの終了まで保"
 "持されているものは残ります。"
 
-#: src/window.rs:1087
+#: src/window.rs:1252
 msgid "No dictations saved"
 msgstr "保存された音声入力はありません"
 
-#: src/window.rs:1089
+#: src/window.rs:1254
 msgid "Deleted once the dictation, export or import ends"
 msgstr "音声入力・書き出し・読み込みが終わると削除されます"
 
-#: src/window.rs:1092
+#: src/window.rs:1257
 msgid ""
 "Wavo looks for a new version at launch and once a day; the menu says when "
 "there is one. Off, it looks only when you choose Check for Updates."
@@ -1470,132 +1496,132 @@ msgstr ""
 "Wavoは起動時と1日1回新しいバージョンを確認し、見つかるとメニューに表示しま"
 "す。オフの場合は「アップデートを確認」を選んだときだけ確認します。"
 
-#: src/window.rs:1095
+#: src/window.rs:1260
 msgid "This copy of Wavo doesn’t update itself."
 msgstr "このWavoは自動でアップデートされません。"
 
-#: src/window.rs:1099
+#: src/window.rs:1264
 msgid "Bottom of the screen"
 msgstr "画面下部"
 
-#: src/window.rs:1100
+#: src/window.rs:1265
 msgid "Top of the screen"
 msgstr "画面上部"
 
 #. Translators: a look of the HUD, its background a gradient.
-#: src/window.rs:1107
+#: src/window.rs:1272
 msgid "Gradient"
 msgstr "グラデーション"
 
 #. Translators: a look of the HUD, its background one colour.
-#: src/window.rs:1109
+#: src/window.rs:1274
 msgid "Plain"
 msgstr "単色"
 
 #. Translators: when to unload the model.
-#: src/window.rs:1116
+#: src/window.rs:1281
 msgid "Never"
 msgstr "しない"
 
-#: src/window.rs:1117
+#: src/window.rs:1282
 msgid "Right after each dictation"
 msgstr "音声入力のたびにすぐ"
 
-#: src/window.rs:1118
+#: src/window.rs:1283
 msgid "After 2 minutes"
 msgstr "2分後"
 
-#: src/window.rs:1119
+#: src/window.rs:1284
 msgid "After 5 minutes"
 msgstr "5分後"
 
-#: src/window.rs:1120
+#: src/window.rs:1285
 msgid "After 10 minutes"
 msgstr "10分後"
 
-#: src/window.rs:1121
+#: src/window.rs:1286
 msgid "After 15 minutes"
 msgstr "15分後"
 
-#: src/window.rs:1122
+#: src/window.rs:1287
 msgid "After 60 minutes"
 msgstr "60分後"
 
-#: src/window.rs:1128
+#: src/window.rs:1293
 msgid "Until Wavo quits"
 msgstr "Wavoの終了まで"
 
 #. Translators: how long to keep the history.
-#: src/window.rs:1134
+#: src/window.rs:1299
 msgid "Forever"
 msgstr "無期限"
 
-#: src/window.rs:1135
+#: src/window.rs:1300
 msgid "The last 100 dictations"
 msgstr "最新の100件"
 
-#: src/window.rs:1136
+#: src/window.rs:1301
 msgid "The last 1,000 dictations"
 msgstr "最新の1,000件"
 
-#: src/window.rs:1137
+#: src/window.rs:1302
 msgid "The last 10,000 dictations"
 msgstr "最新の10,000件"
 
-#: src/window.rs:1138
+#: src/window.rs:1303
 msgid "3 days"
 msgstr "3日間"
 
-#: src/window.rs:1139
+#: src/window.rs:1304
 msgid "2 weeks"
 msgstr "2週間"
 
-#: src/window.rs:1140
+#: src/window.rs:1305
 msgid "3 months"
 msgstr "3か月"
 
 #. Translators: the app's language, the system's.
-#: src/window.rs:1148
+#: src/window.rs:1313
 msgid "System"
 msgstr "システムと同じ"
 
-#: src/window.rs:1156
+#: src/window.rs:1321
 msgid "App"
 msgstr "App"
 
-#: src/window.rs:1170
+#: src/window.rs:1335
 msgid "Unload the model"
 msgstr "モデルを解放"
 
-#: src/window.rs:1183
+#: src/window.rs:1348
 msgid "Use the Neural Engine"
 msgstr "Neural Engineを使用"
 
-#: src/window.rs:1196
+#: src/window.rs:1361
 msgid "Check for updates"
 msgstr "アップデートを確認"
 
-#: src/window.rs:1205
+#: src/window.rs:1370
 msgid "HUD"
 msgstr "インジケータ"
 
-#: src/window.rs:1206
+#: src/window.rs:1371
 msgid "Show the HUD at"
 msgstr "インジケータの位置"
 
-#: src/window.rs:1213
+#: src/window.rs:1378
 msgid "HUD style"
 msgstr "インジケータのスタイル"
 
-#: src/window.rs:1221
+#: src/window.rs:1386
 msgid "Show the text while speaking"
 msgstr "話している間テキストを表示"
 
-#: src/window.rs:1233
+#: src/window.rs:1398
 msgid "Show the transcription time"
 msgstr "文字起こしの時間を表示"
 
-#: src/window.rs:1248
+#: src/window.rs:1413
 #, rust-format
 msgid ""
 "Until Wavo quits: the last {n} dictation stays in memory for History and the "
@@ -1607,69 +1633,69 @@ msgstr[0] ""
 "Wavoの終了まで：最新の{n}件の音声入力を履歴とメニューのためにメモリに保持しま"
 "す（音声は除く）。ディスクには何も保存されません。"
 
-#: src/window.rs:1254
+#: src/window.rs:1419
 msgid "Keep the history"
 msgstr "履歴の保持"
 
-#: src/window.rs:1263 src/window.rs:3122
+#: src/window.rs:1428 src/window.rs:3288
 #, rust-format
 msgid "Show in {app}"
 msgstr "{app}で表示"
 
-#: src/window.rs:1277
+#: src/window.rs:1442
 #, rust-format
 msgid "Exported · {size}"
 msgstr "書き出し済み · {size}"
 
-#: src/window.rs:1278
+#: src/window.rs:1443
 msgid "Copying the history…"
 msgstr "履歴をコピー中…"
 
-#: src/window.rs:1280
+#: src/window.rs:1445
 msgid "Reading the archive…"
 msgstr "アーカイブを読み込み中…"
 
-#: src/window.rs:1304
+#: src/window.rs:1469
 msgid "Delete All…"
 msgstr "すべて削除…"
 
-#: src/window.rs:1304
+#: src/window.rs:1469
 msgid "Export…"
 msgstr "書き出す…"
 
-#: src/window.rs:1304
+#: src/window.rs:1469
 msgid "Import…"
 msgstr "読み込む…"
 
-#: src/window.rs:1308
+#: src/window.rs:1473
 msgid "Saved history"
 msgstr "保存された履歴"
 
 #. Translators: the title of the save panel of Export….
-#: src/window.rs:1319
+#: src/window.rs:1484
 msgid "Export"
 msgstr "書き出す"
 
 #. Translators: the title of the open panel of Import….
-#: src/window.rs:1326
+#: src/window.rs:1491
 msgid "Import"
 msgstr "読み込む"
 
-#: src/window.rs:1334
+#: src/window.rs:1499
 msgid "Delete 1 dictation and its recording?"
 msgstr "1件の音声入力とその録音を削除しますか？"
 
-#: src/window.rs:1336
+#: src/window.rs:1501
 #, rust-format
 msgid "Delete all {count} dictations and their recordings?"
 msgid_plural "Delete all {count} dictations and their recordings?"
 msgstr[0] "{count}件の音声入力とその録音をすべて削除しますか？"
 
-#: src/window.rs:1342
+#: src/window.rs:1507
 msgid "This can’t be undone."
 msgstr "この操作は取り消せません。"
 
-#: src/window.rs:1353
+#: src/window.rs:1518
 #, rust-format
 msgid ""
 "Models: the downloaded models, in the Hugging Face cache, which other apps "
@@ -1690,258 +1716,258 @@ msgstr ""
 "す。履歴から削除した音声入力は、録音も一緒に削除されます。\n"
 "{recordings}"
 
-#: src/window.rs:1363
+#: src/window.rs:1528
 msgid "Recordings"
 msgstr "録音"
 
-#: src/window.rs:1399
+#: src/window.rs:1564
 msgid "Launch at login"
 msgstr "ログイン時に開く"
 
-#: src/window.rs:1411
+#: src/window.rs:1576
 msgid "Could not delete the dictations"
 msgstr "音声入力を削除できませんでした"
 
-#: src/window.rs:1412
+#: src/window.rs:1577
 msgid "Could not delete the dictation"
 msgstr "音声入力を削除できませんでした"
 
-#: src/window.rs:1413
+#: src/window.rs:1578
 msgid "Could not transcribe it again"
 msgstr "再度文字起こしできませんでした"
 
-#: src/window.rs:1414
+#: src/window.rs:1579
 msgid "Could not put the previous text back"
 msgstr "以前のテキストに戻せませんでした"
 
-#: src/window.rs:1415
+#: src/window.rs:1580
 msgid "Could not delete the history"
 msgstr "履歴を削除できませんでした"
 
-#: src/window.rs:1432
+#: src/window.rs:1597
 #, rust-format
 msgid "Couldn’t turn it on: {e}"
 msgstr "オンにできませんでした：{e}"
 
-#: src/window.rs:1433
+#: src/window.rs:1598
 #, rust-format
 msgid "Couldn’t turn it off: {e}"
 msgstr "オフにできませんでした：{e}"
 
-#: src/window.rs:1455 src/window.rs:1457
+#: src/window.rs:1620 src/window.rs:1622
 #, rust-format
 msgid "Automatic ({device})"
 msgstr "自動（{device}）"
 
-#: src/window.rs:1458
+#: src/window.rs:1623
 msgid "Automatic"
 msgstr "自動"
 
-#: src/window.rs:1459
+#: src/window.rs:1624
 msgid "Automatic (none: the lid is closed)"
 msgstr "自動（なし：蓋が閉じています）"
 
-#: src/window.rs:1462
+#: src/window.rs:1627
 #, rust-format
 msgid "System Default ({device})"
 msgstr "システムのデフォルト（{device}）"
 
-#: src/window.rs:1480
+#: src/window.rs:1645
 #, rust-format
 msgid "{device} (not connected)"
 msgstr "{device}（未接続）"
 
-#: src/window.rs:1502
+#: src/window.rs:1667
 #, rust-format
 msgid "{device} (the lid is closed)"
 msgstr "{device}（蓋が閉じています）"
 
-#: src/window.rs:1517
+#: src/window.rs:1682
 #, rust-format
 msgid "{name} isn’t connected: Wavo records with {other}"
 msgstr "{name}が接続されていません：Wavoは{other}で録音します"
 
-#: src/window.rs:1519
+#: src/window.rs:1684
 #, rust-format
 msgid "{name} isn’t connected: Wavo records with the system’s input"
 msgstr "{name}が接続されていません：Wavoはシステムの入力で録音します"
 
-#: src/window.rs:1520
+#: src/window.rs:1685
 #, rust-format
 msgid "{name} isn’t connected, and there is no other microphone"
 msgstr "{name}が接続されておらず、ほかのマイクもありません"
 
-#: src/window.rs:1533
+#: src/window.rs:1698
 msgid "Only a Bluetooth mic: the sound is worse"
 msgstr "Bluetoothマイクのみ：音質が下がります"
 
-#: src/window.rs:1543
+#: src/window.rs:1708
 #, rust-format
 msgid "{size} GB"
 msgstr "{size} GB"
 
-#: src/window.rs:1545
+#: src/window.rs:1710
 #, rust-format
 msgid "{size} KB"
 msgstr "{size} KB"
 
 #. Translators: what goes between the thousands of a number: 86,286 (a narrow space in some).
-#: src/window.rs:1567
+#: src/window.rs:1733
 msgid ","
 msgstr ","
 
-#: src/window.rs:1587
+#: src/window.rs:1753
 #, rust-format
 msgid "{done} of {total} GB"
 msgstr "{done}/{total} GB"
 
-#: src/window.rs:1591
+#: src/window.rs:1757
 #, rust-format
 msgid "{done} of {total} MB"
 msgstr "{done}/{total} MB"
 
-#: src/window.rs:1645
+#: src/window.rs:1811
 msgid "All languages"
 msgstr "すべての言語"
 
-#: src/window.rs:1733
+#: src/window.rs:1899
 #, rust-format
 msgid "WER {wer}%"
 msgstr "WER {wer}%"
 
-#: src/window.rs:1743
+#: src/window.rs:1909
 msgid "Errors per 100 characters"
 msgstr "100文字あたりの誤り"
 
-#: src/window.rs:1744
+#: src/window.rs:1910
 msgid "Errors per 100 words"
 msgstr "100単語あたりの誤り"
 
-#: src/window.rs:1761
+#: src/window.rs:1927
 msgid "The default model"
 msgstr "デフォルトのモデル"
 
-#: src/window.rs:1763
+#: src/window.rs:1929
 #, rust-format
 msgid "The fewest errors in {lang}, but lowercase without punctuation"
 msgstr "{lang}で最も誤りが少ないが、小文字のみで句読点なし"
 
-#: src/window.rs:1766
+#: src/window.rs:1932
 #, rust-format
 msgid "Best balance of accuracy and speed in {lang}"
 msgstr "{lang}で精度と速度のバランスが最良"
 
-#: src/window.rs:1770
+#: src/window.rs:1936
 #, rust-format
 msgid "No accuracy data for {lang} yet: the best general model"
 msgstr "{lang}の精度データはまだありません：最良の汎用モデル"
 
-#: src/window.rs:1777
+#: src/window.rs:1943
 #, rust-format
 msgid "{n} model"
 msgid_plural "{n} models"
 msgstr[0] "{n}個のモデル"
 
-#: src/window.rs:1791
+#: src/window.rs:1957
 #, rust-format
 msgid "The speed baseline ({times})"
 msgstr "速度の基準（{times}）"
 
-#: src/window.rs:1792
+#: src/window.rs:1958
 msgid "As fast as whisper-turbo"
 msgstr "whisper-turboと同等の速さ"
 
-#: src/window.rs:1793
+#: src/window.rs:1959
 #, rust-format
 msgid "{times} the speed of whisper-turbo"
 msgstr "whisper-turboの{times}の速度"
 
-#: src/window.rs:1794
+#: src/window.rs:1960
 #, rust-format
 msgid "{times} faster than whisper-turbo"
 msgstr "whisper-turboより{times}高速"
 
-#: src/window.rs:1803
+#: src/window.rs:1969
 msgid "Search models"
 msgstr "モデルを検索"
 
-#: src/window.rs:1819
+#: src/window.rs:1985
 #, rust-format
 msgid "No model recognizes {lang} well yet."
 msgstr "{lang}を十分に認識できるモデルはまだありません。"
 
-#: src/window.rs:1862 src/window.rs:1940
+#: src/window.rs:2028 src/window.rs:2106
 msgid "Downloaded"
 msgstr "ダウンロード済み"
 
-#: src/window.rs:1863
+#: src/window.rs:2029
 msgid "No model yet"
 msgstr "モデルがまだありません"
 
-#: src/window.rs:1864
+#: src/window.rs:2030
 msgid "Download the recommended one below to start dictating."
 msgstr "音声入力を始めるには、下のおすすめのモデルをダウンロードしてください。"
 
-#: src/window.rs:1875
+#: src/window.rs:2041
 msgid "Available"
 msgstr "利用可能"
 
-#: src/window.rs:1896
+#: src/window.rs:2062
 #, rust-format
 msgid "{n} more, not measured yet"
 msgid_plural "{n} more, not measured yet"
 msgstr[0] "ほか{n}個（未測定）"
 
-#: src/window.rs:1898
+#: src/window.rs:2064
 #, rust-format
 msgid "{n} more, not measured in {lang}"
 msgid_plural "{n} more, not measured in {lang}"
 msgstr[0] "ほか{n}個（{lang}は未測定）"
 
-#: src/window.rs:1904
+#: src/window.rs:2070
 msgid "Other models"
 msgstr "ほかのモデル"
 
-#: src/window.rs:1908
+#: src/window.rs:2074
 #, rust-format
 msgid "Too many errors in {lang}"
 msgstr "{lang}では誤りが多すぎる"
 
-#: src/window.rs:1909
+#: src/window.rs:2075
 #, rust-format
 msgid "{n} more"
 msgid_plural "{n} more"
 msgstr[0] "ほか{n}個"
 
-#: src/window.rs:1916
+#: src/window.rs:2082
 msgid "No model matches."
 msgstr "一致するモデルはありません。"
 
-#: src/window.rs:1962
+#: src/window.rs:2128
 #, rust-format
 msgid "Delete {n} Model…"
 msgid_plural "Delete {n} Models…"
 msgstr[0] "{n}個のモデルを削除…"
 
-#: src/window.rs:1985
+#: src/window.rs:2151
 #, rust-format
 msgid "Delete {model}?"
 msgstr "{model}を削除しますか？"
 
-#: src/window.rs:1986
+#: src/window.rs:2152
 #, rust-format
 msgid "It frees {size} in the Hugging Face cache. You can download it again."
 msgstr ""
 "Hugging Face のキャッシュで {size} が解放されます。あとで再ダウンロードできま"
 "す。"
 
-#: src/window.rs:1989
+#: src/window.rs:2155
 #, rust-format
 msgid "Delete {n} model?"
 msgid_plural "Delete {n} models?"
 msgstr[0] "{n}個のモデルを削除しますか？"
 
-#: src/window.rs:1990
+#: src/window.rs:2156
 #, rust-format
 msgid ""
 "They free {size} in the Hugging Face cache. You can download them again."
@@ -1949,344 +1975,344 @@ msgstr ""
 "Hugging Face のキャッシュで {size} が解放されます。あとで再ダウンロードできま"
 "す。"
 
-#: src/window.rs:1995
+#: src/window.rs:2161
 #, rust-format
 msgid "{model} is in use and stays."
 msgstr "使用中の{model}は残ります。"
 
-#: src/window.rs:1999
+#: src/window.rs:2165
 #, rust-format
 msgid "{models} and {last} are in use and stay."
 msgstr "使用中の{models}と{last}は残ります。"
 
-#: src/window.rs:2042 src/window.rs:2158
+#: src/window.rs:2208 src/window.rs:2324
 msgid "In use"
 msgstr "使用中"
 
-#: src/window.rs:2046 src/window.rs:2157
+#: src/window.rs:2212 src/window.rs:2323
 msgid "Use"
 msgstr "使用"
 
-#: src/window.rs:2053
+#: src/window.rs:2219
 msgid "In use: choose another to delete it"
 msgstr "使用中：削除するには別のモデルを選んでください"
 
-#: src/window.rs:2054
+#: src/window.rs:2220
 msgid "In use until the dictation ends"
 msgstr "音声入力が終わるまで使用中"
 
-#: src/window.rs:2055 src/window.rs:2837 src/window.rs:2875 src/window.rs:3137
-#: src/window.rs:3146
+#: src/window.rs:2221 src/window.rs:3003 src/window.rs:3041 src/window.rs:3303
+#: src/window.rs:3312
 msgid "Delete…"
 msgstr "削除…"
 
-#: src/window.rs:2080
+#: src/window.rs:2246
 #, rust-format
 msgid " · {rate} MB/s"
 msgstr " · {rate} MB/s"
 
-#: src/window.rs:2086
+#: src/window.rs:2252
 msgid "Preparing for the Neural Engine…"
 msgstr "Neural Engine用に準備中…"
 
-#: src/window.rs:2088
+#: src/window.rs:2254
 #, rust-format
 msgid "Could not download: {e}"
 msgstr "ダウンロードできませんでした：{e}"
 
-#: src/window.rs:2099 src/window.rs:2147
+#: src/window.rs:2265 src/window.rs:2313
 msgid "Download"
 msgstr "ダウンロード"
 
-#: src/window.rs:2110
+#: src/window.rs:2276
 msgid "Cancel the download"
 msgstr "ダウンロードをキャンセル"
 
-#: src/window.rs:2131
+#: src/window.rs:2297
 msgid "Open the model’s page on Hugging Face"
 msgstr "Hugging Faceでモデルのページを開く"
 
-#: src/window.rs:2220
+#: src/window.rs:2386
 msgid "Recommended"
 msgstr "おすすめ"
 
-#: src/window.rs:2242
+#: src/window.rs:2408
 msgid " · no punctuation"
 msgstr " · 句読点なし"
 
-#: src/window.rs:2248
+#: src/window.rs:2414
 msgid "Runs on the Apple Neural Engine"
 msgstr "Apple Neural Engineで動作"
 
 #. Translators: the languages a speech model knows.
-#: src/window.rs:2257
+#: src/window.rs:2423
 msgid "100 languages"
 msgstr "100言語"
 
-#: src/window.rs:2258
+#: src/window.rs:2424
 msgid "25 European languages"
 msgstr "ヨーロッパの25言語"
 
-#: src/window.rs:2259
+#: src/window.rs:2425
 msgid "99 languages"
 msgstr "99言語"
 
-#: src/window.rs:2263
+#: src/window.rs:2429
 msgid "Russian, English, Kazakh, Kyrgyz and Uzbek"
 msgstr "ロシア語、英語、カザフ語、キルギス語、ウズベク語"
 
-#: src/window.rs:2264
+#: src/window.rs:2430
 msgid "Taiwanese Mandarin and English"
 msgstr "台湾華語と英語"
 
-#: src/window.rs:2265
+#: src/window.rs:2431
 msgid "Ukrainian and English"
 msgstr "ウクライナ語と英語"
 
-#: src/window.rs:2442
+#: src/window.rs:2608
 #, rust-format
 msgid "Could not export: {e}"
 msgstr "書き出せませんでした：{e}"
 
-#: src/window.rs:2443
+#: src/window.rs:2609
 #, rust-format
 msgid "Could not import: {e}"
 msgstr "読み込めませんでした：{e}"
 
-#: src/window.rs:2483
+#: src/window.rs:2649
 msgid "Nothing new: all of its dictations are here"
 msgstr "新しい項目はありません：すべての音声入力が既にあります"
 
-#: src/window.rs:2484
+#: src/window.rs:2650
 #, rust-format
 msgid "Added {n} dictation"
 msgid_plural "Added {n} dictations"
 msgstr[0] "{n}件の音声入力を追加しました"
 
-#: src/window.rs:2487
+#: src/window.rs:2653
 #, rust-format
 msgid " · {n} recording not copied"
 msgid_plural " · {n} recordings not copied"
 msgstr[0] " · {n}件の録音はコピーされませんでした"
 
-#: src/window.rs:2569
+#: src/window.rs:2735
 msgid "Could not open the history: see the log"
 msgstr "履歴を開けませんでした：ログを参照してください"
 
-#: src/window.rs:2589
+#: src/window.rs:2755
 #, rust-format
 msgid "Could not read the history: {e}"
 msgstr "履歴を読み込めませんでした：{e}"
 
-#: src/window.rs:2646
+#: src/window.rs:2812
 msgid "Today"
 msgstr "今日"
 
-#: src/window.rs:2650
+#: src/window.rs:2816
 #, rust-format
 msgid "Yesterday, {date}"
 msgstr "昨日、{date}"
 
 #. Translators: seconds, short: "4.2 s".
-#: src/window.rs:2662 src/window.rs:2909
+#: src/window.rs:2828 src/window.rs:3075
 #, rust-format
 msgid "{seconds} s"
 msgstr "{seconds}秒"
 
-#: src/window.rs:2673
+#: src/window.rs:2839
 #, rust-format
 msgid "no text · {model}"
 msgstr "テキストなし · {model}"
 
-#: src/window.rs:2674
+#: src/window.rs:2840
 msgid "no text"
 msgstr "テキストなし"
 
-#: src/window.rs:2705
+#: src/window.rs:2871
 #, rust-format
 msgid "{n} dictation · {time}"
 msgid_plural "{n} dictations · {time}"
 msgstr[0] "{n}件の音声入力 · {time}"
 
-#: src/window.rs:2725
+#: src/window.rs:2891
 msgid "Its recording isn’t kept"
 msgstr "録音は保存されていません"
 
-#: src/window.rs:2733
+#: src/window.rs:2899
 msgid "Search dictations"
 msgstr "音声入力を検索"
 
-#: src/window.rs:2754
+#: src/window.rs:2920
 msgid "No dictations yet: hold the shortcut and speak."
 msgstr "音声入力はまだありません：ショートカットを押したまま話してください。"
 
-#: src/window.rs:2755
+#: src/window.rs:2921
 msgid "No dictations since Wavo started: they’re kept only until it quits."
 msgstr ""
 "Wavoの起動以降、音声入力はありません：音声入力はWavoの終了までのみ保持されま"
 "す。"
 
-#: src/window.rs:2756
+#: src/window.rs:2922
 msgid "Nothing found"
 msgstr "見つかりません"
 
-#: src/window.rs:2825
+#: src/window.rs:2991
 msgid "Select a dictation to see all of its text."
 msgstr "音声入力を選択すると、テキスト全体が表示されます。"
 
-#: src/window.rs:2831
+#: src/window.rs:2997
 #, rust-format
 msgid "{n} dictation selected"
 msgid_plural "{n} dictations selected"
 msgstr[0] "{n}件の音声入力を選択中"
 
-#: src/window.rs:2860 src/window.rs:3129 src/window.rs:3148
+#: src/window.rs:3026 src/window.rs:3295 src/window.rs:3314
 msgid "Transcribe Again"
 msgstr "再度文字起こし"
 
-#: src/window.rs:2868 src/window.rs:3133
+#: src/window.rs:3034 src/window.rs:3299
 msgid "Restore the Previous Text"
 msgstr "以前のテキストに戻す"
 
 #. Translators: minutes, short: "12 min".
-#: src/window.rs:2911
+#: src/window.rs:3077
 #, rust-format
 msgid "{minutes} min"
 msgstr "{minutes}分"
 
 #. Translators: hours, short: "312 h".
-#: src/window.rs:2913
+#: src/window.rs:3079
 #, rust-format
 msgid "{hours} h"
 msgstr "{hours}時間"
 
-#: src/window.rs:2917
+#: src/window.rs:3083
 #, rust-format
 msgid "{count} dictation · {spoken}"
 msgid_plural "{count} dictations · {spoken}"
 msgstr[0] "{count}件の音声入力 · {spoken}"
 
-#: src/window.rs:2919
+#: src/window.rs:3085
 msgid " · kept until Wavo quits"
 msgstr " · Wavoの終了まで保持"
 
-#: src/window.rs:2923
+#: src/window.rs:3089
 #, rust-format
 msgid " · since {since}"
 msgstr " · {since}以降"
 
-#: src/window.rs:2934 src/window.rs:2947
+#: src/window.rs:3100 src/window.rs:3113
 msgid "Copied to the clipboard"
 msgstr "クリップボードにコピーしました"
 
-#: src/window.rs:2939
+#: src/window.rs:3105
 msgid "The recording is gone"
 msgstr "録音がありません"
 
-#: src/window.rs:2953 src/window.rs:3030
+#: src/window.rs:3119 src/window.rs:3196
 #, rust-format
 msgid "Could not play the recording: {e}"
 msgstr "録音を再生できませんでした：{e}"
 
-#: src/window.rs:2992
+#: src/window.rs:3158
 #, rust-format
 msgid "“{start}” and its recording are removed from the history."
 msgstr "「{start}」とその録音が履歴から削除されます。"
 
-#: src/window.rs:2993
+#: src/window.rs:3159
 #, rust-format
 msgid "“{start}” is removed from the history."
 msgstr "「{start}」が履歴から削除されます。"
 
-#: src/window.rs:2995
+#: src/window.rs:3161
 msgid "Delete this dictation?"
 msgstr "この音声入力を削除しますか？"
 
-#: src/window.rs:3001
+#: src/window.rs:3167
 #, rust-format
 msgid "{n} dictation and its recording are removed from the history."
 msgid_plural ""
 "{n} dictations and their recordings are removed from the history."
 msgstr[0] "{n}件の音声入力とその録音が履歴から削除されます。"
 
-#: src/window.rs:3006
+#: src/window.rs:3172
 #, rust-format
 msgid "{n} dictation is removed from the history."
 msgid_plural "{n} dictations are removed from the history."
 msgstr[0] "{n}件の音声入力が履歴から削除されます。"
 
-#: src/window.rs:3011
+#: src/window.rs:3177
 #, rust-format
 msgid "Delete {n} dictation?"
 msgid_plural "Delete {n} dictations?"
 msgstr[0] "{n}件の音声入力を削除しますか？"
 
-#: src/window.rs:3077 src/window.rs:3114
+#: src/window.rs:3243 src/window.rs:3280
 msgid "Stop"
 msgstr "停止"
 
-#: src/window.rs:3079
+#: src/window.rs:3245
 msgid "Play the recording"
 msgstr "録音を再生"
 
-#: src/window.rs:3087
+#: src/window.rs:3253
 msgid "Copy"
 msgstr "コピー"
 
-#: src/window.rs:3115
+#: src/window.rs:3281
 msgid "Play the Recording"
 msgstr "録音を再生"
 
-#: src/window.rs:3118
+#: src/window.rs:3284
 msgid "Copy Text"
 msgstr "テキストをコピー"
 
-#: src/window.rs:3123
+#: src/window.rs:3289
 msgid "Copy Recording Path"
 msgstr "録音のパスをコピー"
 
-#: src/window.rs:3176
+#: src/window.rs:3342
 msgid "The models"
 msgstr "モデル"
 
-#: src/window.rs:3180
+#: src/window.rs:3346
 msgid "Speech recognition on this machine"
 msgstr "このコンピュータ上での音声認識"
 
-#: src/window.rs:3181
+#: src/window.rs:3347
 msgid "The UI toolkit Wavo is drawn with"
 msgstr "Wavoの描画に使われているUIツールキット"
 
-#: src/window.rs:3182
+#: src/window.rs:3348
 msgid "The app that inspired Wavo"
 msgstr "Wavoの着想の元になったApp"
 
-#: src/window.rs:3185
+#: src/window.rs:3351
 msgid "The models’ GGUF conversions"
 msgstr "モデルのGGUF変換"
 
-#: src/window.rs:3190
+#: src/window.rs:3356
 msgid "The tensor library and model format, by Georgi Gerganov and others"
 msgstr "テンソルライブラリとモデル形式（Georgi Gerganov氏ほか）"
 
-#: src/window.rs:3195
+#: src/window.rs:3361
 msgid "OpenAI Whisper, NVIDIA Parakeet, Sber GigaAM, Useful Sensors Moonshine"
 msgstr "OpenAI Whisper, NVIDIA Parakeet, Sber GigaAM, Useful Sensors Moonshine"
 
-#: src/window.rs:3216
+#: src/window.rs:3382
 msgid "Local dictation: hold a key, speak, and the text lands where you type."
 msgstr ""
 "ローカルの音声入力：キーを押したまま話すと、入力中の場所にテキストが入りま"
 "す。"
 
-#: src/window.rs:3220
+#: src/window.rs:3386
 msgid "View on GitHub"
 msgstr "GitHubで見る"
 
-#: src/window.rs:3224
+#: src/window.rs:3390
 msgid "Buy Me a Coffee"
 msgstr "Buy Me a Coffee"
 
-#: src/window.rs:3241
+#: src/window.rs:3407
 msgid "Acknowledgements"
 msgstr "謝辞"

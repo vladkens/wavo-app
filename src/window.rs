@@ -6,6 +6,7 @@
 //! shell keeps current ([Prefs::update]), and reaches the app only through [Shell]: tests run it
 //! in nimbo's harness with a fake one.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
@@ -36,7 +37,7 @@ use crate::history::{
 };
 use crate::session::{self, NoModel, Request, Status, label};
 use crate::settings::{
-  Activation, HudPosition, HudStyle, KEYBOARD, Settings, english_name, language_name,
+  Activation, HudPosition, HudStyle, KEYBOARD, Settings, Shortcut, english_name, language_name,
 };
 use crate::transfer::Imported;
 use crate::{engine, mic_start};
@@ -105,7 +106,7 @@ pub struct Access {
 /// through the `Prefs` method named.
 pub trait Shell {
   fn edit(&self, _edit: Box<dyn FnOnce(&mut Settings) + Send>) {}
-  /// The shortcut recorder records: the current hotkey is not matched meanwhile.
+  /// A shortcut recorder records: the hotkeys are not matched meanwhile.
   fn pause_hotkey(&self, _paused: bool) {}
   fn devices(&self) -> Vec<audio::Device>;
   /// [audio::lid_closed], for Automatic's microphone.
@@ -195,8 +196,10 @@ pub struct Prefs {
   pick: Pick,
   access: Access,
   login: Login,
-  /// The shortcut recorder records: the hotkey is paused.
+  /// A shortcut recorder records: the hotkeys are paused.
   recording: bool,
+  /// Why each hotkey does not work, by its place ([Settings::hotkeys]).
+  hotkey_errors: Vec<Option<String>>,
   ask: Option<Ask>,
   /// The file panel open: its answer goes to it.
   panel: Option<Panel>,
@@ -238,6 +241,7 @@ impl Prefs {
       access,
       login: Login { state: Err(String::new()), busy: None, error: None },
       recording: false,
+      hotkey_errors: Vec::new(),
       ask: None,
       panel: None,
       model_search: String::new(),
@@ -284,6 +288,11 @@ impl Prefs {
     self.access = self.shell.access();
   }
 
+  /// Why each hotkey does not work now, by its place.
+  pub fn hotkeys_changed(&mut self, errors: Vec<Option<String>>) {
+    self.hotkey_errors = errors;
+  }
+
   pub fn models_changed(&mut self) {
     self.found = ready(self.hub.downloaded(), |name| self.shell.download_state(name));
     self.repick();
@@ -325,12 +334,14 @@ impl Prefs {
     self.dictates(m) || self.busy(m)
   }
 
-  /// Dictations go to the model: it is the Model, or a keyboard layout's language's.
+  /// Dictations go to the model: it is the Model, a keyboard layout's language's or a shortcut's.
   fn dictates(&self, m: &ModelInfo) -> bool {
     let keyboard = self.settings.follows_keyboard().then_some(&self.settings.keyboard_models);
     let row =
       keyboard.is_some_and(|rows| rows.values().flatten().any(|v| model_name(v) == Some(m.name)));
-    self.active().is_some_and(|f| f.0.name == m.name) || row
+    let shortcut = (self.settings.shortcuts.iter().flat_map(|s| &s.model))
+      .any(|v| model_name(v) == Some(m.name));
+    self.active().is_some_and(|f| f.0.name == m.name) || row || shortcut
   }
 
   /// Some model transcribes: the chosen one, or the first downloaded in its place.
@@ -455,7 +466,10 @@ impl App for Prefs {
     self.confirm(ui);
 
     // Also when the recorder lost its focus with the page, or the window lost the keys.
-    let recording = ui.focused(Id::of("hotkey")) && ui.window_focused();
+    let recorders = iter::once(Id::of("hotkey"))
+      .chain((0..self.settings.shortcuts.len()).map(|i| Id::of(("shortcut", i))));
+    let recording =
+      ui.focus_id().is_some_and(|f| recorders.into_iter().any(|id| id == f)) && ui.window_focused();
     if recording != self.recording {
       self.recording = recording;
       self.shell.pause_hotkey(recording);
@@ -500,6 +514,8 @@ impl App for Prefs {
 
 // The microphone's pop-up at its widest, in points.
 const MIC_WIDTH: f32 = 320.0;
+const SHORTCUT_LANG_WIDTH: f32 = 110.0;
+const SHORTCUT_MODEL_WIDTH: f32 = 180.0;
 
 /// A picker of `labels`, item `at` the current one, a divider after each of `lines`: the item
 /// picked, when it is another.
@@ -520,6 +536,21 @@ fn keyboard_languages(layouts: &[(String, String)]) -> Vec<(String, String)> {
   }
 
   by.into_values().map(|(lang, names)| (lang, names.join(", "))).collect()
+}
+
+/// What a shortcut's row changes.
+enum ShortcutEdit {
+  Hotkey(String),
+  Language(String),
+  /// The model picker's choice by its place.
+  Model(usize),
+  Remove,
+  Add,
+}
+
+/// Where hotkeys are chords only (Linux), a modifier key alone would leave no hotkey at all.
+fn unheard(h: Hotkey) -> bool {
+  !nimbo::hotkey::modifier_alone() && matches!(h, Hotkey::Modifier(_))
 }
 
 /// wavo's name for a model choice, `None` for a file of the person's own.
@@ -726,7 +757,10 @@ impl Prefs {
       };
       // A modifier alone needs the event tap, and so Accessibility.
       let lone = matches!(Hotkey::parse(&self.settings.hotkey), Ok(Hotkey::Modifier(_)));
+      let error = self.hotkey_errors.first().cloned().flatten();
+      let error = error.map(|e| t!("The shortcut does not work: {e}", e));
       let mark = match note {
+        _ if let Some(e) = &error => Mark::Warning(e),
         _ if lone && self.access.needs_admin => Mark::Warning(LONE_KEY_NOTE.as_str()),
         Some(note) => Mark::Info(note),
         None => Mark::None,
@@ -742,6 +776,8 @@ impl Prefs {
       ui.form_row(fs, FormRow::new(marked(t!("Shortcut"), mark, None)), |ui| self.shortcut(ui));
       self.language_row(ui, fs);
     });
+
+    self.shortcuts(ui, fs);
 
     ui.form_section(fs, t!("Output"), |ui| {
       let locked = self.access.needs_admin;
@@ -824,10 +860,8 @@ impl Prefs {
   /// The recorder and its reset; a cleared value keeps the hotkey: the app needs one.
   fn shortcut(&mut self, ui: &mut Ui) {
     let mut hotkey = Hotkey::parse(&self.settings.hotkey).ok();
-    // Where hotkeys are chords only (Linux), a modifier key alone would leave no hotkey at all.
-    let alone = |h: &Hotkey| !nimbo::hotkey::modifier_alone() && matches!(h, Hotkey::Modifier(_));
     if ui.id("hotkey").shortcut(&mut hotkey).changed
-      && let Some(hotkey) = hotkey.filter(|h| !alone(h))
+      && let Some(hotkey) = hotkey.filter(|&h| !unheard(h))
     {
       let hotkey = hotkey.to_string();
       info!("settings: hotkey {hotkey}");
@@ -840,6 +874,129 @@ impl Prefs {
     if ui.id("reset").icon_button(Icon::RESET).clicked {
       self.edit(move |s| s.hotkey = default.clone());
     }
+  }
+
+  /// More Shortcuts: a row per shortcut, its recorder, its language and its model, then Add
+  /// Shortcut.
+  fn shortcuts(&mut self, ui: &mut Ui, fs: &FormStyle) {
+    let rows: Vec<_> = (self.settings.shortcuts.iter().enumerate())
+      .map(|(i, s)| {
+        let error = self.hotkey_errors.get(1 + i).cloned().flatten();
+        let langs = self.shortcut_languages(&s.language);
+        let models = self.model_choices_for(&langs.0[langs.1].1, s.model.as_deref());
+        (Hotkey::parse(&s.hotkey).ok(), error, langs, models)
+      })
+      .collect();
+    let act = Cell::new(None);
+    ui.form_section(fs, t!("More Shortcuts"), |ui| {
+      for (i, (hotkey, error, (langs, lang_at), (labels, _, at))) in rows.iter().enumerate() {
+        let act = &act;
+        // The keys first, as a list of shortcuts shows them.
+        let row = FormRow::new(move |ui: &mut Ui, _: TextStyle| {
+          let mut hotkey = *hotkey;
+          if ui.id(("shortcut", i)).shortcut(&mut hotkey).changed && !hotkey.is_some_and(unheard) {
+            let hotkey = hotkey.map(|h| h.to_string()).unwrap_or_default();
+            act.set(Some((i, ShortcutEdit::Hotkey(hotkey))));
+          }
+        });
+        // Why under the keys: the row has no room for a mark beside them.
+        let row = match error {
+          Some(e) => row.caption(move |ui: &mut Ui, s: TextStyle| {
+            ui.row(Style::new().gap(4.0).align(Align::Start, Align::Center), |ui| {
+              ui.warning_button();
+              ui.id(format!("shortcut-error-{i}")).text(t!("Does not work: {e}", e), s);
+            });
+          }),
+          None => row,
+        };
+        ui.form_row(fs, row, |ui| {
+          let names = langs.iter().map(|l| l.0.as_str());
+          let mut cur = *lang_at;
+          let pop = picker(&mut cur, names, &[0]).max_width(SHORTCUT_LANG_WIDTH);
+          if pop.show(ui.id(format!("shortcut-lang-{i}"))).changed {
+            act.set(Some((i, ShortcutEdit::Language(langs[cur].1.clone()))));
+          }
+
+          let mut cur = *at;
+          let names = labels.iter().map(String::as_str);
+          let pop = picker(&mut cur, names, &[0, labels.len() - 2]).max_width(SHORTCUT_MODEL_WIDTH);
+          if pop.show(ui.id(format!("shortcut-model-{i}"))).changed {
+            act.set(Some((i, ShortcutEdit::Model(cur))));
+          }
+
+          let tip = t!("Remove the shortcut");
+          if ui.help(tip.as_str()).id(("shortcut-remove", i)).icon_button(Icon::TRASH).clicked {
+            act.set(Some((i, ShortcutEdit::Remove)));
+          }
+        });
+      }
+
+      let full = self.settings.shortcuts.len() + 1 >= nimbo::hotkey::MAX;
+      let row = FormRow::new(t!("Dictate in another language or with another model"));
+      ui.form_row(fs, row, |ui| {
+        if ui.disabled(full).id("shortcut-add").button(t!("Add Shortcut").as_str()).clicked {
+          act.set(Some((rows.len(), ShortcutEdit::Add)));
+        }
+      });
+    });
+
+    let Some((i, act)) = act.take() else { return };
+    let change: Box<dyn Fn(&mut Shortcut) + Send> = match act {
+      ShortcutEdit::Hotkey(hotkey) => {
+        info!("settings: shortcut {} {hotkey:?}", i + 2);
+        Box::new(move |s| s.hotkey = hotkey.clone())
+      }
+      // The best model downloaded for the language, as Keyboard layout's rows start on.
+      ShortcutEdit::Language(code) => {
+        let model = self.best_for(&code).filter(|_| code != "auto").map(str::to_owned);
+        info!("settings: shortcut {} dictates {code} with {model:?}", i + 2);
+        Box::new(move |s| (s.language, s.model) = (code.clone(), model.clone()))
+      }
+      ShortcutEdit::Model(0) => {
+        info!("settings: shortcut {} dictates with the default model", i + 2);
+        Box::new(|s| s.model = None)
+      }
+      ShortcutEdit::Model(p) if p + 1 == rows[i].3.0.len() => {
+        let lang = &self.settings.shortcuts[i].language;
+        self.model_lang = languages().iter().find(|l| l.1 == lang).map_or("", |l| l.1);
+        self.page = Page::Models;
+        return;
+      }
+      ShortcutEdit::Model(p) => {
+        let Some(&model) = rows[i].3.1.get(p - 1) else { return };
+        info!("settings: shortcut {} dictates with {model}", i + 2);
+        Box::new(move |s| s.model = Some(model.to_owned()))
+      }
+      ShortcutEdit::Remove => {
+        info!("settings: shortcut {} removed", i + 2);
+        return self.edit(move |s| _ = (i < s.shortcuts.len()).then(|| s.shortcuts.remove(i)));
+      }
+      ShortcutEdit::Add => return self.edit(|s| s.shortcuts.push(Shortcut::default())),
+    };
+    self.edit(move |s| _ = s.shortcuts.get_mut(i).map(&change));
+  }
+
+  /// A shortcut's language choices: Auto-detect, the languages of the downloaded models, `code`
+  /// when it is none of them; and the one in use.
+  fn shortcut_languages(&self, code: &str) -> (Vec<(String, String)>, usize) {
+    let mut codes: Vec<&str> = self.found.iter().flat_map(|f| f.0.langs.iter().copied()).collect();
+    codes.sort_unstable();
+    codes.dedup();
+    let mut langs: Vec<(String, String)> =
+      codes.iter().map(|c| (language_name(c), (*c).to_owned())).collect();
+    langs.sort();
+    langs.insert(0, (t!("Auto-detect").to_string(), "auto".to_owned()));
+    if code.is_empty() || code == "auto" {
+      return (langs, 0);
+    }
+
+    if let Some(i) = langs.iter().position(|(_, c)| c.eq_ignore_ascii_case(code)) {
+      return (langs, i);
+    }
+
+    langs.push((language_name(code), code.to_owned()));
+    let at = langs.len() - 1;
+    (langs, at)
   }
 
   /// The downloaded models, the chosen one when it is none of them, then "Download more…".
@@ -935,7 +1092,10 @@ impl Prefs {
     let label = marked(t!("Language"), mark, Some(Id::of("lang-row").key("info")));
     // With Keyboard layout, its languages under it in the same row, each with its model.
     let rows = if keyboard { keyboard_languages(&self.layouts) } else { Vec::new() };
-    let choices: Vec<_> = rows.iter().map(|(lang, _)| self.keyboard_choices(lang)).collect();
+    let keyboard_models = &self.settings.keyboard_models;
+    let chosen = |lang: &str| keyboard_models.get(lang).and_then(Option::as_deref);
+    let choices: Vec<_> =
+      rows.iter().map(|(lang, _)| self.model_choices_for(lang, chosen(lang))).collect();
     let mut row = FormRow::new(label);
     let mut chosen = None;
     if !rows.is_empty() {
@@ -1019,11 +1179,19 @@ impl Prefs {
     self.models_for(lang).first().map(|m| m.name)
   }
 
-  /// A keyboard language's choices: the default model (the Model's: none of the language's own),
-  /// the downloaded models that know `lang`, best first, the one chosen when it is not on disk,
-  /// and Download more…; the models' names, and the choice in use.
-  fn keyboard_choices(&self, lang: &str) -> (Vec<String>, Vec<&'static str>, usize) {
-    let models = self.models_for(lang);
+  /// A keyboard language's or a shortcut's model choices: the default model (the Model's: none
+  /// of the language's own), the downloaded models that know `lang` (all of them for Auto-detect),
+  /// best first, `chosen` when it is not on disk, and Download more…; the models' names, and the
+  /// choice in use.
+  fn model_choices_for(
+    &self,
+    lang: &str,
+    chosen: Option<&str>,
+  ) -> (Vec<String>, Vec<&'static str>, usize) {
+    let models = match lang {
+      "auto" => self.found.iter().map(|f| f.0).collect(),
+      _ => self.models_for(lang),
+    };
     let default = match (self.active(), &self.pick.other) {
       (_, Some((name, _))) => name.clone(),
       (Some(f), None) => f.0.name.to_owned(),
@@ -1033,7 +1201,7 @@ impl Prefs {
     // Translators: a model in a list of models.
     let mut labels = vec![t!("{default} (default)", default)];
     labels.extend(models.iter().map(|m| m.name.to_owned()));
-    let at = match self.settings.keyboard_models.get(lang).and_then(Option::as_ref) {
+    let at = match chosen {
       None => 0,
       Some(c) => match models.iter().position(|m| model_name(c) == Some(m.name)) {
         Some(i) => i + 1,
@@ -3680,7 +3848,7 @@ mod tests {
       ..Settings::default()
     };
     let h = home.harness(&fake, alone);
-    let (labels, models, at) = h.app().keyboard_choices("ru");
+    let (labels, models, at) = h.app().model_choices_for("ru", None);
     assert_eq!(models, ["gigaam-v3", "parakeet-v3"]);
     assert_eq!((at, labels[at].as_str()), (0, "parakeet-v2 (default)"));
   }
@@ -3777,6 +3945,21 @@ mod tests {
       let mut k = home.harness(&keyboard, settings);
       k.event(Event::Appearance(appearance));
       shot(&mut k, &format!("general-keyboard-{look}"));
+
+      // Two more shortcuts, the second refused.
+      let shortcut = |hotkey: &str, language: &str, model: Option<&str>| Shortcut {
+        hotkey: hotkey.into(),
+        language: language.into(),
+        model: model.map(Into::into),
+      };
+      let shortcuts = vec![
+        shortcut("option+shift+space", "ru", Some("gigaam-v3")),
+        shortcut("ctrl+option+space", "en", None),
+      ];
+      let mut m = home.harness(&Fake::default(), Settings { shortcuts, ..Settings::default() });
+      m.event(Event::Appearance(appearance));
+      m.app_mut().hotkeys_changed(vec![None, None, Some("another app has it".into())]);
+      shot(&mut m, &format!("general-shortcuts-{look}"));
 
       fake.log().updates = false;
       tab(&mut h, Page::Advanced);
@@ -3921,6 +4104,62 @@ mod tests {
       h.event(Event::Appearance(appearance));
       shot(&mut h, &format!("general-first-run-{look}"));
     }
+  }
+
+  /// More Shortcuts: Add, the recorder (pausing the hotkeys), a language (its best model with it),
+  /// the default model, Download more… in the language, why a hotkey does not work, Remove.
+  #[test]
+  fn more_shortcuts_dictate_in_their_language() {
+    let home = Home::new("window-shortcuts", &["parakeet-v3", "parakeet-v2", "gigaam-v3"]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings::default());
+    let gigaam = hub::lookup("gigaam-v3").unwrap();
+    assert!(!h.app().in_use(gigaam));
+    click(&mut h, Id::of("shortcut-add"));
+    assert_eq!(fake.log().settings.shortcuts, [Shortcut::default()]);
+
+    click(&mut h, Id::of(("shortcut", 0)));
+    assert_eq!(fake.log().paused, [true]);
+    h.key('k', Modifiers::CONTROL | Modifiers::ALT);
+    h.frame();
+    h.frame();
+    assert_eq!(fake.log().settings.shortcuts[0].hotkey, "ctrl+option+k");
+    assert_eq!(fake.log().paused, [true, false], "the hotkeys are back");
+
+    let lang = Id::of("shortcut-lang-0");
+    let (langs, _) = h.app().shortcut_languages("ru");
+    let ru = langs.iter().position(|l| l.1 == "ru").unwrap();
+    click(&mut h, lang);
+    click(&mut h, lang.key(("item", ru)));
+    let shortcut = |h: &Harness<Prefs>| h.app().settings.shortcuts[0].clone();
+    let russian = Shortcut {
+      hotkey: "ctrl+option+k".into(),
+      language: "ru".into(),
+      model: Some("gigaam-v3".into()),
+    };
+    assert_eq!((shortcut(&h), &fake.log().settings.shortcuts[0]), (russian.clone(), &russian));
+    assert!(h.app().in_use(gigaam), "Models won't delete it");
+
+    let model = Id::of("shortcut-model-0");
+    click(&mut h, model);
+    click(&mut h, model.key(("item", 0)));
+    assert_eq!(shortcut(&h).model, None, "the default model");
+    assert!(!h.app().in_use(gigaam));
+    let (labels, _, _) = h.app().model_choices_for("ru", None);
+    click(&mut h, model);
+    click(&mut h, model.key(("item", labels.len() - 1)));
+    assert_eq!((h.app().page, h.app().model_lang), (Page::Models, "ru"));
+
+    tab(&mut h, Page::General);
+    let taken = "the app has this hotkey already";
+    h.app_mut().hotkeys_changed(vec![None, Some(taken.into())]);
+    h.frame();
+    let error = h.text(Id::of("shortcut-error-0")).unwrap_or_default().to_owned();
+    assert_eq!(error, format!("Does not work: {taken}"));
+
+    click(&mut h, Id::of(("shortcut-remove", 0)));
+    assert_eq!(fake.log().settings.shortcuts, []);
+    assert!(h.rect(Id::of(("shortcut", 0))).is_none());
   }
 
   #[test]
