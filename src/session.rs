@@ -20,6 +20,7 @@
 //!   the one left on disk, once no dictation nor a transcription again runs: none of them writes
 //!   into it meanwhile.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 use std::path::{Path, PathBuf};
@@ -41,7 +42,7 @@ use crate::engine::{self, Engine, EngineError, Loader, Wavo};
 use crate::history::{self, Entry, History, Retention, now_ms};
 use crate::live::{self, Preview};
 use crate::mic_start::{SlowStart, Start};
-use crate::settings::{self, Activation, Settings, language_name};
+use crate::settings::{self, Activation, Settings, Shortcut, language_name};
 
 /// The microphone stays open at least this long after the stop, for the end of a word the key-up
 /// cut.
@@ -164,6 +165,8 @@ struct Machine {
   /// The place of the hotkey that started the last recording (0 for a toggle's): the dictation
   /// goes by its language and model.
   hotkey: usize,
+  /// [Machine::hotkey] before the press in progress: back when the press is aborted.
+  before: usize,
   /// The last press or repeat of a hotkey, and its place, if no release came after it.
   key_down: Option<(usize, Instant)>,
   /// The take the press in progress started, until its release.
@@ -173,7 +176,7 @@ struct Machine {
 impl Machine {
   fn new(activation: Activation) -> Self {
     let (state, last_take, hotkey, key_down, pressed) = (State::Idle, 0, 0, None, None);
-    Self { activation, state, last_take, hotkey, key_down, pressed }
+    Self { activation, state, last_take, hotkey, before: 0, key_down, pressed }
   }
 
   fn handle(&mut self, input: Input) -> Option<Effect> {
@@ -187,7 +190,7 @@ impl Machine {
         };
 
         self.last_take += 1;
-        (self.hotkey, self.pressed) = (which, Some(self.last_take));
+        (self.before, self.hotkey, self.pressed) = (self.hotkey, which, Some(self.last_take));
         self.state = Recording { take: self.last_take, hold };
         Some(Effect::StartRecording(self.last_take))
       }
@@ -218,7 +221,7 @@ impl Machine {
       (Recording { take, .. }, Input::KeyAborted { which })
         if self.pressed == Some(take) && which == self.hotkey =>
       {
-        (self.state, self.pressed) = (Idle, None);
+        (self.state, self.pressed, self.hotkey) = (Idle, None, self.before);
         Some(Effect::AbortRecording(take))
       }
       (_, Input::KeyAborted { which }) => {
@@ -282,6 +285,28 @@ impl Machine {
     self.state = State::Transcribing { take };
     Some(Effect::StopRecording(take))
   }
+
+  /// The `i`th of More Shortcuts (place `1 + i`) is removed: the places after it move down one,
+  /// and a dictation of its own goes on by the Shortcut's, as a place with no shortcut does.
+  fn shortcut_removed(&mut self, i: usize) {
+    let gone = 1 + i;
+    let moved = |which: usize| match which.cmp(&gone) {
+      Ordering::Greater => which - 1,
+      Ordering::Equal => 0,
+      Ordering::Less => which,
+    };
+    (self.hotkey, self.before) = (moved(self.hotkey), moved(self.before));
+    self.key_down = self.key_down.filter(|k| k.0 != gone).map(|(which, at)| (moved(which), at));
+  }
+}
+
+/// The place in `old` of the one shortcut `new` has removed, if that is the change.
+fn removed(old: &[Shortcut], new: &[Shortcut]) -> Option<usize> {
+  if old.len() != new.len() + 1 {
+    return None;
+  }
+
+  (0..old.len()).find(|&i| old.get(i) != new.get(i))
 }
 
 // MARK: Output
@@ -938,10 +963,11 @@ impl<O: TextOutput> Controller<O> {
       Effect::StopRecording(_) => self.stop_recording(),
       Effect::CancelRecording(_) => self.cancel(),
       Effect::AbortRecording(_) => {
-        // The last dictation and its warnings stay the ones before.
+        // The last dictation, its warnings and its model stay the ones before.
         let (last, warnings) = (self.last.take(), mem::take(&mut self.last_warnings));
         self.cancel();
         (self.last, self.last_warnings) = (last, warnings);
+        self.rerouted(route);
       }
       Effect::CancelTranscription(_) => self.cancel(),
     }
@@ -963,8 +989,13 @@ impl<O: TextOutput> Controller<O> {
     }
 
     self.machine.activation = self.settings.activation;
-    let (which, keyboard) = (self.machine.hotkey, self.keyboard.as_deref());
-    let (was, route) = (old.route(which, keyboard), self.settings.route(which, keyboard));
+    let keyboard = self.keyboard.as_deref();
+    let was = old.route(self.machine.hotkey, keyboard);
+    if let Some(i) = removed(&old.shortcuts, &self.settings.shortcuts) {
+      self.machine.shortcut_removed(i);
+    }
+
+    let route = self.settings.route(self.machine.hotkey, keyboard);
     let model_changed = was.0 != route.0;
     if was != route {
       self.restart_preview();
@@ -2051,6 +2082,34 @@ mod tests {
     let mut d = Drive::new(Activation::Toggle);
     d.press(1, 0);
     assert_eq!(d.press(2, 100), Some(StopRecording(1)), "no autorepeat of the first");
+  }
+
+  /// The place of the last dictation stays its own: a press that was a chord gives it back, and a
+  /// removed shortcut moves the places after it down one; a dictation of the removed one's own
+  /// goes on by the Shortcut's.
+  #[test]
+  fn the_last_dictation_keeps_its_place() {
+    let mut d = Drive::new(Activation::HoldOrToggle);
+    d.press(1, 0);
+    d.release(1, 900);
+    d.finish(1);
+    assert_eq!(d.press(2, 2_000), Some(StartRecording(2)));
+    assert_eq!(d.m.handle(Input::KeyAborted { which: 2 }), Some(AbortRecording(2)));
+    assert_eq!(d.m.hotkey, 1, "the chord's press gave it back");
+
+    for (hotkey, i, moved) in [(2, 0, 1), (3, 0, 2), (2, 1, 0), (1, 1, 1), (0, 0, 0)] {
+      d.m.hotkey = hotkey;
+      d.m.shortcut_removed(i);
+      assert_eq!(d.m.hotkey, moved, "place {hotkey}, the shortcut {i} removed");
+    }
+
+    let shortcut =
+      |hotkey: &str| settings::Shortcut { hotkey: hotkey.into(), ..Default::default() };
+    let old = ["f5", "f6", "f7"].map(shortcut);
+    assert_eq!(removed(&old, &[shortcut("f5"), shortcut("f7")]), Some(1));
+    assert_eq!(removed(&old, &old[..2]), Some(2));
+    assert_eq!(removed(&old, &old), None);
+    assert_eq!(removed(&old[..2], &old), None);
   }
 
   // MARK: Session
@@ -3313,6 +3372,29 @@ mod tests {
     s.handle.edit_settings(|s| s.language = "auto".into());
     assert_eq!(dictated(0, 3), (None, stem("parakeet-v3"), None));
     assert_eq!(dictated(1, 4), (some("ru"), stem("gigaam-v3"), some("ru")));
+  }
+
+  /// A shortcut removed while one after it dictates: the dictation goes on in its own language
+  /// with its own model.
+  #[test]
+  fn a_dictation_keeps_its_shortcut_when_an_earlier_one_is_removed() {
+    let shortcut = |hotkey: &str, language: &str, model: &str| settings::Shortcut {
+      hotkey: hotkey.into(),
+      language: language.into(),
+      model: Some(model.into()),
+    };
+    let shortcuts = vec![shortcut("f5", "en", "parakeet-v3"), shortcut("f6", "ru", "gigaam-v3")];
+    let settings = Settings { model: Some("parakeet-v3".into()), shortcuts, ..Settings::default() };
+    let models = ["gigaam-v3", "parakeet-v3"];
+    let s = InProcess::start("session-removed", &settings, Some(&loud(10.0)), "привет", &models);
+    s.record_of(2, 0.3);
+    s.handle.edit_settings(|s| {
+      s.shortcuts.remove(0);
+    });
+    thread::sleep(Duration::from_millis(300));
+    s.press_of(1);
+    let entry = s.kept(&s.finished(1).last.unwrap());
+    assert_eq!((entry.model.unwrap(), entry.language), (stem("gigaam-v3"), Some("ru".into())));
   }
 
   /// Any other Language: the layout changes nothing, and the status shows no language.
