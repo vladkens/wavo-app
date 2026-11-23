@@ -41,6 +41,9 @@ pub struct Settings {
   /// With [KEYBOARD], the model of a layout's language (`ru`: `gigaam-v3`), `None` for `model`,
   /// picked as the default; a language without an entry is `model`'s too.
   pub keyboard_models: BTreeMap<String, Option<String>>,
+  /// More shortcuts, each dictating in its own language with its own model; `hotkey`, `language`
+  /// and `model` are the first one's.
+  pub shortcuts: Vec<Shortcut>,
   pub auto_paste: bool,
   /// Leave the text on the clipboard instead of restoring it after the paste.
   pub keep_in_clipboard: bool,
@@ -70,6 +73,24 @@ pub struct Settings {
   /// The language of Wavo's own texts, a tag of [crate::LANGUAGES] (`ru`); `None` is the
   /// system's.
   pub app_language: Option<String>,
+}
+
+/// One of [Settings::shortcuts].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Shortcut {
+  /// As [Settings::hotkey]; empty while none is recorded.
+  pub hotkey: String,
+  /// A language code, or `auto` for the model to detect it.
+  pub language: String,
+  /// A model name or a GGUF file path; `None` is [Settings::model].
+  pub model: Option<String>,
+}
+
+impl Default for Shortcut {
+  fn default() -> Self {
+    Self { hotkey: String::new(), language: "auto".into(), model: None }
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -122,6 +143,7 @@ impl Default for Settings {
       language: "auto".into(),
       model: None,
       keyboard_models: BTreeMap::new(),
+      shortcuts: Vec::new(),
       auto_paste: true,
       keep_in_clipboard: false,
       clean_text: true,
@@ -202,19 +224,31 @@ impl Settings {
   /// The language chosen for the engine; `None` (empty, `auto` or [KEYBOARD]) leaves it to the
   /// model, or to the layout.
   pub fn engine_language(&self) -> Option<String> {
-    let code = self.language.trim();
-    let chosen = !code.is_empty() && !code.eq_ignore_ascii_case("auto") && code != KEYBOARD;
-    chosen.then(|| code.to_owned())
+    chosen_language(&self.language)
   }
 
   pub fn follows_keyboard(&self) -> bool {
     self.language == KEYBOARD
   }
 
-  /// The model choice and the language of a dictation while the keyboard layout's language is
-  /// `keyboard`: with [KEYBOARD] its row's model, else `model`, asked in that language (detected
-  /// for a layout without one); otherwise the ones chosen.
-  pub fn route(&self, keyboard: Option<&str>) -> (Option<String>, Option<String>) {
+  /// The hotkeys' texts by place: the Shortcut's, then each of [Settings::shortcuts].
+  pub fn hotkeys(&self) -> impl Iterator<Item = &str> {
+    std::iter::once(&self.hotkey)
+      .chain(self.shortcuts.iter().map(|s| &s.hotkey))
+      .map(String::as_str)
+  }
+
+  /// The model choice and the language of a dictation by hotkey `which` (its place in
+  /// [Settings::hotkeys]) while the keyboard layout's language is `keyboard`. One of
+  /// [Settings::shortcuts]: its own, `model` for none. The Shortcut: with [KEYBOARD] its row's
+  /// model, else `model`, asked in that language (detected for a layout without one); otherwise
+  /// the ones chosen.
+  pub fn route(&self, which: usize, keyboard: Option<&str>) -> (Option<String>, Option<String>) {
+    if let Some(s) = which.checked_sub(1).and_then(|i| self.shortcuts.get(i)) {
+      let model = s.model.as_ref().or(self.model.as_ref());
+      return (model.cloned(), chosen_language(&s.language));
+    }
+
     if !self.follows_keyboard() {
       return (self.model.clone(), self.engine_language());
     }
@@ -242,6 +276,13 @@ impl Settings {
   pub fn unload_after(&self) -> Option<Duration> {
     self.unload_after_minutes.map(|m| Duration::from_secs(u64::from(m) * 60))
   }
+}
+
+/// `code` as the engine is told it: `None` for empty, `auto` or [KEYBOARD].
+fn chosen_language(code: &str) -> Option<String> {
+  let code = code.trim();
+  let chosen = !code.is_empty() && !code.eq_ignore_ascii_case("auto") && code != KEYBOARD;
+  chosen.then(|| code.to_owned())
 }
 
 // MARK: Languages
@@ -444,16 +485,47 @@ mod tests {
     let keyboard =
       Settings { language: KEYBOARD.into(), model, keyboard_models: rows, ..Settings::default() };
     let some = |s: &str| Some(s.to_owned());
-    assert_eq!(keyboard.route(Some("ru")), (some("gigaam-v3"), some("ru")));
-    assert_eq!(keyboard.route(Some("en")), (some("parakeet-v3"), some("en")));
-    assert_eq!(keyboard.route(Some("de")), (some("parakeet-v3"), some("de")), "the default picked");
-    assert_eq!(keyboard.route(None), (some("parakeet-v3"), None), "a layout without a language");
+    assert_eq!(keyboard.route(0, Some("ru")), (some("gigaam-v3"), some("ru")));
+    assert_eq!(keyboard.route(0, Some("en")), (some("parakeet-v3"), some("en")));
+    assert_eq!(
+      keyboard.route(0, Some("de")),
+      (some("parakeet-v3"), some("de")),
+      "the default picked"
+    );
+    assert_eq!(keyboard.route(0, None), (some("parakeet-v3"), None), "a layout without a language");
     assert_eq!(keyboard.engine_language(), None);
 
     let fixed = Settings { language: "de".into(), ..keyboard.clone() };
-    assert_eq!(fixed.route(Some("ru")), (some("parakeet-v3"), some("de")));
+    assert_eq!(fixed.route(0, Some("ru")), (some("parakeet-v3"), some("de")));
     let auto = Settings { language: "auto".into(), ..keyboard };
-    assert_eq!(auto.route(Some("ru")), (some("parakeet-v3"), None));
+    assert_eq!(auto.route(0, Some("ru")), (some("parakeet-v3"), None));
+  }
+
+  /// A shortcut of More Shortcuts: its language and its model, the Model for none, whatever the
+  /// layout; past them, the Shortcut's. Their hotkeys follow the Shortcut's.
+  #[test]
+  fn a_dictation_routes_by_its_shortcut() {
+    let shortcut = |hotkey: &str, language: &str, model: Option<&str>| Shortcut {
+      hotkey: hotkey.into(),
+      language: language.into(),
+      model: model.map(str::to_owned),
+    };
+    let settings = Settings {
+      language: KEYBOARD.into(),
+      model: Some("parakeet-v3".into()),
+      shortcuts: vec![
+        shortcut("option+shift+space", "ru", Some("gigaam-v3")),
+        shortcut("", "auto", None),
+      ],
+      ..Settings::default()
+    };
+    let some = |s: &str| Some(s.to_owned());
+    assert_eq!(settings.route(0, Some("en")), (some("parakeet-v3"), some("en")));
+    assert_eq!(settings.route(1, Some("en")), (some("gigaam-v3"), some("ru")));
+    assert_eq!(settings.route(2, Some("en")), (some("parakeet-v3"), None));
+    assert_eq!(settings.route(3, Some("en")), settings.route(0, Some("en")), "gone meanwhile");
+    let hotkeys: Vec<&str> = settings.hotkeys().collect();
+    assert_eq!(hotkeys, [DEFAULT_HOTKEY, "option+shift+space", ""]);
   }
 
   #[test]

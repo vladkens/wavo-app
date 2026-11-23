@@ -25,7 +25,9 @@ use nimbo::paste::{self, PORTAL_WAIT, Paste};
 use nimbo::permissions::{self, Access, Pane};
 use nimbo::system::Change;
 use nimbo::tray::{Menu, Tray};
-use nimbo::{Clipboard, Locale, Main, Proxy, SystemClipboard, Window, autostart, input_source, t};
+use nimbo::{
+  Clipboard, Hotkey, Locale, Main, Proxy, SystemClipboard, Window, autostart, input_source, t,
+};
 use shipo::{Release, Staged};
 use tracing::{error, info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -407,7 +409,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
     return;
   }
 
-  let Some((shell, update, hub, home, history)) = with_app(|app| {
+  let Some((shell, update, errors, hub, home, history)) = with_app(|app| {
     let shell = AppShell {
       home: app.home.clone(),
       handle: app.handle.clone(),
@@ -417,7 +419,8 @@ fn open_window(main: &mut Main, page: Option<Page>) {
       import: app.import.clone(),
       updater: app.updater.clone(),
     };
-    (shell, app.update.clone(), app.hub.clone(), app.home.clone(), app.history.clone())
+    let errors = app.update.as_ref().map(|u| app.hotkey_errors(&u.settings)).unwrap_or_default();
+    (shell, app.update.clone(), errors, app.hub.clone(), app.home.clone(), app.history.clone())
   }) else {
     return;
   };
@@ -431,6 +434,8 @@ fn open_window(main: &mut Main, page: Option<Page>) {
   if let Some(u) = &update {
     prefs.update(&u.settings, &u.status, u.history);
   }
+
+  prefs.hotkeys_changed(errors);
 
   prefs.page = page.unwrap_or(Page::General);
   let w = main.open(&window::config(prefs.page), prefs);
@@ -570,14 +575,19 @@ impl App {
     // The latest update when it runs: a retry must not put the window back to an older one.
     if self.window.is_some() {
       with_window(|prefs| {
-        if let Some(u) = with_app(|app| app.update.clone()).flatten() {
+        let latest =
+          with_app(|app| app.update.clone().map(|u| (app.hotkey_errors(&u.settings), u)));
+        if let Some((errors, u)) = latest.flatten() {
           prefs.update(&u.settings, &u.status, u.history);
+          prefs.hotkeys_changed(errors);
         }
       });
     }
 
     let status = &update.status;
-    let _ = self.hotkeys.set(&update.settings.hotkey); // its error shows in the menu
+    // A text that does not parse is no hotkey there; why shows in the menu, as the OS's refusal.
+    let hotkeys: Vec<_> = update.settings.hotkeys().map(|t| Hotkey::parse(t).ok()).collect();
+    let _ = self.hotkeys.set(&hotkeys);
     self.hotkeys.escape(status.state != Phase::Idle);
     let shown = self.hud.window.with(|h| h.mode()).unwrap_or(Mode::Hidden);
     let show = match status.state {
@@ -825,17 +835,34 @@ impl App {
     self.pick = Pick::new(&self.hub, query, &self.found);
   }
 
+  /// Why each hotkey of `settings` does not work, by its place: its text does not parse, the app
+  /// or the OS refused it, or the listener failed with nothing else holding it (Windows' hook,
+  /// X11's grab, the portal missing or refused).
+  fn hotkey_errors(&self, settings: &Settings) -> Vec<Option<String>> {
+    let hotkeys = self.hotkeys.status();
+    let failed = hotkeys.listener == Listener::Failed;
+    let error = |(which, text): (usize, &str)| {
+      let slot = hotkeys.slots.get(which).cloned().unwrap_or_default();
+      let dead = hotkeys.listener_error.clone().filter(|_| failed && !slot.fallback);
+      Hotkey::parse(text).err().map(|e| e.to_string()).or(slot.error).or(dead)
+    };
+    let hotkeys = settings.hotkeys().enumerate();
+    hotkeys
+      .map(|(which, text)| (!text.is_empty()).then(|| error((which, text))).flatten())
+      .collect()
+  }
+
   fn warnings(&self, update: &Update) -> Vec<Warning> {
     let hotkeys = self.hotkeys.status();
-    // A listener that failed with nothing else holding the hotkey leaves it dead (Windows' hook,
-    // X11's grab, the portal missing or refused): why shows, and with the portal Allow the
-    // Hotkey… again.
+    // With the portal, Allow the Hotkey… again.
     let listening = matches!(hotkeys.listener, Listener::Starting | Listener::Active);
-    let dead = hotkeys.listener == Listener::Failed && !hotkeys.fallback;
+    let errors = self.hotkey_errors(&update.settings);
+    let hotkey_errors =
+      update.settings.hotkeys().zip(errors).filter_map(|(t, e)| Some((t.to_owned(), e?))).collect();
     let system = menu::System {
       // Nothing to ask for where only an administrator can allow it.
       accessibility: self.accessibility || needs_admin(),
-      hotkey_error: hotkeys.error.or(hotkeys.listener_error.filter(|_| dead)),
+      hotkey_errors,
       hotkey_portal: nimbo::hotkey::start_asks() && !listening,
       paste_portal: focus::hidden() && !nimbo::keys::ready(),
       no_microphone: self.mic() != Access::Granted,
@@ -844,7 +871,7 @@ impl App {
         && !self.clipboard,
       secure_input: hotkeys.secure_input,
     };
-    menu::warnings(&system, &update.settings.hotkey, &update.status)
+    menu::warnings(&system, &update.status)
   }
 
   /// The icon and the menu.
@@ -866,7 +893,7 @@ impl App {
       self.tray.set_tooltip(&icon.description());
     }
 
-    let hotkey = self.hotkeys.status().hotkey.map(|h| h.label());
+    let hotkey = self.hotkeys.status().slots.first().and_then(|s| s.hotkey).map(|h| h.label());
     let now = history::now_ms();
     let recent: Vec<String> = (self.recent.iter())
       .map(|e| {
