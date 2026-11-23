@@ -7,13 +7,12 @@
 //! in nimbo's harness with a fake one.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt::Display;
 use std::iter;
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nimbo::autostart::State as Autostart;
@@ -24,28 +23,32 @@ use nimbo::ui::widgets::icon;
 use nimbo::{
   Align, Answer, App, Button, ButtonLook, ButtonRole, ButtonStyle, Config, ControlSize, Cx, Dialog,
   Event, FileDialog, Font, FormRow, FormStyle, Frame, Hotkey, Icon, Id, Item, LinePattern, List,
-  ListStyle, Localized, Menu, Picker, Rect, Response, Section, Selection, Style, TabItem, Tag,
-  TextStyle, Tone, Ui, Weight, grow, open, paths, px, t, tn,
+  ListStyle, Localized, Menu, Rect, Response, Section, Selection, Style, TabItem, Tag, TextStyle,
+  Tone, Ui, Weight, grow, open, paths, px, t, tn,
 };
 use tracing::{info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
 
 use crate::audio::{self, Auto, Choice, Microphone, Playback, Transport};
 use crate::history::{
-  Entry, History, IN_MEMORY, Local, RECORDINGS_DIR, Retention, fold, local_time, now_ms,
+  Entry, History, IN_MEMORY, Local, RECORDINGS_DIR, Retention, local_time, now_ms,
+};
+use crate::models::{
+  best_for, errors_per, finds, languages, measure, model_count, model_languages, none_usable,
+  plain_fits, rank, recommended, speed_text, times, unusable, wer_text,
 };
 use crate::session::{self, NoModel, Request, Status, label};
-use crate::settings::{
-  Activation, HudPosition, HudStyle, KEYBOARD, Settings, english_name, language_name,
-};
+use crate::settings::{Activation, HudPosition, HudStyle, KEYBOARD, Settings, language_name};
 use crate::transfer::Imported;
+use crate::ui::actions::Actions;
+use crate::ui::parts::{DataRowState, data_row, list_head, two_line_height};
+use crate::ui::rows::{RowMark, Rows, index_picker, pick_index, row_label};
+use crate::ui::{ABOUT_ICON, HISTORY_FOOT_H, HISTORY_TOTAL_H, KEYBOARD_ROW_INDENT, PAGE_PAD};
 use crate::{engine, mic_start};
 
 // MARK: Window
 
 pub const WIDTH: f32 = 560.0;
-/// The model to start with, wavo's own default: first in Available, its Download the blue one.
-const RECOMMENDED: &str = "parakeet-ultra";
 /// The height of the pages that scroll.
 pub const SCROLLING: f32 = 600.0;
 
@@ -53,8 +56,6 @@ const TABS: &str = "tabs";
 const CONFIRM: &str = "confirm";
 /// The row of the Models and History pages' search, over the page.
 const PAGE_HEAD: &str = "page-head";
-/// A page's padding in the window, the History list's too.
-const PAGE_PAD: [f32; 4] = [12.0, 20.0, 20.0, 20.0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -300,6 +301,14 @@ impl Prefs {
     self.shell.edit(Box::new(move |s| edit(s)));
   }
 
+  /// Sets one setting to what a row answered with, here at once and in the session: the same as
+  /// [Prefs::edit] for a row that knows only its slot.
+  fn set<T: Clone + Send + 'static>(&mut self, slot: fn(&mut Settings) -> &mut T, value: T) {
+    *slot(&mut self.settings) = value.clone();
+    self.repick();
+    self.shell.edit(Box::new(move |s| *slot(s) = value));
+  }
+
   fn active(&self) -> Option<&Found> {
     self.found.get(self.pick.active?)
   }
@@ -501,13 +510,6 @@ impl App for Prefs {
 // The microphone's pop-up at its widest, in points.
 const MIC_WIDTH: f32 = 320.0;
 
-/// A picker of `labels`, item `at` the current one, a divider after each of `lines`: the item
-/// picked, when it is another.
-fn pick(ui: &mut Ui, id: &str, labels: &[String], at: usize, lines: &[usize]) -> Option<usize> {
-  let mut cur = at;
-  picker(&mut cur, labels.iter().map(String::as_str), lines).show(ui.id(id)).changed.then_some(cur)
-}
-
 /// The languages of keyboard `layouts` ([Shell::keyboard_layouts]) by name, each with its
 /// layouts' names: `("ru", "Russian – PC")`.
 fn keyboard_languages(layouts: &[(String, String)]) -> Vec<(String, String)> {
@@ -525,58 +527,6 @@ fn keyboard_languages(layouts: &[(String, String)]) -> Vec<(String, String)> {
 /// wavo's name for a model choice, `None` for a file of the person's own.
 fn model_name(choice: &str) -> Option<&'static str> {
   hub::lookup(choice).ok().map(|m| m.name)
-}
-
-/// A picker of `labels` by their place, a divider after each of `lines`.
-fn picker<'s>(
-  cur: &'s mut usize,
-  labels: impl Iterator<Item = &'s str>,
-  lines: &[usize],
-) -> Picker<'s, usize> {
-  let mut p = Picker::new(cur);
-  for (i, label) in labels.enumerate() {
-    p = p.option(i, label);
-    if lines.contains(&i) {
-      p = p.divider();
-    }
-  }
-
-  p
-}
-
-/// What a row's mark says ([marked]).
-enum Mark<'s> {
-  None,
-  /// An ⓘ: what one line can't explain.
-  Info(&'s str),
-  /// What is wrong with the setting, in the ⓘ's place.
-  Warning(&'s str),
-}
-
-/// A row's label: `name`, then its mark with its tip, as `id` when given.
-fn marked<'s>(
-  name: impl Display + 's,
-  mark: Mark<'s>,
-  id: Option<Id>,
-) -> impl FnOnce(&mut Ui, TextStyle) + 's {
-  move |ui: &mut Ui, s: TextStyle| {
-    ui.text(name, s);
-    let help = |ui: &mut Ui, tip: &str| match id {
-      Some(id) => _ = ui.help(tip).with_id(id),
-      None => _ = ui.help(tip),
-    };
-    match mark {
-      Mark::None => {}
-      Mark::Info(tip) => {
-        help(ui, tip);
-        ui.info_button();
-      }
-      Mark::Warning(tip) => {
-        help(ui, tip);
-        ui.warning_button();
-      }
-    }
-  }
 }
 
 // MARK: General
@@ -642,8 +592,6 @@ const MODEL_KEYBOARD_HELP: Localized = t!(
   the model chosen there. This one takes a language set to it, one no model knows, and a layout \
   of any other language."
 );
-/// How far a keyboard language sits in from the Language row's name.
-const KEYBOARD_INDENT: f32 = 16.0;
 const KEYBOARD_HELP: Localized = t!(
   "Each dictation is in the language of the keyboard layout in use when \
   it ends, with the model chosen for that language below. Switch the layout while you speak and \
@@ -704,14 +652,15 @@ impl Prefs {
         mic_warning(devices, saved, self.lid_closed).or_else(|| slow.then(|| SLOW_MIC.to_string()));
       // The warning alone in the ⓘ's place: what is wrong matters then, not how the modes choose.
       let mark = match &warning {
-        Some(warning) => Mark::Warning(warning),
-        None => Mark::Info(MIC_HELP.as_str()),
+        Some(warning) => RowMark::Warning(warning),
+        None => RowMark::Info(MIC_HELP.as_str()),
       };
-      let row = FormRow::new(marked(t!("Microphone"), mark, Some(Id::of("mic-row").key("info"))));
+      let row =
+        FormRow::new(row_label(t!("Microphone"), mark, Some(Id::of("mic-row").key("info"))));
       ui.id("mic-row").form_row(fs, row, |ui| {
         // ALSA's names run past 60 characters: a longer one ends in "…" beside its label.
         let mut cur = at;
-        let pop = picker(&mut cur, labels.iter().copied(), &[1]).max_width(MIC_WIDTH);
+        let pop = index_picker(&mut cur, labels.iter().copied(), &[1]).max_width(MIC_WIDTH);
         if pop.show(ui.id("mic")).changed {
           let choice = mics[cur].1.clone();
           self.edit(move |s| s.microphone = choice.clone());
@@ -727,53 +676,47 @@ impl Prefs {
       // A modifier alone needs the event tap, and so Accessibility.
       let lone = matches!(Hotkey::parse(&self.settings.hotkey), Ok(Hotkey::Modifier(_)));
       let mark = match note {
-        _ if lone && self.access.needs_admin => Mark::Warning(LONE_KEY_NOTE.as_str()),
-        Some(note) => Mark::Info(note),
-        None => Mark::None,
+        _ if lone && self.access.needs_admin => RowMark::Warning(LONE_KEY_NOTE.as_str()),
+        Some(note) => RowMark::Info(note),
+        None => RowMark::None,
       };
 
-      let row = FormRow::new(marked(t!("Activation"), Mark::Info(ACTIVATION_HELP.as_str()), None));
-      ui.form_row(fs, row, |ui| {
-        let mut cur = self.settings.activation;
-        if ui.id("activation").picker(&mut cur, &activations()).changed {
-          self.edit(move |s| s.activation = cur);
-        }
-      });
-      ui.form_row(fs, FormRow::new(marked(t!("Shortcut"), mark, None)), |ui| self.shortcut(ui));
+      let row =
+        FormRow::new(row_label(t!("Activation"), RowMark::Info(ACTIVATION_HELP.as_str()), None));
+      let cur = self.settings.activation;
+      if let Some(cur) = ui.choice_row(fs, "activation", row, cur, &activations()) {
+        self.set(|s| &mut s.activation, cur);
+      }
+      ui.form_row(fs, FormRow::new(row_label(t!("Shortcut"), mark, None)), |ui| self.shortcut(ui));
       self.language_row(ui, fs);
     });
 
     ui.form_section(fs, t!("Output"), |ui| {
       let locked = self.access.needs_admin;
       let row = FormRow::new(t!("Paste the text into the app you dictate in"));
-      ui.disabled(locked).form_row(fs, row, |ui| {
-        let mut on = self.settings.auto_paste;
-        if ui.id("paste").toggle(&mut on, "").changed {
-          self.edit(move |s| s.auto_paste = on);
-        }
-      });
+      let on = self.settings.auto_paste;
+      if let Some(on) = ui.disabled(locked).toggle_row(fs, "paste", row, on) {
+        self.set(|s| &mut s.auto_paste, on);
+      }
 
       let restores = self.settings.restores_clipboard() && !locked;
       let help = match self.access.clipboard_unread && restores {
         true => format!("{KEEP_HELP}\n\n{CLIPBOARD_NOTE}"),
         false => KEEP_HELP.to_string(),
       };
-      let row = FormRow::new(marked(t!("Keep the text on the clipboard"), Mark::Info(&help), None));
-      ui.form_row(fs, row, |ui| {
-        let mut on = self.settings.keep_in_clipboard;
-        if ui.id("keep").toggle(&mut on, "").changed {
-          self.edit(move |s| s.keep_in_clipboard = on);
-        }
-      });
+      let row =
+        FormRow::new(row_label(t!("Keep the text on the clipboard"), RowMark::Info(&help), None));
+      let on = self.settings.keep_in_clipboard;
+      if let Some(on) = ui.toggle_row(fs, "keep", row, on) {
+        self.set(|s| &mut s.keep_in_clipboard, on);
+      }
 
       let row =
-        FormRow::new(marked(t!("Clean up the text"), Mark::Info(CLEAN_HELP.as_str()), None));
-      ui.form_row(fs, row, |ui| {
-        let mut on = self.settings.clean_text;
-        if ui.id("clean").toggle(&mut on, "").changed {
-          self.edit(move |s| s.clean_text = on);
-        }
-      });
+        FormRow::new(row_label(t!("Clean up the text"), RowMark::Info(CLEAN_HELP.as_str()), None));
+      let on = self.settings.clean_text;
+      if let Some(on) = ui.toggle_row(fs, "clean", row, on) {
+        self.set(|s| &mut s.clean_text, on);
+      }
     });
 
     ui.form_section(fs, t!("Startup"), |ui| self.login(ui, fs));
@@ -806,7 +749,7 @@ impl Prefs {
     ];
     ui.form_section(fs, title, |ui| {
       for (_, name, why, id, pane, ask) in rows.into_iter().filter(|r| r.0) {
-        let row = FormRow::new(marked(name, Mark::Info(why.as_str()), None)).tile(tile);
+        let row = FormRow::new(row_label(name, RowMark::Info(why.as_str()), None)).tile(tile);
         ui.form_row(fs, row, |ui| {
           let button = if ask {
             Button::new(t!("Allow").as_str()).style(ButtonStyle::BorderedProminent)
@@ -836,8 +779,8 @@ impl Prefs {
 
     let default = Settings::default().hotkey;
     let off = Hotkey::parse(&self.settings.hotkey).ok() == Hotkey::parse(&default).ok();
-    let ui = ui.disabled(off).help(t!("Back to the default shortcut").as_str());
-    if ui.id("reset").icon_button(Icon::RESET).clicked {
+    let tip = t!("Back to the default shortcut");
+    if ui.icon_action("reset", Icon::RESET, tip.as_str(), off) {
       self.edit(move |s| s.hotkey = default.clone());
     }
   }
@@ -895,15 +838,15 @@ impl Prefs {
     let (labels, at) = self.model_choices();
     let note = self.model_note();
     let keyboard = self.settings.follows_keyboard().then_some(MODEL_KEYBOARD_HELP.as_str());
-    let mark = note.as_deref().or(keyboard).map_or(Mark::None, Mark::Info);
+    let mark = note.as_deref().or(keyboard).map_or(RowMark::None, RowMark::Info);
     let name = if keyboard.is_some() { t!("Default model") } else { t!("Model") };
-    let row = FormRow::new(marked(name, mark, Some(Id::of("model-row").key("info"))));
+    let row = FormRow::new(row_label(name, mark, Some(Id::of("model-row").key("info"))));
 
     let none = self.found.is_empty() && self.pick.other.is_none();
     let mut picked = None;
     ui.form_row(fs, row, |ui| {
       if !none {
-        picked = pick(ui, "model", &labels, at, &[labels.len() - 2]);
+        picked = pick_index(ui, "model", &labels, at, &[labels.len() - 2]);
       } else if Button::new(t!("Download a Model…").as_str())
         .style(ButtonStyle::BorderedProminent)
         .show(ui.id("download-model"))
@@ -928,11 +871,11 @@ impl Prefs {
     let keyboard = self.settings.follows_keyboard();
     let auto = self.auto_help();
     let mark = match () {
-      _ if keyboard => Mark::Info(KEYBOARD_HELP.as_str()),
-      _ if self.settings.engine_language().is_none() => Mark::Info(&auto),
-      _ => Mark::None,
+      _ if keyboard => RowMark::Info(KEYBOARD_HELP.as_str()),
+      _ if self.settings.engine_language().is_none() => RowMark::Info(&auto),
+      _ => RowMark::None,
     };
-    let label = marked(t!("Language"), mark, Some(Id::of("lang-row").key("info")));
+    let label = row_label(t!("Language"), mark, Some(Id::of("lang-row").key("info")));
     // With Keyboard layout, its languages under it in the same row, each with its model.
     let rows = if keyboard { keyboard_languages(&self.layouts) } else { Vec::new() };
     let choices: Vec<_> = rows.iter().map(|(lang, _)| self.keyboard_choices(lang)).collect();
@@ -941,7 +884,7 @@ impl Prefs {
     if !rows.is_empty() {
       let (label_style, chosen, rows, choices) = (fs.label, &mut chosen, &rows, &choices);
       row = row.footer(move |ui: &mut Ui, s: TextStyle| {
-        let list = Style::new().w(grow()).gap(4.0).pads([2.0, 0.0, 0.0, KEYBOARD_INDENT]);
+        let list = Style::new().w(grow()).gap(4.0).pads([2.0, 0.0, 0.0, KEYBOARD_ROW_INDENT]);
         ui.col(list, |ui| {
           for (i, ((lang, layouts), (labels, _, at))) in rows.iter().zip(choices).enumerate() {
             let line = Style::new().w(grow()).gap(6.0).align(Align::Start, Align::Center);
@@ -951,7 +894,7 @@ impl Prefs {
               ui.text(layouts.as_str(), label_style.color(s.color).line_limit(1));
               ui.el(Style::new().w(grow()));
               let id = format!("keyboard-{lang}");
-              if let Some(p) = pick(ui, &id, labels, *at, &[0, labels.len() - 2]) {
+              if let Some(p) = pick_index(ui, &id, labels, *at, &[0, labels.len() - 2]) {
                 *chosen = Some((i, p));
               }
             });
@@ -961,7 +904,7 @@ impl Prefs {
     }
 
     let mut picked = None;
-    ui.form_row(fs, row, |ui| picked = pick(ui, "lang", &labels, at, &[head]));
+    ui.form_row(fs, row, |ui| picked = pick_index(ui, "lang", &labels, at, &[head]));
     if let Some(i) = picked {
       let code = langs[i].1.clone();
       // Keyboard layout starts a language not seen before on its best model downloaded; one the
@@ -1155,91 +1098,83 @@ impl Prefs {
     // The app's language, the model and where it runs, then updates.
     ui.form_section(fs, t!("App"), |ui| {
       // Its own name in each language: the one to go back to in any.
-      ui.form_row(fs, FormRow::new(t!("Language")), |ui| {
-        let tag = self.settings.app_language.as_deref();
-        let mut cur = crate::LANGUAGES.iter().find(|l| Some(l.0) == tag).map(|l| l.0);
-        let items = app_languages();
-        let p = Picker::new(&mut cur).options(&items[..1]).divider().options(&items[1..]);
-        if p.show(ui.id("app-language")).changed {
-          info!("settings: app language {}", cur.unwrap_or("system"));
-          self.edit(move |s| s.app_language = cur.map(str::to_owned));
-        }
-      });
+      let tag = self.settings.app_language.as_deref();
+      let cur = crate::LANGUAGES.iter().find(|l| Some(l.0) == tag).map(|l| l.0);
+      let items = app_languages();
+      let row = FormRow::new(t!("Language"));
+      let chosen = ui.split_choice_row(fs, "app-language", row, cur, &items[..1], &items[1..]);
+      if let Some(cur) = chosen {
+        info!("settings: app language {}", cur.unwrap_or("system"));
+        self.set(|s| &mut s.app_language, cur.map(str::to_owned));
+      }
 
       let row =
-        FormRow::new(marked(t!("Unload the model"), Mark::Info(UNLOAD_HELP.as_str()), None));
-      ui.form_row(fs, row, |ui| {
-        let mut cur = self.settings.unload_after_minutes;
-        let unloads = unloads();
-        let p = Picker::new(&mut cur).options(&unloads[..1]).divider().options(&unloads[1..]);
-        if p.show(ui.id("unload")).changed {
-          self.edit(move |s| s.unload_after_minutes = cur);
-        }
-      });
+        FormRow::new(row_label(t!("Unload the model"), RowMark::Info(UNLOAD_HELP.as_str()), None));
+      let unloads = unloads();
+      let cur = self.settings.unload_after_minutes;
+      if let Some(cur) = ui.split_choice_row(fs, "unload", row, cur, &unloads[..1], &unloads[1..]) {
+        self.set(|s| &mut s.unload_after_minutes, cur);
+      }
 
       // Only where there is one: Apple silicon with macOS 15 or later.
       if self.shell.has_neural_engine() {
-        let row =
-          FormRow::new(marked(t!("Use the Neural Engine"), Mark::Info(ANE_HELP.as_str()), None));
-        ui.form_row(fs, row, |ui| {
-          let mut on = self.settings.neural_engine;
-          if ui.id("ane").toggle(&mut on, "").changed {
-            self.edit(move |s| s.neural_engine = on);
-          }
-        });
+        let row = FormRow::new(row_label(
+          t!("Use the Neural Engine"),
+          RowMark::Info(ANE_HELP.as_str()),
+          None,
+        ));
+        let on = self.settings.neural_engine;
+        if let Some(on) = ui.toggle_row(fs, "ane", row, on) {
+          self.set(|s| &mut s.neural_engine, on);
+        }
       }
 
       // Off and disabled where the app can't update, the setting kept; its ⓘ says why.
       let updates = self.shell.updates();
       let help = if updates { UPDATE_HELP } else { NO_UPDATES };
       let mark = Some(Id::of("auto-update-row").key("info"));
-      let row = FormRow::new(marked(t!("Check for updates"), Mark::Info(help.as_str()), mark));
-      ui.disabled(!updates).id("auto-update-row").form_row(fs, row, |ui| {
-        let mut on = updates && self.settings.auto_update;
-        if ui.id("auto-update").toggle(&mut on, "").changed {
-          self.edit(move |s| s.auto_update = on);
-        }
-      });
+      let row =
+        FormRow::new(row_label(t!("Check for updates"), RowMark::Info(help.as_str()), mark));
+      let on = updates && self.settings.auto_update;
+      if let Some(on) =
+        ui.disabled(!updates).id("auto-update-row").toggle_row(fs, "auto-update", row, on)
+      {
+        self.set(|s| &mut s.auto_update, on);
+      }
     });
 
     ui.form_section(fs, t!("HUD"), |ui| {
-      ui.form_row(fs, FormRow::new(t!("Show the HUD at")), |ui| {
-        let mut cur = self.settings.hud_position;
-        if ui.id("hud").picker(&mut cur, &huds()).changed {
-          self.edit(move |s| s.hud_position = cur);
-        }
-      });
+      let row = FormRow::new(t!("Show the HUD at"));
+      let cur = self.settings.hud_position;
+      if let Some(cur) = ui.choice_row(fs, "hud", row, cur, &huds()) {
+        self.set(|s| &mut s.hud_position, cur);
+      }
 
-      ui.form_row(fs, FormRow::new(t!("HUD style")), |ui| {
-        let mut cur = self.settings.hud_style;
-        if ui.id("hud-style").picker(&mut cur, &hud_styles()).changed {
-          self.edit(move |s| s.hud_style = cur);
-        }
-      });
+      let row = FormRow::new(t!("HUD style"));
+      let cur = self.settings.hud_style;
+      if let Some(cur) = ui.choice_row(fs, "hud-style", row, cur, &hud_styles()) {
+        self.set(|s| &mut s.hud_style, cur);
+      }
 
-      let row = FormRow::new(marked(
+      let row = FormRow::new(row_label(
         t!("Show the text while speaking"),
-        Mark::Info(LIVE_HELP.as_str()),
+        RowMark::Info(LIVE_HELP.as_str()),
         None,
       ));
-      ui.form_row(fs, row, |ui| {
-        let mut on = self.settings.live_preview;
-        if ui.id("live").toggle(&mut on, "").changed {
-          self.edit(move |s| s.live_preview = on);
-        }
-      });
+      let on = self.settings.live_preview;
+      if let Some(on) = ui.toggle_row(fs, "live", row, on) {
+        self.set(|s| &mut s.live_preview, on);
+      }
 
-      let row = FormRow::new(marked(
+      let row = FormRow::new(row_label(
         t!("Show the transcription time"),
-        Mark::Info(TOOK_HELP.as_str()),
+        RowMark::Info(TOOK_HELP.as_str()),
         None,
       ));
-      ui.form_row(fs, row, |ui| {
-        let mut on = self.settings.show_transcription_time;
-        if ui.id("took").toggle(&mut on, "").changed {
-          self.edit(move |s| s.show_transcription_time = on);
-        }
-      });
+      let on = self.settings.show_transcription_time;
+      if let Some(on) = ui.toggle_row(fs, "took", row, on) {
+        self.set(|s| &mut s.show_transcription_time, on);
+      }
     });
 
     // How long it is kept, what is saved, then the folders.
@@ -1251,14 +1186,12 @@ impl Prefs {
         without their audio, and nothing is saved to disk.",
         IN_MEMORY
       );
-      let row = FormRow::new(marked(t!("Keep the history"), Mark::Info(&help), None));
-      ui.form_row(fs, row, |ui| {
-        let mut cur = self.settings.history_retention;
-        let p = Picker::new(&mut cur).options(&retentions()).divider().options(&[until_quit()]);
-        if p.show(ui.id("retention")).changed {
-          self.edit(move |s| s.history_retention = cur);
-        }
-      });
+      let row = FormRow::new(row_label(t!("Keep the history"), RowMark::Info(&help), None));
+      let cur = self.settings.history_retention;
+      let (kept, last) = (retentions(), [until_quit()]);
+      if let Some(cur) = ui.split_choice_row(fs, "retention", row, cur, &kept, &last) {
+        self.set(|s| &mut s.history_retention, cur);
+      }
 
       let show = t!("Show in {app}", app = open::file_manager());
       self.saved_row(ui, fs, &show);
@@ -1300,20 +1233,20 @@ impl Prefs {
 
     let failed = !not_saved && (exported.failed || imported.failed);
     let caption = (!captions.is_empty()).then(|| captions.join(" · "));
-    let shown = Shown { caption, progress, failed };
+    let shown = DataRowState { caption, progress, failed };
     let (export_all, import_all, delete_all) = (t!("Export…"), t!("Import…"), t!("Delete All…"));
     let help = format!(
       "{export_all} {EXPORT_HELP}\n\n{import_all} {IMPORT_HELP}\n\n{delete_all} {DELETE_HELP}"
     );
-    let row = FormRow::new(marked(t!("Saved history"), Mark::Info(&help), None));
+    let row = FormRow::new(row_label(t!("Saved history"), RowMark::Info(&help), None));
     data_row(ui, fs, Id::of("saved-row"), row, &shown, |ui| {
       if let Some(Transfer::Done((file, _))) = &export
-        && ui.disabled(!file.is_file()).id("export-show").button(show).clicked
+        && ui.button_action("export-show", show, !file.is_file())
       {
         self.shell.reveal(file);
       }
 
-      if ui.disabled(exporting || off).id("export").button(&export_all).clicked {
+      if ui.button_action("export", &export_all, exporting || off) {
         let name = export_name(now_ms());
         // Translators: the title of the save panel of Export….
         let panel = FileDialog::save(t!("Export").as_str()).name(&name).types(&["zip"]);
@@ -1321,7 +1254,7 @@ impl Prefs {
         self.panel = Some(Panel::Export);
       }
 
-      if ui.disabled(importing || off).id("import").button(&import_all).clicked {
+      if ui.button_action("import", &import_all, importing || off) {
         // Translators: the title of the open panel of Import….
         let panel = FileDialog::open(t!("Import").as_str()).types(&["zip"]);
         ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
@@ -1357,13 +1290,13 @@ impl Prefs {
       models = paths::display(&models),
       recordings = paths::display(&recordings),
     );
-    let row = FormRow::new(marked(show, Mark::Info(&help), None));
+    let row = FormRow::new(row_label(show, RowMark::Info(&help), None));
     ui.form_row(fs, row, |ui| {
       let folders =
         [("Models", t!("Models"), &models), ("Recordings", t!("Recordings"), &recordings)];
       for (id, name, dir) in folders {
-        let ui = ui.help(&paths::display(dir)).disabled(!dir.is_dir());
-        if ui.id(("reveal", id)).button(&name).clicked {
+        let ui = ui.help(&paths::display(dir));
+        if ui.button_action(("reveal", id), name.as_str(), !dir.is_dir()) {
           self.shell.reveal(dir);
         }
       }
@@ -1393,16 +1326,15 @@ impl Prefs {
       _ => None,
     };
     let state = login.state.as_ref().map_or(self.settings.autostart, |s| s.wanted());
-    let mut on = login.busy.unwrap_or(state);
+    let on = login.busy.unwrap_or(state);
     let off = login.state.is_err() || login.busy.is_some();
-    let mark = note.as_deref().map_or(Mark::None, Mark::Info);
-    ui.disabled(off).form_row(fs, FormRow::new(marked(t!("Launch at login"), mark, None)), |ui| {
-      if ui.id("login").toggle(&mut on, "").changed {
-        self.login.busy = Some(on);
-        self.login.error = None;
-        self.shell.set_autostart(on);
-      }
-    });
+    let mark = note.as_deref().map_or(RowMark::None, RowMark::Info);
+    let row = FormRow::new(row_label(t!("Launch at login"), mark, None));
+    if let Some(on) = ui.disabled(off).toggle_row(fs, "login", row, on) {
+      self.login.busy = Some(on);
+      self.login.error = None;
+      self.shell.set_autostart(on);
+    }
   }
 
   /// A history request the session refused: said under the panel.
@@ -1552,16 +1484,6 @@ fn share(done: u64, total: u64) -> (f32, String) {
   (k, format!("{:.0}% · {}", k * 100.0, done_text(done, total)))
 }
 
-/// A progress bar, moving without a share, and its text, as high as a caption's line: the text
-/// ends in "…" where the row is short, never pushing the row's buttons out.
-fn progress_line(ui: &mut Ui, fs: &FormStyle, k: Option<f32>, text: &str) {
-  let line = Style::new().w(grow()).h(px(ui.line_height(fs.caption))).gap(8.0).clip();
-  ui.row(line.align(Align::Start, Align::Center), |ui| {
-    ui.col(Style::new().w(px(120.0)), |ui| ui.progress(k));
-    ui.text(text, fs.caption.line_limit(1));
-  });
-}
-
 /// `86,286`, the language's separator between the thousands.
 fn thousands(n: usize) -> String {
   // Translators: what goes between the thousands of a number: 86,286 (a narrow space in some).
@@ -1630,170 +1552,6 @@ impl Pick {
   pub fn gone(&self) -> Option<&str> {
     self.other.as_ref().filter(|(_, there)| !there).map(|(name, _)| name.as_str())
   }
-}
-
-/// Every language of wavo's models by its name in the app's language, after "All languages":
-/// `(label, code)`.
-fn languages() -> Vec<(String, &'static str)> {
-  static CODES: LazyLock<Vec<&str>> = LazyLock::new(|| {
-    let mut codes: Vec<&str> = hub::MODELS.iter().flat_map(|m| m.langs.iter().copied()).collect();
-    codes.sort_unstable();
-    codes.dedup();
-    codes
-  });
-  let mut all: Vec<(String, &str)> = CODES.iter().map(|&c| (language_name(c), c)).collect();
-  all.sort();
-  all.insert(0, (t!("All languages").to_string(), ""));
-  all
-}
-
-/// Every word of `search` is in the model's names, maker or languages, in any case.
-fn finds(search: &str, m: &ModelInfo) -> bool {
-  let search = fold(search);
-  if search.trim().is_empty() {
-    return true;
-  }
-
-  // In the app's language and in English, as the models' own descriptions are.
-  let names = |c: &&str| [language_name(c), english_name(c)];
-  let langs: Vec<String> = m.langs.iter().flat_map(names).collect();
-  let text =
-    [m.full_name, m.name, m.family, m.maker, m.languages].join(" ") + " " + &langs.join(" ");
-  let text = fold(&text);
-  search.split_whitespace().all(|w| text.contains(w))
-}
-
-/// Where a model goes in a list of Settings › Models, the least first: `best`, then the measured
-/// ones by [measure], then the rest, with a language chosen those made for it alone first.
-fn rank(lang: &str, best: Option<&str>, m: &ModelInfo) -> (bool, bool, i32, bool) {
-  let by = measure(lang, m);
-  let at = by.map_or(0, |x| (x * 100.0).round() as i32);
-  (Some(m.name) != best, by.is_none(), at, !lang.is_empty() && m.langs != [lang])
-}
-
-/// What orders a measured model, the least first: its errors in `lang`, or with all languages
-/// its speed, the fastest first. `None` when not measured.
-fn measure(lang: &str, m: &ModelInfo) -> Option<f32> {
-  if lang.is_empty() { m.speed().map(|x| -x) } else { m.wer(lang) }
-}
-
-/// A model at least this many times faster than whisper-turbo is fast.
-const FAST: f32 = 3.0;
-
-/// The most errors in 100 words (characters where wavo counts those) a model may make in a
-/// language and still be usable in it: with more, a person fixes about every fourth word and
-/// would rather type. Settings › Models never recommends a model above it, and folds those away.
-const USABLE: f32 = 25.0;
-
-/// Whether `m` was measured in `lang` and makes too many errors there to be usable ([USABLE]).
-fn unusable(lang: &str, m: &ModelInfo) -> bool {
-  m.wer(lang).is_some_and(|x| x > USABLE)
-}
-
-/// Whether `m`, which writes lowercase without punctuation, counts in `lang`: it is usable there
-/// and no model with punctuation is, or the best of those makes twice its errors, as in Kazakh,
-/// Kyrgyz and Uzbek. A text to fix beats none; where a good one punctuates, it stays hidden.
-fn plain_fits(lang: &str, m: &ModelInfo) -> bool {
-  let Some(wer) = m.wer(lang).filter(|&x| x <= USABLE) else { return false };
-  let punctuated = hub::MODELS.iter().filter(|m| m.punctuated).filter_map(|m| m.wer(lang));
-  punctuated.min_by(f32::total_cmp).is_none_or(|best| best > USABLE || best >= wer * 2.0)
-}
-
-/// Whether models were measured in `lang` but none of them is usable there ([USABLE]).
-fn none_usable(lang: &str) -> bool {
-  let measured = hub::MODELS.iter().any(|m| m.wer(lang).is_some());
-  measured && recommended(lang).is_none()
-}
-
-/// The model to recommend for `lang` by wavo's measures: the fast one with the fewest errors, or
-/// the fastest within 10% of it; a slow one only with 1.5 times fewer errors. `None` when none
-/// was measured on it, or none of those is usable in it ([USABLE]).
-fn recommended(lang: &str) -> Option<&'static ModelInfo> {
-  let measured: Vec<(&'static ModelInfo, f32, f32)> = (hub::MODELS.iter())
-    .filter(|m| m.punctuated || plain_fits(lang, m))
-    .filter_map(|m| Some((m, m.wer(lang).filter(|&x| x <= USABLE)?, m.speed().unwrap_or(0.0))))
-    .collect();
-  let least = |fast: bool| {
-    let them = measured.iter().filter(move |x| (x.2 >= FAST) == fast);
-    them.min_by(|a, b| a.1.total_cmp(&b.1))
-  };
-  let Some(&(_, wer, _)) = least(true) else {
-    return least(false).map(|x| x.0);
-  };
-
-  if let Some(slow) = least(false).filter(|x| x.1 * 1.5 <= wer) {
-    return Some(slow.0);
-  }
-
-  let near = measured.iter().filter(|x| x.2 >= FAST && x.1 <= wer * 1.1);
-  near.max_by(|a, b| a.2.total_cmp(&b.2)).map(|x| x.0)
-}
-
-/// `WER 4.5%` of `m` in `lang`, a decimal under 10 (`WER 32%`); `None` when not measured.
-fn wer_text(lang: &str, m: &ModelInfo) -> Option<String> {
-  Some(t!("WER {wer}%", wer = figure(m.wer(lang)?)))
-}
-
-/// Languages written without spaces, whose WER wavo counts in characters: `BY_CHARACTER` in
-/// wavo's `scripts/wer.py`, which makes `src/hub/scores.rs` (the crate doesn't say it).
-const BY_CHARACTER: [&str; 7] = ["zh", "yue", "ja", "th", "lo", "my", "km"];
-
-/// What a WER in `lang` counts, on its hover.
-fn errors_per(lang: &str) -> Localized {
-  match BY_CHARACTER.contains(&lang) {
-    true => t!("Errors per 100 characters"),
-    false => t!("Errors per 100 words"),
-  }
-}
-
-/// A WER or a speed as Settings › Models shows it: a decimal under 10 (`4.5`), whole from it
-/// (`32`; 9.96 is `10`).
-fn figure(x: f32) -> String {
-  let tenths = (x * 10.0).round() / 10.0;
-  if tenths < 10.0 { format!("{tenths:.1}") } else { format!("{:.0}", x.round()) }
-}
-
-/// The model Settings › Models recommends for `lang` and why: [recommended], else whisper-turbo
-/// where it takes the language and wasn't measured on it, the best general model; [RECOMMENDED]
-/// for all languages.
-fn best_for(lang: &str) -> Option<(&'static str, String)> {
-  let name = language_name(lang);
-  match (lang, recommended(lang)) {
-    ("", _) => Some((RECOMMENDED, t!("The default model").to_string())),
-    (_, Some(m)) if !m.punctuated => {
-      let why = t!("The fewest errors in {lang}, but lowercase without punctuation", lang = name);
-      Some((m.name, why))
-    }
-    (_, Some(m)) => Some((m.name, t!("Best balance of accuracy and speed in {lang}", lang = name))),
-    _ => (hub::lookup("whisper-turbo").ok())
-      .filter(|m| m.langs.contains(&lang) && m.wer(lang).is_none())
-      .map(|m| {
-        (m.name, t!("No accuracy data for {lang} yet: the best general model", lang = name))
-      }),
-  }
-}
-
-/// `1 model`, `3 models`.
-fn model_count(n: usize) -> String {
-  tn!("{n} model", "{n} models", n)
-}
-
-/// A speed as times whisper-turbo's: `22×`, a decimal under 10 (`8.5×`, `0.9×`).
-fn times(x: f32) -> String {
-  format!("{}×", figure(x))
-}
-
-/// What [times] says on hover: `22× faster than whisper-turbo`, `As fast as whisper-turbo` when
-/// it shows `1.0×`; `None` when not measured.
-fn speed_text(m: &ModelInfo) -> Option<String> {
-  let x = m.speed()?;
-  let times = times(x);
-  Some(match m.name {
-    "whisper-turbo" => t!("The speed baseline ({times})", times),
-    _ if times == "1.0×" => t!("As fast as whisper-turbo").to_string(),
-    _ if x < 1.0 => t!("{times} the speed of whisper-turbo", times),
-    _ => t!("{times} faster than whisper-turbo", times),
-  })
 }
 
 impl Prefs {
@@ -1938,15 +1696,13 @@ impl Prefs {
     // As a form section's title: the note centred on the title's line.
     let head = |ui: &mut Ui, _| {
       ui.row(Style::new().w(grow()).h(px(line)).align(Align::Start, Align::Center), |ui| {
-        ui.text(t!("Downloaded"), fs.head);
-        ui.spacer();
-        ui.text(&note, fs.note);
+        list_head(ui, fs, t!("Downloaded").as_str(), &note);
       });
     };
     // Its rows the form's, padded by the list.
     let keys: Vec<u64> = downloaded.iter().map(|m| model_key(m)).collect();
     let key = |i: usize| keys[i];
-    let (row_h, head_h) = (two_line_h(ui, fs), line + fs.head_pad[2]);
+    let (row_h, head_h) = (two_line_height(ui, fs), line + fs.head_pad[2]);
     let rfs = &FormStyle { row: fs.row.pad(0.0), tile_x: fs.tile_x - fs.row.pad[3], ..*fs };
     let list = List::new(downloaded.len(), row_h).key(&key).multi().selection(&mut sel);
     let list = list.sections(&[0], head_h, &head).list_style(ListStyle::Grouped);
@@ -2056,7 +1812,7 @@ impl Prefs {
           _ => t!("Delete…"),
         };
         let off = in_use || busy;
-        if ui.help(&tip).disabled(off).id(("delete", m.name)).icon_button(Icon::TRASH).clicked {
+        if ui.icon_action(("delete", m.name), Icon::TRASH, tip.as_str(), off) {
           act = Some(m);
         }
       });
@@ -2091,7 +1847,7 @@ impl Prefs {
     };
 
     let (id, failed) = (Id::of(("model", m.name)), matches!(state, Some(Download::Failed(_))));
-    let shown = Shown { caption, progress, failed };
+    let shown = DataRowState { caption, progress, failed };
     let controls = |ui: &mut Ui| {
       fit.show(ui, m);
       let slot = actions(ui, fs.gap);
@@ -2109,7 +1865,7 @@ impl Prefs {
         } else {
           let preparing = matches!(state, Some(Download::Preparing));
           let tip = if preparing { t!("Cancel") } else { t!("Cancel the download") };
-          if ui.help(&tip).id(("cancel", m.name)).icon_button(Icon::X).clicked {
+          if ui.icon_action(("cancel", m.name), Icon::X, tip.as_str(), false) {
             self.shell.cancel_download(m.name);
           }
         }
@@ -2129,8 +1885,8 @@ impl Prefs {
   /// A model's ↗, last in its row: its card (license, languages, benchmarks) in the browser, the
   /// sign About's links have too.
   fn card(&self, ui: &mut Ui, m: &ModelInfo) {
-    let ui = ui.help(t!("Open the model’s page on Hugging Face").as_str()).id(("card", m.name));
-    if ui.icon_button(Icon::EXTERNAL).clicked {
+    let tip = t!("Open the model’s page on Hugging Face");
+    if ui.icon_action(("card", m.name), Icon::EXTERNAL, tip.as_str(), false) {
       self.shell.open_url(m.card);
     }
   }
@@ -2250,27 +2006,6 @@ fn model_caption(ui: &mut Ui, s: TextStyle, row: Id, m: &ModelInfo, fit: Fit, an
         .text("ANE", s.underline(LinePattern::Dot));
     }
   });
-}
-
-/// What wavo says of the languages of its models, to translate: [model_languages].
-const MODEL_LANGUAGES: [Localized; 9] = [
-  // Translators: the languages a speech model knows.
-  t!("100 languages"),
-  t!("25 European languages"),
-  t!("99 languages"),
-  t!("English"),
-  t!("Hebrew"),
-  t!("Russian"),
-  t!("Russian, English, Kazakh, Kyrgyz and Uzbek"),
-  t!("Taiwanese Mandarin and English"),
-  t!("Ukrainian and English"),
-];
-
-/// The languages `m` knows as wavo says them, in the app's language: one wavo adds later in
-/// English until it is in [MODEL_LANGUAGES].
-fn model_languages(m: &ModelInfo) -> &'static str {
-  let known = MODEL_LANGUAGES.iter().find(|l| l.key() == m.languages);
-  known.map_or(m.languages, |l| l.as_str())
 }
 
 // MARK: Downloads
@@ -2417,20 +2152,13 @@ fn export_name(ms: i64) -> String {
   format!("wavo-export-{y:04}-{mo:02}-{d:02}-{h:02}-{mi:02}-{s:02}.zip")
 }
 
-/// What a Data row shows of a transfer: its caption, else its progress while it runs.
-struct Shown {
-  caption: Option<String>,
-  progress: Option<(Option<f32>, String)>,
-  failed: bool,
-}
-
 /// `starting` until it knows its total, `ended` once done; a failure says it could not `what`.
 fn shown<T>(
   state: &Option<Transfer<T>>,
   what: Panel,
   starting: &str,
   ended: impl Fn(&T) -> String,
-) -> Shown {
+) -> DataRowState {
   let (caption, progress) = match state {
     Some(Transfer::Running { total: 0, .. }) => (None, Some((None, starting.to_owned()))),
     Some(Transfer::Running { done, total }) => {
@@ -2447,35 +2175,7 @@ fn shown<T>(
     }
     None => (None, None),
   };
-  Shown { caption, progress, failed: matches!(state, Some(Transfer::Failed(_))) }
-}
-
-/// A Data row with what it `shown`s: the progress under the title, a failure in red.
-fn data_row<'a>(
-  ui: &mut Ui,
-  fs: &FormStyle,
-  id: Id,
-  row: FormRow<'a>,
-  shown: &'a Shown,
-  controls: impl FnOnce(&mut Ui),
-) {
-  let danger = ui.theme().danger;
-  let caption = move |ui: &mut Ui, s: TextStyle| {
-    if let Some(caption) = &shown.caption {
-      // A failure in red; cut short, it shows whole in its tooltip.
-      let s = if shown.failed { s.color(danger) } else { s };
-      if shown.failed {
-        ui.help(caption);
-      }
-
-      ui.with_id(id.key("caption")).text(caption, s);
-    }
-
-    if let Some((k, text)) = &shown.progress {
-      progress_line(ui, fs, *k, text);
-    }
-  };
-  ui.with_id(id).form_row(fs, row.caption(caption), controls);
+  DataRowState { caption, progress, failed: matches!(state, Some(Transfer::Failed(_))) }
 }
 
 /// `Added 120 dictations`, and the recordings that did not come.
@@ -2630,11 +2330,6 @@ fn days(entries: &[Entry]) -> Vec<(Day, Range<usize>, i64)> {
   days
 }
 
-/// A row of a name and a line under it: the padding, the two lines and nimbo's 2 points between.
-fn two_line_h(ui: &mut Ui, fs: &FormStyle) -> f32 {
-  2.0 * fs.pad_y + ui.line_height(fs.label) + 2.0 + ui.line_height(fs.caption)
-}
-
 fn date_of(ms: i64) -> Day {
   local_time(ms).map(|t| t.date()).unwrap_or_default()
 }
@@ -2719,13 +2414,9 @@ enum Act {
   RetranscribeChosen,
 }
 
-/// The panel under the list, with the selected dictation's whole text and its actions.
-const FOOT_H: f32 = 150.0;
 /// Play's and Transcribe Again's tip on a dictation without a recording: in memory, imported
 /// without one.
 const NO_RECORDING: Localized = t!("Its recording isn’t kept");
-/// The line under it with the whole history.
-const TOTAL_H: f32 = 30.0;
 
 impl Prefs {
   fn history_head(&mut self, ui: &mut Ui, s: Style) -> Response {
@@ -2768,12 +2459,10 @@ impl Prefs {
     let status = &self.status;
     let starts: Vec<usize> = days.iter().map(|(_, r, _)| r.start).collect();
     let line = ui.line_height(fs.head);
-    let row_h = two_line_h(ui, fs);
+    let row_h = two_line_height(ui, fs);
     let head = |ui: &mut Ui, g: usize| {
       let (day, r, ms) = &days[g];
-      ui.text(day_title(*day, now), fs.head);
-      ui.spacer();
-      ui.text(day_note((r.len(), *ms)), fs.note);
+      list_head(ui, fs, &day_title(*day, now), &day_note((r.len(), *ms)));
     };
     let key = |i: usize| entries[i].id as u64;
     let list = List::new(entries.len(), row_h).key(&key).multi().selection(selected);
@@ -2818,7 +2507,7 @@ impl Prefs {
     let chosen = self.history.chosen();
     let mut act = None;
     ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
-    let s = Style::new().w(grow()).h(px(FOOT_H)).pads([12.0, 20.0, 16.0, 20.0]).gap(10.0);
+    let s = Style::new().w(grow()).h(px(HISTORY_FOOT_H)).pads([12.0, 20.0, 16.0, 20.0]).gap(10.0);
     ui.col(s, |ui| {
       let e = match chosen[..] {
         [] => {
@@ -2835,7 +2524,7 @@ impl Prefs {
           ui.row(Style::new().w(grow()), |ui| {
             ui.el(Style::new().w(grow()));
             let busy = self.selection_busy();
-            if ui.disabled(busy).id("delete-chosen").button(t!("Delete…").as_str()).clicked {
+            if ui.button_action("delete-chosen", t!("Delete…").as_str(), busy) {
               act = Some(Act::Delete);
             }
           });
@@ -2855,25 +2544,17 @@ impl Prefs {
           ui.help(&NO_RECORDING);
         }
 
-        if ui
-          .disabled(off)
-          .id(("retranscribe", e.id))
-          .button(t!("Transcribe Again").as_str())
-          .clicked
-        {
+        if ui.button_action(("retranscribe", e.id), t!("Transcribe Again").as_str(), off) {
           act = Some(Act::Request(Request::Retranscribe(e.id)));
         }
 
-        if st.restorable
-          && (ui.disabled(st.busy).id(("restore", e.id)))
-            .button(t!("Restore the Previous Text").as_str())
-            .clicked
-        {
+        let restore = t!("Restore the Previous Text");
+        if st.restorable && ui.button_action(("restore", e.id), restore.as_str(), st.busy) {
           act = Some(Act::Request(Request::Restore(e.id)));
         }
 
         ui.el(Style::new().w(grow()));
-        if ui.disabled(st.busy).id(("delete", e.id)).button(t!("Delete…").as_str()).clicked {
+        if ui.button_action(("delete", e.id), t!("Delete…").as_str(), st.busy) {
           act = Some(Act::Delete);
         }
       });
@@ -2899,9 +2580,12 @@ impl Prefs {
     };
 
     ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
-    ui.row(Style::new().w(grow()).h(px(TOTAL_H)).align(Align::Center, Align::Center), |ui| {
-      ui.id("history-total").text(&text, fs.note.nowrap());
-    });
+    ui.row(
+      Style::new().w(grow()).h(px(HISTORY_TOTAL_H)).align(Align::Center, Align::Center),
+      |ui| {
+        ui.id("history-total").text(&text, fs.note.nowrap());
+      },
+    );
   }
 
   fn total_text(&self) -> Option<String> {
@@ -3079,15 +2763,14 @@ fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, playing: bool, working: boo
     _ if e.audio_path.is_none() => NO_RECORDING,
     _ => t!("Play the recording"),
   };
-  let r = ui.help(&tip).disabled(e.audio_path.is_none()).control_size(ControlSize::Large);
-  let r = r.id(("play", e.id)).icon_button(if playing { Icon::STOP } else { Icon::PLAY });
-  if r.clicked {
+  let icon = if playing { Icon::STOP } else { Icon::PLAY };
+  let off = e.audio_path.is_none();
+  if ui.list_icon_action(("play", e.id), icon, tip.as_str(), off) {
     act = Some(if playing { Act::Stop } else { Act::Play(e.id) });
   }
 
-  let r = ui.help(t!("Copy").as_str()).disabled(e.text.is_empty()).control_size(ControlSize::Large);
-  let r = r.id(("copy", e.id)).icon_button(Icon::COPY);
-  if r.clicked {
+  let copy = t!("Copy");
+  if ui.list_icon_action(("copy", e.id), Icon::COPY, copy.as_str(), e.text.is_empty()) {
     act = Some(Act::Copy(e.text.clone()));
   }
 
@@ -3206,7 +2889,7 @@ impl Prefs {
     ui.col(head, |ui| {
       // 128 px: 64 points at 2x.
       let icon = nimbo::Png::new(crate::ICON).side(128);
-      ui.image(icon, Style::new().w(px(64.0)).h(px(64.0)));
+      ui.image(icon, Style::new().w(px(ABOUT_ICON)).h(px(ABOUT_ICON)));
       ui.el(Style::new().h(px(10.0)));
       let title = TextStyle::new(Font { size: 20.0, ..t.bold }, t.text).line_limit(1);
       ui.text(crate::INFO.name, title);
@@ -3218,18 +2901,17 @@ impl Prefs {
       ui.text(tagline, t.body());
       ui.el(Style::new().h(px(14.0)));
       ui.row(Style::new().gap(8.0), |ui| {
-        if ui.id(("link", "source")).button(t!("View on GitHub").as_str()).clicked {
+        if ui.button_action(("link", "source"), t!("View on GitHub").as_str(), false) {
           self.shell.open_url(SOURCE);
         }
 
-        if ui.id(("link", "coffee")).button(t!("Buy Me a Coffee").as_str()).clicked {
+        if ui.button_action(("link", "coffee"), t!("Buy Me a Coffee").as_str(), false) {
           self.shell.open_url(COFFEE);
         }
 
         // Only where the app can update.
-        if self.shell.updates()
-          && ui.id("updates").button(t!("Check for Updates…").as_str()).clicked
-        {
+        let updates = t!("Check for Updates…");
+        if self.shell.updates() && ui.button_action("updates", updates.as_str(), false) {
           self.shell.check_updates();
         }
       });
@@ -3238,14 +2920,14 @@ impl Prefs {
     // Denser than a setting's rows: six of them.
     let fs = &FormStyle { caption: fs.caption.line_limit(1), pad_y: 5.0, ..*fs };
     // A row's controls go on its name's line: the ↗ is centred in the whole row instead.
-    let row_h = two_line_h(ui, fs);
+    let row_h = two_line_height(ui, fs);
     ui.form_section(fs, t!("Acknowledgements"), |ui| {
       for (name, what, url) in ACKS {
         let label = if name == THE_MODELS.key() { THE_MODELS.as_str() } else { name };
         ui.form_row(fs, FormRow::new(label).caption(what), |ui| {
           ui.col(Style::new().h(px(row_h)).align(Align::Center, Align::Center), |ui| {
-            let ui = ui.help(url.trim_start_matches("https://")).control_size(ControlSize::Large);
-            if ui.id(("link", name)).icon_button(Icon::EXTERNAL).clicked {
+            let tip = url.trim_start_matches("https://");
+            if ui.list_icon_action(("link", name), Icon::EXTERNAL, tip, false) {
               self.shell.open_url(url);
             }
           });
@@ -3266,6 +2948,7 @@ mod tests {
   };
 
   use super::*;
+  use crate::models::{MODEL_LANGUAGES, RECOMMENDED, USABLE};
   use crate::session::EngineStatus;
   use crate::testing::TempDir;
 
@@ -4731,99 +4414,6 @@ mod tests {
     lang(&mut h, "sq");
     assert!(note(&h).is_none() && h.rect(Id::of(("poor-models", "sq"))).is_none());
     assert_eq!(best_for("sq").map(|p| p.0), Some("whisper-turbo"));
-  }
-
-  /// The recommended model first, the measured ones by their errors, then the rest, those made
-  /// for the language alone first.
-  #[test]
-  fn a_language_lists_its_pick_then_its_own_models_first() {
-    let order = |lang: &str| {
-      let best = recommended(lang).map(|m| m.name);
-      let mut models: Vec<&ModelInfo> =
-        hub::MODELS.iter().filter(|m| m.langs.contains(&lang)).collect();
-      models.sort_by_key(|m| rank(lang, best, m));
-      models.into_iter().map(|m| m.name).collect::<Vec<_>>()
-    };
-    assert_eq!(order("he")[..3], ["parakeet-he", "whisper-turbo-he", "whisper-turbo"]);
-    let en = ["parakeet-v2", RECOMMENDED, "whisper-large-v3", "breeze-asr-25", "parakeet-uk"];
-    assert_eq!(order("en")[..6], [&en[..], &["whisper-turbo"]].concat());
-    let ru = ["gigaam-v3-e2e-ctc", "whisper-large-v3", "gigaam-v3", "whisper-turbo", RECOMMENDED];
-    assert_eq!(order("ru")[..5], ru);
-
-    // On a tie, the one made for the language alone first, wherever it is in wavo's table.
-    let all = *hub::lookup("whisper-turbo").unwrap();
-    let mut he = all;
-    he.langs = &["he"];
-    let mut tie = [&all, &he];
-    tie.sort_by_key(|m| rank("he", None, m));
-    assert_eq!(tie.map(|m| m.langs.len() == 1), [true, false]);
-  }
-
-  /// The fast model with the fewest errors, the fastest of those near it; a slow one only when
-  /// far better, as whisper-turbo in Greek; never one with too many errors, none in Bengali.
-  #[test]
-  fn the_recommended_model_is_fast_and_accurate() {
-    let cases = [
-      ("ru", "gigaam-v3-e2e-ctc"),
-      ("en", "parakeet-v2"),
-      ("sv", "parakeet-ultra"),
-      ("el", "whisper-turbo"),
-      ("he", "parakeet-he"),
-    ];
-    for (lang, name) in cases {
-      assert_eq!(recommended(lang).map(|m| m.name), Some(name), "{lang}");
-    }
-
-    assert_eq!(recommended(""), None);
-
-    // With none measured, whisper-turbo where it takes the language.
-    let pick = |lang: &str| best_for(lang).map(|p| p.0);
-    assert_eq!(
-      (pick(""), pick("ru"), pick("sq"), pick("xx")),
-      (Some(RECOMMENDED), Some("gigaam-v3-e2e-ctc"), Some("whisper-turbo"), None)
-    );
-    let sq = best_for("sq").unwrap().1;
-    assert_eq!(sq, "No accuracy data for Albanian yet: the best general model");
-    assert_eq!(recommended("sq"), None, "none measured");
-    // None in Georgian or Bengali, where every model measured has too many errors.
-    for lang in ["ka", "bn"] {
-      assert_eq!(pick(lang), None, "{lang}: none usable");
-      assert!(none_usable(lang), "{lang}");
-      assert!(hub::lookup("whisper-turbo").unwrap().wer(lang).is_some_and(|x| x > USABLE));
-    }
-
-    assert!(!none_usable("sq") && !none_usable("ru") && !none_usable(""));
-    // Never one above the cutoff, in any language.
-    for (_, lang) in &languages() {
-      assert!(recommended(lang).is_none_or(|m| m.wer(lang).unwrap() <= USABLE), "{lang}");
-    }
-  }
-
-  /// WER to a decimal under 10 (rounded first); bolts and the speed's words, whisper-turbo the
-  /// baseline; an unpunctuated model recommended only where nothing better is.
-  #[test]
-  fn models_say_their_errors_and_speed() {
-    let m = |name: &str| hub::lookup(name).unwrap();
-    assert_eq!(wer_text("ru", m("gigaam-v3")).as_deref(), Some("WER 4.5%"));
-    assert_eq!(wer_text("el", m("parakeet-ultra")).as_deref(), Some("WER 32%"));
-    assert_eq!(wer_text("", m("parakeet-ultra")), None, "all languages");
-    assert_eq!([9.94, 9.96, 31.6].map(figure), ["9.9", "10", "32"]);
-    for (_, lang) in &languages() {
-      let plain = recommended(lang).filter(|m| !m.punctuated).map(|m| m.name);
-      let only = ["kk", "ky", "uz"].contains(lang);
-      assert_eq!(plain, only.then_some("gigaam-multilingual"), "{lang}");
-    }
-
-    assert_eq!([22.1, 9.96, 8.5, 0.9].map(times), ["22×", "10×", "8.5×", "0.9×"]);
-    let speed = |name| speed_text(m(name)).unwrap();
-    assert_eq!(speed("gigaam-v3"), "13× faster than whisper-turbo");
-    assert_eq!(speed("parakeet-ultra"), "6.7× faster than whisper-turbo");
-    assert_eq!(speed("whisper-turbo"), "The speed baseline (1.0×)");
-    assert_eq!(speed("whisper-turbo-he"), "As fast as whisper-turbo");
-    assert_eq!(speed("whisper-medium"), "0.9× the speed of whisper-turbo");
-    let mut unmeasured = *m("whisper-tiny");
-    unmeasured.name = "unmeasured";
-    assert_eq!(speed_text(&unmeasured), None);
   }
 
   #[test]
