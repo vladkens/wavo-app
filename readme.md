@@ -65,7 +65,7 @@ The same Export… and Import… in Advanced › Data move your history to anoth
 
 ARM64 is Apple Silicon and other ARM chips; AMD64 is a usual Intel or AMD PC. `<version>` is the release's, such as `v0.1.0`.
 
-- **macOS** 14.2 or later, ARM64: `Wavo-<version>-macos-aarch64.dmg`; open it and drag Wavo into Applications. It is signed and notarized by Apple, so it opens like any other app.
+- **macOS** 14.2 or later, ARM64: `Wavo-<version>-macos-aarch64.dmg`; Intel (AMD64): `Wavo-<version>-macos-x86_64.dmg`; open it and drag Wavo into Applications. It is signed and notarized by Apple, so it opens like any other app.
 - **Windows** 10 or 11, AMD64: `Wavo-<version>-windows-x64-setup.exe`; ARM64: `Wavo-<version>-windows-arm64-setup.exe`. It installs Wavo for you alone, no administrator needed, with a Start menu entry. It is not signed yet: SmartScreen says "Windows protected your PC", More info → Run anyway. Its icon is in the notification area, perhaps under the ^ arrow.
 - **Linux** AMD64: `Wavo-<version>-linux-x86_64.AppImage`; ARM64: `Wavo-<version>-linux-aarch64.AppImage`. Make it executable (`chmod +x`) and run it. On Debian and Ubuntu the `.deb` of the same name installs it instead: `sudo apt install ./Wavo-<version>-linux-x86_64.deb`.
 
