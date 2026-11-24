@@ -620,6 +620,7 @@ fn open_stream(device: &cpal::Device, first: Arc<FirstSound>) -> Result<(Capture
   let format = supported.sample_format();
   let stream = by_format!(format, build(device, config, producer, failure.clone(), first.clone()))?;
   stream.play().context("start the input stream")?;
+
   // Once it starts, out of its way.
   let input = Input::new(device.clone());
   let (id, transport) = input.map_or((None, Transport::Unknown), |x| (x.id, x.transport));

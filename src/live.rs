@@ -310,6 +310,7 @@ mod tests {
     let (tx, events) = unbounded();
     let engine = Engine::start(Arc::new(Wavo), model, false, None, tx);
     let mut busy = Duration::ZERO;
+
     let all = Clip::analyze(pcm);
     let (mut p, mut id, mut steps) = (Preview::default(), 0, Vec::new());
     let step = frame(STEP.as_millis() as usize);
@@ -321,6 +322,7 @@ mod tests {
           pcm: all.pcm[from * 256..end * 256].to_vec(),
           scores: all.scores[from..end].to_vec(),
         };
+
         id += 1;
         if let Some(pcm) = p.next(id, after) {
           let started = Instant::now();

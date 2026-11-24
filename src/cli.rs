@@ -88,6 +88,7 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
   let mut paths: Vec<PathBuf> =
     folders(&INFO, home.clone()).into_iter().filter(|p| p.exists()).collect();
   paths.extend(uninstall::app_path().filter(|_| shares(&INFO)));
+
   // Windows can't delete the exe that runs this: its folder is left to the person.
   let left = std::env::current_exe().ok().filter(|_| cfg!(windows)).and_then(|exe| {
     let (dir, name) = (exe.parent()?.display(), exe.file_name()?.display());
@@ -97,6 +98,7 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
     paths.iter().for_each(|p| println!("{}", p.display()));
     models.iter().for_each(|(m, _)| println!("the model {} in {hub}", m.name));
   };
+
   // Windows: never asked ([YES]).
   if dry_run || (cfg!(windows) && !yes) {
     println!("would quit {}, {STEPS}, and remove:", INFO.name);

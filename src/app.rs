@@ -199,6 +199,7 @@ fn start(
   let observer = Box::new(|update: Update| {
     proxy().post(move |main| _ = with_app(|app| app.on_update(main, update)))
   });
+
   // The language before any text: the session's warnings are made in it. nimbo reads the
   // catalogs from a window's config, so the HUD opens first, hidden.
   let locale = Settings::locale_at(&home.join(settings::FILE));
@@ -206,8 +207,10 @@ fn start(
   let hud = open_hud(main, HudPosition::default(), false);
   let session = Session::start(config, GuiOutput, observer)?;
   let handle = session.handle();
+
   // The session has not told its settings yet: they are read from the file.
   let saved = Settings::load(&home.join(settings::FILE)).0;
+
   // After the session's: it creates and migrates the history.
   let in_memory = saved.history_retention.in_memory();
   let history = open_history(&home, in_memory);
@@ -215,6 +218,7 @@ fn start(
     let handle = handle.clone();
     Hotkeys::new(move |edge| {
       handle.input(edge.into());
+
       // The layout as the key goes down and up, ahead of its change, which nimbo tells once a
       // burst of them ends: a switch just before the release decides the recording.
       proxy().post(|_| _ = with_app(App::tell_keyboard));
@@ -427,6 +431,7 @@ fn open_window(main: &mut Main, page: Option<Page>) {
     Some(u) => u.settings.clone(),
     None => Settings::load(&home.join(settings::FILE)).0,
   };
+
   let mut prefs = Prefs::new(Box::new(shell), settings, hub, &home, history);
   if let Some(u) = &update {
     prefs.update(&u.settings, &u.status, u.history);
@@ -597,6 +602,7 @@ impl App {
           }
           _ => hud::during(status),
         };
+
         let r = status.recording.as_ref();
         Show::Recording {
           meter: update.meter.clone().filter(|_| !denied),
@@ -874,6 +880,7 @@ impl App {
         menu::recent_title(empty.as_deref().unwrap_or(&e.text), e.created_at, now)
       })
       .collect();
+
     let mics = (&self.devices[..], &update.settings.microphone, self.lid_closed);
     let (status, found, pick) = (&update.status, &self.found, &self.pick);
     let updating = self.updater.lock().unwrap().showing().cloned();
@@ -976,6 +983,7 @@ impl App {
                 proxy().post(move |_| _ = with_app(|app| app.update_progress(done)));
               }
             };
+
             let staged = shipo::download(&release, progress);
             proxy().post(|_| _ = with_app(|app| app.update_downloaded(staged)));
           });
@@ -1261,6 +1269,7 @@ impl window::Shell for AppShell {
           Transfer::Failed(format!("{e:#}"))
         }
       };
+
       *state.lock().unwrap() = Some(end);
       // A delete of the saved history may wait for it.
       if let Err(e) = handle.request(Request::Transferred) {
@@ -1298,6 +1307,7 @@ impl window::Shell for AppShell {
           Transfer::Failed(format!("{e:#}"))
         }
       };
+
       *state.lock().unwrap() = Some(end);
       if let Err(e) = handle.request(Request::Transferred) {
         warn!("import: {e}");

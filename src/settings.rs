@@ -161,6 +161,7 @@ impl Settings {
           Ok(()) => t!("{path}: {e}; using the defaults, the file kept as {kept}", path, e, kept),
           Err(_) => t!("{path}: {e}; using the defaults", path, e),
         };
+
         return (Self::default(), Some(warning));
       }
     };
