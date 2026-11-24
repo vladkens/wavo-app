@@ -133,14 +133,16 @@ pub enum Input {
   },
 }
 
-impl From<Edge> for Input {
-  fn from(edge: Edge) -> Self {
-    match edge {
+impl Input {
+  /// What a hotkey's edge means to the session; none for an edge it doesn't know.
+  pub fn from_edge(edge: Edge) -> Option<Self> {
+    Some(match edge {
       Edge::Down { which, at, repeat } => Input::KeyDown { which, at, repeat },
       Edge::Up { which, at } => Input::KeyUp { which, at },
       Edge::Escape => Input::Escape,
       Edge::Aborted { which } => Input::KeyAborted { which },
-    }
+      _ => return None,
+    })
   }
 }
 
@@ -3031,7 +3033,8 @@ mod tests {
     let text = menu::SOFTWARE_GPU.to_string();
     assert_eq!(shown, [menu::Warning { id: menu::Warn::Status, text, action: false }]);
     let mics = (&[][..], &audio::Microphone::Automatic, false);
-    let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;
+    let items =
+      menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items().to_vec();
     assert_eq!(items[1].label(), format!("⚠︎ {}", menu::SOFTWARE_GPU), "not cut");
   }
 

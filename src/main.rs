@@ -45,13 +45,11 @@ const VERSION: &str = concat!("v", env!("WAVO_VERSION"));
 const INFO: AppInfo = if cfg!(wavo_dev) { DEV } else { RELEASE };
 
 /// Wavo, as released and installed: its id is in every install (data, permissions, login item).
-const RELEASE: AppInfo =
-  AppInfo { id: "me.vladkens.wavo", name: "Wavo", presence: Presence::Accessory };
+const RELEASE: AppInfo = AppInfo::new("me.vladkens.wavo", "Wavo").presence(Presence::Accessory);
 
 /// Wavo Dev, `make run`'s: an app of its own beside the installed Wavo, with its own data,
 /// permissions, login item and instance, all by its id. It never updates itself.
-const DEV: AppInfo =
-  AppInfo { id: "me.vladkens.wavo-dev", name: "Wavo Dev", presence: Presence::Accessory };
+const DEV: AppInfo = AppInfo::new("me.vladkens.wavo-dev", "Wavo Dev").presence(Presence::Accessory);
 
 /// The app's icon, decoded by nimbo when first shown; Wavo Dev's is orange, as its bundle's
 /// (build.rs, scripts/dev-icon.py).
@@ -69,11 +67,9 @@ const LOG_MAX: u64 = 5 << 20;
 
 /// The launcher entry on Linux, as the AppImage's .desktop has it (Cargo.toml's
 /// `[package.metadata.shipo]`).
-const LAUNCHER: Launcher = Launcher {
-  comment: "Local dictation: hold a hotkey, speak, and the text lands where you were typing",
-  categories: &["Utility", "Accessibility"],
-  icon: Png::icon(ICON),
-};
+const LAUNCHER: Launcher = Launcher::new(Png::icon(ICON))
+  .comment("Local dictation: hold a hotkey, speak, and the text lands where you were typing")
+  .categories(&["Utility", "Accessibility"]);
 
 /// The app's translations (`make i18n` keeps them): its English texts are the keys.
 const LOCALES: Localizations = &[
@@ -170,7 +166,7 @@ fn main() -> Result<()> {
 fn home() -> PathBuf {
   match std::env::var_os("WAVO_HOME") {
     Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-    _ => nimbo::paths::data_dir(INFO.id),
+    _ => nimbo::paths::data_dir(INFO.id()),
   }
 }
 
@@ -237,12 +233,16 @@ mod tests {
   #[test]
   fn wavo_dev_is_an_app_of_its_own() {
     // What installs and macOS know Wavo by: never changed.
-    assert_eq!((RELEASE.id, RELEASE.name), ("me.vladkens.wavo", "Wavo"));
-    assert_eq!((DEV.id, DEV.name), ("me.vladkens.wavo-dev", "Wavo Dev"));
-    let folder = |info: AppInfo| nimbo::paths::data_dir(info.id).file_name().unwrap().to_owned();
+    assert_eq!((RELEASE.id(), RELEASE.name()), ("me.vladkens.wavo", "Wavo"));
+    assert_eq!((DEV.id(), DEV.name()), ("me.vladkens.wavo-dev", "Wavo Dev"));
+    let folder = |info: AppInfo| nimbo::paths::data_dir(info.id()).file_name().unwrap().to_owned();
     assert_eq!(folder(RELEASE), "me.vladkens.wavo");
     assert_eq!(folder(DEV), "me.vladkens.wavo-dev");
-    assert_eq!(INFO.id, RELEASE.id, "without WAVO_FLAVOR, as `make test` and CI build, it is Wavo");
+    assert_eq!(
+      INFO.id(),
+      RELEASE.id(),
+      "without WAVO_FLAVOR, as `make test` and CI build, it is Wavo"
+    );
   }
 
   #[test]

@@ -16,7 +16,7 @@ use crate::INFO;
 /// `cmd` to the running app.
 pub fn send(cmd: &str) -> Result<()> {
   if instance::send_in(&crate::home(), cmd).is_err() {
-    bail!("{} is not running", INFO.name);
+    bail!("{} is not running", INFO.name());
   }
 
   Ok(())
@@ -62,7 +62,7 @@ const STEPS: &str = match () {
 /// the Hugging Face cache, the app it runs from. Wavo does; Wavo Dev ([crate::DEV]) leaves them,
 /// as the installed Wavo uses the caches and the models, and its app is a build in `target/`.
 fn shares(info: &AppInfo) -> bool {
-  info.id == crate::RELEASE.id
+  info.id() == crate::RELEASE.id()
 }
 
 /// The folders `uninstall` removes, the outermost of them: the app's data (`home`), nimbo's config
@@ -70,10 +70,10 @@ fn shares(info: &AppInfo) -> bool {
 /// [shares], wavo's (the models built for the Neural Engine, too).
 fn folders(info: &AppInfo, home: PathBuf) -> Vec<PathBuf> {
   // On macOS config and data are one, which a `WAVO_HOME` stands in for and must not reach past.
-  let config = nimbo::paths::config_dir(info.id);
-  let config = (config != nimbo::paths::data_dir(info.id)).then_some(config);
+  let config = nimbo::paths::config_dir(info.id());
+  let config = (config != nimbo::paths::data_dir(info.id())).then_some(config);
   let wavo = shares(info).then(|| nimbo::paths::cache_dir("wavo"));
-  let caches = [nimbo::paths::cache_dir(info.id)].into_iter().chain(wavo);
+  let caches = [nimbo::paths::cache_dir(info.id())].into_iter().chain(wavo);
   uninstall::outermost([home].into_iter().chain(config).chain(caches))
 }
 
@@ -99,7 +99,7 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
   };
   // Windows: never asked ([YES]).
   if dry_run || (cfg!(windows) && !yes) {
-    println!("would quit {}, {STEPS}, and remove:", INFO.name);
+    println!("would quit {}, {STEPS}, and remove:", INFO.name());
     list();
     left.iter().for_each(|l| println!("{l}"));
     if !dry_run {
@@ -152,7 +152,7 @@ pub fn uninstall(dry_run: bool, yes: bool) -> Result<()> {
 }
 
 fn confirm() -> Result<bool> {
-  print!("Uninstall {}? [y/N] ", INFO.name);
+  print!("Uninstall {}? [y/N] ", INFO.name());
   io::stdout().flush()?;
   let mut answer = String::new();
   io::stdin().read_line(&mut answer)?;
@@ -167,11 +167,11 @@ fn quit_and_wait(home: &Path) -> Result<()> {
 
   let running = matches!(instance::claim_in(home)?, Claim::Running);
   if instance::quit_and_wait_in(home, Duration::from_secs(5)).is_err() {
-    bail!("quit {} first", INFO.name);
+    bail!("quit {} first", INFO.name());
   }
 
   if running {
-    println!("{} quit", INFO.name);
+    println!("{} quit", INFO.name());
   }
 
   Ok(())
@@ -193,6 +193,6 @@ mod tests {
     assert!(!shares(&DEV));
     let dev = folders(&DEV, home.clone());
     assert!(!dev.contains(&wavo));
-    assert!(dev.iter().all(|p| *p == home || p.to_string_lossy().contains(DEV.id)), "{dev:?}");
+    assert!(dev.iter().all(|p| *p == home || p.to_string_lossy().contains(DEV.id())), "{dev:?}");
   }
 }

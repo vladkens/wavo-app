@@ -18,16 +18,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
+use nimbo::clipboard::{Clipboard, SystemClipboard};
 use nimbo::focus::{self, Focused};
 use nimbo::hotkey::{Hotkeys, Listener};
 use nimbo::instance::{self, Claim, Instance};
 use nimbo::paste::{self, PORTAL_WAIT, Paste};
 use nimbo::permissions::{self, Access, Pane};
 use nimbo::system::Change;
-use nimbo::tray::{Menu, Tray};
-use nimbo::{
-  Clipboard, Hotkey, Locale, Main, Proxy, SystemClipboard, Window, autostart, input_source, t,
-};
+use nimbo::tray::Tray;
+use nimbo::{Hotkey, Locale, Main, Menu, Proxy, Window, autostart, input_source, t};
 use shipo::{Release, Staged};
 use tracing::{error, info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -35,7 +34,7 @@ use wavo::hub::{self, Hub, ModelInfo};
 use crate::history::{self, Entry, History};
 use crate::hud::{self, Hud, Mode, Show};
 use crate::menu::{self, Action, Icon, Warn, Warning};
-use crate::session::{self, Handle, NotPasted, Phase, Request, Session, TextOutput, Update};
+use crate::session::{self, Handle, Input, NotPasted, Phase, Request, Session, TextOutput, Update};
 use crate::settings::{self, HudPosition, Settings};
 use crate::updater::{Act, State, UpdateWindow, Updater};
 use crate::window::{
@@ -149,7 +148,7 @@ pub fn run(updated: Option<shipo::Error>) -> Result<()> {
     Claim::Primary(instance) => instance,
     Claim::Running => {
       let opened = instance::send_in(&home, instance::OPEN).is_ok();
-      let name = INFO.name;
+      let name = INFO.name();
       eprintln!("{name} is already running for {} (settings opened: {opened})", home.display());
       return Ok(());
     }
@@ -216,7 +215,9 @@ fn start(
   let hotkeys = {
     let handle = handle.clone();
     Hotkeys::new(move |edge| {
-      handle.input(edge.into());
+      if let Some(input) = Input::from_edge(edge) {
+        handle.input(input);
+      }
       // The layout as the key goes down and up, ahead of its change, which nimbo tells once a
       // burst of them ends: a switch just before the release decides the recording.
       proxy().post(|_| _ = with_app(App::tell_keyboard));
@@ -844,7 +845,8 @@ impl App {
     let error = |(which, text): (usize, &str)| {
       let slot = hotkeys.slots.get(which).cloned().unwrap_or_default();
       let dead = hotkeys.listener_error.clone().filter(|_| failed && !slot.fallback);
-      Hotkey::parse(text).err().map(|e| e.to_string()).or(slot.error).or(dead)
+      let refused = slot.error.or(dead).map(|e| e.to_string());
+      Hotkey::parse(text).err().map(|e| e.to_string()).or(refused)
     };
     let hotkeys = settings.hotkeys().enumerate();
     hotkeys
@@ -864,7 +866,7 @@ impl App {
       accessibility: self.accessibility || needs_admin(),
       hotkey_errors,
       hotkey_portal: nimbo::hotkey::start_asks() && !listening,
-      paste_portal: focus::hidden() && !nimbo::keys::ready(),
+      paste_portal: focus::hidden() && !nimbo::paste::ready(),
       no_microphone: self.mic() != Access::Granted,
       clipboard_unread: self.pastes(&update.settings)
         && update.settings.restores_clipboard()
@@ -1216,13 +1218,13 @@ impl window::Shell for AppShell {
   }
 
   fn autostart(&self) -> Result<autostart::State, String> {
-    autostart::state(&INFO)
+    autostart::state(&INFO).map_err(|e| e.to_string())
   }
 
   fn set_autostart(&self, on: bool) {
     let handle = self.handle.clone();
     spawn("autostart", move || {
-      let result = autostart::set(&INFO, on);
+      let result = autostart::set(&INFO, on).map_err(|e| e.to_string());
       if result.is_ok() {
         handle.edit_settings(move |s| s.autostart = on);
       }
@@ -1416,8 +1418,8 @@ impl TextOutput for GuiOutput {
     // pasted any more, and nimbo's paste stops just before then, as a clipboard or a focus that
     // doesn't answer holds it (no ⌘V a minute late).
     let wait = if focus::hidden() { PORTAL_WAIT } else { MAIN_WAIT };
-    let deadline = Some(Instant::now() + wait - Duration::from_millis(100));
-    let opts = Paste { restore: !keep, target: target.clone(), deadline };
+    let deadline = Instant::now() + wait - Duration::from_millis(100);
+    let opts = Paste::new(target.clone()).restore(!keep).deadline(deadline);
     let (text, late) = (text.to_owned(), Arc::new(AtomicBool::new(false)));
     let gave_up = late.clone();
     let paste = move |_: &mut Main| {
@@ -1475,8 +1477,12 @@ fn busy() -> NotPasted {
 #[cfg(test)]
 #[test]
 fn a_target_moves_by_what_both_told() {
-  let at = |pid, window| Some(Focused { pid, name: "app".into(), window, secure: Ok(false) });
-  let (here, busy) = (at(7, Ok(None)), at(7, Err("no answer".into())));
+  let at = |pid, window| {
+    let mut f = Focused::default();
+    (f.pid, f.name, f.window) = (pid, "app".into(), window);
+    Some(f)
+  };
+  let (here, busy) = (at(7, Ok(None)), at(7, Err(nimbo::Error::System("no answer".into()))));
   assert!(!GuiOutput::moved(&here, &busy));
   assert!(GuiOutput::moved(&here, &at(8, Ok(None))), "another app");
   assert!(GuiOutput::moved(&None, &None), "Wayland");

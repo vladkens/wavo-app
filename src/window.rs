@@ -17,15 +17,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use nimbo::a11y::Role;
 use nimbo::autostart::State as Autostart;
 use nimbo::permissions::{Access as Grant, Pane};
 use nimbo::system::Change;
-use nimbo::ui::Role;
-use nimbo::ui::widgets::icon;
 use nimbo::{
-  Align, Answer, App, Button, ButtonLook, ButtonRole, ButtonStyle, Config, ControlSize, Cx, Dialog,
-  Event, FileDialog, Font, FormRow, FormStyle, Frame, Hotkey, Icon, Id, Item, LinePattern, List,
-  ListStyle, Localized, Menu, Picker, Rect, Response, Section, Selection, Style, TabItem, Tag,
+  Align, Answer, App, BorderedProminentButtonStyle, Button, ButtonRole, Config, ControlSize, Cx,
+  Dialog, Event, FileDialog, FormRow, FormStyle, Frame, Hotkey, Icon, Id, InsetGroupedListStyle,
+  Item, LinePattern, List, Localized, Menu, Picker, Rect, Response, Section, Selection, Style, Tag,
   TextStyle, Tone, Ui, Weight, grow, open, paths, px, t, tn,
 };
 use tracing::{info, warn};
@@ -67,13 +66,13 @@ pub enum Page {
 }
 
 /// The tabs, in the language chosen now.
-fn pages() -> [TabItem<'static, Page>; 5] {
+fn pages() -> [Tag<'static, Page>; 5] {
   [
-    TabItem::new(Page::General, Icon::GEAR, t!("General").as_str()),
-    TabItem::new(Page::Models, Icon::DOWNLOAD, t!("Models").as_str()),
-    TabItem::new(Page::History, Icon::HISTORY, t!("History").as_str()),
-    TabItem::new(Page::Advanced, Icon::SLIDERS, t!("Advanced").as_str()),
-    TabItem::new(Page::About, Icon::INFO, t!("About").as_str()),
+    Tag::new(Page::General, t!("General").as_str()).icon(Icon::GEAR),
+    Tag::new(Page::Models, t!("Models").as_str()).icon(Icon::DOWNLOAD),
+    Tag::new(Page::History, t!("History").as_str()).icon(Icon::HISTORY),
+    Tag::new(Page::Advanced, t!("Advanced").as_str()).icon(Icon::SLIDERS),
+    Tag::new(Page::About, t!("About").as_str()).icon(Icon::INFO),
   ]
 }
 
@@ -86,7 +85,7 @@ impl Page {
 /// A macOS preferences window: the title over the tabs, under one background.
 pub fn config(page: Page) -> Config {
   let h = if page.scrolls() { SCROLLING } else { 500.0 };
-  crate::app_config(Config::new(crate::INFO.name, WIDTH, h).fixed().unified())
+  crate::app_config(Config::new(crate::INFO.name(), WIDTH, h).fixed().unified())
 }
 
 /// What the system allows the app.
@@ -426,7 +425,7 @@ impl App for Prefs {
     }
 
     let fs = FormStyle::plates(&ui.theme());
-    ui.col(Style::new().grow().bg(fs.bg), |ui| {
+    ui.col(Style::new().grow().bg(fs.bg()), |ui| {
       ui.id(TABS).toolbar_tabs(&fs, &mut self.page, &pages());
       let head = Style::new().w(grow()).pads([12.0, 20.0, 2.0, 20.0]).gap(10.0);
       let head = head.align(Align::Start, Align::Center);
@@ -444,7 +443,7 @@ impl App for Prefs {
         }
         page => {
           let r = ui.id(("page", page as u8)).form_scroll(&fs, Style::new().grow(), |ui| {
-            ui.col(fs.page.pads(PAGE_PAD), |ui| match page {
+            ui.col(fs.page().pads(PAGE_PAD), |ui| match page {
               Page::General => self.general(ui, &fs),
               Page::Models => self.models(ui, &fs),
               Page::Advanced => self.advanced(ui, &fs),
@@ -784,7 +783,7 @@ impl Prefs {
       let row = FormRow::new(t!("Paste the text into the app you dictate in"));
       ui.disabled(locked).form_row(fs, row, |ui| {
         let mut on = self.settings.auto_paste;
-        if ui.id("paste").toggle(&mut on, "").changed {
+        if ui.id("paste").toggle(&mut on, ()).changed {
           self.edit(move |s| s.auto_paste = on);
         }
       });
@@ -797,7 +796,7 @@ impl Prefs {
       let row = FormRow::new(marked(t!("Keep the text on the clipboard"), Mark::Info(&help), None));
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.keep_in_clipboard;
-        if ui.id("keep").toggle(&mut on, "").changed {
+        if ui.id("keep").toggle(&mut on, ()).changed {
           self.edit(move |s| s.keep_in_clipboard = on);
         }
       });
@@ -806,7 +805,7 @@ impl Prefs {
         FormRow::new(marked(t!("Clean up the text"), Mark::Info(CLEAN_HELP.as_str()), None));
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.clean_text;
-        if ui.id("clean").toggle(&mut on, "").changed {
+        if ui.id("clean").toggle(&mut on, ()).changed {
           self.edit(move |s| s.clean_text = on);
         }
       });
@@ -818,8 +817,8 @@ impl Prefs {
   /// While the system does not allow them, a row for the microphone and one for Accessibility, or
   /// in its place a warning with no button where only an administrator can allow it.
   fn permissions(&mut self, ui: &mut Ui, fs: &FormStyle) {
-    let warning = ui.theme().warning;
-    let size = fs.tile_icon;
+    let warning = ui.theme().warning();
+    let size = fs.tile_icon();
     let tile = move |ui: &mut Ui, _: TextStyle| _ = ui.icon(WARNING.stroke(1.6), size, warning);
     if self.access.needs_admin {
       let row = FormRow::new(NO_ADMIN).tile(tile);
@@ -844,12 +843,9 @@ impl Prefs {
       for (_, name, why, id, pane, ask) in rows.into_iter().filter(|r| r.0) {
         let row = FormRow::new(marked(name, Mark::Info(why.as_str()), None)).tile(tile);
         ui.form_row(fs, row, |ui| {
-          let button = if ask {
-            Button::new(t!("Allow").as_str()).style(ButtonStyle::BorderedProminent)
-          } else {
-            Button::new(t!("Open Settings").as_str())
-          };
-          if button.show(ui.id(id)).clicked {
+          let ui = if ask { ui.button_style(&BorderedProminentButtonStyle) } else { ui };
+          let label = if ask { t!("Allow") } else { t!("Open Settings") };
+          if ui.id(id).button(label).clicked {
             self.shell.allow(pane);
           }
         });
@@ -860,7 +856,7 @@ impl Prefs {
   /// The recorder and its reset; a cleared value keeps the hotkey: the app needs one.
   fn shortcut(&mut self, ui: &mut Ui) {
     let mut hotkey = Hotkey::parse(&self.settings.hotkey).ok();
-    if ui.id("hotkey").shortcut(&mut hotkey).changed
+    if ui.id("hotkey").hotkey_recorder(&mut hotkey).changed
       && let Some(hotkey) = hotkey.filter(|&h| !unheard(h))
     {
       let hotkey = hotkey.to_string();
@@ -894,7 +890,9 @@ impl Prefs {
         // The keys first, as a list of shortcuts shows them.
         let row = FormRow::new(move |ui: &mut Ui, _: TextStyle| {
           let mut hotkey = *hotkey;
-          if ui.id(("shortcut", i)).shortcut(&mut hotkey).changed && !hotkey.is_some_and(unheard) {
+          if ui.id(("shortcut", i)).hotkey_recorder(&mut hotkey).changed
+            && !hotkey.is_some_and(unheard)
+          {
             let hotkey = hotkey.map(|h| h.to_string()).unwrap_or_default();
             act.set(Some((i, ShortcutEdit::Hotkey(hotkey))));
           }
@@ -1061,9 +1059,10 @@ impl Prefs {
     ui.form_row(fs, row, |ui| {
       if !none {
         picked = pick(ui, "model", &labels, at, &[labels.len() - 2]);
-      } else if Button::new(t!("Download a Model…").as_str())
-        .style(ButtonStyle::BorderedProminent)
-        .show(ui.id("download-model"))
+      } else if ui
+        .button_style(&BorderedProminentButtonStyle)
+        .id("download-model")
+        .button(t!("Download a Model…"))
         .clicked
       {
         self.page = Page::Models;
@@ -1099,7 +1098,7 @@ impl Prefs {
     let mut row = FormRow::new(label);
     let mut chosen = None;
     if !rows.is_empty() {
-      let (label_style, chosen, rows, choices) = (fs.label, &mut chosen, &rows, &choices);
+      let (label_style, chosen, rows, choices) = (fs.label(), &mut chosen, &rows, &choices);
       row = row.footer(move |ui: &mut Ui, s: TextStyle| {
         let list = Style::new().w(grow()).gap(4.0).pads([2.0, 0.0, 0.0, KEYBOARD_INDENT]);
         ui.col(list, |ui| {
@@ -1108,7 +1107,7 @@ impl Prefs {
             ui.row(line, |ui| {
               ui.text(language_name(lang), label_style.line_limit(1));
               // The label's size, dimmed: one baseline with the name.
-              ui.text(layouts.as_str(), label_style.color(s.color).line_limit(1));
+              ui.text(layouts.as_str(), label_style.color(s.get_color()).line_limit(1));
               ui.el(Style::new().w(grow()));
               let id = format!("keyboard-{lang}");
               if let Some(p) = pick(ui, &id, labels, *at, &[0, labels.len() - 2]) {
@@ -1351,7 +1350,7 @@ impl Prefs {
           FormRow::new(marked(t!("Use the Neural Engine"), Mark::Info(ANE_HELP.as_str()), None));
         ui.form_row(fs, row, |ui| {
           let mut on = self.settings.neural_engine;
-          if ui.id("ane").toggle(&mut on, "").changed {
+          if ui.id("ane").toggle(&mut on, ()).changed {
             self.edit(move |s| s.neural_engine = on);
           }
         });
@@ -1364,7 +1363,7 @@ impl Prefs {
       let row = FormRow::new(marked(t!("Check for updates"), Mark::Info(help.as_str()), mark));
       ui.disabled(!updates).id("auto-update-row").form_row(fs, row, |ui| {
         let mut on = updates && self.settings.auto_update;
-        if ui.id("auto-update").toggle(&mut on, "").changed {
+        if ui.id("auto-update").toggle(&mut on, ()).changed {
           self.edit(move |s| s.auto_update = on);
         }
       });
@@ -1392,7 +1391,7 @@ impl Prefs {
       ));
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.live_preview;
-        if ui.id("live").toggle(&mut on, "").changed {
+        if ui.id("live").toggle(&mut on, ()).changed {
           self.edit(move |s| s.live_preview = on);
         }
       });
@@ -1404,7 +1403,7 @@ impl Prefs {
       ));
       ui.form_row(fs, row, |ui| {
         let mut on = self.settings.show_transcription_time;
-        if ui.id("took").toggle(&mut on, "").changed {
+        if ui.id("took").toggle(&mut on, ()).changed {
           self.edit(move |s| s.show_transcription_time = on);
         }
       });
@@ -1481,22 +1480,22 @@ impl Prefs {
         self.shell.reveal(file);
       }
 
-      if ui.disabled(exporting || off).id("export").button(&export_all).clicked {
+      if ui.disabled(exporting || off).id("export").button(export_all).clicked {
         let name = export_name(now_ms());
         // Translators: the title of the save panel of Export….
         let panel = FileDialog::save(t!("Export").as_str()).name(&name).types(&["zip"]);
-        ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
+        ui.file_dialog(panel.dir(nimbo::paths::downloads()));
         self.panel = Some(Panel::Export);
       }
 
-      if ui.disabled(importing || off).id("import").button(&import_all).clicked {
+      if ui.disabled(importing || off).id("import").button(import_all).clicked {
         // Translators: the title of the open panel of Import….
         let panel = FileDialog::open(t!("Import").as_str()).types(&["zip"]);
-        ui.file_dialog(FileDialog { dir: nimbo::paths::downloads(), ..panel });
+        ui.file_dialog(panel.dir(nimbo::paths::downloads()));
         self.panel = Some(Panel::Import);
       }
 
-      let button = Button::new(&delete_all).role(ButtonRole::Destructive);
+      let button = Button::new(delete_all).role(ButtonRole::Destructive);
       if button.show(ui.disabled(n == 0).id("delete-all")).clicked {
         let title = match n {
           1 => t!("Delete 1 dictation and its recording?").to_string(),
@@ -1531,7 +1530,7 @@ impl Prefs {
         [("Models", t!("Models"), &models), ("Recordings", t!("Recordings"), &recordings)];
       for (id, name, dir) in folders {
         let ui = ui.help(&paths::display(dir)).disabled(!dir.is_dir());
-        if ui.id(("reveal", id)).button(&name).clicked {
+        if ui.id(("reveal", id)).button(name).clicked {
           self.shell.reveal(dir);
         }
       }
@@ -1565,7 +1564,7 @@ impl Prefs {
     let off = login.state.is_err() || login.busy.is_some();
     let mark = note.as_deref().map_or(Mark::None, Mark::Info);
     ui.disabled(off).form_row(fs, FormRow::new(marked(t!("Launch at login"), mark, None)), |ui| {
-      if ui.id("login").toggle(&mut on, "").changed {
+      if ui.id("login").toggle(&mut on, ()).changed {
         self.login.busy = Some(on);
         self.login.error = None;
         self.shell.set_autostart(on);
@@ -1723,10 +1722,10 @@ fn share(done: u64, total: u64) -> (f32, String) {
 /// A progress bar, moving without a share, and its text, as high as a caption's line: the text
 /// ends in "…" where the row is short, never pushing the row's buttons out.
 fn progress_line(ui: &mut Ui, fs: &FormStyle, k: Option<f32>, text: &str) {
-  let line = Style::new().w(grow()).h(px(ui.line_height(fs.caption))).gap(8.0).clip();
+  let line = Style::new().w(grow()).h(px(ui.line_height(fs.caption()))).gap(8.0).clip();
   ui.row(line.align(Align::Start, Align::Center), |ui| {
     ui.col(Style::new().w(px(120.0)), |ui| ui.progress(k));
-    ui.text(text, fs.caption.line_limit(1));
+    ui.text(text, fs.caption().line_limit(1));
   });
 }
 
@@ -1969,7 +1968,7 @@ impl Prefs {
     let languages = languages();
     let items: Vec<Tag<&str>> = languages.iter().map(|l| Tag::new(l.1, l.0.as_str())).collect();
     ui.id(PAGE_HEAD).row(s, |ui| {
-      ui.id("model-search").search(&mut self.model_search, t!("Search models").as_str());
+      ui.id("model-search").search_field(&mut self.model_search, t!("Search models").as_str());
       ui.id("model-lang").picker(&mut self.model_lang, &items);
     })
   }
@@ -1981,15 +1980,15 @@ impl Prefs {
   fn models(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let lang = self.model_lang;
     if let Some(note) = self.model_note() {
-      ui.text(note, fs.caption.color(ui.theme().warning));
+      ui.text(note, fs.caption().color(ui.theme().warning()));
     }
 
     if none_usable(lang) {
       let note = t!("No model recognizes {lang} well yet.", lang = language_name(lang));
-      ui.id("no-usable-model").text(note, fs.caption);
+      ui.id("no-usable-model").text(note, fs.caption());
     }
 
-    let fs = &FormStyle { caption: fs.caption.line_limit(1), ..*fs };
+    let fs = &fs.with_caption(fs.caption().line_limit(1));
     let (active, chosen) = (self.active().map(|f| f.0.name), self.chosen());
     let shown = |m: &ModelInfo| {
       let lang = lang.is_empty() || m.langs.contains(&lang);
@@ -2043,7 +2042,7 @@ impl Prefs {
       let head = |ui: &mut Ui, s: TextStyle| {
         ui.text(t!("Available"), s);
         ui.spacer();
-        ui.text(&note, fs.note);
+        ui.text(&note, fs.note());
       };
       ui.form_section(fs, Section::new(head), |ui| {
         for &m in &remote {
@@ -2082,7 +2081,7 @@ impl Prefs {
     }
 
     if downloaded.is_empty() && available == 0 {
-      ui.text(t!("No model matches."), fs.caption);
+      ui.text(t!("No model matches."), fs.caption());
     }
 
     self.ask_delete_models(acts);
@@ -2101,25 +2100,25 @@ impl Prefs {
     let (active, mut act) = (self.active().map(|f| f.0.name), None);
     let size: u64 = downloaded.iter().map(|m| m.size).sum();
     let note = format!("{} · {}", model_count(downloaded.len()), size_text(size));
-    let line = ui.line_height(fs.head);
+    let line = ui.line_height(fs.head());
     let mut sel = std::mem::take(&mut self.model_sel);
     // As a form section's title: the note centred on the title's line.
     let head = |ui: &mut Ui, _| {
       ui.row(Style::new().w(grow()).h(px(line)).align(Align::Start, Align::Center), |ui| {
-        ui.text(t!("Downloaded"), fs.head);
+        ui.text(t!("Downloaded"), fs.head());
         ui.spacer();
-        ui.text(&note, fs.note);
+        ui.text(&note, fs.note());
       });
     };
     // Its rows the form's, padded by the list.
     let keys: Vec<u64> = downloaded.iter().map(|m| model_key(m)).collect();
     let key = |i: usize| keys[i];
-    let (row_h, head_h) = (two_line_h(ui, fs), line + fs.head_pad[2]);
-    let rfs = &FormStyle { row: fs.row.pad(0.0), tile_x: fs.tile_x - fs.row.pad[3], ..*fs };
+    let (row_h, head_h) = (two_line_h(ui, fs), line + fs.head_pad()[2]);
+    let rfs = &fs.with_row(fs.row().pad(0.0)).with_tile_x(fs.tile_x() - fs.row().get_pad()[3]);
     let list = List::new(downloaded.len(), row_h).key(&key).multi().selection(&mut sel);
-    let list = list.sections(&[0], head_h, &head).list_style(ListStyle::Grouped);
+    let list = list.sections(&[0], head_h, &head);
     let list = list.style(Style::new().w(grow()).h(px(head_h + row_h * keys.len() as f32)));
-    let r = list.show(ui.id("downloaded"), |ui, row| {
+    let r = list.show(ui.list_style(&InsetGroupedListStyle).id("downloaded"), |ui, row| {
       let m = downloaded[row.index];
       act = self.downloaded_row(ui, rfs, m, fit(m), active == Some(m.name)).or(act);
     });
@@ -2200,19 +2199,22 @@ impl Prefs {
     let caption = |ui: &mut Ui, s: TextStyle| model_caption(ui, s, id, m, fit, ane);
     ui.with_id(id).form_row(fs, model_row(m, fit).caption(caption), |ui| {
       fit.show(ui, m);
-      let slot = actions(ui, fs.gap);
+      let slot = actions(ui, fs.gap());
       // Use and In use as wide, both centred in one column: the rows line up.
       let w = use_w(ui).ceil();
       let column = Style::new().w(px(w)).align(Align::Center, Align::Center);
       ui.row(slot, |ui| {
         ui.row(column, |ui| {
           if in_use {
-            let s = t.label().color(t.accent).font(t.font.weight(Weight::Medium)).nowrap();
+            let s = t.label().color(t.accent()).font(t.font().weight(Weight::Medium)).nowrap();
             ui.text(t!("In use"), s);
           } else {
-            let b = t.button(ButtonStyle::Bordered);
-            let look = ButtonLook { frame: b.frame.w(px(w)), ..b };
-            used = Button::new(t!("Use").as_str()).look(look).show(ui.id(("use", m.name))).clicked;
+            // The label's frame as wide as the column, the button's padding around it.
+            let pad = 2.0 * t.button_padding(ControlSize::Regular);
+            let label = |ui: &mut Ui, s: TextStyle| {
+              ui.row(Style::new().w(px(w - pad)).center(), |ui| ui.text(t!("Use"), s));
+            };
+            used = ui.id(("use", m.name)).button(label).clicked;
           }
         });
 
@@ -2262,16 +2264,15 @@ impl Prefs {
     let shown = Shown { caption, progress, failed };
     let controls = |ui: &mut Ui| {
       fit.show(ui, m);
-      let slot = actions(ui, fs.gap);
+      let slot = actions(ui, fs.gap());
       ui.row(slot, |ui| {
         if shown.progress.is_none() {
           let label = if failed { t!("Retry") } else { t!("Download") };
-          let mut button = Button::new(&label);
-          if fit.best.is_some() {
-            button = button.style(ButtonStyle::BorderedProminent);
-          }
-
-          if button.show(ui.id(("download", m.name))).clicked {
+          let ui = match fit.best {
+            Some(_) => ui.button_style(&BorderedProminentButtonStyle),
+            None => ui,
+          };
+          if ui.id(("download", m.name)).button(label).clicked {
             self.shell.download(m);
           }
         } else {
@@ -2309,10 +2310,10 @@ impl Prefs {
 /// on every row.
 fn actions(ui: &mut Ui, gap: f32) -> Style {
   let t = ui.theme();
-  let b = t.button(ButtonStyle::Bordered);
-  let (h, pad) = (b.frame.min[0], b.frame.pad[1] + b.frame.pad[3]);
+  let (h, pad) = (t.sizes().control_h(), 2.0 * t.button_padding(ControlSize::Regular));
+  let text = TextStyle::new(t.font(), t.text()).line_limit(1);
   let column = use_w(ui).ceil();
-  let mut button = |s: &str| (ui.measure(s, b.text) + pad).max(h);
+  let mut button = |s: &str| (ui.measure(s, text) + pad).max(h);
   let wide = [button(t!("Download").as_str()), button(t!("Retry").as_str())];
   let w = wide.into_iter().fold(column + gap + h, f32::max);
   Style::new().w(px(w.ceil())).gap(gap).align(Align::End, Align::Center)
@@ -2321,10 +2322,10 @@ fn actions(ui: &mut Ui, gap: f32) -> Style {
 /// The column of Use and In use: as wide as the wider.
 fn use_w(ui: &mut Ui) -> f32 {
   let t = ui.theme();
-  let b = t.button(ButtonStyle::Bordered);
-  let pad = b.frame.pad[1] + b.frame.pad[3];
-  let button = (ui.measure(t!("Use").as_str(), b.text) + pad).max(b.frame.min[0]);
-  let in_use = ui.measure(t!("In use").as_str(), t.label().font(t.font.weight(Weight::Medium)));
+  let (h, pad) = (t.sizes().control_h(), 2.0 * t.button_padding(ControlSize::Regular));
+  let text = TextStyle::new(t.font(), t.text()).line_limit(1);
+  let button = (ui.measure(t!("Use").as_str(), text) + pad).max(h);
+  let in_use = ui.measure(t!("In use").as_str(), t.label().font(t.font().weight(Weight::Medium)));
   in_use.max(button)
 }
 
@@ -2351,7 +2352,7 @@ impl Fit<'_> {
   /// for a model not measured; what it means on hover and for assistive technology.
   fn show(self, ui: &mut Ui, m: &ModelInfo) {
     let t = ui.theme();
-    let s = TextStyle::new(t.small, t.muted).nowrap();
+    let s = TextStyle::new(t.small(), t.secondary()).nowrap();
     let w = ["8.8×", "88×"].map(|x| ui.measure(x, s)).into_iter().fold(0.0, f32::max);
     let slot = Style::new().w(px((w + 11.0).ceil())).h(px(16.0)).gap(4.0);
     let slot = slot.align(Align::End, Align::Center);
@@ -2365,7 +2366,7 @@ impl Fit<'_> {
       ui.text(&times, s);
       // Its view box 13 square, the bolt 3.6 in from the left.
       let draw = move |f: &mut Frame, r: Rect| {
-        icon::draw(f, BOLT, Rect::new(r.x - 3.6, r.y, 13.0, 13.0), t.muted)
+        BOLT.draw(f, Rect::new(r.x - 3.6, r.y, 13.0, 13.0), t.secondary())
       };
       ui.with_id(id.key("bolt")).canvas(Style::new().w(px(7.0)).h(px(13.0)), draw);
     });
@@ -2627,7 +2628,7 @@ fn data_row<'a>(
   shown: &'a Shown,
   controls: impl FnOnce(&mut Ui),
 ) {
-  let danger = ui.theme().danger;
+  let danger = ui.theme().danger();
   let caption = move |ui: &mut Ui, s: TextStyle| {
     if let Some(caption) = &shown.caption {
       // A failure in red; cut short, it shows whole in its tooltip.
@@ -2800,7 +2801,7 @@ fn days(entries: &[Entry]) -> Vec<(Day, Range<usize>, i64)> {
 
 /// A row of a name and a line under it: the padding, the two lines and nimbo's 2 points between.
 fn two_line_h(ui: &mut Ui, fs: &FormStyle) -> f32 {
-  2.0 * fs.pad_y + ui.line_height(fs.label) + 2.0 + ui.line_height(fs.caption)
+  2.0 * fs.pad_y() + ui.line_height(fs.label()) + 2.0 + ui.line_height(fs.caption())
 }
 
 fn date_of(ms: i64) -> Day {
@@ -2899,7 +2900,11 @@ impl Prefs {
   fn history_head(&mut self, ui: &mut Ui, s: Style) -> Response {
     let h = &mut self.history;
     ui.id(PAGE_HEAD).row(s, |ui| {
-      if ui.id("history-search").search(&mut h.search, t!("Search dictations").as_str()).changed {
+      if ui
+        .id("history-search")
+        .search_field(&mut h.search, t!("Search dictations").as_str())
+        .changed
+      {
         h.typed(ui.now());
       }
     })
@@ -2924,34 +2929,34 @@ impl Prefs {
         (true, true) => t!("No dictations since Wavo started: they’re kept only until it quits."),
         (false, _) => t!("Nothing found"),
       };
-      ui.col(fs.page.pads(PAGE_PAD).h(grow()), |ui| {
+      ui.col(fs.page().pads(PAGE_PAD).h(grow()), |ui| {
         ui.form_section(fs, "", |ui| ui.form_row(fs, FormRow::new(empty), |_| {}));
       });
       return;
     }
 
     let (now, mut act) = (now_ms(), None);
-    let fs = &FormStyle { caption: fs.caption.line_limit(1), ..*fs };
+    let fs = &fs.with_caption(fs.caption().line_limit(1));
     let HistoryPage { entries, days, selected, playing, .. } = &mut self.history;
     let status = &self.status;
     let starts: Vec<usize> = days.iter().map(|(_, r, _)| r.start).collect();
-    let line = ui.line_height(fs.head);
+    let line = ui.line_height(fs.head());
     let row_h = two_line_h(ui, fs);
     let head = |ui: &mut Ui, g: usize| {
       let (day, r, ms) = &days[g];
-      ui.text(day_title(*day, now), fs.head);
+      ui.text(day_title(*day, now), fs.head());
       ui.spacer();
-      ui.text(day_note((r.len(), *ms)), fs.note);
+      ui.text(day_note((r.len(), *ms)), fs.note());
     };
     let key = |i: usize| entries[i].id as u64;
     let list = List::new(entries.len(), row_h).key(&key).multi().selection(selected);
-    let list = list.sections(&starts, line + fs.head_pad[2], &head).list_style(ListStyle::Grouped);
-    if fs.fade > 0.0 {
-      ui.fade_edges(fs.bg, fs.fade);
+    let list = list.sections(&starts, line + fs.head_pad()[2], &head);
+    if fs.fade() > 0.0 {
+      ui.fade_edges(fs.bg(), fs.fade());
     }
 
     let list = list.style(Style::new().grow().pads(PAGE_PAD));
-    let r = list.show(ui.id("history-list"), |ui, row| {
+    let r = list.show(ui.list_style(&InsetGroupedListStyle).id("history-list"), |ui, row| {
       let e = &entries[row.index];
       let playing = playing.as_ref().is_some_and(|(id, _)| *id == e.id);
       let working = status.retranscribing.contains(&e.id) || status.current == Some(e.id);
@@ -2985,12 +2990,12 @@ impl Prefs {
     let t = ui.theme();
     let chosen = self.history.chosen();
     let mut act = None;
-    ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
+    ui.el(Style::new().w(grow()).h(px(fs.hairline())).bg(fs.divider()));
     let s = Style::new().w(grow()).h(px(FOOT_H)).pads([12.0, 20.0, 16.0, 20.0]).gap(10.0);
     ui.col(s, |ui| {
       let e = match chosen[..] {
         [] => {
-          let muted = t.label().color(t.muted);
+          let muted = t.label().color(t.secondary());
           ui.text(t!("Select a dictation to see all of its text."), muted);
           return;
         }
@@ -3066,9 +3071,9 @@ impl Prefs {
       },
     };
 
-    ui.el(Style::new().w(grow()).h(px(fs.hairline)).bg(fs.divider));
+    ui.el(Style::new().w(grow()).h(px(fs.hairline())).bg(fs.divider()));
     ui.row(Style::new().w(grow()).h(px(TOTAL_H)).align(Align::Center, Align::Center), |ui| {
-      ui.id("history-total").text(&text, fs.note.nowrap());
+      ui.id("history-total").text(&text, fs.note().nowrap());
     });
   }
 
@@ -3237,8 +3242,8 @@ impl RowState {
 /// Copy at its right; the list selects it and draws the selection.
 fn entry_row(ui: &mut Ui, fs: &FormStyle, e: &Entry, playing: bool, working: bool) -> Option<Act> {
   ui.col(Style::new().w(grow()).gap(2.0), |ui| {
-    ui.text(row_line(e, working), fs.label.line_limit(1));
-    ui.text(details(e), fs.caption);
+    ui.text(row_line(e, working), fs.label().line_limit(1));
+    ui.text(details(e), fs.caption());
   });
 
   let mut act = None;
@@ -3376,10 +3381,10 @@ impl Prefs {
       let icon = nimbo::Png::new(crate::ICON).side(128);
       ui.image(icon, Style::new().w(px(64.0)).h(px(64.0)));
       ui.el(Style::new().h(px(10.0)));
-      let title = TextStyle::new(Font { size: 20.0, ..t.bold }, t.text).line_limit(1);
-      ui.text(crate::INFO.name, title);
+      let title = TextStyle::new(t.bold().size(20.0), t.text()).line_limit(1);
+      ui.text(crate::INFO.name(), title);
       ui.el(Style::new().h(px(2.0)));
-      ui.text(crate::VERSION, fs.note);
+      ui.text(crate::VERSION, fs.note());
       ui.el(Style::new().h(px(8.0)));
       // It wraps in a longer language.
       let tagline = t!("Local dictation: hold a key, speak, and the text lands where you type.");
@@ -3404,7 +3409,7 @@ impl Prefs {
     });
 
     // Denser than a setting's rows: six of them.
-    let fs = &FormStyle { caption: fs.caption.line_limit(1), pad_y: 5.0, ..*fs };
+    let fs = &fs.with_caption(fs.caption().line_limit(1)).with_pad_y(5.0);
     // A row's controls go on its name's line: the ↗ is centred in the whole row instead.
     let row_h = two_line_h(ui, fs);
     ui.form_section(fs, t!("Acknowledgements"), |ui| {
@@ -3629,10 +3634,10 @@ mod tests {
       let history = History::open_as(self.dir.path(), in_memory).ok().map(Rc::new);
       let prefs = Prefs::new(shell, settings, self.hub.clone(), self.dir.path(), history);
       let cfg = config(Page::General);
-      let mut h = Harness::new(prefs, cfg.size, 2.0);
+      let mut h = Harness::new(prefs, cfg.size(), 2.0);
       crate::testing::shots_locale(&mut h);
       // macOS 26's, as nimbo's own shots draw it.
-      h.set_titlebar(Some(mac_titlebar(cfg.title, false)));
+      h.set_titlebar(Some(mac_titlebar(cfg.title(), false)));
       h.event(Event::Appearance(Appearance::LIGHT));
       h.frame();
       h.frame();
@@ -3689,7 +3694,7 @@ mod tests {
   }
 
   fn tab(h: &mut Harness<Prefs>, page: Page) {
-    let i = pages().iter().position(|p| p.value == page).unwrap();
+    let i = pages().iter().position(|p| p.value() == page).unwrap();
     click(h, Id::of(TABS).key(i));
     h.frame();
     assert_eq!(h.app().page, page);
@@ -3910,7 +3915,7 @@ mod tests {
       fake.log().updates = true;
       let mut h = home.harness(&fake, Settings::default());
       h.event(Event::Appearance(appearance));
-      for TabItem { value: page, label: name, .. } in pages() {
+      for (page, name) in pages().map(|p| (p.value(), p.label())) {
         tab(&mut h, page);
         shot(&mut h, &format!("{}-{look}", page_name(page)));
         let size = h.size();
@@ -4411,8 +4416,8 @@ mod tests {
     click(&mut h, Id::of("export"));
     let file = home.dir.path().join("wavo-export.zip");
     let asked = h.file_dialog(Some(&file)).unwrap();
-    let save = asked.kind == nimbo::FileDialogKind::Save;
-    assert!(save && asked.name.unwrap().starts_with("wavo-export-"));
+    let save = asked.kind() == nimbo::FileDialogKind::Save;
+    assert!(save && asked.get_name().unwrap().starts_with("wavo-export-"));
     h.frame();
     assert_eq!(fake.log().exports, std::slice::from_ref(&file));
     assert!(fake.log().imports.is_empty(), "the answer goes to the panel that asked");
@@ -4553,7 +4558,7 @@ mod tests {
     tab(&mut h, Page::Advanced);
     click(&mut h, Id::of("import"));
     let file = home.dir.path().join("wavo-export.zip");
-    assert_eq!(h.file_dialog(Some(&file)).unwrap().types, ["zip"]);
+    assert_eq!(h.file_dialog(Some(&file)).unwrap().get_types(), ["zip"]);
     h.frame();
     assert_eq!(fake.log().imports, [file]);
     assert!(fake.log().exports.is_empty());
@@ -4744,12 +4749,12 @@ mod tests {
     h.frame();
     assert_eq!(h.app().model_sel.len(), 3);
     // The menu says how many go.
-    h.native_menus();
+    h.set_native_menus(true);
     let r = h.rect(row_of("whisper-tiny")).unwrap();
     h.right_click(r.x + 60.0, r.y + r.h / 2.0);
     h.frame();
     let (_, menu) = h.context_menu(None).expect("the row's menu");
-    assert_eq!((menu.items[0].label(), menu.items[0].is_enabled()), ("Delete 2 Models…", true));
+    assert_eq!((menu.items()[0].label(), menu.items()[0].is_enabled()), ("Delete 2 Models…", true));
     h.frame();
     assert_eq!(h.app().model_sel.len(), 3, "a right-click inside the selection keeps it");
 
@@ -5158,7 +5163,7 @@ mod tests {
     let (_, menu) = h.context_menu(answer.and_then(label)).expect("the row's menu");
     h.frame();
     // A row among several has its own Transcribe Again.
-    let several = menu.items.len() == 3;
+    let several = menu.items().len() == 3;
     let name = |label: &str| {
       let found = names.iter().find(|n| n.1 == label && !(several && n.0 == "retranscribe"));
       found.map_or("", |n| n.0).to_owned()
@@ -5167,7 +5172,7 @@ mod tests {
       nimbo::Item::Divider => (String::new(), true),
       i => (name(i.label()), i.is_enabled()),
     };
-    menu.items.iter().map(item).collect()
+    menu.items().iter().map(item).collect()
   }
 
   /// A right-click on a row selects it and opens its menu, which does what the row's buttons and
@@ -5180,7 +5185,7 @@ mod tests {
       home.dictations(&[("Let's move the design review.", 3), ("Send the invoice to Anna.", 2)]);
     let fake = Fake::default();
     let mut h = home.harness(&fake, Settings::default());
-    h.native_menus();
+    h.set_native_menus(true);
     tab(&mut h, Page::History);
     let items = |want: &[(&str, bool)]| -> Vec<(String, bool)> {
       want.iter().map(|&(id, on)| (id.into(), on)).collect()
@@ -5261,7 +5266,7 @@ mod tests {
     let texts = [("Let's move the review.", 4), ("Send the invoice.", 3), ("Call Anna.", 2)];
     let ids = home.dictations(&[texts[0], texts[1], texts[2], ("Book a table.", 1)]);
     let mut h = home.harness(fake, Settings::default());
-    h.native_menus();
+    h.set_native_menus(true);
     tab(&mut h, Page::History);
     let sel = &mut h.app_mut().history.selected;
     for (i, &id) in ids[..3].iter().rev().enumerate() {
@@ -5368,7 +5373,7 @@ mod tests {
     let (file, other) = (file(ids[0]), file(ids[1]));
     let fake = Fake::default();
     let mut h = home.harness(&fake, Settings::default());
-    h.native_menus();
+    h.set_native_menus(true);
     tab(&mut h, Page::History);
 
     let got = menu(&mut h, ids[0], Some("copy-path"));
@@ -5393,7 +5398,7 @@ mod tests {
   fn a_rows_menu_stops_as_it_says() {
     let e = Entry { id: 7, audio_path: Some("a.wav".into()), ..Entry::default() };
     let st = RowState { playing: true, ..RowState::default() };
-    assert_eq!(row_menu(&e, &st, true).items[1].action(), Some(&RowItem::Stop));
+    assert_eq!(row_menu(&e, &st, true).items()[1].action(), Some(&RowItem::Stop));
     assert!(matches!(row_act(RowItem::Stop, &e), Act::Stop));
     assert!(matches!(row_act(RowItem::Play, &e), Act::Play(7)));
   }
@@ -5665,7 +5670,7 @@ mod tests {
     let mut h = home.harness(&fake, Settings::default());
     h.set_locale(Locale::Tag("pseudo"), crate::LOCALES);
     h.frame();
-    for page in pages().map(|p| p.value) {
+    for page in pages().map(|p| p.value()) {
       tab(&mut h, page);
       sweep(&mut h, &page_name(page));
     }

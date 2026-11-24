@@ -687,15 +687,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "keyboard-types"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fbe853b403ae61a04233030ae8a79d94975281ed9770a1f9e246732b534b28d"
-dependencies = [
- "bitflags",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -836,19 +827,17 @@ dependencies = [
 
 [[package]]
 name = "nimbo"
-version = "0.0.1"
-source = "git+https://github.com/vladkens/nimbo?branch=main#ee678a0e9fecf270365f02022f4a2551ea64a3c7"
+version = "0.1.0"
+source = "git+https://github.com/vladkens/nimbo?branch=release-0.1#44920b56e074130f6b1f709c1be8aef9cc5f2cc0"
 dependencies = [
  "block2",
  "dispatch2",
- "keyboard-types",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-core-text",
  "objc2-foundation",
- "objc2-image-io",
  "objc2-quartz-core",
  "objc2-service-management",
  "windows-sys 0.61.2",
@@ -1073,16 +1062,6 @@ dependencies = [
  "libc",
  "objc2",
  "objc2-core-foundation",
-]
-
-[[package]]
-name = "objc2-image-io"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32b0446e98cf4a784cc7a0177715ff317eeaa8463841c616cfc78aa4f953c4ea"
-dependencies = [
- "objc2-core-foundation",
- "objc2-core-graphics",
 ]
 
 [[package]]

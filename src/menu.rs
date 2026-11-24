@@ -5,8 +5,8 @@
 //! model in use with the others downloaded; Unload Model, History…, Settings…, Check for Updates…,
 //! Quit.
 
-use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
-use nimbo::{Hotkey, Localized, Shortcut, t};
+use nimbo::tray::{LABEL, TrayIcon};
+use nimbo::{Hotkey, Item, Localized, Menu, Shortcut, t};
 
 use crate::audio::{Auto, Device, Microphone};
 use crate::engine::Phase as EnginePhase;
@@ -106,7 +106,7 @@ impl Icon {
 
   /// The tooltip, also what accessibility says.
   pub fn description(self) -> String {
-    let name = crate::INFO.name;
+    let name = crate::INFO.name();
     match self {
       Icon::Idle => name.into(),
       Icon::Recording => t!("{name} — recording", name),
@@ -245,7 +245,7 @@ pub fn menu(
   (found, pick): (&[Found], &Pick),
   update: Option<&State>,
 ) -> Menu<Action> {
-  let title = format!("{} {}", crate::INFO.name, crate::VERSION);
+  let title = format!("{} {}", crate::INFO.name(), crate::VERSION);
   let header = [Some(title.as_str()), hotkey, state(status)].into_iter().flatten();
   let header = header.collect::<Vec<_>>().join(" · ");
   // Labels fit the menu's width by themselves (nimbo's Item::button).
@@ -287,7 +287,7 @@ pub fn menu(
     with_key(Item::button(Action::Settings, &t!("Settings…")), Shortcut::char(',').cmd()),
   ]);
   items.extend(update.map(check_item));
-  let quit = Item::button(Action::Quit, &t!("Quit {name}", name = crate::INFO.name));
+  let quit = Item::button(Action::Quit, &t!("Quit {name}", name = crate::INFO.name()));
   items.extend([Item::Divider, with_key(quit, Shortcut::char('q').cmd())]);
   Menu::new(items)
 }
@@ -397,14 +397,14 @@ mod tests {
   fn mic_menu(items: &[Item<Action>]) -> (&str, &[Item<Action>]) {
     let mic = |it: &&Item<Action>| match it {
       Item::Submenu { menu, .. } => {
-        menu.items.iter().any(|i| matches!(i.action(), Some(Action::Mic(_))))
+        menu.items().iter().any(|i| matches!(i.action(), Some(Action::Mic(_))))
       }
       _ => false,
     };
     let Some(Item::Submenu { label, menu, .. }) = items.iter().find(mic) else {
       panic!("no mic menu")
     };
-    (label, &menu.items)
+    (label, menu.items())
   }
 
   /// The label of the item doing `action`.
@@ -492,7 +492,7 @@ mod tests {
     let wave = Microphone::Device(wave);
     let mics = (&devices[..], &wave, false);
     let pick = Pick::default();
-    let items = menu(Some("⌥Space"), &s, &list, &[], mics, (&[], &pick), None).items;
+    let items = menu(Some("⌥Space"), &s, &list, &[], mics, (&[], &pick), None).items().to_vec();
     // The header as long as the build's version lets it be (a dirty build's runs longer).
     let header = format!("Wavo {} · ⌥Space · Recording…", crate::VERSION);
     let label = items[0].label();
@@ -518,7 +518,7 @@ mod tests {
 
     let mic_label = |devices: &[Device], saved: &Microphone, lid_closed| {
       let items = menu(None, &s, &list, &[], (devices, saved, lid_closed), (&[], &pick), None);
-      (mic_menu(&items.items).0.to_owned(), label_of(&items.items, Action::MicNote))
+      (mic_menu(items.items()).0.to_owned(), label_of(items.items(), Action::MicNote))
     };
     let system = mic_label(&devices, &Microphone::System, false);
     assert_eq!(system, ("System Default (MacBook Pro Microphone)".into(), None));
@@ -569,7 +569,7 @@ mod tests {
     // The menu's title and note, the submenu's checked item.
     let mics = |devices: &[Device], lid_closed| {
       let mics = (devices, &headphones, lid_closed);
-      let items = menu(None, &s, &[], &[], mics, (&[], &pick), None).items;
+      let items = menu(None, &s, &[], &[], mics, (&[], &pick), None).items().to_vec();
       let (title, sub) = mic_menu(&items);
       let checked = sub.iter().find(|i| i.is_on()).map(|i| i.label().to_owned());
       (title.to_owned(), label_of(&items, Action::MicNote), checked)
@@ -612,7 +612,7 @@ mod tests {
     let pick = Pick::default();
     let items = |state: State| {
       let mics = (&[][..], &Microphone::System, false);
-      let items = menu(None, &s, &[], &[], mics, (&[], &pick), Some(&state)).items;
+      let items = menu(None, &s, &[], &[], mics, (&[], &pick), Some(&state)).items().to_vec();
       items.into_iter().map(|i| (i.action().cloned(), i.label().to_owned())).collect::<Vec<_>>()
     };
     let idle = items(State::Idle);

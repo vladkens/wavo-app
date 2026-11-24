@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use nimbo::{
-  Align, Button, ButtonStyle, Config, Localized, Png, Style, TextStyle, Ui, grow, px, t,
+  Align, BorderedProminentButtonStyle, Config, Localized, Png, Style, TextStyle, Ui, grow, px, t,
 };
 use shipo::{Error, Feed, Release};
 
@@ -337,12 +337,12 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
   };
 
   let mut act = None;
-  let page = Style::new().grow().pads([20.0, 20.0, 16.0, 20.0]).gap(12.0).bg(t.bg);
+  let page = Style::new().grow().pads([20.0, 20.0, 16.0, 20.0]).gap(12.0).bg(t.bg());
   ui.col(page, |ui| {
     ui.row(Style::new().w(grow()).gap(16.0), |ui| {
       ui.image(ICON, Style::new().w(px(64.0)).h(px(64.0)));
       ui.col(Style::new().w(grow()).gap(6.0), |ui| {
-        ui.text(title, TextStyle::new(t.bold, t.text).line_limit(1));
+        ui.text(title, TextStyle::new(t.bold(), t.text()).line_limit(1));
         if !text.is_empty() {
           ui.text(&text, t.body());
         }
@@ -378,12 +378,8 @@ fn view(ui: &mut Ui, state: &State) -> Option<Act> {
     ui.row(bar, |ui| {
       let mut button = |ui: &mut Ui, id, label: Localized, then, primary| {
         let label = label.as_str();
-        let b = if primary {
-          Button::new(label).style(ButtonStyle::BorderedProminent)
-        } else {
-          Button::new(label)
-        };
-        if b.show(ui.id(id)).clicked {
+        let ui = if primary { ui.button_style(&BorderedProminentButtonStyle) } else { ui };
+        if ui.id(id).button(label).clicked {
           act = Some(then);
         }
       };
@@ -701,7 +697,7 @@ mod tests {
     let acts = Rc::new(RefCell::new(Vec::new()));
     let chosen = acts.clone();
     let w = UpdateWindow::new(Arc::new(Mutex::new(u)), move |act| chosen.borrow_mut().push(act));
-    let mut h = Harness::new(w, config().size, 2.0);
+    let mut h = Harness::new(w, config().size(), 2.0);
     crate::testing::shots_locale(&mut h);
     h.event(Event::Appearance(Appearance::LIGHT));
     h.render();
