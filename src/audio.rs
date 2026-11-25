@@ -288,9 +288,10 @@ fn best(devices: &[Device], lid_closed: bool) -> Option<usize> {
     Transport::Usb => Some(0),
     Transport::BuiltIn if lid_closed => None,
     Transport::BuiltIn => Some(1),
-    Transport::Other | Transport::Unknown => Some(2),
     Transport::Bluetooth => Some(3),
     Transport::Virtual => None,
+    // Other, Unknown and kinds nimbo may add.
+    _ => Some(2),
   };
   let ranked = devices.iter().enumerate().filter_map(|(i, d)| Some((rank(d)?, !d.default, i)));
   ranked.min().map(|(_, _, i)| i)

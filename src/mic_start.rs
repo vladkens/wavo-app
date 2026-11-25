@@ -236,7 +236,8 @@ mod tests {
     let system = menu::System { accessibility: true, ..menu::System::default() };
     let shown = menu::warnings(&system, &status);
     let mics = (&[][..], &audio::Microphone::Automatic, false);
-    let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;
+    let items =
+      menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items().to_vec();
     assert_eq!(items[1].label(), format!("⚠︎ {warning}"));
 
     // Another device records, one of the same name too: no warning; each keeps its own.

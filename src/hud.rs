@@ -20,7 +20,6 @@ use std::hash::{BuildHasher, Hasher, RandomState};
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use nimbo::ui::widgets::icon;
 use nimbo::{
   Anchor, App, Color, Config, Cx, Event, Font, Frame, Icon, ImageId, Localized, Quad, Rect, Size,
   Theme, Ui, Weight, alpha, rgb, t,
@@ -137,7 +136,7 @@ const DIM: f32 = 0.76;
 const TAIL: f32 = 0.65;
 // White text on the gradient: the dark look in either appearance, its text white, as the
 // contrast is reckoned for.
-const DARK: Theme = Theme { text: rgb(0xffffff), ..Theme::PLATES_DARK };
+const DARK: Theme = Theme::PLATES_DARK.with_text(rgb(0xffffff));
 
 const FONT: Font = Font::ui(13.0);
 const CHIP: Font = Font::ui(11.0).weight(Weight::Semibold);
@@ -162,7 +161,7 @@ pub fn config(position: HudPosition, live: bool) -> Config {
   };
 
   let (w, h) = if live { (WIDE, HEIGHT + ROOM) } else { (MAX_WIDTH, HEIGHT) };
-  let cfg = Config::new(crate::INFO.name, w + 2.0 * MARGIN, h + 2.0 * MARGIN);
+  let cfg = Config::new(crate::INFO.name(), w + 2.0 * MARGIN, h + 2.0 * MARGIN);
   crate::app_config(cfg.overlay(anchor).hidden())
 }
 
@@ -476,7 +475,7 @@ impl Hud {
   }
 
   fn apply(&mut self, show: Show, f: &mut Frame) {
-    let now = f.now;
+    let now = f.now();
     if !matches!(show, Show::Recording { .. }) {
       self.meter = None;
     }
@@ -554,7 +553,7 @@ impl Hud {
   /// brightens; the pill opens, grows
   /// or shrinks to its lines, up to [LINES], and scrolls to its last.
   fn say(&mut self, f: &mut Frame, text: Option<&live::Text>) {
-    let (now, space, width) = (f.now, f.measure(" ", FONT), WIDE - 2.0 * TEXT_PAD);
+    let (now, space, width) = (f.now(), f.measure(" ", FONT), WIDE - 2.0 * TEXT_PAD);
     let said = text.map_or_else(Vec::new, |t| {
       let fixed = t.fixed.split_whitespace().map(|w| (w, false));
       let words = fixed.chain(t.tail.split_whitespace().map(|w| (w, true))).collect::<Vec<_>>();
@@ -624,7 +623,7 @@ impl Hud {
     }
 
     let to = warning.as_ref().map_or(self.base(), |w| reason_width(f.measure(w, FONT)));
-    self.resize(to, f.now);
+    self.resize(to, f.now());
     self.text = warning;
   }
 
@@ -672,7 +671,7 @@ impl Hud {
   /// Makes the gradient again when [FLOW_TICK] has passed or the pill's size changed, the edge
   /// at a new size: an image is never updated, so the old one goes and the new one takes its id.
   fn flow(&mut self, f: &mut Frame) {
-    let (now, scale) = (f.now, f.scale);
+    let (now, scale) = (f.now(), f.scale());
     let size = self.shape(now, scale);
     let made = |z, s| (z, s) == (size, scale);
     if self.style == HudStyle::Gradient && !self.edge.is_some_and(|(_, z, s)| made(z, s)) {
@@ -719,25 +718,25 @@ impl Hud {
 
   fn draw(&self, f: &mut Frame) {
     let plain = self.style == HudStyle::Plain;
-    let (th, now) = (if plain { &self.theme } else { &DARK }, f.now);
+    let (th, now) = (if plain { &self.theme } else { &DARK }, f.now());
     let (width, pill_alpha, a) = self.pill(now);
     let fade = |c: Color, k: f32| alpha(c, c[3] * pill_alpha * k);
     // The row at its edge of the window; the pill around it, open for the live text away from it.
-    let size = self.shape(now, f.scale);
-    let row = if self.top { MARGIN } else { f.size.h - MARGIN - HEIGHT };
+    let size = self.shape(now, f.scale());
+    let row = if self.top { MARGIN } else { f.size().h - MARGIN - HEIGHT };
     let radius = corner(size.h);
     // The gradient's pill starts on the pixel grid, where its images, drawn 1:1, start too, so
     // the grey under the edge meets it.
-    let left = (f.size.w - size.w) / 2.0;
-    let left = if plain { left } else { (left * f.scale).round() / f.scale };
+    let left = (f.size().w - size.w) / 2.0;
+    let left = if plain { left } else { (left * f.scale()).round() / f.scale() };
     let pill = Rect::new(left, if self.top { row } else { row + HEIGHT - size.h }, size.w, size.h);
     let shadow = Rect::new(pill.x, pill.y + 2.0, pill.w, pill.h);
-    f.shadow(shadow, radius, 6.0, fade(th.shadow, 1.0));
+    f.shadow(shadow, radius, 6.0, fade(th.shadow(), 1.0));
     let flows = self.flows();
-    let ground = if plain { th.menu } else { GREY };
+    let ground = if plain { th.menu() } else { GREY };
     if plain {
       let quad = Quad::new(pill, fade(ground, 1.0)).radius(radius);
-      f.quad(quad.border(1.0, fade(th.line, 1.0)));
+      f.quad(quad.border(1.0, fade(th.line(), 1.0)));
       f.layer();
       f.push_clip(pill);
     } else {
@@ -749,37 +748,37 @@ impl Hud {
       f.push_clip(pill);
       let field = self.field.filter(|_| flows).map(|(id, z, ..)| (id, z));
       for (id, z) in [field, self.edge.map(|(id, z, _)| (id, z))].into_iter().flatten() {
-        let rect = Rect::new(pill.x, pill.y, (z.w * f.scale).ceil() / f.scale, z.h);
+        let rect = Rect::new(pill.x, pill.y, (z.w * f.scale()).ceil() / f.scale(), z.h);
         f.image(id, rect, pill_alpha);
       }
 
       f.layer();
     }
 
-    self.draw_text(f, pill, row, fade(th.text, a));
+    self.draw_text(f, pill, row, fade(th.text(), a));
     // The contents keep their place as the pill narrows: centred at the recording's width, a
     // dictation's at its own, the language's chip after the time.
-    let x = (f.size.w - width.max(WIDTH)) / 2.0;
-    let xd = (f.size.w - width.max(self.base())) / 2.0;
+    let x = (f.size().w - width.max(WIDTH)) / 2.0;
+    let xd = (f.size().w - width.max(self.base())) / 2.0;
     let mid = row + HEIGHT / 2.0;
     let baseline = |f: &mut Frame, font| mid + (f.metrics(font).cap_height / 2.0).round();
     let dot = |f: &mut Frame, k: f32| {
       if plain {
         let rect = Rect::new(xd + PAD, mid - DOT / 2.0, DOT, DOT);
-        return f.rect(rect, fade(th.danger, k), DOT / 2.0);
+        return f.rect(rect, fade(th.danger(), k), DOT / 2.0);
       }
 
       let side = DOT + 2.0 * RING;
       let rect = Rect::new(xd + PAD - RING, mid - side / 2.0, side, side);
       let ring = fade(alpha([1.0; 4], 0.9), k);
-      f.quad(Quad::new(rect, fade(th.danger, k)).radius(side / 2.0).border(RING, ring));
+      f.quad(Quad::new(rect, fade(th.danger(), k)).radius(side / 2.0).border(RING, ring));
     };
     // White with the code in violet on the gradient; the plain pill's text colour, its code in the
     // pill's.
     let chip = |f: &mut Frame, k: f32| {
       let Some(language) = &self.language else { return };
       let rect = Rect::new(xd + WIDTH - PAD + CHIP_GAP, mid - CHIP_H / 2.0, CHIP_W, CHIP_H);
-      let (fill, ink) = if plain { (th.text, th.menu) } else { ([1.0; 4], CHIP_TEXT) };
+      let (fill, ink) = if plain { (th.text(), th.menu()) } else { ([1.0; 4], CHIP_TEXT) };
       f.rect(rect, fade(fill, k), 4.0);
       let code = language.to_uppercase();
       let at = rect.x + (rect.w - f.measure(&code, CHIP)) / 2.0;
@@ -789,11 +788,11 @@ impl Hud {
     let bar = |f: &mut Frame, i: usize, height: f32, k: f32| {
       let rect =
         Rect::new(xd + BARS_X + i as f32 * BAR_STEP, mid - height / 2.0, BAR_WIDTH, height);
-      f.rect(rect, fade(th.text, k), BAR_WIDTH / 2.0);
+      f.rect(rect, fade(th.text(), k), BAR_WIDTH / 2.0);
     };
     let time = |f: &mut Frame, text: &str, k: f32| {
       let y = baseline(f, TIME);
-      f.text(xd + TIME_X, y, text, TIME, fade(th.text, k));
+      f.text(xd + TIME_X, y, text, TIME, fade(th.text(), k));
     };
     let clock = |end: Duration| {
       let secs = end.saturating_sub(self.started).as_secs();
@@ -805,21 +804,21 @@ impl Hud {
       // The reason centred in the room right of the glyph; in the plain style against it.
       (Mode::Recording | Mode::Error, Some(text)) => {
         let glyph = Rect::new(x + PAD, mid - GLYPH / 2.0, GLYPH, GLYPH);
-        icon::draw(f, TRIANGLE, glyph, fade(th.warning, a));
-        icon::draw(f, MARK.stroke(2.2), glyph, fade(ground, a));
+        TRIANGLE.draw(f, glyph, fade(th.warning(), a));
+        MARK.stroke(2.2).draw(f, glyph, fade(ground, a));
         // Never left of its place: a pill still widening to fit the reason has less room.
         let room = width.max(WIDTH) - REASON_X - PAD;
         let gap = if plain { 0.0 } else { ((room - f.measure(text, FONT)) / 2.0).max(0.0) };
         let y = baseline(f, FONT);
-        f.text(x + REASON_X + gap, y, text, FONT, fade(th.text, a));
+        f.text(x + REASON_X + gap, y, text, FONT, fade(th.text(), a));
       }
       // The check and the time, centred.
       (Mode::Done, Some(took)) => {
         let start = x + (WIDTH - GLYPH - 6.0 - f.measure(took, TIME)) / 2.0;
         let glyph = Rect::new(start, mid - GLYPH / 2.0, GLYPH, GLYPH);
-        icon::draw(f, Icon::CHECK.stroke(2.2), glyph, fade(th.success, a));
+        Icon::CHECK.stroke(2.2).draw(f, glyph, fade(th.success(), a));
         let y = baseline(f, TIME);
-        f.text(start + GLYPH + 6.0, y, took, TIME, fade(th.text, a));
+        f.text(start + GLYPH + 6.0, y, took, TIME, fade(th.text(), a));
       }
       (Mode::Recording, None) => {
         dot(f, a);
@@ -871,9 +870,9 @@ impl Hud {
       return;
     }
 
-    let now = f.now;
+    let now = f.now();
     let top = if self.top { row + HEIGHT } else { pill.y + TEXT_EDGE };
-    let view = Rect::new((f.size.w - WIDE) / 2.0 + TEXT_PAD, top, WIDE - 2.0 * TEXT_PAD, room);
+    let view = Rect::new((f.size().w - WIDE) / 2.0 + TEXT_PAD, top, WIDE - 2.0 * TEXT_PAD, room);
     let (scroll, cap) = (moving(self.scroll, now, SCROLL), f.metrics(FONT).cap_height);
     f.push_clip(view);
     for word in &self.words {
@@ -911,7 +910,7 @@ impl App for Hud {
 
   fn paint(&mut self, f: &mut Frame) {
     // What the view asked for, from the state before this frame's changes.
-    let asked = self.due(f.now);
+    let asked = self.due(f.now());
     let shown = self.mode != Mode::Hidden;
     let shows = std::mem::take(&mut self.pending);
     let silent = self.meter.as_ref().is_some_and(Meter::silent);
@@ -924,7 +923,7 @@ impl App for Hud {
       self.warn(f);
     }
 
-    self.tick(self.meter.as_ref().map_or(0.0, Meter::level), f.now);
+    self.tick(self.meter.as_ref().map_or(0.0, Meter::level), f.now());
     if self.mode == Mode::Hidden {
       if shown {
         (self.hidden)();
@@ -941,7 +940,7 @@ impl App for Hud {
     self.flow(f);
     self.draw(f);
     // The next refresh while something moves, or to ask for the new time when it changed.
-    let due = self.due(f.now);
+    let due = self.due(f.now());
     if due.is_none() || due != asked {
       f.animate();
     }
@@ -1404,7 +1403,7 @@ mod tests {
     let count = hidden.clone();
     let config = config(position, live);
     let hud = Hud::new(position, move || count.set(count.get() + 1));
-    let mut h = Harness::new(hud, config.size, 2.0);
+    let mut h = Harness::new(hud, config.size(), 2.0);
     crate::testing::shots_locale(&mut h);
     h.set_transparent(true);
     // The gradient's starts, the same in every run.
@@ -1420,7 +1419,7 @@ mod tests {
 
   /// The pill's colour near its top in the middle, where no content is.
   fn fill(h: &mut Harness<Hud>) -> [u8; 4] {
-    h.render().pixel(config(HudPosition::Bottom, false).size.w / 2.0, MARGIN + 3.0)
+    h.render().pixel(config(HudPosition::Bottom, false).size().w / 2.0, MARGIN + 3.0)
   }
 
   fn grey([r, g, b, _]: [u8; 4]) -> bool {
@@ -1456,7 +1455,7 @@ mod tests {
     assert_eq!(h.app().mode(), Mode::Recording, "as soon as it is asked");
     h.wait(ms(500));
     let img = h.render();
-    let size = config(HudPosition::Bottom, false).size;
+    let size = config(HudPosition::Bottom, false).size();
     assert_eq!(img.pixel(1.0, 1.0), [0; 4], "transparent around the pill");
     let (left, mid) = ((size.w - WIDTH) / 2.0, MARGIN + HEIGHT / 2.0);
     let [r, g, _, a] = img.pixel(left + PAD + DOT / 2.0, mid);
@@ -1480,7 +1479,7 @@ mod tests {
     h.app_mut().show(speaking("ru"));
     h.wait(ms(500));
     assert_eq!(h.app().width.1, WIDTH + CHIP_ROOM);
-    let size = config(HudPosition::Bottom, false).size;
+    let size = config(HudPosition::Bottom, false).size();
     let (left, mid) = ((size.w - WIDTH - CHIP_ROOM) / 2.0, MARGIN + HEIGHT / 2.0);
     let [r, g, _, _] = h.render().pixel(left + PAD + DOT / 2.0, mid);
     assert!(r > 200 && g < 100, "the red dot where it was: {r} {g}");
@@ -1549,7 +1548,7 @@ mod tests {
     let img = h.render();
     let mid = MARGIN + HEIGHT / 2.0;
     let left = (0..400).map(|x| x as f32).find(|&x| img.pixel(x, mid)[3] == 255).unwrap();
-    let recording = (config(HudPosition::Bottom, false).size.w - WIDTH) / 2.0;
+    let recording = (config(HudPosition::Bottom, false).size().w - WIDTH) / 2.0;
     assert!(left < recording - 10.0, "wider than the recording's pill: {left}");
     let [r, g, b, _] = img.pixel(left + PAD + GLYPH / 2.0 - 4.0, mid + 5.0);
     assert!(r > 200 && g > 100 && b < 100, "the orange glyph: {r} {g} {b}");
@@ -1606,7 +1605,7 @@ mod tests {
     h.app_mut().show(Show::Error(crashed()));
     h.wait(ms(300));
     let img = h.render();
-    let left = (config(HudPosition::Bottom, false).size.w - WIDTH) / 2.0;
+    let left = (config(HudPosition::Bottom, false).size().w - WIDTH) / 2.0;
     let (from, to) = (left + REASON_X, left + WIDTH - PAD);
     let ink = |x: f32| (-6..=6).any(|dy| img.pixel(x, MARGIN + HEIGHT / 2.0 + dy as f32)[0] > 150);
     let xs: Vec<f32> = (0..((to - from) * 2.0) as usize).map(|i| from + i as f32 / 2.0).collect();
@@ -1769,7 +1768,7 @@ mod tests {
   fn the_live_text_opens_the_pill_away_from_the_edge() {
     for position in [HudPosition::Bottom, HudPosition::Top] {
       let (mut h, hidden) = placed(HudStyle::Gradient, position, true);
-      let size = config(position, true).size;
+      let size = config(position, true).size();
       let top = position == HudPosition::Top;
       let row = if top { MARGIN } else { size.h - MARGIN - HEIGHT };
       // The pill's alpha `by` points beyond the row, away from the edge (or towards it, below 0),
@@ -1900,7 +1899,7 @@ mod tests {
           h.wait(ms(300));
           h.app_mut().show(saying(fixed, tail));
           h.wait(ms(1000));
-          let size = config(position, true).size;
+          let size = config(position, true).size();
           let img = h.render();
           assert_eq!(img.pixel(1.0, size.h / 2.0)[3], 0, "{name}: around");
           // The text: pixels of the text's colour beyond the row.
