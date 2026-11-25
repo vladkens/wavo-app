@@ -60,7 +60,7 @@ earshot = "1.2.2"
 hound = "3.5.1"
 isolang = "2.4.0"
 libc = "0.2.191"
-nimbo = { git = "https://github.com/vladkens/nimbo", branch = "release-0.1", features = ["tray", "hotkey", "paste", "permissions", "instance", "autostart", "system", "png"] }
+nimbo = { git = "https://github.com/vladkens/nimbo", branch = "v1-prep", features = ["tray", "hotkey", "paste", "permissions", "instance", "autostart", "system", "png"] }
 rtrb = "0.4.1"
 rubato = "5.1.0"
 rusqlite = { version = "0.42.0", features = ["bundled", "functions"] }
@@ -74,7 +74,7 @@ wavo = { git = "https://github.com/vladkens/wavo", branch = "main", default-feat
 zip = { version = "9.5.1", default-features = false }
 
 [dev-dependencies]
-nimbo = { git = "https://github.com/vladkens/nimbo", branch = "release-0.1", features = ["harness"] }
+nimbo = { git = "https://github.com/vladkens/nimbo", branch = "v1-prep", features = ["harness"] }
 
 # Everything built here, once: no LTO and incremental, a change rebuilds the app's crate and links
 # fast. panic = "unwind" (the default), not "abort": the engine thread catches a panic of wavo or
