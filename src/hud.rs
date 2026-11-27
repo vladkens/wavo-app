@@ -378,7 +378,7 @@ pub struct Hud {
   warning: Option<String>,
   silent: bool,
   // The dictation's language, when there are languages to switch between, and its chip's width:
-  // wider than [CHIP_W] for Auto.
+  // wider than [CHIP_W] for a longer code (HAW, Auto).
   language: Option<String>,
   chip: f32,
   // The live text's words and lines; how far the pill opened for them (0..1), the room for its
@@ -502,11 +502,7 @@ impl Hud {
     match show {
       Show::Recording { meter, device, seconds, warning, language, text } => {
         let new = self.mode != Mode::Recording;
-        // A code keeps the chip's width in any font; Auto is a word of the person's language.
-        let wide = |l: &String| match l.as_str() {
-          "auto" => (f.measure(&code(l), CHIP) + 8.0).max(CHIP_W),
-          _ => CHIP_W,
-        };
+        let wide = |l: &String| (f.measure(&code(l), CHIP) + 8.0).max(CHIP_W);
         self.chip = language.as_ref().map_or(CHIP_W, wide);
         self.language = language;
         if new {
@@ -1221,9 +1217,6 @@ mod tests {
   use crate::session::{Last, NotPasted};
   use crate::settings::Line;
 
-  /// The room of a two-letter chip (`RU`) after the time.
-  const CHIP_ROOM: f32 = CHIP_W + CHIP_GAP;
-
   fn said(status: &Status, before: Option<&Status>, auto_paste: bool) -> Option<String> {
     match after(status, before, auto_paste, false)? {
       Show::Error(reason) => Some(reason),
@@ -1500,16 +1493,18 @@ mod tests {
   }
 
   /// A dictation with languages to switch between: its language's chip after the time, white, in
-  /// a pill that widens for it, the dot where it was; a change of language changes the code and
-  /// nothing moves but for a longer code; the dictation's end goes back to the narrow pill.
+  /// a pill that widens for it, the dot where it was; a change of language changes the code, the
+  /// chip as wide as its code in the font at hand; the end goes back to the narrow pill.
   #[test]
   fn the_language_shows_after_the_time() {
     let (mut h, _) = hud();
     h.app_mut().show(speaking("ru"));
     h.wait(ms(500));
-    assert_eq!(h.app().width.1, WIDTH + CHIP_ROOM);
+    let room = h.app().chip + CHIP_GAP;
+    assert!(h.app().chip >= CHIP_W, "{}", h.app().chip);
+    assert_eq!(h.app().width.1, WIDTH + room);
     let size = config(HudPosition::Bottom, false).size;
-    let (left, mid) = ((size.w - WIDTH - CHIP_ROOM) / 2.0, MARGIN + HEIGHT / 2.0);
+    let (left, mid) = ((size.w - WIDTH - room) / 2.0, MARGIN + HEIGHT / 2.0);
     let [r, g, _, _] = h.render().pixel(left + PAD + DOT / 2.0, mid);
     assert!(r > 200 && g < 100, "the red dot where it was: {r} {g}");
     let [r, g, b, _] =
@@ -1519,13 +1514,14 @@ mod tests {
     // Auto-detect's chip says Auto, wider.
     h.app_mut().show(speaking("auto"));
     h.wait(ms(500));
-    assert!(h.app().width.1 > WIDTH + CHIP_ROOM, "{}", h.app().width.1);
+    assert!(h.app().width.1 > WIDTH + room, "{}", h.app().width.1);
     h.app_mut().show(speaking("en"));
     h.wait(ms(500));
-    assert_eq!((h.app().language.as_deref(), h.app().width.1), (Some("en"), WIDTH + CHIP_ROOM));
+    let room = h.app().chip + CHIP_GAP;
+    assert_eq!((h.app().language.as_deref(), h.app().width.1), (Some("en"), WIDTH + room));
     h.app_mut().show(Show::Transcribing(None));
     h.wait(ms(500));
-    assert_eq!(h.app().width.1, WIDTH + CHIP_ROOM, "the chip stays while transcribing");
+    assert_eq!(h.app().width.1, WIDTH + room, "the chip stays while transcribing");
     h.app_mut().show(Show::Done("420 ms".into()));
     h.wait(ms(500));
     assert_eq!((h.app().language.as_deref(), h.app().width.1), (None, WIDTH));
