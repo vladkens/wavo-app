@@ -48,7 +48,7 @@ Wavo is inspired by [Handy](https://github.com/cjpais/Handy) and runs the same G
 1. Download the file for your system from the [latest release](https://github.com/vladkens/wavo-app/releases/latest) and run it.
 2. Pick a model in Settings › Models: **Parakeet Ultra**, about 0.7 GB, downloaded once.
 
-   **Which model?** Parakeet Ultra is the default: one model for 25 languages with the lowest error rate of them. If you speak one or two languages, smaller single-language models can be faster and as accurate: I dictate with Parakeet v2 for English and GigaAM v3 for Russian, and switch between them in the menu.
+   **Which model?** Parakeet Ultra is the default: one model for 25 languages with the lowest error rate of them. If you speak one or two languages, smaller single-language models can be faster and as accurate: I dictate with Parakeet v2 for English and GigaAM v3 for Russian, each a language in Settings › General › Language, and switch between them with one shortcut, also while I speak.
 
 3. Hold **Option-Space** (Ctrl+Alt+Space on Windows and Linux), speak and let go. A short tap starts a longer dictation that the next press ends; Esc cancels.
 

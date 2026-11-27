@@ -25,7 +25,7 @@ use nimbo::paste::{self, PORTAL_WAIT, Paste};
 use nimbo::permissions::{self, Access, Pane};
 use nimbo::system::Change;
 use nimbo::tray::{Menu, Tray};
-use nimbo::{Clipboard, Locale, Main, Proxy, SystemClipboard, Window, autostart, input_source, t};
+use nimbo::{Clipboard, Hotkey, Locale, Main, Proxy, SystemClipboard, Window, autostart, t};
 use shipo::{Release, Staged};
 use tracing::{error, info, warn};
 use wavo::hub::{self, Hub, ModelInfo};
@@ -47,9 +47,7 @@ const ACCESS_POLL: Duration = Duration::from_secs(2);
 // as the first paste waits for the desktop's dialog there.
 const MAIN_WAIT: Duration = Duration::from_secs(3);
 // The system's changes the settings window shows (its Microphone row): the microphones, and on
-// macOS the lid, which cuts the built-in one off ([audio::lid_closed]). The keyboard's input
-// source too where the system tells it ([input_source::available]): a dictation may follow its
-// language, the session's.
+// macOS the lid, which cuts the built-in one off ([audio::lid_closed]).
 const WATCHED: &[Change] = match cfg!(target_os = "macos") {
   true => &[Change::AudioInputs, Change::DefaultInput, Change::Lid],
   false => &[Change::AudioInputs, Change::DefaultInput],
@@ -213,22 +211,14 @@ fn start(
   let history = open_history(&home, in_memory);
   let hotkeys = {
     let handle = handle.clone();
-    Hotkeys::new(move |edge| {
-      handle.input(edge.into());
-      // The layout as the key goes down and up, ahead of its change, which nimbo tells once a
-      // burst of them ends: a switch just before the release decides the recording.
-      proxy().post(|_| _ = with_app(App::tell_keyboard));
-    })
+    Hotkeys::new(move |edge| handle.hotkey(edge))
   };
 
   // `open` shows the settings (the reopen hook below) and `quit` quits: nimbo's.
   let toggle = handle.clone();
   main.serve(instance, move |_, cmd| match cmd.name.as_str() {
     instance::OPEN | instance::QUIT => {}
-    "toggle" => {
-      _ = with_app(App::tell_keyboard);
-      toggle.input(session::Input::Toggle);
-    }
+    "toggle" => toggle.input(session::Input::Toggle),
     other => warn!("unknown command {other:?}"),
   })?;
 
@@ -301,25 +291,15 @@ fn start(
   main.on_reopen(|main| open_window(main, None));
   // Only the open windows read them again ([Prefs]'s event). The menu reads them as it opens, and
   // its `mic:i` items index the list it shows: read again while it is open, a click would pick
-  // from another list. The session hears of a microphone that came or went (an unplug) and of the
-  // keyboard layout's language.
-  let mut watched = WATCHED.to_vec();
-  if input_source::available() {
-    watched.push(Change::InputSource);
-  }
-
-  let watch = main.watch(&watched, move |_: &mut Main, change| match change {
-    Change::AudioInputs => session.inputs_changed(),
-    Change::InputSource => {
-      _ = with_app(App::tell_keyboard);
+  // from another list. The session hears of a microphone that came or went (an unplug).
+  let watch = main.watch(WATCHED, move |_: &mut Main, change| {
+    if change == Change::AudioInputs {
+      session.inputs_changed()
     }
-    _ => {}
   });
   if let Err(e) = watch {
     warn!("system changes: {e}");
   }
-
-  _ = with_app(App::tell_keyboard);
 
   if missing {
     proxy().post(|main| open_window(main, Some(Page::General)));
@@ -360,7 +340,16 @@ fn chosen(main: &mut Main, action: Action) {
     Action::Update | Action::CheckUpdates => open_update(main),
     Action::Model(name) => {
       info!("model {name} chosen in the menu");
-      with_app(|app| app.handle.edit_settings(move |s| s.model = Some(name.to_owned())));
+      with_app(|app| app.handle.edit_settings(move |s| s.choose_model(name)));
+    }
+    Action::Language(i) => {
+      info!("language {i} chosen in the menu");
+      let choose = move |s: &mut Settings| {
+        if let Some(language) = s.languages.get(i).map(|l| l.language.clone()) {
+          s.choose_language(&language);
+        }
+      };
+      with_app(|app| app.handle.edit_settings(choose));
     }
     Action::CopyLast => _ = with_app(App::copy_last),
     Action::Unload => _ = with_app(App::unload),
@@ -543,12 +532,6 @@ fn open_history(home: &Path, in_memory: bool) -> Option<Rc<History>> {
 }
 
 impl App {
-  /// The keyboard layout's language, for a dictation that follows it.
-  fn tell_keyboard(&mut self) {
-    let language = input_source::current().and_then(|s| s.language);
-    self.handle.keyboard(language.map(settings::model_language));
-  }
-
   fn on_update(&mut self, main: &mut Main, update: Update) {
     // The windows redraw in the new language; the menu and the tooltip are made again below and
     // the session's warnings once it checks the model again.
@@ -577,7 +560,9 @@ impl App {
     }
 
     let status = &update.status;
-    let _ = self.hotkeys.set(&update.settings.hotkey); // its error shows in the menu
+    // A text that does not parse is no hotkey there; why shows in the menu, as the OS's refusal.
+    let hotkeys = update.settings.hotkeys().map(|t| Hotkey::parse(t).ok());
+    let _ = self.hotkeys.set(&hotkeys);
     self.hotkeys.escape(status.state != Phase::Idle);
     let shown = self.hud.window.with(|h| h.mode()).unwrap_or(Mode::Hidden);
     let show = match status.state {
@@ -612,7 +597,9 @@ impl App {
         let before = self.update.as_ref().map(|u| &u.status);
         let (paste, took) =
           (self.pastes(&update.settings), update.settings.show_transcription_time);
-        match hud::after(status, before, paste, took) {
+        let switched =
+          || hud::switched(self.update.as_ref().map(|u| &u.settings), &update.settings);
+        match hud::after(status, before, paste, took).or_else(switched) {
           Some(show) => show,
           // An error or the time shown stays for its time.
           None if matches!(shown, Mode::Error | Mode::Done) => return self.keep(update),
@@ -825,17 +812,29 @@ impl App {
     self.pick = Pick::new(&self.hub, query, &self.found);
   }
 
+  /// Each hotkey of `settings` that does not work, as stored, and why: its text does not parse,
+  /// the OS refused it, or the listener failed with nothing else holding it (Windows' hook, X11's
+  /// grab, the portal missing or refused).
+  fn hotkey_errors(&self, settings: &Settings) -> Vec<(String, String)> {
+    let hotkeys = self.hotkeys.status();
+    let failed = hotkeys.listener == Listener::Failed;
+    let error = |which: usize, text: &str| {
+      let slot = hotkeys.slots.get(which).cloned().unwrap_or_default();
+      let dead = hotkeys.listener_error.clone().filter(|_| failed && !slot.fallback);
+      Hotkey::parse(text).err().map(|e| e.to_string()).or(slot.error).or(dead)
+    };
+    let texts = settings.hotkeys().into_iter().enumerate().filter(|(_, t)| !t.is_empty());
+    texts.filter_map(|(which, t)| Some((t.to_owned(), error(which, t)?))).collect()
+  }
+
   fn warnings(&self, update: &Update) -> Vec<Warning> {
     let hotkeys = self.hotkeys.status();
-    // A listener that failed with nothing else holding the hotkey leaves it dead (Windows' hook,
-    // X11's grab, the portal missing or refused): why shows, and with the portal Allow the
-    // Hotkey… again.
+    // With the portal, Allow the Hotkey… again.
     let listening = matches!(hotkeys.listener, Listener::Starting | Listener::Active);
-    let dead = hotkeys.listener == Listener::Failed && !hotkeys.fallback;
     let system = menu::System {
       // Nothing to ask for where only an administrator can allow it.
       accessibility: self.accessibility || needs_admin(),
-      hotkey_error: hotkeys.error.or(hotkeys.listener_error.filter(|_| dead)),
+      hotkey_errors: self.hotkey_errors(&update.settings),
       hotkey_portal: nimbo::hotkey::start_asks() && !listening,
       paste_portal: focus::hidden() && !nimbo::keys::ready(),
       no_microphone: self.mic() != Access::Granted,
@@ -844,7 +843,7 @@ impl App {
         && !self.clipboard,
       secure_input: hotkeys.secure_input,
     };
-    menu::warnings(&system, &update.settings.hotkey, &update.status)
+    menu::warnings(&system, &update.status)
   }
 
   /// The icon and the menu.
@@ -866,7 +865,7 @@ impl App {
       self.tray.set_tooltip(&icon.description());
     }
 
-    let hotkey = self.hotkeys.status().hotkey.map(|h| h.label());
+    let hotkey = self.hotkeys.status().slots.first().and_then(|s| s.hotkey).map(|h| h.label());
     let now = history::now_ms();
     let recent: Vec<String> = (self.recent.iter())
       .map(|e| {
@@ -877,9 +876,10 @@ impl App {
     let mics = (&self.devices[..], &update.settings.microphone, self.lid_closed);
     let (status, found, pick) = (&update.status, &self.found, &self.pick);
     let updating = self.updater.lock().unwrap().showing().cloned();
-    let models = (&found[..], pick);
-    let menu =
-      menu::menu(hotkey.as_deref(), status, &warnings, &recent, mics, models, updating.as_ref());
+    let (lines, current) = (&update.settings.languages[..], update.settings.language.as_str());
+    let models = (&found[..], pick, lines, current);
+    let updating = updating.as_ref();
+    let menu = menu::menu(hotkey.as_deref(), status, &warnings, &recent, mics, models, updating);
     if menu != self.menu {
       self.tray.set_menu(&menu);
       self.menu = menu;
@@ -1131,11 +1131,6 @@ impl window::Shell for AppShell {
 
   fn lid_closed(&self) -> bool {
     audio::lid_closed()
-  }
-
-  fn keyboard_layouts(&self) -> Vec<(String, String)> {
-    let sources = input_source::enabled().into_iter();
-    sources.filter_map(|s| Some((settings::model_language(s.language?), s.name))).collect()
   }
 
   fn download(&self, model: &'static ModelInfo) {

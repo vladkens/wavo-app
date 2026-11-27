@@ -234,9 +234,10 @@ mod tests {
     // In the menu, whole.
     let status = Status { warnings: vec![warning.into()], ..Status::default() };
     let system = menu::System { accessibility: true, ..menu::System::default() };
-    let shown = menu::warnings(&system, "f5", &status);
+    let shown = menu::warnings(&system, &status);
     let mics = (&[][..], &audio::Microphone::Automatic, false);
-    let items = menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default()), None).items;
+    let items =
+      menu::menu(None, &status, &shown, &[], mics, (&[], &Pick::default(), &[], ""), None).items;
     assert_eq!(items[1].label(), format!("⚠︎ {warning}"));
 
     // Another device records, one of the same name too: no warning; each keeps its own.

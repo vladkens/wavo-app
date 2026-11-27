@@ -2,8 +2,8 @@
 
 //! The menu bar icon and menu: a header with the app, the hotkey and the state; the warnings, most
 //! opening where they are fixed; an update found or going on; Copy Last Dictation and Recent; the
-//! model in use with the others downloaded; Unload Model, History…, Settings…, Check for Updates…,
-//! Quit.
+//! model in use with the others downloaded, or the languages to switch between; Unload Model,
+//! History…, Settings…, Check for Updates…, Quit.
 
 use nimbo::tray::{Item, LABEL, Menu, TrayIcon};
 use nimbo::{Hotkey, Localized, Shortcut, t};
@@ -11,7 +11,8 @@ use nimbo::{Hotkey, Localized, Shortcut, t};
 use crate::audio::{Auto, Device, Microphone};
 use crate::engine::Phase as EnginePhase;
 use crate::history::{local_time, shorten};
-use crate::session::{NoModel, Outcome, Phase, Status};
+use crate::session::{NoModel, Outcome, Phase, Status, label};
+use crate::settings::Line;
 use crate::updater::{self, State};
 use crate::window::{
   Found, Pick, bluetooth_only, mic_name, microphones as mic_choices, not_connected,
@@ -35,6 +36,8 @@ pub enum Action {
   MicNote,
   /// A downloaded model, by name.
   Model(&'static str),
+  /// One of the languages to switch between, by its place.
+  Language(usize),
   /// The model chosen, not among those downloaded.
   ModelChosen,
   NoModels,
@@ -132,8 +135,9 @@ pub fn icon(status: &Status, warnings: &[Warning]) -> Icon {
 #[derive(Debug, Clone, Default)]
 pub struct System {
   pub accessibility: bool,
-  /// The hotkey does not parse, or the OS refused it.
-  pub hotkey_error: Option<String>,
+  /// Each hotkey that does not work, as stored, and why: it does not parse, the app or the OS
+  /// refused it, the listener failed.
+  pub hotkey_errors: Vec<(String, String)>,
   /// The hotkey waits for the person to let the desktop's portal ask them (Wayland).
   pub hotkey_portal: bool,
   /// The paste waits for the person to let the desktop's RemoteDesktop portal ask them (Wayland).
@@ -152,14 +156,14 @@ pub struct Warning {
   pub action: bool,
 }
 
-pub fn warnings(system: &System, hotkey: &str, status: &Status) -> Vec<Warning> {
+pub fn warnings(system: &System, status: &Status) -> Vec<Warning> {
   let mut list = Vec::new();
   let mut add = |id, text: String, action| list.push(Warning { id, text, action });
   if !system.accessibility {
     add(Warn::Accessibility, t!("Allow Accessibility…").to_string(), true);
   }
 
-  if let Some(e) = &system.hotkey_error {
+  for (hotkey, e) in &system.hotkey_errors {
     // As the platform names its keys (Ctrl+Alt+K, not the stored ctrl+option+k); a click opens
     // General, where it changes.
     let label = Hotkey::parse(hotkey).map_or_else(|_| hotkey.to_owned(), |h| h.label());
@@ -233,7 +237,8 @@ pub fn recent_title(text: &str, created_at: i64, now: i64) -> String {
 
 /// Item ids: `recent:<i>`, `mic:<i>`, `model:<name>`, `warn:…` and fixed ones, as
 /// `app::chosen` handles them. `mics`: the devices, the one saved and whether the lid is closed;
-/// `models`: those downloaded and the pick; `update`: the updater's state, `None` in a build that
+/// `models`: those downloaded, the pick, the languages to switch between and the current one (in
+/// the models' place while there are any); `update`: the updater's state, `None` in a build that
 /// doesn't update.
 pub fn menu(
   hotkey: Option<&str>,
@@ -241,7 +246,7 @@ pub fn menu(
   warnings: &[Warning],
   recent: &[String],
   mics: (&[Device], &Microphone, bool),
-  (found, pick): (&[Found], &Pick),
+  (found, pick, lines, current): (&[Found], &Pick, &[Line], &str),
   update: Option<&State>,
 ) -> Menu<Action> {
   let title = format!("{} {}", crate::INFO.name, crate::VERSION);
@@ -276,8 +281,19 @@ pub fn menu(
     items.push(Item::button(Action::MicNote, &note).enabled(false));
   }
 
+  if lines.is_empty() {
+    items.push(Item::submenu(&model, models));
+  }
+
+  for (i, line) in lines.iter().enumerate() {
+    let label = match &line.model {
+      Some(m) => format!("{} · {}", line.name(), label(m)),
+      None => line.name(),
+    };
+    items.push(Item::toggle(Action::Language(i), &label, line.language == current));
+  }
+
   items.extend([
-    Item::submenu(&model, models),
     Item::button(Action::Unload, &t!("Unload Model")).enabled(loaded),
     Item::Divider,
     Item::button(Action::History, &t!("History…")),
@@ -437,10 +453,13 @@ mod tests {
   fn warnings_open_what_fixes_them_and_turn_the_icon() {
     let mut s = Status::default();
     let fine = System { accessibility: true, ..System::default() };
-    assert_eq!((warnings(&fine, "f5", &s), icon(&s, &[])), (vec![], Icon::Idle));
+    assert_eq!((warnings(&fine, &s), icon(&s, &[])), (vec![], Icon::Idle));
 
     let system = System {
-      hotkey_error: Some("taken".into()),
+      hotkey_errors: vec![
+        ("f5".into(), "taken".into()),
+        ("ctrl+option+space".into(), "the app has this hotkey already".into()),
+      ],
       hotkey_portal: true,
       paste_portal: true,
       no_microphone: true,
@@ -450,10 +469,11 @@ mod tests {
     };
     s.no_model = Some(NoModel::NoneDownloaded);
     s.warnings = vec!["no sound from USB Mic".into()];
-    let list = warnings(&system, "f5", &s);
+    let list = warnings(&system, &s);
     let ids: Vec<_> = list.iter().map(|w| (w.id, w.action)).collect();
     let expected = [
       (Warn::Accessibility, true),
+      (Warn::Hotkey, true),
       (Warn::Hotkey, true),
       (Warn::HotkeyPortal, true),
       (Warn::PastePortal, true),
@@ -464,7 +484,13 @@ mod tests {
       (Warn::Status, false),
     ];
     assert_eq!(ids, expected);
-    assert_eq!(list[8].text, "No sound from USB Mic");
+    let label = Hotkey::parse("ctrl+option+space").unwrap().label();
+    assert_eq!(list[1].text, "The hotkey “F5” does not work: taken");
+    assert_eq!(
+      list[2].text,
+      format!("The hotkey “{label}” does not work: the app has this hotkey already")
+    );
+    assert_eq!(list[9].text, "No sound from USB Mic");
     assert_eq!(icon(&s, &list), Icon::Warning);
     s.state = Phase::Recording;
     assert_eq!(icon(&s, &list), Icon::Recording, "the phase first");
@@ -481,7 +507,7 @@ mod tests {
     let wave = Microphone::Device(wave);
     let mics = (&devices[..], &wave, false);
     let pick = Pick::default();
-    let items = menu(Some("⌥Space"), &s, &list, &[], mics, (&[], &pick), None).items;
+    let items = menu(Some("⌥Space"), &s, &list, &[], mics, (&[], &pick, &[], ""), None).items;
     // The header as long as the build's version lets it be (a dirty build's runs longer).
     let header = format!("Wavo {} · ⌥Space · Recording…", crate::VERSION);
     let label = items[0].label();
@@ -490,11 +516,11 @@ mod tests {
       false => assert!(label.starts_with("Wavo v") && label.contains("⌥Space"), "{label}"),
     }
     assert_eq!(
-      (items[1].label(), items[8].label()),
+      (items[1].label(), items[9].label()),
       ("⚠︎ Allow Accessibility…", "Download a Speech Model…")
     );
-    // The hotkey's warning opens General too, its key as the platform names it.
-    assert!(items[1].is_enabled() && items[2].is_enabled());
+    // Each hotkey's warning opens General too, its key as the platform names it.
+    assert!(items[1].is_enabled() && items[2].is_enabled() && items[3].is_enabled());
     assert!(items[2].label().contains("“F5” does not work"), "{}", items[2].label());
     // One name in the menu and its submenu.
     let (mic, sub) = mic_menu(&items);
@@ -506,7 +532,8 @@ mod tests {
     assert_eq!(devices_got, [("MacBook Pro Microphone", false), (devices[1].name.as_str(), true)]);
 
     let mic_label = |devices: &[Device], saved: &Microphone, lid_closed| {
-      let items = menu(None, &s, &list, &[], (devices, saved, lid_closed), (&[], &pick), None);
+      let items =
+        menu(None, &s, &list, &[], (devices, saved, lid_closed), (&[], &pick, &[], ""), None);
       (mic_menu(&items.items).0.to_owned(), label_of(&items.items, Action::MicNote))
     };
     let system = mic_label(&devices, &Microphone::System, false);
@@ -558,7 +585,7 @@ mod tests {
     // The menu's title and note, the submenu's checked item.
     let mics = |devices: &[Device], lid_closed| {
       let mics = (devices, &headphones, lid_closed);
-      let items = menu(None, &s, &[], &[], mics, (&[], &pick), None).items;
+      let items = menu(None, &s, &[], &[], mics, (&[], &pick, &[], ""), None).items;
       let (title, sub) = mic_menu(&items);
       let checked = sub.iter().find(|i| i.is_on()).map(|i| i.label().to_owned());
       (title.to_owned(), label_of(&items, Action::MicNote), checked)
@@ -594,6 +621,38 @@ mod tests {
     assert_eq!(mics(&back, false), want);
   }
 
+  /// The languages to switch between take the Model submenu's place, each with its model, the
+  /// current one on; without them, the submenu.
+  #[test]
+  fn the_languages_take_the_models_place() {
+    let (s, pick) = (Status::default(), Pick::default());
+    let line = |language: &str, model: Option<&str>| Line {
+      language: language.into(),
+      model: model.map(Into::into),
+    };
+    let lines =
+      [line("en", Some("parakeet-v2")), line("ru", Some("gigaam-v3")), line("auto", None)];
+    let items = |lines: &[Line]| {
+      let mics = (&[][..], &Microphone::System, false);
+      menu(None, &s, &[], &[], mics, (&[], &pick, lines, "ru"), None).items
+    };
+    let model = |items: &[Item<Action>]| {
+      items.iter().any(|i| matches!(i, Item::Submenu { label, .. } if label == "No Model"))
+    };
+    let shown = items(&lines);
+    let got: Vec<_> = (shown.iter())
+      .filter(|i| matches!(i.action(), Some(Action::Language(_))))
+      .map(|i| (i.label().to_owned(), i.is_on()))
+      .collect();
+    let want =
+      [("English · parakeet-v2", false), ("Russian · gigaam-v3", true), ("Auto-detect", false)];
+    assert_eq!(got, want.map(|(l, on)| (l.to_owned(), on)));
+    let unload = shown.iter().position(|i| i.action() == Some(&Action::Unload)).unwrap();
+    assert_eq!(shown[unload - 1].action(), Some(&Action::Language(2)));
+    assert!(!model(&shown));
+    assert!(model(&items(&[])));
+  }
+
   /// An update shows under the header and the warnings; Check for Updates… sits above Quit.
   #[test]
   fn an_update_shows_under_the_header() {
@@ -601,7 +660,7 @@ mod tests {
     let pick = Pick::default();
     let items = |state: State| {
       let mics = (&[][..], &Microphone::System, false);
-      let items = menu(None, &s, &[], &[], mics, (&[], &pick), Some(&state)).items;
+      let items = menu(None, &s, &[], &[], mics, (&[], &pick, &[], ""), Some(&state)).items;
       items.into_iter().map(|i| (i.action().cloned(), i.label().to_owned())).collect::<Vec<_>>()
     };
     let idle = items(State::Idle);

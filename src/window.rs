@@ -6,7 +6,7 @@
 //! shell keeps current ([Prefs::update]), and reaches the app only through [Shell]: tests run it
 //! in nimbo's harness with a fake one.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
 use std::ops::{ControlFlow, Range};
@@ -36,7 +36,7 @@ use crate::history::{
 };
 use crate::session::{self, NoModel, Request, Status, label};
 use crate::settings::{
-  Activation, HudPosition, HudStyle, KEYBOARD, Settings, english_name, language_name,
+  Activation, HudPosition, HudStyle, Line, Settings, english_name, language_name,
 };
 use crate::transfer::Imported;
 use crate::{engine, mic_start};
@@ -113,12 +113,6 @@ pub trait Shell {
     false
   }
 
-  /// The keyboard layouts the person can switch to that type a language: its code and the
-  /// layout's name (`ru`, `Russian – PC`); none where the system doesn't tell.
-  fn keyboard_layouts(&self) -> Vec<(String, String)> {
-    Vec::new()
-  }
-
   fn access(&self) -> Access;
   /// The system's prompt while it can still ask ([Prefs::access_changed]), else its pane.
   fn allow(&self, _pane: Pane) {}
@@ -189,8 +183,6 @@ pub struct Prefs {
   devices: Vec<audio::Device>,
   /// A laptop's lid is closed: its built-in microphone hears nothing ([audio::automatic]).
   lid_closed: bool,
-  /// [Shell::keyboard_layouts].
-  layouts: Vec<(String, String)>,
   found: Vec<Found>,
   pick: Pick,
   access: Access,
@@ -232,7 +224,6 @@ impl Prefs {
       home: home.to_owned(),
       devices: Vec::new(),
       lid_closed: false,
-      layouts: Vec::new(),
       found: Vec::new(),
       pick: Pick::default(),
       access,
@@ -274,7 +265,6 @@ impl Prefs {
   pub fn refresh(&mut self) {
     self.devices = self.shell.devices();
     self.lid_closed = self.shell.lid_closed();
-    self.layouts = self.shell.keyboard_layouts();
     self.access = self.shell.access();
     self.login.state = self.shell.autostart();
     self.models_changed();
@@ -325,12 +315,11 @@ impl Prefs {
     self.dictates(m) || self.busy(m)
   }
 
-  /// Dictations go to the model: it is the Model, or a keyboard layout's language's.
+  /// Dictations go to the model: it is the Model, or a language's to switch to.
   fn dictates(&self, m: &ModelInfo) -> bool {
-    let keyboard = self.settings.follows_keyboard().then_some(&self.settings.keyboard_models);
-    let row =
-      keyboard.is_some_and(|rows| rows.values().flatten().any(|v| model_name(v) == Some(m.name)));
-    self.active().is_some_and(|f| f.0.name == m.name) || row
+    let mut lines = self.settings.languages.iter().filter_map(|l| l.model.as_deref());
+    self.active().is_some_and(|f| f.0.name == m.name)
+      || lines.any(|v| model_name(v) == Some(m.name))
   }
 
   /// Some model transcribes: the chosen one, or the first downloaded in its place.
@@ -455,7 +444,8 @@ impl App for Prefs {
     self.confirm(ui);
 
     // Also when the recorder lost its focus with the page, or the window lost the keys.
-    let recording = ui.focused(Id::of("hotkey")) && ui.window_focused();
+    let recorder = ui.focused(Id::of("hotkey")) || ui.focused(Id::of("switch-hotkey"));
+    let recording = recorder && ui.window_focused();
     if recording != self.recording {
       self.recording = recording;
       self.shell.pause_hotkey(recording);
@@ -478,10 +468,6 @@ impl App for Prefs {
       Event::System(Change::Lid) => {
         self.lid_closed = self.shell.lid_closed();
         true
-      }
-      Event::System(Change::InputSource) => {
-        let layouts = self.shell.keyboard_layouts();
-        std::mem::replace(&mut self.layouts, layouts) != self.layouts
       }
       Event::FileDialog(answer) => {
         match (self.panel.take(), answer) {
@@ -506,20 +492,6 @@ const MIC_WIDTH: f32 = 320.0;
 fn pick(ui: &mut Ui, id: &str, labels: &[String], at: usize, lines: &[usize]) -> Option<usize> {
   let mut cur = at;
   picker(&mut cur, labels.iter().map(String::as_str), lines).show(ui.id(id)).changed.then_some(cur)
-}
-
-/// The languages of keyboard `layouts` ([Shell::keyboard_layouts]) by name, each with its
-/// layouts' names: `("ru", "Russian – PC")`.
-fn keyboard_languages(layouts: &[(String, String)]) -> Vec<(String, String)> {
-  let mut by: BTreeMap<String, (String, Vec<&str>)> = BTreeMap::new();
-  for (lang, layout) in layouts {
-    let entry = by.entry(language_name(lang)).or_insert_with(|| (lang.clone(), Vec::new()));
-    if !entry.1.contains(&layout.as_str()) {
-      entry.1.push(layout);
-    }
-  }
-
-  by.into_values().map(|(lang, names)| (lang, names.join(", "))).collect()
 }
 
 /// wavo's name for a model choice, `None` for a file of the person's own.
@@ -635,19 +607,16 @@ const KEEP_HELP: Localized = t!(
 const AUTO_HELP: Localized = t!(
   "The model tells the language of each dictation by itself. Short \
   phrases, an accent or two languages mixed can mislead it: choose the language you speak, or \
-  Keyboard layout to follow the layout you type with."
+  add languages to switch between, each with its own model."
 );
-const MODEL_KEYBOARD_HELP: Localized = t!(
-  "With Keyboard layout, each language under Language goes to \
-  the model chosen there. This one takes a language set to it, one no model knows, and a layout \
-  of any other language."
-);
-/// How far a keyboard language sits in from the Language row's name.
-const KEYBOARD_INDENT: f32 = 16.0;
-const KEYBOARD_HELP: Localized = t!(
-  "Each dictation is in the language of the keyboard layout in use when \
-  it ends, with the model chosen for that language below. Switch the layout while you speak and \
-  the whole dictation follows it; the HUD shows the language."
+/// How far a language to switch to sits in from the Language row's name.
+const LINE_INDENT: f32 = 16.0;
+/// The tick of the current one.
+const TICK: f32 = 14.0;
+const SWITCH_HELP: Localized = t!(
+  "Each dictation is in the language ticked below, with its model. The \
+  Switch Language shortcut moves to the next one, also while you speak: the whole dictation goes \
+  to the one ticked when it ends, and the HUD shows it."
 );
 const CLEAN_HELP: Localized = t!(
   "Adds a space after each paste. A paste into the same window less than \
@@ -693,7 +662,7 @@ impl Prefs {
   fn general(&mut self, ui: &mut Ui, fs: &FormStyle) {
     self.permissions(ui, fs);
     // By what a dictation needs: the microphone, the model, how the key records and the key; then
-    // the language, which may open into one row per keyboard layout.
+    // the language, with the languages to switch between under it.
     ui.form_section(fs, t!("Dictation"), |ui| {
       let (devices, saved) = (&self.devices, &self.settings.microphone);
       let (mics, at) = microphones(devices, saved, self.lid_closed);
@@ -741,6 +710,10 @@ impl Prefs {
       });
       ui.form_row(fs, FormRow::new(marked(t!("Shortcut"), mark, None)), |ui| self.shortcut(ui));
       self.language_row(ui, fs);
+      if !self.settings.languages.is_empty() {
+        let row = FormRow::new(t!("Switch Language"));
+        ui.form_row(fs, row, |ui| self.switch_shortcut(ui));
+      }
     });
 
     ui.form_section(fs, t!("Output"), |ui| {
@@ -842,6 +815,23 @@ impl Prefs {
     }
   }
 
+  /// The switch's recorder; cleared, nothing switches.
+  fn switch_shortcut(&mut self, ui: &mut Ui) {
+    let mut hotkey = Hotkey::parse(&self.settings.switch_hotkey).ok();
+    if !ui.id("switch-hotkey").shortcut(&mut hotkey).changed {
+      return;
+    }
+
+    let alone = |h: &Hotkey| !nimbo::hotkey::modifier_alone() && matches!(h, Hotkey::Modifier(_));
+    let text = match hotkey {
+      Some(h) if alone(&h) => return,
+      Some(h) => h.to_string(),
+      None => String::new(),
+    };
+    info!("settings: switch hotkey {text:?}");
+    self.edit(move |s| s.switch_hotkey = text.clone());
+  }
+
   /// The downloaded models, the chosen one when it is none of them, then "Download more…".
   fn model_choices(&self) -> (Vec<String>, usize) {
     let mut items: Vec<String> = self.found.iter().map(|f| f.0.name.to_owned()).collect();
@@ -861,23 +851,18 @@ impl Prefs {
     (items, at)
   }
 
-  /// The language choices: auto, the keyboard layout's where the system tells it, then the
-  /// languages the model in use is meant for.
+  /// The language choices: auto, then the languages the model in use is meant for and those to
+  /// switch to.
   fn languages(&self) -> (Vec<(String, String)>, usize) {
-    let codes = self.active().map_or(&[][..], |f| f.0.langs);
+    let codes = self.active().map_or(&[][..], |f| f.0.langs).iter().copied();
+    let lines = self.settings.languages.iter().map(|l| l.language.as_str());
+    let mut codes: Vec<&str> = codes.chain(lines).filter(|c| *c != "auto").collect();
+    codes.sort();
+    codes.dedup();
     let mut langs: Vec<(String, String)> =
       codes.iter().map(|c| (language_name(c), (*c).to_owned())).collect();
     langs.sort();
     langs.insert(0, (t!("Auto-detect").to_string(), "auto".to_owned()));
-    let keyboard = self.settings.follows_keyboard();
-    if keyboard || !self.layouts.is_empty() {
-      langs.insert(1, (t!("Keyboard layout").to_string(), KEYBOARD.to_owned()));
-    }
-
-    if keyboard {
-      return (langs, 1);
-    }
-
     let Some(current) = self.settings.engine_language() else { return (langs, 0) };
 
     if let Some(i) = langs.iter().position(|(_, c)| c.eq_ignore_ascii_case(&current)) {
@@ -894,10 +879,8 @@ impl Prefs {
   fn model_row(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let (labels, at) = self.model_choices();
     let note = self.model_note();
-    let keyboard = self.settings.follows_keyboard().then_some(MODEL_KEYBOARD_HELP.as_str());
-    let mark = note.as_deref().or(keyboard).map_or(Mark::None, Mark::Info);
-    let name = if keyboard.is_some() { t!("Default model") } else { t!("Model") };
-    let row = FormRow::new(marked(name, mark, Some(Id::of("model-row").key("info"))));
+    let mark = note.as_deref().map_or(Mark::None, Mark::Info);
+    let row = FormRow::new(marked(t!("Model"), mark, Some(Id::of("model-row").key("info"))));
 
     let none = self.found.is_empty() && self.pick.other.is_none();
     let mut picked = None;
@@ -920,77 +903,126 @@ impl Prefs {
     }
   }
 
-  /// The language, last of the dictation's rows: with Keyboard layout, its languages under it.
+  /// The language, last of the dictation's rows; under it the languages the switch goes
+  /// through, each with its model, the current one ticked, and one to add.
   fn language_row(&mut self, ui: &mut Ui, fs: &FormStyle) {
     let (langs, at) = self.languages();
     let labels: Vec<String> = langs.iter().map(|l| l.0.clone()).collect();
-    let head = langs.iter().position(|l| l.1 == KEYBOARD).unwrap_or(0);
-    let keyboard = self.settings.follows_keyboard();
+    let lines = self.settings.languages.clone();
     let auto = self.auto_help();
     let mark = match () {
-      _ if keyboard => Mark::Info(KEYBOARD_HELP.as_str()),
+      _ if !lines.is_empty() => Mark::Info(SWITCH_HELP.as_str()),
       _ if self.settings.engine_language().is_none() => Mark::Info(&auto),
       _ => Mark::None,
     };
     let label = marked(t!("Language"), mark, Some(Id::of("lang-row").key("info")));
-    // With Keyboard layout, its languages under it in the same row, each with its model.
-    let rows = if keyboard { keyboard_languages(&self.layouts) } else { Vec::new() };
-    let choices: Vec<_> = rows.iter().map(|(lang, _)| self.keyboard_choices(lang)).collect();
-    let mut row = FormRow::new(label);
-    let mut chosen = None;
-    if !rows.is_empty() {
-      let (label_style, chosen, rows, choices) = (fs.label, &mut chosen, &rows, &choices);
-      row = row.footer(move |ui: &mut Ui, s: TextStyle| {
-        let list = Style::new().w(grow()).gap(4.0).pads([2.0, 0.0, 0.0, KEYBOARD_INDENT]);
-        ui.col(list, |ui| {
-          for (i, ((lang, layouts), (labels, _, at))) in rows.iter().zip(choices).enumerate() {
-            let line = Style::new().w(grow()).gap(6.0).align(Align::Start, Align::Center);
-            ui.row(line, |ui| {
-              ui.text(language_name(lang), label_style.line_limit(1));
-              // The label's size, dimmed: one baseline with the name.
-              ui.text(layouts.as_str(), label_style.color(s.color).line_limit(1));
-              ui.el(Style::new().w(grow()));
-              let id = format!("keyboard-{lang}");
-              if let Some(p) = pick(ui, &id, labels, *at, &[0, labels.len() - 2]) {
-                *chosen = Some((i, p));
-              }
-            });
-          }
-        });
-      });
-    }
+    let choices: Vec<_> = lines.iter().map(|l| self.line_choices(l)).collect();
+    let adds = self.addable();
+    // Translators: the first item of a pop-up of languages, which adds the one picked.
+    let mut add_labels = vec![t!("Add a Language to Switch To…").to_string()];
+    add_labels.extend(adds.iter().map(|a| a.0.clone()));
+    let (label_style, accent, current) = (fs.label, ui.theme().accent, &self.settings.language);
+    let mut act = None;
+    let footer = |ui: &mut Ui, _: TextStyle| {
+      let list = Style::new().w(grow()).gap(4.0).pads([2.0, 0.0, 0.0, LINE_INDENT]);
+      ui.col(list, |ui| {
+        for (i, (line, (labels, _, at))) in lines.iter().zip(&choices).enumerate() {
+          let row = Style::new().w(grow()).gap(6.0).align(Align::Start, Align::Center);
+          ui.row(row, |ui| {
+            match &line.language == current {
+              true => _ = ui.icon(Icon::CHECK.stroke(1.8), TICK, accent),
+              false => _ = ui.el(Style::new().w(px(TICK)).h(px(TICK))),
+            }
+            ui.text(line.name(), label_style.line_limit(1));
+            ui.el(Style::new().w(grow()));
+            let id = format!("line-{}", line.language);
+            if let Some(p) = pick(ui, &id, labels, *at, &[labels.len() - 2]) {
+              act = Some(LineAct::Model(i, p));
+            }
 
-    let mut picked = None;
-    ui.form_row(fs, row, |ui| picked = pick(ui, "lang", &labels, at, &[head]));
-    if let Some(i) = picked {
-      let code = langs[i].1.clone();
-      // Keyboard layout starts a language not seen before on its best model downloaded; one the
-      // person set, the default too, keeps it.
-      let mut rows = self.settings.keyboard_models.clone();
-      if code == KEYBOARD {
-        for (lang, _) in keyboard_languages(&self.layouts) {
-          if let Some(m) = self.best_for(&lang).filter(|_| !rows.contains_key(&lang)) {
-            rows.insert(lang, Some(m.to_owned()));
+            let remove = ui.help(t!("Remove").as_str()).id(("remove", i));
+            if remove.icon_button(Icon::X).clicked {
+              act = Some(LineAct::Remove(i));
+            }
+          });
+        }
+
+        if add_labels.len() > 1 {
+          let mut cur = 0;
+          let pop = picker(&mut cur, add_labels.iter().map(String::as_str), &[0]);
+          if pop.show(ui.id("add-language")).changed && cur > 0 {
+            act = Some(LineAct::Add(cur - 1));
           }
         }
+      });
+    };
+    let row = FormRow::new(label).footer(footer);
+
+    let mut picked = None;
+    ui.form_row(fs, row, |ui| picked = pick(ui, "lang", &labels, at, &[0]));
+    if let Some(i) = picked {
+      let code = langs[i].1.clone();
+      info!("settings: language {code}");
+      self.edit(move |s| s.choose_language(&code));
+    }
+
+    match act {
+      Some(LineAct::Add(i)) => {
+        let (language, model) = (adds[i].1.clone(), self.best_for(&adds[i].1).map(str::to_owned));
+        info!("settings: switch to {language} too, with {model:?}");
+        let line = Line { language, model };
+        self.edit(move |s| {
+          if s.languages.is_empty() {
+            s.languages.push(Line { language: s.language.clone(), model: s.model.clone() });
+          }
+
+          s.languages.push(line.clone());
+        });
       }
-
-      self.edit(move |s| (s.language, s.keyboard_models) = (code.clone(), rows.clone()));
+      Some(LineAct::Remove(i)) => {
+        info!("settings: no switch to {}", self.settings.languages[i].language);
+        self.edit(move |s| {
+          s.languages.remove(i);
+          if s.languages.len() < 2 {
+            s.languages.clear();
+          }
+        });
+      }
+      Some(LineAct::Model(i, p)) => {
+        let (labels, models, _) = &choices[i];
+        let language = self.settings.languages[i].language.clone();
+        if p + 1 == labels.len() {
+          self.model_lang = languages().iter().find(|l| l.1 == language).map_or("", |l| l.1);
+          self.page = Page::Models;
+        } else if let Some(&model) = models.get(p) {
+          info!("settings: {language} goes to {model}");
+          self.edit(move |s| {
+            s.languages[i].model = Some(model.to_owned());
+            if s.languages[i].language == s.language {
+              s.model = Some(model.to_owned());
+            }
+          });
+        }
+      }
+      None => {}
     }
+  }
 
-    let Some((i, p)) = chosen else { return };
-    let ((lang, _), (labels, models, _)) = (&rows[i], &choices[i]);
-    let lang = lang.clone();
-    if p == 0 {
-      info!("settings: {lang} goes to the default model");
-      self.edit(move |s| _ = s.keyboard_models.insert(lang.clone(), None));
-    } else if p + 1 == labels.len() {
-      self.model_lang = languages().iter().find(|l| l.1 == lang).map_or("", |l| l.1);
-      self.page = Page::Models;
-    } else if let Some(&model) = models.get(p - 1) {
-      info!("settings: {lang} goes to {model}");
-      self.edit(move |s| _ = s.keyboard_models.insert(lang.clone(), Some(model.to_owned())));
-    }
+  /// The languages to add to those to switch between: of the downloaded models, by name, but
+  /// those already there (the current one while there are none).
+  fn addable(&self) -> Vec<(String, String)> {
+    let lines = &self.settings.languages;
+    let taken = |c: &str| match lines.is_empty() {
+      true => c == self.settings.language,
+      false => lines.iter().any(|l| l.language == c),
+    };
+    let mut codes: Vec<&str> = self.found.iter().flat_map(|f| f.0.langs.iter().copied()).collect();
+    codes.sort();
+    codes.dedup();
+    let mut langs: Vec<_> =
+      codes.into_iter().filter(|c| !taken(c)).map(|c| (language_name(c), c.to_owned())).collect();
+    langs.sort();
+    langs
   }
 
   /// What Auto-detect does with the model in use: one of one language always takes its own.
@@ -1014,39 +1046,42 @@ impl Prefs {
     models
   }
 
-  /// The model a keyboard layout's language starts on: the best downloaded for it.
+  /// The model a language to switch to starts on: the best downloaded for it.
   fn best_for(&self, lang: &str) -> Option<&'static str> {
     self.models_for(lang).first().map(|m| m.name)
   }
 
-  /// A keyboard language's choices: the default model (the Model's: none of the language's own),
-  /// the downloaded models that know `lang`, best first, the one chosen when it is not on disk,
-  /// and Download more…; the models' names, and the choice in use.
-  fn keyboard_choices(&self, lang: &str) -> (Vec<String>, Vec<&'static str>, usize) {
-    let models = self.models_for(lang);
-    let default = match (self.active(), &self.pick.other) {
-      (_, Some((name, _))) => name.clone(),
-      (Some(f), None) => f.0.name.to_owned(),
-      // Translators: no model, as the default model of a keyboard language.
-      (None, None) => t!("none").to_string(),
+  /// A language to switch to's choices: the downloaded models that know it, best first (any
+  /// for Auto-detect), the one chosen when it is not on disk, and Download more…; the models'
+  /// names, and the choice in use.
+  fn line_choices(&self, line: &Line) -> (Vec<String>, Vec<&'static str>, usize) {
+    let models = match line.language.as_str() {
+      "auto" => self.found.iter().map(|f| f.0).collect(),
+      lang => self.models_for(lang),
     };
-    // Translators: a model in a list of models.
-    let mut labels = vec![t!("{default} (default)", default)];
-    labels.extend(models.iter().map(|m| m.name.to_owned()));
-    let at = match self.settings.keyboard_models.get(lang).and_then(Option::as_ref) {
-      None => 0,
-      Some(c) => match models.iter().position(|m| model_name(c) == Some(m.name)) {
-        Some(i) => i + 1,
-        None => {
-          labels.push(t!("{name} (not on disk)", name = label(c)));
-          labels.len() - 1
-        }
-      },
+    let mut labels: Vec<String> = models.iter().map(|m| m.name.to_owned()).collect();
+    let chosen = line.model.as_deref();
+    let at = match models.iter().position(|m| chosen.and_then(model_name) == Some(m.name)) {
+      Some(i) => i,
+      None => {
+        // Translators: no model, as the model of a language to switch to.
+        let name = chosen.map_or_else(|| t!("none").to_string(), label);
+        labels.push(t!("{name} (not on disk)", name));
+        labels.len() - 1
+      }
     };
 
     labels.push(t!("Download more…").to_string());
     (labels, models.iter().map(|m| m.name).collect(), at)
   }
+}
+
+/// What a click in the languages to switch between does.
+enum LineAct {
+  Add(usize),
+  Remove(usize),
+  /// The line's model picker's item.
+  Model(usize, usize),
 }
 
 // MARK: Advanced
@@ -2009,7 +2044,7 @@ impl Prefs {
 
   fn use_model(&mut self, name: &'static str) {
     info!("settings: use model {name}");
-    self.edit(move |s| s.model = Some(name.to_owned()));
+    self.edit(move |s| s.choose_model(name));
   }
 
   /// Whether the model runs on this Mac's Neural Engine.
@@ -3280,7 +3315,6 @@ mod tests {
     /// Times the devices were read.
     looks: usize,
     lid_closed: bool,
-    layouts: Vec<(String, String)>,
     /// All allowed unless set.
     access: Option<Access>,
     allowed: Vec<Pane>,
@@ -3341,10 +3375,6 @@ mod tests {
 
     fn lid_closed(&self) -> bool {
       self.log().lid_closed
-    }
-
-    fn keyboard_layouts(&self) -> Vec<(String, String)> {
-      self.log().layouts.clone()
     }
 
     fn access(&self) -> Access {
@@ -3595,12 +3625,6 @@ mod tests {
     assert_eq!(with_zip(&dir.path().join("backup")), dir.path().join("backup 2.zip"));
   }
 
-  /// A Mac's layouts: two of English, one of Russian.
-  fn layouts() -> Vec<(String, String)> {
-    let pairs = [("en", "U.S."), ("ru", "Russian – PC"), ("en", "ABC")];
-    pairs.iter().map(|(l, n)| ((*l).to_owned(), (*n).to_owned())).collect()
-  }
-
   /// Auto-detect with a model of one language says that language is every dictation's.
   #[test]
   fn auto_detect_says_what_a_model_of_one_language_does() {
@@ -3610,79 +3634,75 @@ mod tests {
     assert_eq!(tip(&mut h, "lang-row"), want);
   }
 
-  /// Keyboard layout is a Language where the system tells the layouts. Chosen, it starts each of
-  /// their languages on its best model downloaded, listed in the Language row by name: the
-  /// default model, the models that know it as Models orders them, and Download more…, which
-  /// opens Models in that language. A language's model is in use: Models won't delete it. One
-  /// without a model of its own shows the default.
-  #[test]
-  fn a_language_per_keyboard_layout() {
-    let home = Home::new("window-keyboard", &["parakeet-v3", "parakeet-v2", "gigaam-v3"]);
-    let fake = Fake::default();
-    let mut h = home.harness(&fake, Settings::default());
-    assert_eq!(tip(&mut h, "lang-row"), AUTO_HELP.as_str());
-    click(&mut h, Id::of("lang"));
-    let item = |i: usize| Id::of("lang").key(("item", i));
-    let items = |h: &Harness<Prefs>| (0..).take_while(|&i| h.rect(item(i)).is_some()).count();
-    let without = items(&h);
-    h.key(NamedKey::Escape, Modifiers::empty());
-    h.frame();
-
-    fake.log().layouts = layouts();
-    assert!(h.event(Event::System(Change::InputSource)));
-    h.frame();
-    click(&mut h, Id::of("lang"));
-    assert_eq!(items(&h), without + 1, "Keyboard layout is offered");
-    click(&mut h, item(1));
-    type Rows = BTreeMap<String, Option<String>>;
-    let rows = |m: &[(&str, Option<&str>)]| {
-      m.iter().map(|(l, m)| ((*l).into(), m.map(Into::into))).collect()
-    };
-    let started: Rows = rows(&[("en", Some("parakeet-v2")), ("ru", Some("gigaam-v3"))]);
-    assert_eq!(fake.log().settings.language, KEYBOARD);
-    assert_eq!(fake.log().settings.keyboard_models, started);
-    assert_eq!(tip(&mut h, "lang-row"), KEYBOARD_HELP.as_str());
-    assert_eq!(tip(&mut h, "model-row"), MODEL_KEYBOARD_HELP.as_str());
-
-    let (en, ru) = (Id::of("keyboard-en"), Id::of("keyboard-ru"));
-    assert!(h.rect(en).unwrap().y < h.rect(ru).unwrap().y, "English, then Russian");
-    let named = vec![("en".into(), "U.S., ABC".into()), ("ru".into(), "Russian – PC".into())];
-    assert_eq!(keyboard_languages(&layouts()), named);
-
-    click(&mut h, ru);
-    click(&mut h, ru.key(("item", 2)));
-    let moved: Rows = rows(&[("en", Some("parakeet-v2")), ("ru", Some("parakeet-v3"))]);
-    assert_eq!(fake.log().settings.keyboard_models, moved);
-    assert!(h.app().in_use(hub::lookup("parakeet-v2").unwrap()));
-
-    click(&mut h, ru);
-    click(&mut h, ru.key(("item", 0)));
-    let default: Rows = rows(&[("en", Some("parakeet-v2")), ("ru", None)]);
-    assert_eq!(fake.log().settings.keyboard_models, default, "the default model");
-
-    // Auto-detect and back: each language keeps what the person set, the default too.
-    click(&mut h, Id::of("lang"));
-    click(&mut h, item(0));
-    assert_eq!(fake.log().settings.language, "auto");
-    click(&mut h, Id::of("lang"));
-    click(&mut h, item(1));
-    assert_eq!(fake.log().settings.language, KEYBOARD);
-    assert_eq!(fake.log().settings.keyboard_models, default, "kept");
-
-    click(&mut h, ru);
-    click(&mut h, ru.key(("item", 3)));
-    assert_eq!(h.app().page, Page::Models);
-    assert_eq!(h.app().model_lang, "ru");
-
-    let alone = Settings {
-      language: KEYBOARD.into(),
+  /// English and Russian, each on its own model, with the switch between them.
+  fn two_languages() -> Settings {
+    let line = |l: &str, m: &str| Line { language: l.into(), model: Some(m.into()) };
+    Settings {
+      language: "en".into(),
       model: Some("parakeet-v2".into()),
+      languages: vec![line("en", "parakeet-v2"), line("ru", "gigaam-v3")],
+      switch_hotkey: "f6".into(),
       ..Settings::default()
-    };
-    let h = home.harness(&fake, alone);
-    let (labels, models, at) = h.app().keyboard_choices("ru");
-    assert_eq!(models, ["gigaam-v3", "parakeet-v3"]);
-    assert_eq!((at, labels[at].as_str()), (0, "parakeet-v2 (default)"));
+    }
+  }
+
+  /// A language added to switch to takes the current one with it as the first, on its best model
+  /// downloaded, and brings the Switch Language row. A line's model is its own and in use
+  /// (Models won't delete it); Download more… opens Models in its language; Language takes a
+  /// line's model; removing one of two leaves none, and the row goes.
+  #[test]
+  fn languages_to_switch_between() {
+    let home = Home::new("window-languages", &["parakeet-v3", "parakeet-v2", "gigaam-v3"]);
+    let fake = Fake::default();
+    let english = Settings { languages: vec![], switch_hotkey: String::new(), ..two_languages() };
+    let mut h = home.harness(&fake, english);
+    assert!(h.rect(Id::of("switch-hotkey")).is_none(), "nothing to switch between");
+    let adds = h.app().addable();
+    assert!(!adds.iter().any(|a| a.1 == "en"), "the current one is there: {adds:?}");
+    let ru = adds.iter().position(|a| a.1 == "ru").unwrap();
+    click(&mut h, Id::of("add-language"));
+    click(&mut h, Id::of("add-language").key(("item", ru + 1)));
+    assert_eq!(fake.log().settings.languages, two_languages().languages);
+    assert_eq!(fake.log().settings.language, "en");
+    assert!(h.rect(Id::of("switch-hotkey")).is_some(), "the switch's row");
+    assert_eq!(tip(&mut h, "lang-row"), SWITCH_HELP.as_str());
+
+    let line = Id::of("line-ru");
+    click(&mut h, line);
+    click(&mut h, line.key(("item", 1)));
+    assert_eq!(fake.log().settings.languages[1].model.as_deref(), Some("parakeet-v3"));
+    assert_eq!(fake.log().settings.model.as_deref(), Some("parakeet-v2"), "English's");
+    assert!(h.app().in_use(hub::lookup("parakeet-v3").unwrap()));
+
+    let (langs, _) = h.app().languages();
+    let ru = langs.iter().position(|l| l.1 == "ru").unwrap();
+    click(&mut h, Id::of("lang"));
+    click(&mut h, Id::of("lang").key(("item", ru)));
+    assert_eq!(fake.log().settings.language, "ru");
+    assert_eq!(fake.log().settings.model.as_deref(), Some("parakeet-v3"), "Russian's");
+
+    click(&mut h, line);
+    let (labels, _, _) = h.app().line_choices(&fake.log().settings.languages[1]);
+    click(&mut h, line.key(("item", labels.len() - 1)));
+    assert_eq!((h.app().page, h.app().model_lang), (Page::Models, "ru"));
+    tab(&mut h, Page::General);
+
+    click(&mut h, Id::of(("remove", 0)));
+    assert!(fake.log().settings.languages.is_empty());
+    assert_eq!(fake.log().settings.language, "ru", "kept");
+    assert!(h.rect(Id::of("switch-hotkey")).is_none());
+  }
+
+  /// Language offers the languages to switch to too, beside the model's: English on gigaam-v3.
+  #[test]
+  fn language_offers_the_languages_to_switch_to() {
+    let home = Home::new("window-languages-offered", &["parakeet-v2", "gigaam-v3"]);
+    let settings =
+      Settings { language: "ru".into(), model: Some("gigaam-v3".into()), ..two_languages() };
+    let h = home.harness(&Fake::default(), settings);
+    let (langs, at) = h.app().languages();
+    let codes: Vec<&str> = langs.iter().map(|l| l.1.as_str()).collect();
+    assert_eq!((codes, at), (vec!["auto", "en", "ru"], 2));
   }
 
   /// Every page in both looks, as high as its content or [SCROLLING] high; with `WAVO_SHOTS` set
@@ -3764,19 +3784,10 @@ mod tests {
         assert_eq!(ground[0] < 100, appearance.scheme.is_dark(), "{name} {look}: {ground:?}");
       }
 
-      // Language by the keyboard layout, Russian to its own model.
-      let keyboard = Fake::default();
-      keyboard.log().layouts = layouts();
-      let rows = BTreeMap::from([("ru".to_owned(), Some("gigaam-v3".to_owned()))]);
-      let settings = Settings {
-        language: KEYBOARD.into(),
-        model: Some("parakeet-v3".into()),
-        keyboard_models: rows,
-        ..Settings::default()
-      };
-      let mut k = home.harness(&keyboard, settings);
+      // English and Russian to switch between, each on its own model.
+      let mut k = home.harness(&Fake::default(), two_languages());
       k.event(Event::Appearance(appearance));
-      shot(&mut k, &format!("general-keyboard-{look}"));
+      shot(&mut k, &format!("general-languages-{look}"));
 
       fake.log().updates = false;
       tab(&mut h, Page::Advanced);
@@ -5384,14 +5395,13 @@ mod tests {
   }
 
   /// The names a pseudo-locale leaves as they are: models (their files, the tiles' letters and
-  /// ANE's badge), devices and keyboard layouts, the folders, the dictations, the languages' own
+  /// ANE's badge), devices, the folders, the dictations, the languages' own
   /// names, the About page's projects and links, the app's, the OS's and the shortcuts'.
   fn not_translated(home: &Home, dictations: &[(&str, i64)]) -> Vec<String> {
     let mut names: Vec<String> = hub::MODELS.iter().map(|m| m.name.to_owned()).collect();
     names.extend(hub::MODELS.iter().map(|m| m.file().trim_end_matches(".gguf").to_owned()));
     names.extend(["P", "G", "W", "M", "ANE"].map(Into::into));
     names.extend(["MacBook Pro Microphone", "USB Mic"].map(Into::into));
-    names.extend(layouts().into_iter().map(|l| l.1));
     names.extend(["hub", "recordings"].map(|d| home.dir.path().join(d).display().to_string()));
     names.extend(dictations.iter().map(|d| d.0.to_owned()));
     names.extend(crate::LANGUAGES.map(|l| l.1.to_owned()));
@@ -5399,7 +5409,7 @@ mod tests {
     names.extend(ACKS.iter().map(|a| a.2.trim_start_matches("https://").to_owned()));
     let projects = ACKS.iter().filter(|a| a.0 != THE_MODELS.key());
     names.extend(projects.map(|a| a.0.to_owned()));
-    names.extend(["Wavo", "Finder", "fn", "Space", "Ctrl", "Alt"].map(Into::into));
+    names.extend(["Wavo", "Finder", "fn", "Space", "Ctrl", "Alt", "F6"].map(Into::into));
     names
   }
 
@@ -5459,14 +5469,11 @@ mod tests {
     click(&mut h, Id::of(("delete", "whisper-turbo")));
     sweep(&mut h, "models delete");
 
-    // The keyboard's languages, a first launch and the history in memory.
-    let keyboard = Fake::default();
-    keyboard.log().layouts = layouts();
-    let settings = Settings { language: KEYBOARD.into(), ..Settings::default() };
-    let mut h = home.harness(&keyboard, settings);
+    // The languages to switch between, a first launch and the history in memory.
+    let mut h = home.harness(&Fake::default(), two_languages());
     h.set_locale(Locale::Tag("pseudo"), crate::LOCALES);
     h.frame();
-    sweep(&mut h, "general keyboard");
+    sweep(&mut h, "general languages");
     let first = Home::new("window-pseudo-first", &[]);
     let mut h = first.harness(&Fake::default(), Settings::default());
     h.set_locale(Locale::Tag("pseudo"), crate::LOCALES);
