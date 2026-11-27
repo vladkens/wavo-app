@@ -378,7 +378,7 @@ pub struct Hud {
   warning: Option<String>,
   silent: bool,
   // The dictation's language, when there are languages to switch between, and its chip's width:
-  // wider than [CHIP_W] for a longer code (Auto).
+  // wider than [CHIP_W] for Auto.
   language: Option<String>,
   chip: f32,
   // The live text's words and lines; how far the pill opened for them (0..1), the room for its
@@ -502,7 +502,11 @@ impl Hud {
     match show {
       Show::Recording { meter, device, seconds, warning, language, text } => {
         let new = self.mode != Mode::Recording;
-        let wide = |l: &String| (f.measure(&code(l), CHIP) + 8.0).max(CHIP_W);
+        // A code keeps the chip's width in any font; Auto is a word of the person's language.
+        let wide = |l: &String| match l.as_str() {
+          "auto" => (f.measure(&code(l), CHIP) + 8.0).max(CHIP_W),
+          _ => CHIP_W,
+        };
         self.chip = language.as_ref().map_or(CHIP_W, wide);
         self.language = language;
         if new {
