@@ -636,8 +636,9 @@ impl App {
       return;
     }
 
+    // A hidden HUD opens for a recording, an error, and a switch's language while idle (a Done).
     let hidden = shown == Mode::Hidden;
-    if hidden && !matches!(show, Show::Recording { .. } | Show::Error(_)) {
+    if hidden && !matches!(show, Show::Recording { .. } | Show::Error(_) | Show::Done(_)) {
       return;
     }
 
