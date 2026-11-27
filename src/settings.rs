@@ -3,7 +3,6 @@
 //! `settings.json` in the data home: a missing file or field is the default; a file that does not
 //! parse is copied to `settings.json.bad` and the defaults are used.
 
-use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
@@ -19,8 +18,6 @@ use crate::audio::Microphone;
 use crate::history::Retention;
 
 pub const FILE: &str = "settings.json";
-/// [Settings::language] that follows the keyboard layout: its language, its row's model.
-pub const KEYBOARD: &str = "keyboard";
 // Option-Space on macOS, as dictation apps there have it; Ctrl+Alt+Space elsewhere, where Alt+Space
 // opens a window's menu.
 const DEFAULT_HOTKEY: &str =
@@ -34,13 +31,15 @@ pub struct Settings {
   pub hotkey: String,
   pub activation: Activation,
   pub microphone: Microphone,
-  /// A language code, `auto` for the model to detect it, or [KEYBOARD].
+  /// A language code, `auto` for the model to detect it.
   pub language: String,
   /// A model name or a GGUF file path; `None` is the first model found.
   pub model: Option<String>,
-  /// With [KEYBOARD], the model of a layout's language (`ru`: `gigaam-v3`), `None` for `model`,
-  /// picked as the default; a language without an entry is `model`'s too.
-  pub keyboard_models: BTreeMap<String, Option<String>>,
+  /// The languages [Settings::switch_hotkey] goes through in turn, each with its model: the
+  /// current one is [Settings::language] with [Settings::model]. None, or two and more.
+  pub languages: Vec<Line>,
+  /// The hotkey that moves to the next of [Settings::languages]; empty for none.
+  pub switch_hotkey: String,
   pub auto_paste: bool,
   /// Leave the text on the clipboard instead of restoring it after the paste.
   pub keep_in_clipboard: bool,
@@ -70,6 +69,24 @@ pub struct Settings {
   /// The language of Wavo's own texts, a tag of [crate::LANGUAGES] (`ru`); `None` is the
   /// system's.
   pub app_language: Option<String>,
+}
+
+/// One of [Settings::languages].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Line {
+  pub language: String,
+  pub model: Option<String>,
+}
+
+impl Line {
+  /// The language's name, Auto-detect for `auto`.
+  pub fn name(&self) -> String {
+    match self.language.as_str() {
+      "auto" => t!("Auto-detect").to_string(),
+      lang => language_name(lang),
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -121,7 +138,8 @@ impl Default for Settings {
       microphone: Microphone::Automatic,
       language: "auto".into(),
       model: None,
-      keyboard_models: BTreeMap::new(),
+      languages: Vec::new(),
+      switch_hotkey: String::new(),
       auto_paste: true,
       keep_in_clipboard: false,
       clean_text: true,
@@ -165,8 +183,12 @@ impl Settings {
       }
     };
 
-    match serde_json::from_slice(&bytes) {
-      Ok(settings) => (settings, None),
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes);
+    match value.and_then(|v| Ok((Self::deserialize(&v)?, v))) {
+      Ok((mut settings, value)) => {
+        settings.migrate(&value);
+        (settings, None)
+      }
       Err(e) => {
         let bad = path.with_extension("json.bad");
         let _ = fs::write(&bad, &bytes);
@@ -199,29 +221,75 @@ impl Settings {
     self.auto_paste && !self.keep_in_clipboard
   }
 
-  /// The language chosen for the engine; `None` (empty, `auto` or [KEYBOARD]) leaves it to the
-  /// model, or to the layout.
+  /// What v0.3.0 stored as Keyboard layout (`"language": "keyboard"` and `keyboard_models`, the
+  /// model of each layout's language, none for `model`'s): its languages to switch between, the
+  /// one of `model` current.
+  fn migrate(&mut self, value: &serde_json::Value) {
+    if self.language != "keyboard" {
+      return;
+    }
+
+    let rows = value.get("keyboard_models").and_then(|v| v.as_object());
+    let lines = rows.into_iter().flatten().map(|(language, model)| Line {
+      language: language.clone(),
+      model: model.as_str().map(str::to_owned).or_else(|| self.model.clone()),
+    });
+    self.languages = lines.collect();
+    let current = self.languages.iter().position(|l| l.model == self.model).unwrap_or(0);
+    match self.languages.get(current).cloned() {
+      Some(line) => (self.language, self.model) = (line.language, line.model),
+      None => self.language = "auto".into(),
+    }
+
+    if self.languages.len() < 2 {
+      self.languages.clear();
+    }
+  }
+
+  /// The language chosen for the engine; `None` (empty or `auto`) leaves it to the model.
   pub fn engine_language(&self) -> Option<String> {
     let code = self.language.trim();
-    let chosen = !code.is_empty() && !code.eq_ignore_ascii_case("auto") && code != KEYBOARD;
+    let chosen = !code.is_empty() && !code.eq_ignore_ascii_case("auto");
     chosen.then(|| code.to_owned())
   }
 
-  pub fn follows_keyboard(&self) -> bool {
-    self.language == KEYBOARD
+  /// The model choice and the language of a dictation now.
+  pub fn route(&self) -> (Option<String>, Option<String>) {
+    (self.model.clone(), self.engine_language())
   }
 
-  /// The model choice and the language of a dictation while the keyboard layout's language is
-  /// `keyboard`: with [KEYBOARD] its row's model, else `model`, asked in that language (detected
-  /// for a layout without one); otherwise the ones chosen.
-  pub fn route(&self, keyboard: Option<&str>) -> (Option<String>, Option<String>) {
-    if !self.follows_keyboard() {
-      return (self.model.clone(), self.engine_language());
-    }
+  /// The hotkeys by nimbo's place: the dictation's, then the switch's while there are languages
+  /// to switch between; empty for none.
+  pub fn hotkeys(&self) -> [&str; 2] {
+    let switch = if self.languages.is_empty() { "" } else { self.switch_hotkey.as_str() };
+    [&self.hotkey, switch]
+  }
 
-    let row = keyboard.and_then(|k| self.keyboard_models.get(k)).and_then(Option::as_ref);
-    let model = row.or(self.model.as_ref());
-    (model.cloned(), keyboard.map(str::to_owned))
+  /// Makes the next of [Settings::languages] current, the first after the last or after a
+  /// language not among them; `false` with none.
+  pub fn next_language(&mut self) -> bool {
+    let Some(first) = self.languages.first() else { return false };
+    let at = self.languages.iter().position(|l| l.language == self.language);
+    let next = at.and_then(|i| self.languages.get(i + 1)).unwrap_or(first).clone();
+    (self.language, self.model) = (next.language, next.model);
+    true
+  }
+
+  /// `language` current, with its line's model when it has one.
+  pub fn choose_language(&mut self, language: &str) {
+    self.language = language.to_owned();
+    if let Some(line) = self.languages.iter().find(|l| l.language == language) {
+      self.model = line.model.clone();
+    }
+  }
+
+  /// `model` current, and the model of the current language's line.
+  pub fn choose_model(&mut self, model: &str) {
+    self.model = Some(model.to_owned());
+    let current = self.languages.iter_mut().find(|l| l.language == self.language);
+    if let Some(line) = current {
+      line.model = self.model.clone();
+    }
   }
 
   /// The language of the app's texts: [Settings::app_language], the system's when it is none of
@@ -377,12 +445,6 @@ const NAMES: [(&str, Localized); 101] = [
   ("zh", t!("Chinese")),
 ];
 
-/// The code wavo's models list a language under, from a language tag's (`ru`): Whisper's `jw` for
-/// Javanese's `jv`.
-pub fn model_language(code: String) -> String {
-  if code == "jv" { "jw".to_owned() } else { code }
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -434,26 +496,81 @@ mod tests {
     assert_eq!(Settings::load(&path), (memory, None));
   }
 
-  /// The layout's row, else the model, in the layout's language; any other choice as chosen,
-  /// whatever the layout.
+  /// The switch goes round the languages, each with its model; choosing a model or a language
+  /// keeps the line in step.
   #[test]
-  fn a_dictation_routes_by_the_keyboard_layout() {
-    let rows =
-      BTreeMap::from([("ru".to_owned(), Some("gigaam-v3".to_owned())), ("de".into(), None)]);
-    let model = Some("parakeet-v3".to_owned());
-    let keyboard =
-      Settings { language: KEYBOARD.into(), model, keyboard_models: rows, ..Settings::default() };
-    let some = |s: &str| Some(s.to_owned());
-    assert_eq!(keyboard.route(Some("ru")), (some("gigaam-v3"), some("ru")));
-    assert_eq!(keyboard.route(Some("en")), (some("parakeet-v3"), some("en")));
-    assert_eq!(keyboard.route(Some("de")), (some("parakeet-v3"), some("de")), "the default picked");
-    assert_eq!(keyboard.route(None), (some("parakeet-v3"), None), "a layout without a language");
-    assert_eq!(keyboard.engine_language(), None);
+  fn the_switch_goes_round_the_languages() {
+    let line =
+      |language: &str, model: &str| Line { language: language.into(), model: Some(model.into()) };
+    let mut s = Settings {
+      language: "ru".into(),
+      model: Some("gigaam-v3".into()),
+      languages: vec![
+        line("ru", "gigaam-v3"),
+        line("en", "parakeet-v2"),
+        line("de", "parakeet-v3"),
+      ],
+      switch_hotkey: "f6".into(),
+      ..Settings::default()
+    };
+    let now = |s: &Settings| (s.language.clone(), s.model.clone().unwrap_or_default());
+    let pair = |l: &str, m: &str| (l.to_owned(), m.to_owned());
+    assert_eq!(s.hotkeys(), [DEFAULT_HOTKEY, "f6"]);
+    assert!(s.next_language());
+    assert_eq!(now(&s), pair("en", "parakeet-v2"));
+    assert_eq!(s.route(), (Some("parakeet-v2".into()), Some("en".into())));
+    s.next_language();
+    s.next_language();
+    assert_eq!(now(&s), pair("ru", "gigaam-v3"), "after the last, the first");
 
-    let fixed = Settings { language: "de".into(), ..keyboard.clone() };
-    assert_eq!(fixed.route(Some("ru")), (some("parakeet-v3"), some("de")));
-    let auto = Settings { language: "auto".into(), ..keyboard };
-    assert_eq!(auto.route(Some("ru")), (some("parakeet-v3"), None));
+    s.choose_language("de");
+    assert_eq!(now(&s), pair("de", "parakeet-v3"));
+    s.choose_model("parakeet-ultra");
+    assert_eq!(s.languages[2], line("de", "parakeet-ultra"));
+    s.choose_language("fr");
+    assert_eq!(now(&s), pair("fr", "parakeet-ultra"), "a language of none keeps the model");
+    s.choose_model("parakeet-v3");
+    assert_eq!(s.languages[2], line("de", "parakeet-ultra"), "no line of it");
+    s.next_language();
+    assert_eq!(now(&s), pair("ru", "gigaam-v3"), "the first after one of none");
+
+    let mut none = Settings { switch_hotkey: "f6".into(), ..Settings::default() };
+    assert!(!none.next_language());
+    assert_eq!(none.hotkeys(), [DEFAULT_HOTKEY, ""], "no switch without languages");
+  }
+
+  /// v0.3.0's Keyboard layout: its rows to switch between, the one of the Model current.
+  #[test]
+  fn keyboard_layout_becomes_the_languages() {
+    let dir = TempDir::new("settings-keyboard");
+    let path = dir.path().join(FILE);
+    let load = |json: &str| {
+      fs::write(&path, json).unwrap();
+      let s = Settings::load(&path).0;
+      let lines: Vec<_> =
+        s.languages.iter().map(|l| (l.language.as_str(), l.model.as_deref())).collect();
+      (s.language.clone(), s.model.clone(), format!("{lines:?}"))
+    };
+    let some = |s: &str| Some(s.to_owned());
+    let rows = r#"{"language": "keyboard", "model": "parakeet-v2",
+      "keyboard_models": {"en": null, "ru": "gigaam-v3"}}"#;
+    let want = r#"[("en", Some("parakeet-v2")), ("ru", Some("gigaam-v3"))]"#;
+    assert_eq!(load(rows), ("en".into(), some("parakeet-v2"), want.into()));
+    let other = r#"{"language": "keyboard", "model": "parakeet-v3",
+      "keyboard_models": {"en": "parakeet-v2", "ru": "gigaam-v3"}}"#;
+    let want = r#"[("en", Some("parakeet-v2")), ("ru", Some("gigaam-v3"))]"#;
+    assert_eq!(load(other), ("en".into(), some("parakeet-v2"), want.into()), "none of the Model");
+    let one =
+      r#"{"language": "keyboard", "model": "parakeet-v3", "keyboard_models": {"ru": "gigaam-v3"}}"#;
+    assert_eq!(load(one), ("ru".into(), some("gigaam-v3"), "[]".into()), "one is no switch");
+    let empty = r#"{"language": "keyboard", "model": "parakeet-v3"}"#;
+    assert_eq!(load(empty), ("auto".into(), some("parakeet-v3"), "[]".into()));
+    let plain = r#"{"language": "ru", "model": "gigaam-v3", "keyboard_models": {"en": null}}"#;
+    assert_eq!(load(plain), ("ru".into(), some("gigaam-v3"), "[]".into()), "a retired field");
+
+    let s = Settings::load(&path).0;
+    s.save(&path).unwrap();
+    assert!(!fs::read_to_string(&path).unwrap().contains("keyboard"));
   }
 
   #[test]
@@ -498,11 +615,5 @@ mod tests {
       let language = Language::from_639_1(code).or_else(|| Language::from_639_3(code));
       assert_eq!(language.map(|l| l.to_name()), Some(name.key()), "{code}");
     }
-
-    // A layout's Javanese is the models' `jw`; the rest as they are.
-    assert_eq!(
-      (model_language("jv".into()), model_language("ru".into())),
-      ("jw".into(), "ru".into())
-    );
   }
 }

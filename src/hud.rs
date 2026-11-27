@@ -2,7 +2,7 @@
 
 //! The HUD: one pill in an overlay at the bottom or top of the screen with the pointer, over every
 //! app, never focused. Recording: a red dot, the level as bars, the time, and after it the
-//! dictation's language when it follows the keyboard layout (`RU`). Transcribing: the bars
+//! dictation's language when there are languages to switch between (`RU`). Transcribing: the bars
 //! become a travelling wave, the time freezes (`n/m` for a recording in pieces). Then the pill
 //! collapses to a circle and fades: no "done" state. An error shows a glyph and a short lowercase
 //! reason for a few seconds, the pill widening to fit; while recording, a warning (no sound, no
@@ -29,7 +29,7 @@ use nimbo::{
 use crate::audio::{self, Meter};
 use crate::live;
 use crate::session::{NoModel, Outcome, Status};
-use crate::settings::{HudPosition, HudStyle};
+use crate::settings::{HudPosition, HudStyle, Settings};
 
 // Points.
 const WIDTH: f32 = 176.0;
@@ -56,7 +56,6 @@ const RING: f32 = 1.2;
 const CHIP_W: f32 = 24.0;
 const CHIP_H: f32 = 17.0;
 const CHIP_GAP: f32 = 2.0;
-const CHIP_ROOM: f32 = CHIP_W + CHIP_GAP;
 // The live text: the open pill's width, its lines, their padding at the sides and the far edge,
 // the corners' radius once open.
 const WIDE: f32 = 400.0;
@@ -167,6 +166,22 @@ pub fn config(position: HudPosition, live: bool) -> Config {
 }
 
 // MARK: What it says
+
+/// A language as the chip says it: its code in capitals (`RU`), Auto for Auto-detect.
+pub fn code(language: &str) -> String {
+  match language {
+    // Translators: Auto-detect as the HUD shows it, short beside the codes of languages (RU, EN).
+    "auto" => t!("Auto").to_string(),
+    code => code.to_uppercase(),
+  }
+}
+
+/// A switch since `before` while idle: the language it moved to, for a moment, as the chip says it.
+pub fn switched(before: Option<&Settings>, settings: &Settings) -> Option<Show> {
+  let now = &settings.language;
+  let moved = before.is_some_and(|b| &b.language != now) && !settings.languages.is_empty();
+  moved.then(|| Show::Done(code(now)))
+}
 
 /// What came of a dictation that ended since `before`, or a new error of a recording that did not
 /// start; `None` is no news. With `auto_paste` a refused paste is an error; with `took` a dictation
@@ -304,7 +319,7 @@ pub enum Show {
     device: String,
     seconds: f64,
     warning: Option<String>,
-    /// The keyboard layout's (`ru`), when the dictation follows it.
+    /// The dictation's (`ru`), when there are languages to switch between.
     language: Option<String>,
     /// The live text so far.
     text: Option<live::Text>,
@@ -362,8 +377,10 @@ pub struct Hud {
   device: String,
   warning: Option<String>,
   silent: bool,
-  // The dictation's language, when it follows the keyboard layout.
+  // The dictation's language, when there are languages to switch between, and its chip's width:
+  // wider than [CHIP_W] for a longer code (HAW, Auto).
   language: Option<String>,
+  chip: f32,
   // The live text's words and lines; how far the pill opened for them (0..1), the room for its
   // lines and how far they scrolled, in points: from, to, since.
   words: Vec<Word>,
@@ -407,6 +424,7 @@ impl Hud {
       warning: None,
       silent: false,
       language: None,
+      chip: CHIP_W,
       words: Vec::new(),
       lines: 0,
       open: (0.0, 0.0, Duration::ZERO),
@@ -463,7 +481,7 @@ impl Hud {
 
   /// The width of a dictation's pill: the language's chip widens it.
   fn base(&self) -> f32 {
-    WIDTH + if self.language.is_some() { CHIP_ROOM } else { 0.0 }
+    WIDTH + if self.language.is_some() { self.chip + CHIP_GAP } else { 0.0 }
   }
 
   fn width_at(&self, now: Duration) -> f32 {
@@ -484,6 +502,8 @@ impl Hud {
     match show {
       Show::Recording { meter, device, seconds, warning, language, text } => {
         let new = self.mode != Mode::Recording;
+        let wide = |l: &String| (f.measure(&code(l), CHIP) + 8.0).max(CHIP_W);
+        self.chip = language.as_ref().map_or(CHIP_W, wide);
         self.language = language;
         if new {
           self.enter(Mode::Recording, now);
@@ -778,10 +798,10 @@ impl Hud {
     // pill's.
     let chip = |f: &mut Frame, k: f32| {
       let Some(language) = &self.language else { return };
-      let rect = Rect::new(xd + WIDTH - PAD + CHIP_GAP, mid - CHIP_H / 2.0, CHIP_W, CHIP_H);
+      let rect = Rect::new(xd + WIDTH - PAD + CHIP_GAP, mid - CHIP_H / 2.0, self.chip, CHIP_H);
       let (fill, ink) = if plain { (th.text, th.menu) } else { ([1.0; 4], CHIP_TEXT) };
       f.rect(rect, fade(fill, k), 4.0);
-      let code = language.to_uppercase();
+      let code = code(language);
       let at = rect.x + (rect.w - f.measure(&code, CHIP)) / 2.0;
       let y = baseline(f, CHIP);
       f.text(at, y, &code, CHIP, fade(ink, k));
@@ -1195,6 +1215,7 @@ mod tests {
 
   use super::*;
   use crate::session::{Last, NotPasted};
+  use crate::settings::Line;
 
   fn said(status: &Status, before: Option<&Status>, auto_paste: bool) -> Option<String> {
     match after(status, before, auto_paste, false)? {
@@ -1343,7 +1364,7 @@ mod tests {
     }
   }
 
-  /// A recording that follows the keyboard layout, now in `language`.
+  /// A recording with languages to switch between, now in `language`.
   fn speaking(language: &str) -> Show {
     let language = Some(language.to_owned());
     Show::Recording {
@@ -1471,32 +1492,60 @@ mod tests {
     assert!(!h.needs_frame(), "no frames once hidden");
   }
 
-  /// A dictation that follows the keyboard layout: its language's chip after the time, white, in
-  /// a pill that widens for it, the dot where it was; a change of language changes the code and
-  /// nothing moves; the dictation's end goes back to the narrow pill.
+  /// A dictation with languages to switch between: its language's chip after the time, white, in
+  /// a pill that widens for it, the dot where it was; a change of language changes the code, the
+  /// chip as wide as its code in the font at hand; the end goes back to the narrow pill.
   #[test]
   fn the_language_shows_after_the_time() {
     let (mut h, _) = hud();
     h.app_mut().show(speaking("ru"));
     h.wait(ms(500));
-    assert_eq!(h.app().width.1, WIDTH + CHIP_ROOM);
+    let room = h.app().chip + CHIP_GAP;
+    assert!(h.app().chip >= CHIP_W, "{}", h.app().chip);
+    assert_eq!(h.app().width.1, WIDTH + room);
     let size = config(HudPosition::Bottom, false).size;
-    let (left, mid) = ((size.w - WIDTH - CHIP_ROOM) / 2.0, MARGIN + HEIGHT / 2.0);
+    let (left, mid) = ((size.w - WIDTH - room) / 2.0, MARGIN + HEIGHT / 2.0);
     let [r, g, _, _] = h.render().pixel(left + PAD + DOT / 2.0, mid);
     assert!(r > 200 && g < 100, "the red dot where it was: {r} {g}");
     let [r, g, b, _] =
       h.render().pixel(left + WIDTH - PAD + CHIP_GAP + 1.5, mid - CHIP_H / 2.0 + 1.5);
     assert!(r > 230 && g > 230 && b > 230, "the chip's white: {r} {g} {b}");
 
+    // Auto-detect's chip says Auto, wider.
+    h.app_mut().show(speaking("auto"));
+    h.wait(ms(500));
+    assert!(h.app().width.1 > WIDTH + room, "{}", h.app().width.1);
     h.app_mut().show(speaking("en"));
     h.wait(ms(500));
-    assert_eq!((h.app().language.as_deref(), h.app().width.1), (Some("en"), WIDTH + CHIP_ROOM));
+    let room = h.app().chip + CHIP_GAP;
+    assert_eq!((h.app().language.as_deref(), h.app().width.1), (Some("en"), WIDTH + room));
     h.app_mut().show(Show::Transcribing(None));
     h.wait(ms(500));
-    assert_eq!(h.app().width.1, WIDTH + CHIP_ROOM, "the chip stays while transcribing");
+    assert_eq!(h.app().width.1, WIDTH + room, "the chip stays while transcribing");
     h.app_mut().show(Show::Done("420 ms".into()));
     h.wait(ms(500));
     assert_eq!((h.app().language.as_deref(), h.app().width.1), (None, WIDTH));
+  }
+
+  /// A switch while idle shows the language it moved to; without languages a new language is no
+  /// news, nor is the same one.
+  #[test]
+  fn a_switch_while_idle_shows_the_language() {
+    let line = |language: &str| Line { language: language.into(), model: None };
+    let at = |language: &str| Settings {
+      language: language.into(),
+      languages: vec![line("en"), line("auto"), line("ru")],
+      ..Settings::default()
+    };
+    let shown = |was: &str, now: &Settings| match switched(Some(&at(was)), now) {
+      Some(Show::Done(code)) => Some(code),
+      _ => None,
+    };
+    assert_eq!(shown("en", &at("ru")).as_deref(), Some("RU"));
+    assert_eq!(shown("ru", &at("auto")).as_deref(), Some("Auto"));
+    assert_eq!(shown("ru", &at("ru")), None);
+    assert_eq!(shown("en", &Settings { languages: vec![], ..at("ru") }), None);
+    assert!(switched(None, &at("ru")).is_none(), "the first update");
   }
 
   /// With the setting, a dictation's time to text shows instead of the plain collapse; an error
