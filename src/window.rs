@@ -1008,8 +1008,8 @@ impl Prefs {
     }
   }
 
-  /// The languages to add to those to switch between: of the downloaded models, by name, but
-  /// those already there (the current one while there are none).
+  /// The languages to add to those to switch between: Auto-detect, then those of the downloaded
+  /// models by name, but those already there (the current one while there are none).
   fn addable(&self) -> Vec<(String, String)> {
     let lines = &self.settings.languages;
     let taken = |c: &str| match lines.is_empty() {
@@ -1022,6 +1022,10 @@ impl Prefs {
     let mut langs: Vec<_> =
       codes.into_iter().filter(|c| !taken(c)).map(|c| (language_name(c), c.to_owned())).collect();
     langs.sort();
+    if !taken("auto") {
+      langs.insert(0, (t!("Auto-detect").to_string(), "auto".to_owned()));
+    }
+
     langs
   }
 
@@ -1046,9 +1050,13 @@ impl Prefs {
     models
   }
 
-  /// The model a language to switch to starts on: the best downloaded for it.
+  /// The model a language to switch to starts on: the best downloaded for it; for Auto-detect,
+  /// the one of most languages.
   fn best_for(&self, lang: &str) -> Option<&'static str> {
-    self.models_for(lang).first().map(|m| m.name)
+    match lang {
+      "auto" => self.found.iter().rev().map(|f| f.0).max_by_key(|m| m.langs.len()).map(|m| m.name),
+      lang => self.models_for(lang).first().map(|m| m.name),
+    }
   }
 
   /// A language to switch to's choices: the downloaded models that know it, best first (any
@@ -3647,9 +3655,10 @@ mod tests {
   }
 
   /// A language added to switch to takes the current one with it as the first, on its best model
-  /// downloaded, and brings the Switch Language row. A line's model is its own and in use
-  /// (Models won't delete it); Download more… opens Models in its language; Language takes a
-  /// line's model; removing one of two leaves none, and the row goes.
+  /// downloaded (Auto-detect on the one of most languages), and brings the Switch Language row. A
+  /// line's model is its own and in use (Models won't delete it); Download more… opens Models in
+  /// its language; Language takes a line's model; removing one of two leaves none, and the row
+  /// goes.
   #[test]
   fn languages_to_switch_between() {
     let home = Home::new("window-languages", &["parakeet-v3", "parakeet-v2", "gigaam-v3"]);
@@ -3691,6 +3700,13 @@ mod tests {
     assert!(fake.log().settings.languages.is_empty());
     assert_eq!(fake.log().settings.language, "ru", "kept");
     assert!(h.rect(Id::of("switch-hotkey")).is_none());
+
+    // Auto-detect first, on the model of most languages.
+    assert_eq!(h.app().addable()[0].1, "auto");
+    click(&mut h, Id::of("add-language"));
+    click(&mut h, Id::of("add-language").key(("item", 1)));
+    let line = |l: &str| Line { language: l.into(), model: Some("parakeet-v3".into()) };
+    assert_eq!(fake.log().settings.languages, [line("ru"), line("auto")]);
   }
 
   /// Language offers the languages to switch to too, beside the model's: English on gigaam-v3.

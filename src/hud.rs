@@ -56,7 +56,6 @@ const RING: f32 = 1.2;
 const CHIP_W: f32 = 24.0;
 const CHIP_H: f32 = 17.0;
 const CHIP_GAP: f32 = 2.0;
-const CHIP_ROOM: f32 = CHIP_W + CHIP_GAP;
 // The live text: the open pill's width, its lines, their padding at the sides and the far edge,
 // the corners' radius once open.
 const WIDE: f32 = 400.0;
@@ -378,8 +377,10 @@ pub struct Hud {
   device: String,
   warning: Option<String>,
   silent: bool,
-  // The dictation's language, when there are languages to switch between.
+  // The dictation's language, when there are languages to switch between, and its chip's width:
+  // wider than [CHIP_W] for a longer code (Auto).
   language: Option<String>,
+  chip: f32,
   // The live text's words and lines; how far the pill opened for them (0..1), the room for its
   // lines and how far they scrolled, in points: from, to, since.
   words: Vec<Word>,
@@ -423,6 +424,7 @@ impl Hud {
       warning: None,
       silent: false,
       language: None,
+      chip: CHIP_W,
       words: Vec::new(),
       lines: 0,
       open: (0.0, 0.0, Duration::ZERO),
@@ -479,7 +481,7 @@ impl Hud {
 
   /// The width of a dictation's pill: the language's chip widens it.
   fn base(&self) -> f32 {
-    WIDTH + if self.language.is_some() { CHIP_ROOM } else { 0.0 }
+    WIDTH + if self.language.is_some() { self.chip + CHIP_GAP } else { 0.0 }
   }
 
   fn width_at(&self, now: Duration) -> f32 {
@@ -500,6 +502,8 @@ impl Hud {
     match show {
       Show::Recording { meter, device, seconds, warning, language, text } => {
         let new = self.mode != Mode::Recording;
+        let wide = |l: &String| (f.measure(&code(l), CHIP) + 8.0).max(CHIP_W);
+        self.chip = language.as_ref().map_or(CHIP_W, wide);
         self.language = language;
         if new {
           self.enter(Mode::Recording, now);
@@ -794,7 +798,7 @@ impl Hud {
     // pill's.
     let chip = |f: &mut Frame, k: f32| {
       let Some(language) = &self.language else { return };
-      let rect = Rect::new(xd + WIDTH - PAD + CHIP_GAP, mid - CHIP_H / 2.0, CHIP_W, CHIP_H);
+      let rect = Rect::new(xd + WIDTH - PAD + CHIP_GAP, mid - CHIP_H / 2.0, self.chip, CHIP_H);
       let (fill, ink) = if plain { (th.text, th.menu) } else { ([1.0; 4], CHIP_TEXT) };
       f.rect(rect, fade(fill, k), 4.0);
       let code = code(language);
@@ -1213,6 +1217,9 @@ mod tests {
   use crate::session::{Last, NotPasted};
   use crate::settings::Line;
 
+  /// The room of a two-letter chip (`RU`) after the time.
+  const CHIP_ROOM: f32 = CHIP_W + CHIP_GAP;
+
   fn said(status: &Status, before: Option<&Status>, auto_paste: bool) -> Option<String> {
     match after(status, before, auto_paste, false)? {
       Show::Error(reason) => Some(reason),
@@ -1490,7 +1497,7 @@ mod tests {
 
   /// A dictation with languages to switch between: its language's chip after the time, white, in
   /// a pill that widens for it, the dot where it was; a change of language changes the code and
-  /// nothing moves; the dictation's end goes back to the narrow pill.
+  /// nothing moves but for a longer code; the dictation's end goes back to the narrow pill.
   #[test]
   fn the_language_shows_after_the_time() {
     let (mut h, _) = hud();
@@ -1505,6 +1512,10 @@ mod tests {
       h.render().pixel(left + WIDTH - PAD + CHIP_GAP + 1.5, mid - CHIP_H / 2.0 + 1.5);
     assert!(r > 230 && g > 230 && b > 230, "the chip's white: {r} {g} {b}");
 
+    // Auto-detect's chip says Auto, wider.
+    h.app_mut().show(speaking("auto"));
+    h.wait(ms(500));
+    assert!(h.app().width.1 > WIDTH + CHIP_ROOM, "{}", h.app().width.1);
     h.app_mut().show(speaking("en"));
     h.wait(ms(500));
     assert_eq!((h.app().language.as_deref(), h.app().width.1), (Some("en"), WIDTH + CHIP_ROOM));

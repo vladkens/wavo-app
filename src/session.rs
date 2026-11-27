@@ -340,7 +340,7 @@ pub struct Status {
   /// The entry of the dictation in progress, recording or transcribing.
   pub current: Option<i64>,
   /// With [Settings::languages], the language of the dictation in progress: the current one while
-  /// it records, then the one it is transcribed in; `None` for Auto-detect.
+  /// it records, then the one it is transcribed in; `auto` for Auto-detect.
   pub language: Option<String>,
   /// With [Settings::live_preview], what the dictation in progress said so far, until its text.
   pub preview: Option<live::Text>,
@@ -587,11 +587,13 @@ impl Handle {
     let _ = self.0.send(Msg::InputsChanged);
   }
 
-  /// A hotkey's edge: the dictation's goes to the recording, the switch's press moves to the
+  /// A hotkey's edge: the dictation's goes to the recording, the switch's release moves to the
   /// next language, also while recording; the recording goes to the one current when it closes.
+  /// The release, not the press: a modifier alone as the switch (⇧) is pressed in the person's own
+  /// chords too (⇧A), which nimbo tells as an abort with no release.
   pub fn hotkey(&self, edge: Edge) {
     match edge {
-      Edge::Down { which: SWITCH, repeat: false, .. } => _ = self.0.send(Msg::Switch),
+      Edge::Up { which: SWITCH, .. } => _ = self.0.send(Msg::Switch),
       edge => Input::of(edge).into_iter().for_each(|input| self.input(input)),
     }
   }
@@ -1774,9 +1776,9 @@ impl<O: TextOutput> Controller<O> {
       engine,
       last: self.last.clone(),
       current: d.and_then(|d| d.last.entry),
-      language: d.filter(|_| !self.settings.languages.is_empty()).and_then(|d| match &d.job {
-        Some(job) => job.language.clone(),
-        None => self.settings.engine_language(),
+      language: d.filter(|_| !self.settings.languages.is_empty()).map(|d| match &d.job {
+        Some(job) => job.language.clone().unwrap_or_else(|| "auto".into()),
+        None => self.settings.language.clone(),
       }),
       preview: d.and_then(|d| d.preview.as_ref()).map(|(p, _)| p.text.clone()),
       retranscribing: self.retranscribing.iter().map(|r| r.entry).collect(),
@@ -3238,6 +3240,26 @@ mod tests {
     s.next_language();
     s.update_where("no load error", |u| u.status.no_model.is_none());
     assert_eq!(s.dictate(2).outcome, Outcome::Done);
+  }
+
+  /// The switch goes on its release: a modifier alone as the switch that a chord aborted (⇧ of ⇧A)
+  /// switches nothing.
+  #[test]
+  fn an_aborted_switch_does_nothing() {
+    let models = ["gigaam-v3", "parakeet-v3"];
+    let s = InProcess::start(
+      "session-switch-aborted",
+      &two_languages(),
+      Some(&loud(10.0)),
+      "hi",
+      &models,
+    );
+    s.handle.hotkey(Edge::Down { which: SWITCH, at: Instant::now(), repeat: false });
+    s.handle.hotkey(Edge::Aborted { which: SWITCH });
+    s.next_language();
+    s.handle.edit_settings(|s| s.unload_after_minutes = Some(30));
+    let update = s.update_where("the edit after", |u| u.settings.unload_after_minutes == Some(30));
+    assert_eq!(update.settings.language, "ru", "one switch, not two");
   }
 
   /// Without languages to switch between, the switch's press changes nothing, and the status
