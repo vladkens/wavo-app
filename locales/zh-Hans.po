@@ -5,7 +5,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Wavo\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-27 03:56+0200\n"
+"POT-Creation-Date: 2026-11-27 04:02+0200\n"
 "PO-Revision-Date: 2026-11-18 06:00+0200\n"
 "Last-Translator: vladkens\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -406,11 +406,11 @@ msgstr "更新失败…"
 msgid "Checking for Updates…"
 msgstr "正在检查更新…"
 
-#: src/menu.rs:328 src/window.rs:3274
+#: src/menu.rs:328 src/window.rs:3282
 msgid "Check for Updates…"
 msgstr "检查更新…"
 
-#: src/menu.rs:356 src/window.rs:1506
+#: src/menu.rs:356 src/window.rs:1514
 msgid "System Default"
 msgstr "系统默认"
 
@@ -424,7 +424,7 @@ msgid "{name} isn’t connected"
 msgstr "{name} 未连接"
 
 #. Translators: a model in a list of models.
-#: src/menu.rs:371 src/window.rs:842 src/window.rs:1077
+#: src/menu.rs:371 src/window.rs:842 src/window.rs:1085
 #, rust-format
 msgid "{name} (not on disk)"
 msgstr "{name}（不在磁盘上）"
@@ -449,7 +449,7 @@ msgstr "正在录音…"
 msgid "Loading the model…"
 msgstr "正在加载模型…"
 
-#: src/menu.rs:396 src/window.rs:2724
+#: src/menu.rs:396 src/window.rs:2732
 msgid "Transcribing…"
 msgstr "正在识别…"
 
@@ -518,7 +518,7 @@ msgstr "无法删除已保存的历史记录：{e}"
 msgid "{model} understands {lang} only"
 msgstr "{model} 仅支持{lang}"
 
-#: src/settings.rs:86 src/window.rs:865 src/window.rs:1026
+#: src/settings.rs:86 src/window.rs:865 src/window.rs:1034
 msgid "Auto-detect"
 msgstr "自动检测"
 
@@ -610,7 +610,7 @@ msgstr "德语"
 msgid "Modern Greek"
 msgstr "希腊语"
 
-#: src/settings.rs:363 src/window.rs:2304
+#: src/settings.rs:363 src/window.rs:2312
 msgid "English"
 msgstr "英语"
 
@@ -658,7 +658,7 @@ msgstr "豪萨语"
 msgid "Hawaiian"
 msgstr "夏威夷语"
 
-#: src/settings.rs:375 src/window.rs:2305
+#: src/settings.rs:375 src/window.rs:2313
 msgid "Hebrew"
 msgstr "希伯来语"
 
@@ -826,7 +826,7 @@ msgstr "葡萄牙语"
 msgid "Romanian"
 msgstr "罗马尼亚语"
 
-#: src/settings.rs:417 src/window.rs:2306
+#: src/settings.rs:417 src/window.rs:2314
 msgid "Russian"
 msgstr "俄语"
 
@@ -1009,7 +1009,7 @@ msgstr "更新失败"
 msgid "Couldn’t check for updates"
 msgstr "无法检查更新"
 
-#: src/updater.rs:355 src/window.rs:1587
+#: src/updater.rs:355 src/window.rs:1595
 #, rust-format
 msgid "{size} MB"
 msgstr "{size} MB"
@@ -1039,7 +1039,7 @@ msgstr "安装更新"
 msgid "Close"
 msgstr "关闭"
 
-#: src/updater.rs:401 src/window.rs:2143 src/window.rs:2191
+#: src/updater.rs:401 src/window.rs:2151 src/window.rs:2199
 msgid "Retry"
 msgstr "重试"
 
@@ -1047,7 +1047,7 @@ msgstr "重试"
 msgid "OK"
 msgstr "好"
 
-#: src/updater.rs:409 src/window.rs:2154
+#: src/updater.rs:409 src/window.rs:2162
 msgid "Cancel"
 msgstr "取消"
 
@@ -1059,11 +1059,11 @@ msgstr "隐藏"
 msgid "General"
 msgstr "通用"
 
-#: src/window.rs:72 src/window.rs:1406
+#: src/window.rs:72 src/window.rs:1414
 msgid "Models"
 msgstr "模型"
 
-#: src/window.rs:73 src/window.rs:1289
+#: src/window.rs:73 src/window.rs:1297
 msgid "History"
 msgstr "历史记录"
 
@@ -1311,7 +1311,7 @@ msgstr "打开设置"
 msgid "Back to the default shortcut"
 msgstr "恢复默认快捷键"
 
-#: src/window.rs:850 src/window.rs:1082
+#: src/window.rs:850 src/window.rs:1090
 msgid "Download more…"
 msgstr "下载更多…"
 
@@ -1328,7 +1328,7 @@ msgstr "模型"
 msgid "Download a Model…"
 msgstr "下载模型…"
 
-#: src/window.rs:918 src/window.rs:1201
+#: src/window.rs:918 src/window.rs:1209
 msgid "Language"
 msgstr "语言"
 
@@ -1341,23 +1341,23 @@ msgstr "添加要切换的语言…"
 msgid "Remove"
 msgstr "移除"
 
-#: src/window.rs:1037
+#: src/window.rs:1045
 #, rust-format
 msgid "{model} knows {lang} only, so every dictation is in {lang}."
 msgstr "{model} 仅支持{lang}，因此所有听写都按{lang}识别。"
 
 #. Translators: no model, as the model of a language to switch to.
-#: src/window.rs:1076
+#: src/window.rs:1084
 msgid "none"
 msgstr "无"
 
-#: src/window.rs:1098
+#: src/window.rs:1106
 msgid ""
 "After each dictation the HUD shows for a second how long the text took after "
 "the stop."
 msgstr "每次听写后，悬浮窗会显示 1 秒钟，告诉你停止后生成文本用了多长时间。"
 
-#: src/window.rs:1102
+#: src/window.rs:1110
 msgid ""
 "The HUD shows the words as you speak, recognized again every half second. "
 "The text pasted is still recognized from the whole recording after the stop. "
@@ -1368,14 +1368,14 @@ msgstr ""
 "音识别。在 Mac 或配有独立 GPU 的电脑上默认打开：集成 GPU 会在你说话时一直被占"
 "用。"
 
-#: src/window.rs:1107
+#: src/window.rs:1115
 msgid ""
 "Frees the model's memory after Wavo has been idle this long. The next "
 "dictation loads it again, which takes a moment."
 msgstr ""
 "Wavo 闲置达到此时长后，释放模型占用的内存。下次听写时会重新加载，需要片刻。"
 
-#: src/window.rs:1111
+#: src/window.rs:1119
 msgid ""
 "Models marked ANE run on the Neural Engine: as fast as on the GPU at a "
 "fraction of the energy. Each new version of Wavo prepares such a model once, "
@@ -1386,7 +1386,7 @@ msgstr ""
 "版本的 Wavo 会在后台为此类模型准备一次（10–30 秒），在此期间它在 GPU 上运行。"
 "其他模型始终在 GPU 上运行。"
 
-#: src/window.rs:1116
+#: src/window.rs:1124
 msgid ""
 "A .zip that Wavo exported, here or on another computer: the dictations this "
 "history does not have are added with their recordings; the settings stay as "
@@ -1395,32 +1395,32 @@ msgstr ""
 "Wavo 在本机或其他电脑上导出的 .zip：此历史记录中没有的听写会连同录音一起添"
 "加；设置保持不变。"
 
-#: src/window.rs:1120
+#: src/window.rs:1128
 msgid ""
 "The history, its recordings and the settings, into a .zip archive: Import "
 "brings it back, here or on another computer."
 msgstr ""
 "将历史记录、录音和设置导出为 .zip 归档：用“导入”可在本机或其他电脑上恢复。"
 
-#: src/window.rs:1124
+#: src/window.rs:1132
 msgid "Off while the history is kept until Wavo quits"
 msgstr "历史记录仅保留到 Wavo 退出时不可用"
 
-#: src/window.rs:1126
+#: src/window.rs:1134
 msgid ""
 "Deletes every dictation saved on disk and its recording. The ones kept until "
 "Wavo quits stay."
 msgstr "删除磁盘上保存的所有听写及其录音。保留到 Wavo 退出的听写不受影响。"
 
-#: src/window.rs:1130
+#: src/window.rs:1138
 msgid "No dictations saved"
 msgstr "没有已保存的听写"
 
-#: src/window.rs:1132
+#: src/window.rs:1140
 msgid "Deleted once the dictation, export or import ends"
 msgstr "将在听写、导出或导入结束后删除"
 
-#: src/window.rs:1135
+#: src/window.rs:1143
 msgid ""
 "Wavo looks for a new version at launch and once a day; the menu says when "
 "there is one. Off, it looks only when you choose Check for Updates."
@@ -1428,132 +1428,132 @@ msgstr ""
 "Wavo 会在启动时及每天检查一次新版本，有新版本时菜单会提示。关闭后，只在你选择"
 "“检查更新”时检查。"
 
-#: src/window.rs:1138
+#: src/window.rs:1146
 msgid "This copy of Wavo doesn’t update itself."
 msgstr "此 Wavo 副本不会自动更新。"
 
-#: src/window.rs:1142
+#: src/window.rs:1150
 msgid "Bottom of the screen"
 msgstr "屏幕底部"
 
-#: src/window.rs:1143
+#: src/window.rs:1151
 msgid "Top of the screen"
 msgstr "屏幕顶部"
 
 #. Translators: a look of the HUD, its background a gradient.
-#: src/window.rs:1150
+#: src/window.rs:1158
 msgid "Gradient"
 msgstr "渐变"
 
 #. Translators: a look of the HUD, its background one colour.
-#: src/window.rs:1152
+#: src/window.rs:1160
 msgid "Plain"
 msgstr "纯色"
 
 #. Translators: when to unload the model.
-#: src/window.rs:1159
+#: src/window.rs:1167
 msgid "Never"
 msgstr "永不"
 
-#: src/window.rs:1160
+#: src/window.rs:1168
 msgid "Right after each dictation"
 msgstr "每次听写后立即"
 
-#: src/window.rs:1161
+#: src/window.rs:1169
 msgid "After 2 minutes"
 msgstr "2 分钟后"
 
-#: src/window.rs:1162
+#: src/window.rs:1170
 msgid "After 5 minutes"
 msgstr "5 分钟后"
 
-#: src/window.rs:1163
+#: src/window.rs:1171
 msgid "After 10 minutes"
 msgstr "10 分钟后"
 
-#: src/window.rs:1164
+#: src/window.rs:1172
 msgid "After 15 minutes"
 msgstr "15 分钟后"
 
-#: src/window.rs:1165
+#: src/window.rs:1173
 msgid "After 60 minutes"
 msgstr "60 分钟后"
 
-#: src/window.rs:1171
+#: src/window.rs:1179
 msgid "Until Wavo quits"
 msgstr "直到 Wavo 退出"
 
 #. Translators: how long to keep the history.
-#: src/window.rs:1177
+#: src/window.rs:1185
 msgid "Forever"
 msgstr "永久"
 
-#: src/window.rs:1178
+#: src/window.rs:1186
 msgid "The last 100 dictations"
 msgstr "最近 100 条"
 
-#: src/window.rs:1179
+#: src/window.rs:1187
 msgid "The last 1,000 dictations"
 msgstr "最近 1,000 条"
 
-#: src/window.rs:1180
+#: src/window.rs:1188
 msgid "The last 10,000 dictations"
 msgstr "最近 10,000 条"
 
-#: src/window.rs:1181
+#: src/window.rs:1189
 msgid "3 days"
 msgstr "3 天"
 
-#: src/window.rs:1182
+#: src/window.rs:1190
 msgid "2 weeks"
 msgstr "2 周"
 
-#: src/window.rs:1183
+#: src/window.rs:1191
 msgid "3 months"
 msgstr "3 个月"
 
 #. Translators: the app's language, the system's.
-#: src/window.rs:1191
+#: src/window.rs:1199
 msgid "System"
 msgstr "跟随系统"
 
-#: src/window.rs:1199
+#: src/window.rs:1207
 msgid "App"
 msgstr "App"
 
-#: src/window.rs:1213
+#: src/window.rs:1221
 msgid "Unload the model"
 msgstr "释放模型"
 
-#: src/window.rs:1226
+#: src/window.rs:1234
 msgid "Use the Neural Engine"
 msgstr "使用 Neural Engine"
 
-#: src/window.rs:1239
+#: src/window.rs:1247
 msgid "Check for updates"
 msgstr "检查更新"
 
-#: src/window.rs:1248
+#: src/window.rs:1256
 msgid "HUD"
 msgstr "悬浮窗"
 
-#: src/window.rs:1249
+#: src/window.rs:1257
 msgid "Show the HUD at"
 msgstr "悬浮窗位置"
 
-#: src/window.rs:1256
+#: src/window.rs:1264
 msgid "HUD style"
 msgstr "悬浮窗样式"
 
-#: src/window.rs:1264
+#: src/window.rs:1272
 msgid "Show the text while speaking"
 msgstr "说话时显示文字"
 
-#: src/window.rs:1276
+#: src/window.rs:1284
 msgid "Show the transcription time"
 msgstr "显示识别用时"
 
-#: src/window.rs:1291
+#: src/window.rs:1299
 #, rust-format
 msgid ""
 "Until Wavo quits: the last {n} dictation stays in memory for History and the "
@@ -1565,69 +1565,69 @@ msgstr[0] ""
 "直到 Wavo 退出：最近 {n} 条听写会保留在内存中，供历史记录和菜单使用，不含音"
 "频，也不会存储到磁盘。"
 
-#: src/window.rs:1297
+#: src/window.rs:1305
 msgid "Keep the history"
 msgstr "保留历史记录"
 
-#: src/window.rs:1306 src/window.rs:3166
+#: src/window.rs:1314 src/window.rs:3174
 #, rust-format
 msgid "Show in {app}"
 msgstr "在 {app} 中显示"
 
-#: src/window.rs:1320
+#: src/window.rs:1328
 #, rust-format
 msgid "Exported · {size}"
 msgstr "已导出 · {size}"
 
-#: src/window.rs:1321
+#: src/window.rs:1329
 msgid "Copying the history…"
 msgstr "正在拷贝历史记录…"
 
-#: src/window.rs:1323
+#: src/window.rs:1331
 msgid "Reading the archive…"
 msgstr "正在读取归档…"
 
-#: src/window.rs:1347
+#: src/window.rs:1355
 msgid "Delete All…"
 msgstr "全部删除…"
 
-#: src/window.rs:1347
+#: src/window.rs:1355
 msgid "Export…"
 msgstr "导出…"
 
-#: src/window.rs:1347
+#: src/window.rs:1355
 msgid "Import…"
 msgstr "导入…"
 
-#: src/window.rs:1351
+#: src/window.rs:1359
 msgid "Saved history"
 msgstr "已保存的历史记录"
 
 #. Translators: the title of the save panel of Export….
-#: src/window.rs:1362
+#: src/window.rs:1370
 msgid "Export"
 msgstr "导出"
 
 #. Translators: the title of the open panel of Import….
-#: src/window.rs:1369
+#: src/window.rs:1377
 msgid "Import"
 msgstr "导入"
 
-#: src/window.rs:1377
+#: src/window.rs:1385
 msgid "Delete 1 dictation and its recording?"
 msgstr "要删除 1 条听写及其录音吗？"
 
-#: src/window.rs:1379
+#: src/window.rs:1387
 #, rust-format
 msgid "Delete all {count} dictations and their recordings?"
 msgid_plural "Delete all {count} dictations and their recordings?"
 msgstr[0] "要删除全部 {count} 条听写及其录音吗？"
 
-#: src/window.rs:1385
+#: src/window.rs:1393
 msgid "This can’t be undone."
 msgstr "此操作无法撤销。"
 
-#: src/window.rs:1396
+#: src/window.rs:1404
 #, rust-format
 msgid ""
 "Models: the downloaded models, in the Hugging Face cache, which other apps "
@@ -1647,595 +1647,595 @@ msgstr ""
 "音也会一并删除。\n"
 "{recordings}"
 
-#: src/window.rs:1406
+#: src/window.rs:1414
 msgid "Recordings"
 msgstr "录音"
 
-#: src/window.rs:1442
+#: src/window.rs:1450
 msgid "Launch at login"
 msgstr "登录时打开"
 
-#: src/window.rs:1454
+#: src/window.rs:1462
 msgid "Could not delete the dictations"
 msgstr "无法删除听写"
 
-#: src/window.rs:1455
+#: src/window.rs:1463
 msgid "Could not delete the dictation"
 msgstr "无法删除听写"
 
-#: src/window.rs:1456
+#: src/window.rs:1464
 msgid "Could not transcribe it again"
 msgstr "无法重新识别"
 
-#: src/window.rs:1457
+#: src/window.rs:1465
 msgid "Could not put the previous text back"
 msgstr "无法恢复之前的文本"
 
-#: src/window.rs:1458
+#: src/window.rs:1466
 msgid "Could not delete the history"
 msgstr "无法删除历史记录"
 
-#: src/window.rs:1475
+#: src/window.rs:1483
 #, rust-format
 msgid "Couldn’t turn it on: {e}"
 msgstr "无法打开：{e}"
 
-#: src/window.rs:1476
+#: src/window.rs:1484
 #, rust-format
 msgid "Couldn’t turn it off: {e}"
 msgstr "无法关闭：{e}"
 
-#: src/window.rs:1498 src/window.rs:1500
+#: src/window.rs:1506 src/window.rs:1508
 #, rust-format
 msgid "Automatic ({device})"
 msgstr "自动（{device}）"
 
-#: src/window.rs:1501
+#: src/window.rs:1509
 msgid "Automatic"
 msgstr "自动"
 
-#: src/window.rs:1502
+#: src/window.rs:1510
 msgid "Automatic (none: the lid is closed)"
 msgstr "自动（无：机盖已合上）"
 
-#: src/window.rs:1505
+#: src/window.rs:1513
 #, rust-format
 msgid "System Default ({device})"
 msgstr "系统默认（{device}）"
 
-#: src/window.rs:1523
+#: src/window.rs:1531
 #, rust-format
 msgid "{device} (not connected)"
 msgstr "{device}（未连接）"
 
-#: src/window.rs:1545
+#: src/window.rs:1553
 #, rust-format
 msgid "{device} (the lid is closed)"
 msgstr "{device}（机盖已合上）"
 
-#: src/window.rs:1560
+#: src/window.rs:1568
 #, rust-format
 msgid "{name} isn’t connected: Wavo records with {other}"
 msgstr "{name} 未连接：Wavo 将使用 {other} 录音"
 
-#: src/window.rs:1562
+#: src/window.rs:1570
 #, rust-format
 msgid "{name} isn’t connected: Wavo records with the system’s input"
 msgstr "{name} 未连接：Wavo 将使用系统输入设备录音"
 
-#: src/window.rs:1563
+#: src/window.rs:1571
 #, rust-format
 msgid "{name} isn’t connected, and there is no other microphone"
 msgstr "{name} 未连接，且没有其他麦克风"
 
-#: src/window.rs:1576
+#: src/window.rs:1584
 msgid "Only a Bluetooth mic: the sound is worse"
 msgstr "只有蓝牙麦克风：音质较差"
 
-#: src/window.rs:1586
+#: src/window.rs:1594
 #, rust-format
 msgid "{size} GB"
 msgstr "{size} GB"
 
-#: src/window.rs:1588
+#: src/window.rs:1596
 #, rust-format
 msgid "{size} KB"
 msgstr "{size} KB"
 
 #. Translators: what goes between the thousands of a number: 86,286 (a narrow space in some).
-#: src/window.rs:1611
+#: src/window.rs:1619
 msgid ","
 msgstr ","
 
-#: src/window.rs:1631
+#: src/window.rs:1639
 #, rust-format
 msgid "{done} of {total} GB"
 msgstr "{done}/{total} GB"
 
-#: src/window.rs:1635
+#: src/window.rs:1643
 #, rust-format
 msgid "{done} of {total} MB"
 msgstr "{done}/{total} MB"
 
-#: src/window.rs:1689
+#: src/window.rs:1697
 msgid "All languages"
 msgstr "所有语言"
 
-#: src/window.rs:1777
+#: src/window.rs:1785
 #, rust-format
 msgid "WER {wer}%"
 msgstr "WER {wer}%"
 
-#: src/window.rs:1787
+#: src/window.rs:1795
 msgid "Errors per 100 characters"
 msgstr "每 100 个字符的错误数"
 
-#: src/window.rs:1788
+#: src/window.rs:1796
 msgid "Errors per 100 words"
 msgstr "每 100 个词的错误数"
 
-#: src/window.rs:1805
+#: src/window.rs:1813
 msgid "The default model"
 msgstr "默认模型"
 
-#: src/window.rs:1807
+#: src/window.rs:1815
 #, rust-format
 msgid "The fewest errors in {lang}, but lowercase without punctuation"
 msgstr "{lang}错误最少，但全为小写且无标点"
 
-#: src/window.rs:1810
+#: src/window.rs:1818
 #, rust-format
 msgid "Best balance of accuracy and speed in {lang}"
 msgstr "{lang}准确率与速度的最佳平衡"
 
-#: src/window.rs:1814
+#: src/window.rs:1822
 #, rust-format
 msgid "No accuracy data for {lang} yet: the best general model"
 msgstr "暂无{lang}的准确率数据：最佳通用模型"
 
-#: src/window.rs:1821
+#: src/window.rs:1829
 #, rust-format
 msgid "{n} model"
 msgid_plural "{n} models"
 msgstr[0] "{n} 个模型"
 
-#: src/window.rs:1835
+#: src/window.rs:1843
 #, rust-format
 msgid "The speed baseline ({times})"
 msgstr "速度基准（{times}）"
 
-#: src/window.rs:1836
+#: src/window.rs:1844
 msgid "As fast as whisper-turbo"
 msgstr "与 whisper-turbo 一样快"
 
-#: src/window.rs:1837
+#: src/window.rs:1845
 #, rust-format
 msgid "{times} the speed of whisper-turbo"
 msgstr "whisper-turbo 速度的 {times}"
 
-#: src/window.rs:1838
+#: src/window.rs:1846
 #, rust-format
 msgid "{times} faster than whisper-turbo"
 msgstr "比 whisper-turbo 快 {times}"
 
-#: src/window.rs:1847
+#: src/window.rs:1855
 msgid "Search models"
 msgstr "搜索模型"
 
-#: src/window.rs:1863
+#: src/window.rs:1871
 #, rust-format
 msgid "No model recognizes {lang} well yet."
 msgstr "目前还没有能很好识别{lang}的模型。"
 
-#: src/window.rs:1906 src/window.rs:1984
+#: src/window.rs:1914 src/window.rs:1992
 msgid "Downloaded"
 msgstr "已下载"
 
-#: src/window.rs:1907
+#: src/window.rs:1915
 msgid "No model yet"
 msgstr "尚无模型"
 
-#: src/window.rs:1908
+#: src/window.rs:1916
 msgid "Download the recommended one below to start dictating."
 msgstr "下载下方推荐的模型即可开始听写。"
 
-#: src/window.rs:1919
+#: src/window.rs:1927
 msgid "Available"
 msgstr "可用"
 
-#: src/window.rs:1940
+#: src/window.rs:1948
 #, rust-format
 msgid "{n} more, not measured yet"
 msgid_plural "{n} more, not measured yet"
 msgstr[0] "另有 {n} 个，尚未测量"
 
-#: src/window.rs:1942
+#: src/window.rs:1950
 #, rust-format
 msgid "{n} more, not measured in {lang}"
 msgid_plural "{n} more, not measured in {lang}"
 msgstr[0] "另有 {n} 个，未针对{lang}测量"
 
-#: src/window.rs:1948
+#: src/window.rs:1956
 msgid "Other models"
 msgstr "其他模型"
 
-#: src/window.rs:1952
+#: src/window.rs:1960
 #, rust-format
 msgid "Too many errors in {lang}"
 msgstr "{lang}错误过多"
 
-#: src/window.rs:1953
+#: src/window.rs:1961
 #, rust-format
 msgid "{n} more"
 msgid_plural "{n} more"
 msgstr[0] "另有 {n} 个"
 
-#: src/window.rs:1960
+#: src/window.rs:1968
 msgid "No model matches."
 msgstr "没有匹配的模型。"
 
-#: src/window.rs:2006
+#: src/window.rs:2014
 #, rust-format
 msgid "Delete {n} Model…"
 msgid_plural "Delete {n} Models…"
 msgstr[0] "删除 {n} 个模型…"
 
-#: src/window.rs:2029
+#: src/window.rs:2037
 #, rust-format
 msgid "Delete {model}?"
 msgstr "要删除 {model} 吗？"
 
-#: src/window.rs:2030
+#: src/window.rs:2038
 #, rust-format
 msgid "It frees {size} in the Hugging Face cache. You can download it again."
 msgstr "这将释放 Hugging Face 缓存中的 {size}。你可以再次下载。"
 
-#: src/window.rs:2033
+#: src/window.rs:2041
 #, rust-format
 msgid "Delete {n} model?"
 msgid_plural "Delete {n} models?"
 msgstr[0] "要删除 {n} 个模型吗？"
 
-#: src/window.rs:2034
+#: src/window.rs:2042
 #, rust-format
 msgid ""
 "They free {size} in the Hugging Face cache. You can download them again."
 msgstr "这将释放 Hugging Face 缓存中的 {size}。你可以再次下载。"
 
-#: src/window.rs:2039
+#: src/window.rs:2047
 #, rust-format
 msgid "{model} is in use and stays."
 msgstr "{model} 正在使用，将保留。"
 
-#: src/window.rs:2043
+#: src/window.rs:2051
 #, rust-format
 msgid "{models} and {last} are in use and stay."
 msgstr "{models} 和 {last} 正在使用，将保留。"
 
-#: src/window.rs:2086 src/window.rs:2202
+#: src/window.rs:2094 src/window.rs:2210
 msgid "In use"
 msgstr "使用中"
 
-#: src/window.rs:2090 src/window.rs:2201
+#: src/window.rs:2098 src/window.rs:2209
 msgid "Use"
 msgstr "使用"
 
-#: src/window.rs:2097
+#: src/window.rs:2105
 msgid "In use: choose another to delete it"
 msgstr "使用中：如需删除，请选择其他模型"
 
-#: src/window.rs:2098
+#: src/window.rs:2106
 msgid "In use until the dictation ends"
 msgstr "使用中，直到听写结束"
 
-#: src/window.rs:2099 src/window.rs:2881 src/window.rs:2919 src/window.rs:3181
-#: src/window.rs:3190
+#: src/window.rs:2107 src/window.rs:2889 src/window.rs:2927 src/window.rs:3189
+#: src/window.rs:3198
 msgid "Delete…"
 msgstr "删除…"
 
-#: src/window.rs:2124
+#: src/window.rs:2132
 #, rust-format
 msgid " · {rate} MB/s"
 msgstr " · {rate} MB/s"
 
-#: src/window.rs:2130
+#: src/window.rs:2138
 msgid "Preparing for the Neural Engine…"
 msgstr "正在为 Neural Engine 准备…"
 
-#: src/window.rs:2132
+#: src/window.rs:2140
 #, rust-format
 msgid "Could not download: {e}"
 msgstr "无法下载：{e}"
 
-#: src/window.rs:2143 src/window.rs:2191
+#: src/window.rs:2151 src/window.rs:2199
 msgid "Download"
 msgstr "下载"
 
-#: src/window.rs:2154
+#: src/window.rs:2162
 msgid "Cancel the download"
 msgstr "取消下载"
 
-#: src/window.rs:2175
+#: src/window.rs:2183
 msgid "Open the model’s page on Hugging Face"
 msgstr "在 Hugging Face 上打开模型页面"
 
-#: src/window.rs:2264
+#: src/window.rs:2272
 msgid "Recommended"
 msgstr "推荐"
 
-#: src/window.rs:2286
+#: src/window.rs:2294
 msgid " · no punctuation"
 msgstr " · 无标点"
 
-#: src/window.rs:2292
+#: src/window.rs:2300
 msgid "Runs on the Apple Neural Engine"
 msgstr "在 Apple Neural Engine 上运行"
 
 #. Translators: the languages a speech model knows.
-#: src/window.rs:2301
+#: src/window.rs:2309
 msgid "100 languages"
 msgstr "100 种语言"
 
-#: src/window.rs:2302
+#: src/window.rs:2310
 msgid "25 European languages"
 msgstr "25 种欧洲语言"
 
-#: src/window.rs:2303
+#: src/window.rs:2311
 msgid "99 languages"
 msgstr "99 种语言"
 
-#: src/window.rs:2307
+#: src/window.rs:2315
 msgid "Russian, English, Kazakh, Kyrgyz and Uzbek"
 msgstr "俄语、英语、哈萨克语、吉尔吉斯语和乌兹别克语"
 
-#: src/window.rs:2308
+#: src/window.rs:2316
 msgid "Taiwanese Mandarin and English"
 msgstr "台湾华语和英语"
 
-#: src/window.rs:2309
+#: src/window.rs:2317
 msgid "Ukrainian and English"
 msgstr "乌克兰语和英语"
 
-#: src/window.rs:2486
+#: src/window.rs:2494
 #, rust-format
 msgid "Could not export: {e}"
 msgstr "无法导出：{e}"
 
-#: src/window.rs:2487
+#: src/window.rs:2495
 #, rust-format
 msgid "Could not import: {e}"
 msgstr "无法导入：{e}"
 
-#: src/window.rs:2527
+#: src/window.rs:2535
 msgid "Nothing new: all of its dictations are here"
 msgstr "没有新内容：其中的听写都已存在"
 
-#: src/window.rs:2528
+#: src/window.rs:2536
 #, rust-format
 msgid "Added {n} dictation"
 msgid_plural "Added {n} dictations"
 msgstr[0] "已添加 {n} 条听写"
 
-#: src/window.rs:2531
+#: src/window.rs:2539
 #, rust-format
 msgid " · {n} recording not copied"
 msgid_plural " · {n} recordings not copied"
 msgstr[0] " · {n} 段录音未拷贝"
 
-#: src/window.rs:2613
+#: src/window.rs:2621
 msgid "Could not open the history: see the log"
 msgstr "无法打开历史记录：请查看日志"
 
-#: src/window.rs:2633
+#: src/window.rs:2641
 #, rust-format
 msgid "Could not read the history: {e}"
 msgstr "无法读取历史记录：{e}"
 
-#: src/window.rs:2690
+#: src/window.rs:2698
 msgid "Today"
 msgstr "今天"
 
-#: src/window.rs:2694
+#: src/window.rs:2702
 #, rust-format
 msgid "Yesterday, {date}"
 msgstr "昨天，{date}"
 
 #. Translators: seconds, short: "4.2 s".
-#: src/window.rs:2706 src/window.rs:2953
+#: src/window.rs:2714 src/window.rs:2961
 #, rust-format
 msgid "{seconds} s"
 msgstr "{seconds} 秒"
 
-#: src/window.rs:2717
+#: src/window.rs:2725
 #, rust-format
 msgid "no text · {model}"
 msgstr "无文本 · {model}"
 
-#: src/window.rs:2718
+#: src/window.rs:2726
 msgid "no text"
 msgstr "无文本"
 
-#: src/window.rs:2749
+#: src/window.rs:2757
 #, rust-format
 msgid "{n} dictation · {time}"
 msgid_plural "{n} dictations · {time}"
 msgstr[0] "{n} 条听写 · {time}"
 
-#: src/window.rs:2769
+#: src/window.rs:2777
 msgid "Its recording isn’t kept"
 msgstr "录音未保留"
 
-#: src/window.rs:2777
+#: src/window.rs:2785
 msgid "Search dictations"
 msgstr "搜索听写"
 
-#: src/window.rs:2798
+#: src/window.rs:2806
 msgid "No dictations yet: hold the shortcut and speak."
 msgstr "还没有听写：按住快捷键并说话。"
 
-#: src/window.rs:2799
+#: src/window.rs:2807
 msgid "No dictations since Wavo started: they’re kept only until it quits."
 msgstr "Wavo 启动后还没有听写：听写只保留到 Wavo 退出。"
 
-#: src/window.rs:2800
+#: src/window.rs:2808
 msgid "Nothing found"
 msgstr "未找到"
 
-#: src/window.rs:2869
+#: src/window.rs:2877
 msgid "Select a dictation to see all of its text."
 msgstr "选择一条听写以查看全部文本。"
 
-#: src/window.rs:2875
+#: src/window.rs:2883
 #, rust-format
 msgid "{n} dictation selected"
 msgid_plural "{n} dictations selected"
 msgstr[0] "已选择 {n} 条听写"
 
-#: src/window.rs:2904 src/window.rs:3173 src/window.rs:3192
+#: src/window.rs:2912 src/window.rs:3181 src/window.rs:3200
 msgid "Transcribe Again"
 msgstr "重新识别"
 
-#: src/window.rs:2912 src/window.rs:3177
+#: src/window.rs:2920 src/window.rs:3185
 msgid "Restore the Previous Text"
 msgstr "恢复之前的文本"
 
 #. Translators: minutes, short: "12 min".
-#: src/window.rs:2955
+#: src/window.rs:2963
 #, rust-format
 msgid "{minutes} min"
 msgstr "{minutes} 分钟"
 
 #. Translators: hours, short: "312 h".
-#: src/window.rs:2957
+#: src/window.rs:2965
 #, rust-format
 msgid "{hours} h"
 msgstr "{hours} 小时"
 
-#: src/window.rs:2961
+#: src/window.rs:2969
 #, rust-format
 msgid "{count} dictation · {spoken}"
 msgid_plural "{count} dictations · {spoken}"
 msgstr[0] "{count} 条听写 · {spoken}"
 
-#: src/window.rs:2963
+#: src/window.rs:2971
 msgid " · kept until Wavo quits"
 msgstr " · 保留到 Wavo 退出"
 
-#: src/window.rs:2967
+#: src/window.rs:2975
 #, rust-format
 msgid " · since {since}"
 msgstr " · 自{since}起"
 
-#: src/window.rs:2978 src/window.rs:2991
+#: src/window.rs:2986 src/window.rs:2999
 msgid "Copied to the clipboard"
 msgstr "已拷贝到剪贴板"
 
-#: src/window.rs:2983
+#: src/window.rs:2991
 msgid "The recording is gone"
 msgstr "录音已不存在"
 
-#: src/window.rs:2997 src/window.rs:3074
+#: src/window.rs:3005 src/window.rs:3082
 #, rust-format
 msgid "Could not play the recording: {e}"
 msgstr "无法播放录音：{e}"
 
-#: src/window.rs:3036
+#: src/window.rs:3044
 #, rust-format
 msgid "“{start}” and its recording are removed from the history."
 msgstr "“{start}”及其录音将从历史记录中删除。"
 
-#: src/window.rs:3037
+#: src/window.rs:3045
 #, rust-format
 msgid "“{start}” is removed from the history."
 msgstr "“{start}”将从历史记录中删除。"
 
-#: src/window.rs:3039
+#: src/window.rs:3047
 msgid "Delete this dictation?"
 msgstr "要删除这条听写吗？"
 
-#: src/window.rs:3045
+#: src/window.rs:3053
 #, rust-format
 msgid "{n} dictation and its recording are removed from the history."
 msgid_plural ""
 "{n} dictations and their recordings are removed from the history."
 msgstr[0] "{n} 条听写及其录音将从历史记录中删除。"
 
-#: src/window.rs:3050
+#: src/window.rs:3058
 #, rust-format
 msgid "{n} dictation is removed from the history."
 msgid_plural "{n} dictations are removed from the history."
 msgstr[0] "{n} 条听写将从历史记录中删除。"
 
-#: src/window.rs:3055
+#: src/window.rs:3063
 #, rust-format
 msgid "Delete {n} dictation?"
 msgid_plural "Delete {n} dictations?"
 msgstr[0] "要删除 {n} 条听写吗？"
 
-#: src/window.rs:3121 src/window.rs:3158
+#: src/window.rs:3129 src/window.rs:3166
 msgid "Stop"
 msgstr "停止"
 
-#: src/window.rs:3123
+#: src/window.rs:3131
 msgid "Play the recording"
 msgstr "播放录音"
 
-#: src/window.rs:3131
+#: src/window.rs:3139
 msgid "Copy"
 msgstr "拷贝"
 
-#: src/window.rs:3159
+#: src/window.rs:3167
 msgid "Play the Recording"
 msgstr "播放录音"
 
-#: src/window.rs:3162
+#: src/window.rs:3170
 msgid "Copy Text"
 msgstr "拷贝文本"
 
-#: src/window.rs:3167
+#: src/window.rs:3175
 msgid "Copy Recording Path"
 msgstr "拷贝录音路径"
 
-#: src/window.rs:3220
+#: src/window.rs:3228
 msgid "The models"
 msgstr "模型"
 
-#: src/window.rs:3224
+#: src/window.rs:3232
 msgid "Speech recognition on this machine"
 msgstr "在本机上进行语音识别"
 
-#: src/window.rs:3225
+#: src/window.rs:3233
 msgid "The UI toolkit Wavo is drawn with"
 msgstr "绘制 Wavo 界面的 UI 工具包"
 
-#: src/window.rs:3226
+#: src/window.rs:3234
 msgid "The app that inspired Wavo"
 msgstr "启发了 Wavo 的 App"
 
-#: src/window.rs:3229
+#: src/window.rs:3237
 msgid "The models’ GGUF conversions"
 msgstr "模型的 GGUF 转换版本"
 
-#: src/window.rs:3234
+#: src/window.rs:3242
 msgid "The tensor library and model format, by Georgi Gerganov and others"
 msgstr "张量库和模型格式，由 Georgi Gerganov 等人开发"
 
-#: src/window.rs:3239
+#: src/window.rs:3247
 msgid "OpenAI Whisper, NVIDIA Parakeet, Sber GigaAM, Useful Sensors Moonshine"
 msgstr "OpenAI Whisper, NVIDIA Parakeet, Sber GigaAM, Useful Sensors Moonshine"
 
-#: src/window.rs:3260
+#: src/window.rs:3268
 msgid "Local dictation: hold a key, speak, and the text lands where you type."
 msgstr "本地听写：按住按键说话，文字就会出现在你输入的位置。"
 
-#: src/window.rs:3264
+#: src/window.rs:3272
 msgid "View on GitHub"
 msgstr "在 GitHub 上查看"
 
-#: src/window.rs:3268
+#: src/window.rs:3276
 msgid "Buy Me a Coffee"
 msgstr "Buy Me a Coffee"
 
-#: src/window.rs:3285
+#: src/window.rs:3293
 msgid "Acknowledgements"
 msgstr "致谢"

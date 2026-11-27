@@ -967,22 +967,27 @@ impl Prefs {
     }
 
     match act {
+      // By the language, not the place: the session's list may have changed meanwhile.
       Some(LineAct::Add(i)) => {
-        let (language, model) = (adds[i].1.clone(), self.best_for(&adds[i].1).map(str::to_owned));
-        info!("settings: switch to {language} too, with {model:?}");
-        let line = Line { language, model };
+        let (language, best) = (adds[i].1.clone(), self.best_for(&adds[i].1).map(str::to_owned));
+        info!("settings: switch to {language} too, with {best:?}");
         self.edit(move |s| {
           if s.languages.is_empty() {
             s.languages.push(Line { language: s.language.clone(), model: s.model.clone() });
           }
 
-          s.languages.push(line.clone());
+          if s.languages.iter().all(|l| l.language != language) {
+            // The current language keeps the model it dictates with.
+            let model = if language == s.language { s.model.clone() } else { best.clone() };
+            s.languages.push(Line { language: language.clone(), model });
+          }
         });
       }
       Some(LineAct::Remove(i)) => {
-        info!("settings: no switch to {}", self.settings.languages[i].language);
+        let language = lines[i].language.clone();
+        info!("settings: no switch to {language}");
         self.edit(move |s| {
-          s.languages.remove(i);
+          s.languages.retain(|l| l.language != language);
           if s.languages.len() < 2 {
             s.languages.clear();
           }
@@ -990,16 +995,19 @@ impl Prefs {
       }
       Some(LineAct::Model(i, p)) => {
         let (labels, models, _) = &choices[i];
-        let language = self.settings.languages[i].language.clone();
+        let language = lines[i].language.clone();
         if p + 1 == labels.len() {
           self.model_lang = languages().iter().find(|l| l.1 == language).map_or("", |l| l.1);
           self.page = Page::Models;
         } else if let Some(&model) = models.get(p) {
           info!("settings: {language} goes to {model}");
           self.edit(move |s| {
-            s.languages[i].model = Some(model.to_owned());
-            if s.languages[i].language == s.language {
-              s.model = Some(model.to_owned());
+            let current = language == s.language;
+            if let Some(line) = s.languages.iter_mut().find(|l| l.language == language) {
+              line.model = Some(model.to_owned());
+              if current {
+                s.model = Some(model.to_owned());
+              }
             }
           });
         }
@@ -3707,6 +3715,24 @@ mod tests {
     click(&mut h, Id::of("add-language").key(("item", 1)));
     let line = |l: &str| Line { language: l.into(), model: Some("parakeet-v3".into()) };
     assert_eq!(fake.log().settings.languages, [line("ru"), line("auto")]);
+  }
+
+  /// The current language added keeps the model it dictates with; a removal goes by the language,
+  /// so one from a list the session changed meanwhile takes nothing else.
+  #[test]
+  fn the_current_language_added_keeps_its_model() {
+    let home = Home::new("window-languages-current", &["parakeet-v3", "parakeet-v2", "gigaam-v3"]);
+    let fake = Fake::default();
+    let mut h = home.harness(&fake, Settings { language: "auto".into(), ..two_languages() });
+    assert_eq!(h.app().addable()[0].1, "auto");
+    click(&mut h, Id::of("add-language"));
+    click(&mut h, Id::of("add-language").key(("item", 1)));
+    let auto = Line { language: "auto".into(), model: Some("parakeet-v2".into()) };
+    assert_eq!(fake.log().settings.languages[2], auto);
+
+    fake.log().settings.languages.clear();
+    click(&mut h, Id::of(("remove", 0)));
+    assert!(fake.log().settings.languages.is_empty());
   }
 
   /// Language offers the languages to switch to too, beside the model's: English on gigaam-v3.
