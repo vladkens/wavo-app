@@ -1402,7 +1402,9 @@ impl<O: TextOutput> Controller<O> {
     self.complete();
   }
 
-  /// As the switches say: pasted where it can be, and on the clipboard when kept, pasted or not.
+  /// As the switches say: pasted where it can be, and on the clipboard when kept, pasted or not;
+  /// with auto-paste on, a text that could not be pasted goes on the clipboard all the same, kept
+  /// or not, so a long dictation into no window is a paste away.
   /// With `clean_text` the text ends with a space, and goes on the sentence a paste into the same
   /// target left open less than [GOING_ON] before the recording started; the clipboard gets it so,
   /// pasted or not, the last dictation and the history get neither.
@@ -1427,7 +1429,7 @@ impl<O: TextOutput> Controller<O> {
       (None, true) => Some("the app in focus when the dictation started is unknown".into()),
       (_, false) => Some("auto-paste is off".into()),
     };
-    let refused = refused.map(|why| match keep {
+    let refused = refused.map(|why| match keep || auto_paste {
       true => match self.output.copy(&text) {
         Ok(()) => format!("{why}; the text is on the clipboard"),
         Err(e) => format!("{why}, and copying failed: {e:#}"),
@@ -2222,8 +2224,8 @@ mod tests {
   }
 
   /// Taken for speech by the VAD; dictations of it are transcribed, kept and delivered where they
-  /// started, as the switches say: pasted when on and possible, else copied when kept, else only in
-  /// the history.
+  /// started, as the switches say: pasted when on and possible, else copied when kept or when the
+  /// paste was refused, else only in the history.
   #[test]
   fn dictations_are_transcribed_kept_and_delivered() {
     let s = hello("session-done");
@@ -2234,7 +2236,7 @@ mod tests {
       (false, false, true, HistoryOnly),
       (true, false, true, Pasted),
       (true, true, false, Clipboard),
-      (true, false, false, HistoryOnly),
+      (true, false, false, Clipboard),
       (false, true, false, Clipboard),
       (false, false, false, HistoryOnly),
     ];
@@ -2270,11 +2272,12 @@ mod tests {
     assert_eq!(s.kept(&last).not_pasted.as_ref(), Some(&moved_kept));
     assert_eq!(s.output.went(), Clipboard);
 
+    // Not kept, a refused paste's text still goes on the clipboard: it is not lost.
     s.switch(true, false);
     let last = s.dictate(2);
-    assert_eq!(last.not_pasted.as_deref(), Some(moved));
-    assert_eq!(s.kept(&last).not_pasted.as_deref(), Some(moved));
-    assert_eq!(s.output.went(), HistoryOnly);
+    assert_eq!(last.not_pasted.as_ref(), Some(&moved_kept));
+    assert_eq!(s.kept(&last).not_pasted.as_ref(), Some(&moved_kept));
+    assert_eq!(s.output.went(), Clipboard);
 
     s.switch(false, true);
     let last = s.dictate(3);
